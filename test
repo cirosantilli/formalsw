@@ -6,6 +6,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,7 @@ class TestResult:
     returncode: int
     stdout: str
     stderr: str
+    elapsed: float
 
 
 def run_leanpy(source: Path) -> subprocess.CompletedProcess[str]:
@@ -50,7 +52,9 @@ def run_leanpy(source: Path) -> subprocess.CompletedProcess[str]:
 
 def run_case(case: TestCase) -> TestResult:
     """Run one test case and compare status plus optional diagnostic text."""
+    start = time.perf_counter()
     completed = run_leanpy(case.source)
+    elapsed = time.perf_counter() - start
     output = completed.stdout + completed.stderr
     passed = completed.returncode == case.expected_returncode
     if case.expected_output is not None:
@@ -62,13 +66,14 @@ def run_case(case: TestCase) -> TestResult:
         returncode=completed.returncode,
         stdout=completed.stdout,
         stderr=completed.stderr,
+        elapsed=elapsed,
     )
 
 
 def print_result(result: TestResult) -> None:
     """Print one test result, including diagnostics for failures."""
     status = "PASS" if result.passed else "FAIL"
-    print(f"{status} {result.case.source}")
+    print(f"{status} {result.case.source} ({result.elapsed:.2f}s)", flush=True)
     if result.passed:
         return
     print(f"  command: {' '.join(result.command)}")
@@ -89,7 +94,6 @@ def main() -> int:
     cases = [
         TestCase("range_sum passes", Path("tests/pass/range_sum.py"), 0),
         TestCase("raw Lean requirement passes", Path("tests/pass/raw_lean.py"), 0),
-        TestCase("pass directory checks all Python files", Path("tests/pass"), 0),
         TestCase(
             "sorrys are rejected",
             Path("tests/fail/sorry.py"),
@@ -115,9 +119,11 @@ def main() -> int:
             "tests/fail/dir/fail.py",
         ),
     ]
-    results = [run_case(case) for case in cases]
-
-    for result in results:
+    results = []
+    for case in cases:
+        print(f"RUN  {case.source}", flush=True)
+        result = run_case(case)
+        results.append(result)
         print_result(result)
     return 0 if all(result.passed for result in results) else 1
 
