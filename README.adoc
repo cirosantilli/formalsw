@@ -38,7 +38,7 @@ leanpy tests/pass/range_sum.py
 and if all went well you should see a message:
 
 ----
-All checks passed
+All 3 checks passed
 ----
 
 and exit status 0.

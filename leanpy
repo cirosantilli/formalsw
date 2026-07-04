@@ -755,7 +755,7 @@ def require_executable(name: str) -> None:
         raise SystemExit(f"required executable not found on PATH: {name}")
 
 
-def check_source(source: Path) -> None:
+def check_source(source: Path) -> int:
     """Compile-check one Python file and its paired Lean proof."""
     ast_path = ast_path_for_source(source)
     proof_path = proof_path_for_source(source)
@@ -841,6 +841,7 @@ def check_source(source: Path) -> None:
         proof_path=proof_path,
         requirements_path=requirements_path,
     )
+    return len(requirements)
 
 
 def iter_python_sources(directory: Path) -> list[Path]:
@@ -853,21 +854,23 @@ def iter_python_sources(directory: Path) -> list[Path]:
     return sources
 
 
-def check_directory(directory: Path) -> None:
+def check_directory(directory: Path) -> int:
     """Check all Python files under a directory."""
     sources = iter_python_sources(directory)
     if not sources:
         raise SystemExit(f"error: {directory}: no Python files found")
     failed = False
+    checks = 0
     for source in sources:
         try:
-            check_source(source)
+            checks += check_source(source)
         except SystemExit as error:
             failed = True
             if error.code == 0:
                 continue
     if failed:
         raise SystemExit(1)
+    return checks
 
 
 def main() -> None:
@@ -878,10 +881,10 @@ def main() -> None:
 
     source = args.source
     if source.is_dir():
-        check_directory(source)
+        checks = check_directory(source)
     else:
-        check_source(source)
-    print("All checks passed")
+        checks = check_source(source)
+    print(f"All {checks} checks passed")
 
 
 if __name__ == "__main__":
