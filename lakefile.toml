@@ -1,0 +1,8 @@
+# Lake package configuration for the Python-to-Lean AST framework.
+name = "leanpy"
+version = "0.1.0"
+defaultTargets = ["LeanPy"]
+
+# The reusable Lean library lives under `LeanPy/`.
+[[lean_lib]]
+name = "LeanPy"

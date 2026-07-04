@@ -1,0 +1,887 @@
+#!/usr/bin/env python3
+"""Check a Python file against its paired Lean AST proof file."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+class UnsupportedSyntax(Exception):
+    """Raised when the input uses Python syntax not represented by PyAst yet."""
+
+    pass
+
+
+class InvalidRequirement(Exception):
+    """Raised when a `leanpy` proof marker is malformed."""
+
+    pass
+
+
+@dataclass(frozen=True)
+class Requirement:
+    """A proof obligation requested by a Python source marker."""
+
+    theorem_name: str
+    property_type: str
+    source_path: Path
+    source_line: int
+    marker: str
+
+
+@dataclass(frozen=True)
+class Marker:
+    """A proof marker extracted from a Python docstring."""
+
+    text: str
+    line: int
+
+
+@dataclass(frozen=True)
+class RawTheoremRequirement:
+    """A proof obligation requested with a raw Lean theorem statement."""
+
+    theorem_name: str
+    params: str
+    property_type: str
+
+
+def lean_string(value: str) -> str:
+    """Return a Lean string literal for a Python string."""
+    return json.dumps(value)
+
+
+def indent(text: str, spaces: int) -> str:
+    """Indent every non-empty line in `text` by `spaces` spaces."""
+    prefix = " " * spaces
+    return "\n".join(prefix + line if line else line for line in text.splitlines())
+
+
+def list_lit(items: list[str]) -> str:
+    """Render a multiline Lean list literal from already-rendered items."""
+    if not items:
+        return "[]"
+    return "[\n" + ",\n".join(indent(item, 2) for item in items) + "\n]"
+
+
+def option_lit(item: str | None) -> str:
+    """Render a Lean `Option` literal from an optional rendered expression."""
+    return "none" if item is None else f"some ({item})"
+
+
+def lower_camel_component(component: str) -> str:
+    """Convert one path/name component into a lower-camel Lean name part."""
+    camel = camel_component(component)
+    return camel[:1].lower() + camel[1:] if camel else ""
+
+
+def theorem_suffix_for_function(function_name: str) -> str:
+    """Return the conventional theorem-name component for a Python function."""
+    return lower_camel_component(function_name)
+
+
+def proof_namespace_for_source(source: Path) -> str:
+    """Return the conventional namespace for proof theorems for a source file."""
+    try:
+        source = source.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        pass
+    path_without_suffix = source.with_suffix("")
+    return ".".join(camel_component(component) for component in path_without_suffix.parts)
+
+
+def proof_name_for_short_requirement(
+    proof_namespace: str,
+    function_name: str,
+    property_name: str,
+    args: list[str],
+) -> str:
+    """Return the conventional theorem name for a short property marker."""
+    function_part = theorem_suffix_for_function(function_name)
+    match property_name, args:
+        case "NoThrow", []:
+            local_name = f"{function_part}_noThrow"
+        case "Equiv", [other]:
+            other_part = theorem_suffix_for_function(other)
+            local_name = f"{function_part}_equiv_{other_part}"
+        case _:
+            raise InvalidRequirement(
+                f"{function_name}: unsupported leanpy property marker: "
+                f"{property_name}({', '.join(args)})"
+            )
+    return f"{proof_namespace}.{local_name}"
+
+
+def property_type_for_short_requirement(
+    ast_namespace: str,
+    function_name: str,
+    property_name: str,
+    args: list[str],
+) -> str:
+    """Return the Lean property type for a short property marker."""
+    match property_name, args:
+        case "NoThrow", []:
+            return (
+                f'LeanPy.Property.Function.NoThrow {ast_namespace}.module '
+                f'{lean_string(function_name)}'
+            )
+        case "Equiv", [other]:
+            return (
+                f'LeanPy.Property.Function.Equiv {ast_namespace}.module '
+                f'{lean_string(function_name)} {lean_string(other)}'
+            )
+        case _:
+            raise InvalidRequirement(
+                f"{function_name}: unsupported leanpy property marker: "
+                f"{property_name}({', '.join(args)})"
+            )
+
+
+def parse_short_marker(marker: str) -> tuple[str, list[str]] | None:
+    """Parse a short `leanpy` property marker such as `NoThrow`."""
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\((.*)\))?", marker)
+    if match is None:
+        return None
+    args_text = match.group(2)
+    args = [] if args_text is None else [
+        arg.strip() for arg in args_text.split(",") if arg.strip()
+    ]
+    return match.group(1), args
+
+
+def strip_marker_prefix(line: str) -> str | None:
+    """Return a proof marker line without its marker prefix."""
+    stripped = line.strip()
+    match = re.fullmatch(r"(?:@leanpy|@lean|leanpy:)\s*:?\s*(.*)", stripped)
+    if match is not None:
+        return match.group(1).strip()
+    return None
+
+
+def parse_raw_theorem(marker: str) -> RawTheoremRequirement | None:
+    """Parse a raw Lean theorem header into a typed proof obligation."""
+    theorem = marker.strip().removesuffix(".").strip()
+    match = re.match(r"theorem\s+([A-Za-z_][A-Za-z0-9_'.]*)\s*(.*)", theorem, re.DOTALL)
+    if match is None:
+        return None
+    rest = match.group(2)
+    depth = 0
+    split_at = None
+    for index, char in enumerate(rest):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == ":" and depth == 0:
+            split_at = index
+            break
+    if split_at is None:
+        return None
+    return RawTheoremRequirement(
+        theorem_name=match.group(1),
+        params=rest[:split_at].strip(),
+        property_type=rest[split_at + 1:].strip(),
+    )
+
+
+def raw_theorem_type(requirement: RawTheoremRequirement) -> str:
+    """Return the proposition type expected by a raw theorem marker."""
+    if requirement.params:
+        return f"∀ {requirement.params},\n{requirement.property_type}"
+    return requirement.property_type
+
+
+def docstring_markers(docstring: str | None, start_line: int | None) -> list[Marker]:
+    """Extract `leanpy` marker blocks from a Python docstring."""
+    if docstring is None:
+        return []
+    markers: list[Marker] = []
+    lines = docstring.splitlines()
+    index = 0
+    while index < len(lines):
+        first = strip_marker_prefix(lines[index])
+        if first is None:
+            index += 1
+            continue
+        marker_line = (start_line or 1) + index
+        if first.startswith("theorem "):
+            block = [first]
+            index += 1
+            while index < len(lines):
+                if not lines[index].strip():
+                    break
+                if strip_marker_prefix(lines[index]) is not None:
+                    break
+                block.append(lines[index])
+                index += 1
+            markers.append(Marker("\n".join(block), marker_line))
+        else:
+            markers.append(Marker(first, marker_line))
+            index += 1
+    return markers
+
+
+def docstring_start_line(node: ast.Module | ast.FunctionDef) -> int | None:
+    """Return the source line where a module or function docstring starts."""
+    body = node.body
+    if not body:
+        return None
+    first = body[0]
+    if not isinstance(first, ast.Expr):
+        return None
+    if not isinstance(first.value, ast.Constant) or not isinstance(first.value.value, str):
+        return None
+    return first.lineno
+
+
+def collect_requirements(
+    source_path: Path,
+    module: ast.Module,
+    proof_namespace: str,
+    ast_namespace: str,
+) -> list[Requirement]:
+    """Collect proof obligations requested by source docstring markers."""
+    requirements: list[Requirement] = []
+    for marker in docstring_markers(
+        ast.get_docstring(module, clean=False),
+        docstring_start_line(module),
+    ):
+        raw_theorem = parse_raw_theorem(marker.text)
+        if raw_theorem is None:
+            raise InvalidRequirement(f"module docstring: unsupported leanpy marker: {marker.text}")
+        theorem_name = raw_theorem.theorem_name
+        if "." not in theorem_name:
+            theorem_name = f"{proof_namespace}.{theorem_name}"
+        requirements.append(Requirement(
+            theorem_name,
+            raw_theorem_type(raw_theorem),
+            source_path,
+            marker.line,
+            marker.text,
+        ))
+    for stmt in module.body:
+        if not isinstance(stmt, ast.FunctionDef):
+            continue
+        for marker in docstring_markers(
+            ast.get_docstring(stmt, clean=False),
+            docstring_start_line(stmt),
+        ):
+            raw_theorem = parse_raw_theorem(marker.text)
+            if raw_theorem is not None:
+                theorem_name = raw_theorem.theorem_name
+                if "." not in theorem_name:
+                    theorem_name = f"{proof_namespace}.{theorem_name}"
+                requirements.append(Requirement(
+                    theorem_name,
+                    raw_theorem_type(raw_theorem),
+                    source_path,
+                    marker.line,
+                    marker.text,
+                ))
+                continue
+            parsed = parse_short_marker(marker.text)
+            if parsed is None:
+                raise InvalidRequirement(
+                    f"{stmt.name}: unsupported leanpy marker: {marker.text}"
+                )
+            property_name, args = parsed
+            requirements.append(Requirement(
+                proof_name_for_short_requirement(
+                    proof_namespace,
+                    stmt.name,
+                    property_name,
+                    args,
+                ),
+                property_type_for_short_requirement(
+                    ast_namespace,
+                    stmt.name,
+                    property_name,
+                    args,
+                ),
+                source_path,
+                marker.line,
+                marker.text,
+            ))
+    return requirements
+
+
+class RequirementEmitter:
+    """Render a generated Lean wrapper that checks a proof and its obligations."""
+
+    def __init__(
+        self,
+        proof_path: Path,
+        proof_module: str,
+        requirements: list[Requirement],
+    ):
+        """Store the proof import and the requirements it must expose."""
+        self.proof_path = proof_path
+        self.proof_module = proof_module
+        self.requirements = requirements
+
+    def emit(self) -> str:
+        """Render the generated Lean requirements file."""
+        lines = [
+            f"import {self.proof_module}",
+            "",
+            "/-!",
+            "Generated by leanpy. Do not edit by hand.",
+            "",
+            f"This file checks `{self.proof_path}` and its requested proof obligations.",
+            "-/",
+            "",
+            "/- leanpy proof obligations -/",
+            "",
+        ]
+        for requirement in self.requirements:
+            lines.extend([
+                "example :",
+                f"{indent(requirement.property_type, 4)}",
+                f"  := {requirement.theorem_name}",
+                "",
+            ])
+        return "\n".join(lines)
+
+
+class AstEmitter:
+    """Translate Python `ast` nodes into constructors from `LeanPy.PyAst`."""
+
+    def __init__(self, module: ast.Module, namespace: str):
+        """Store the parsed Python module and output Lean namespace."""
+        self.module = module
+        self.namespace = namespace
+
+    def emit(self) -> str:
+        """Render the complete generated Lean file."""
+        return "\n".join(
+            [
+                "import LeanPy",
+                "",
+                "/-!",
+                "Generated by leanpy. Do not edit by hand.",
+                "",
+                "This file contains an AST-like Lean value for the source Python file.",
+                "-/",
+                "",
+                f"namespace {self.namespace}",
+                "open LeanPy.PyAst",
+                "",
+                "/-- The parsed Python module encoded with `LeanPy.PyAst`. -/",
+                "def module : Module := {",
+                f"  body := {indent(self.stmt_list(self.module.body), 10).lstrip()}",
+                "}",
+                "",
+                f"end {self.namespace}",
+                "",
+            ]
+        )
+
+    def stmt_list(self, stmts: list[ast.stmt]) -> str:
+        """Render a Python statement list as a Lean `List Stmt`."""
+        return list_lit([self.stmt(stmt) for stmt in stmts])
+
+    def stmt(self, stmt: ast.stmt) -> str:
+        """Render one Python statement as a Lean `Stmt` constructor."""
+        match stmt:
+            case ast.FunctionDef(name=name, args=args, returns=returns, body=body):
+                if stmt.decorator_list:
+                    raise UnsupportedSyntax(f"{name}: decorators are unsupported")
+                return (
+                    f".functionDef {lean_string(name)} "
+                    f"{self.arguments(args)} "
+                    f"({option_lit(self.expr(returns) if returns is not None else None)}) "
+                    f"{self.stmt_list(body)}"
+                )
+            case ast.Return(value=value):
+                if value is None:
+                    return ".return (.constant .none)"
+                return f".return ({self.expr(value)})"
+            case ast.Assign(targets=targets, value=value):
+                return f".assign {list_lit([self.expr(t) for t in targets])} ({self.expr(value)})"
+            case ast.AugAssign(target=target, op=op, value=value):
+                return f".augAssign ({self.expr(target)}) {self.binop(op)} ({self.expr(value)})"
+            case ast.For(target=target, iter=iter_expr, body=body, orelse=orelse):
+                return (
+                    f".forIn ({self.expr(target)}) ({self.expr(iter_expr)}) "
+                    f"{self.stmt_list(body)} {self.stmt_list(orelse)}"
+                )
+            case ast.If(test=test, body=body, orelse=orelse):
+                return f".ifThen ({self.expr(test)}) {self.stmt_list(body)} {self.stmt_list(orelse)}"
+            case ast.Assert(test=test, msg=msg):
+                return f".assert ({self.expr(test)}) ({option_lit(self.expr(msg) if msg is not None else None)})"
+            case ast.Expr(value=value):
+                return f".expr ({self.expr(value)})"
+            case _:
+                raise UnsupportedSyntax(f"unsupported statement: {type(stmt).__name__}")
+
+    def arguments(self, args: ast.arguments) -> str:
+        """Render supported Python function arguments as a Lean list of `Arg`."""
+        if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
+            raise UnsupportedSyntax("only plain positional args supported")
+        return list_lit([self.arg(arg) for arg in args.args])
+
+    def arg(self, arg: ast.arg) -> str:
+        """Render one supported Python function argument."""
+        annotation = self.expr(arg.annotation) if arg.annotation is not None else None
+        return f"{{ name := {lean_string(arg.arg)}, annotation := {option_lit(annotation)} }}"
+
+    def expr(self, expr: ast.expr) -> str:
+        """Render one Python expression as a Lean `Expr` constructor."""
+        match expr:
+            case ast.Constant(value=value):
+                return f".constant ({self.constant(value)})"
+            case ast.Name(id=name):
+                return f".name {lean_string(name)}"
+            case ast.List(elts=elts):
+                return f".list {list_lit([self.expr(elt) for elt in elts])}"
+            case ast.BinOp(left=left, op=op, right=right):
+                return f".binOp ({self.expr(left)}) {self.binop(op)} ({self.expr(right)})"
+            case ast.UnaryOp(op=op, operand=operand):
+                return f".unaryOp {self.unaryop(op)} ({self.expr(operand)})"
+            case ast.Compare(left=left, ops=ops, comparators=comparators):
+                pairs = [
+                    f"({self.cmpop(op)}, {self.expr(comparator)})"
+                    for op, comparator in zip(ops, comparators, strict=True)
+                ]
+                return f".compare ({self.expr(left)}) {list_lit(pairs)}"
+            case ast.Call(func=func, args=args, keywords=[]):
+                return f".call ({self.expr(func)}) {list_lit([self.expr(arg) for arg in args])}"
+            case _:
+                raise UnsupportedSyntax(f"unsupported expression: {ast.dump(expr)}")
+
+    def constant(self, value: object) -> str:
+        """Render one Python constant as a Lean `Constant` constructor."""
+        if isinstance(value, bool):
+            return f".bool {str(value).lower()}"
+        if isinstance(value, int):
+            return f".int {value}"
+        if isinstance(value, str):
+            return f".string {lean_string(value)}"
+        if value is None:
+            return ".none"
+        raise UnsupportedSyntax(f"unsupported constant: {value!r}")
+
+    def unaryop(self, op: ast.unaryop) -> str:
+        """Render a supported Python unary operator."""
+        match op:
+            case ast.USub():
+                return ".uSub"
+            case ast.Not():
+                return ".not"
+            case _:
+                raise UnsupportedSyntax(f"unsupported unary operator: {type(op).__name__}")
+
+    def binop(self, op: ast.operator) -> str:
+        """Render a supported Python binary operator."""
+        match op:
+            case ast.Add():
+                return ".add"
+            case ast.Sub():
+                return ".sub"
+            case ast.Mult():
+                return ".mult"
+            case ast.FloorDiv():
+                return ".floorDiv"
+            case _:
+                raise UnsupportedSyntax(f"unsupported binary operator: {type(op).__name__}")
+
+    def cmpop(self, op: ast.cmpop) -> str:
+        """Render a supported Python comparison operator."""
+        match op:
+            case ast.Eq():
+                return ".eq"
+            case ast.NotEq():
+                return ".notEq"
+            case ast.Lt():
+                return ".lt"
+            case ast.LtE():
+                return ".ltE"
+            case ast.Gt():
+                return ".gt"
+            case ast.GtE():
+                return ".gtE"
+            case _:
+                raise UnsupportedSyntax(f"unsupported comparison: {type(op).__name__}")
+
+
+def camel_component(component: str) -> str:
+    """Convert one path/name component into a Lean namespace component."""
+    words = re.split(r"[^0-9A-Za-z]+", component)
+    return "".join(word[:1].upper() + word[1:] for word in words if word)
+
+
+def lean_import_component(component: str) -> str:
+    """Return one filesystem path component rendered as a Lean import component."""
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_']*", component):
+        return component
+    return f"«{component}»"
+
+
+def lean_module_for_path(path: Path) -> str:
+    """Return the Lean module name for a `.lean` file under the current directory."""
+    try:
+        relative = path.resolve().relative_to(Path.cwd().resolve())
+    except ValueError as error:
+        raise SystemExit(
+            f"error: {path}: proof files outside the current directory "
+            "cannot be imported by leanpy"
+        ) from error
+    without_suffix = relative.with_suffix("")
+    return ".".join(lean_import_component(component) for component in without_suffix.parts)
+
+
+def namespace_for_source(source: Path) -> str:
+    """Return the generated Lean namespace for a Python source file."""
+    return camel_component(source.stem) + "Ast"
+
+
+def git_root_for_source(source: Path) -> Path | None:
+    """Return the containing git worktree root for a source path, if any."""
+    directory = source.resolve().parent
+    for candidate in [directory, *directory.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def generated_path_for_source(source: Path, suffix: str) -> Path:
+    """Return a generated-file path for a Python source."""
+    git_root = git_root_for_source(source)
+    if git_root is not None:
+        relative_source = source.resolve().relative_to(git_root)
+        return git_root / ".leanpy" / relative_source.parent / f"{source.name}{suffix}"
+    return source.parent / ".leanpy" / f"{source.name}{suffix}"
+
+
+def ast_path_for_source(source: Path) -> Path:
+    """Return the generated Lean AST path for a Python source file."""
+    return generated_path_for_source(source, ".ast.lean")
+
+
+def proof_path_for_source(source: Path) -> Path:
+    """Return the Lean proof path paired with a Python source file."""
+    return source.with_name(source.name + ".lean")
+
+
+def requirements_path_for_source(source: Path) -> Path:
+    """Return the generated Lean requirements path for a Python source file."""
+    return generated_path_for_source(source, ".reqs.lean")
+
+
+def olean_path_for_lean(source: Path) -> Path:
+    """Return the object-file path Lean uses for a `.lean` file."""
+    return source.with_suffix(".olean")
+
+
+def lean_env() -> dict[str, str]:
+    """Return an environment that lets Lean import generated files from cwd."""
+    env = os.environ.copy()
+    existing = env.get("LEAN_PATH")
+    env["LEAN_PATH"] = "." if not existing else f".:{existing}"
+    return env
+
+
+def useful_diagnostic_lines(output: str) -> list[str]:
+    """Return the short diagnostic lines worth showing to users."""
+    lines = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Build completed successfully"):
+            continue
+        if stripped.startswith("✔ "):
+            continue
+        if "Traceback (most recent call last)" in stripped:
+            continue
+        if stripped.startswith("File ") or stripped.startswith("subprocess."):
+            continue
+        if "error" in stripped or "warning" in stripped or "Unknown identifier" in stripped:
+            lines.append(line)
+    if lines:
+        return lines[:8]
+    return [
+        line for line in output.splitlines()
+        if line.strip() and not line.startswith("Build completed successfully")
+    ][:8]
+
+
+def first_lean_error(output: str) -> tuple[Path, int, str] | None:
+    """Return the first Lean diagnostic location and message from output."""
+    pattern = re.compile(r"^(.+?):(\d+):\d+:\s+(?:error(?:\([^)]*\))?:\s*)?(.*)$")
+    for line in output.splitlines():
+        match = pattern.match(line.strip())
+        if match is None:
+            continue
+        return Path(match.group(1)), int(match.group(2)), match.group(3).strip()
+    return None
+
+
+def first_sorry_line(path: Path) -> int | None:
+    """Return the first line in a Lean file that contains `sorry`."""
+    for index, line in enumerate(path.read_text().splitlines(), start=1):
+        if re.search(r"\bsorry\b", line):
+            return index
+    return None
+
+
+def proof_body_start_in_requirements(proof_path: Path) -> tuple[int, int]:
+    """Return `(generated_start_line, original_start_line)` for embedded proof body."""
+    proof_lines = proof_path.read_text().splitlines()
+    import_count = 0
+    while import_count < len(proof_lines) and (
+        not proof_lines[import_count].strip()
+        or proof_lines[import_count].startswith("import ")
+    ):
+        import_count += 1
+    return import_count + 8, import_count + 1
+
+
+def unknown_identifier(output: str) -> str | None:
+    """Return the unknown identifier reported by Lean, if any."""
+    match = re.search(r"Unknown identifier `([^`]+)`", output)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def final_error_line(
+    completed: subprocess.CompletedProcess[str],
+    proof_path: Path | None,
+    requirements_path: Path | None,
+    expected: list[Requirement] | None,
+) -> str:
+    """Return the final source-mapped user-facing error line."""
+    output = completed.stdout + completed.stderr
+    identifier = unknown_identifier(output)
+    if identifier and expected:
+        for requirement in expected:
+            if requirement.theorem_name == identifier:
+                return (
+                    f"error: {requirement.source_path}:{requirement.source_line}: "
+                    f"missing proof `{requirement.theorem_name}` for "
+                    f"`@leanpy: {requirement.marker}`"
+                )
+    if "declaration uses `sorry`" in output and proof_path is not None:
+        line = first_sorry_line(proof_path)
+        if line is not None:
+            return f"error: {proof_path}:{line}: proof uses `sorry`"
+    diagnostic = first_lean_error(output)
+    if diagnostic is not None:
+        diagnostic_path, diagnostic_line, message = diagnostic
+        if (
+            proof_path is not None
+            and requirements_path is not None
+            and diagnostic_path == requirements_path
+        ):
+            generated_start, original_start = proof_body_start_in_requirements(proof_path)
+            original_line = original_start + diagnostic_line - generated_start
+            if original_line >= original_start:
+                return f"error: {proof_path}:{original_line}: {message}"
+        return f"error: {diagnostic_path}:{diagnostic_line}: {message}"
+    return f"error: command failed with exit {completed.returncode}"
+
+
+def print_command_failure(
+    command: list[str],
+    completed: subprocess.CompletedProcess[str],
+    message: str,
+    hint: str | None = None,
+    expected: list[Requirement] | None = None,
+    proof_path: Path | None = None,
+    requirements_path: Path | None = None,
+) -> None:
+    """Print a compact, user-facing subprocess failure."""
+    print(message, file=sys.stderr)
+    if hint is not None:
+        print(hint, file=sys.stderr)
+    if expected:
+        print("Expected proof obligations:", file=sys.stderr)
+        for requirement in expected:
+            print(f"  {requirement.theorem_name} :", file=sys.stderr)
+            print(indent(requirement.property_type, 4), file=sys.stderr)
+    diagnostics = useful_diagnostic_lines(completed.stdout + completed.stderr)
+    if diagnostics:
+        print("Lean diagnostic:", file=sys.stderr)
+        for line in diagnostics:
+            print(f"  {line}", file=sys.stderr)
+    print(final_error_line(completed, proof_path, requirements_path, expected), file=sys.stderr)
+
+
+def run(
+    command: list[str],
+    env: dict[str, str] | None = None,
+    failure_message: str = "command failed",
+    failure_hint: str | None = None,
+    expected: list[Requirement] | None = None,
+    proof_path: Path | None = None,
+    requirements_path: Path | None = None,
+) -> None:
+    """Run a subprocess command, failing the entrypoint cleanly if it fails."""
+    completed = subprocess.run(
+        command,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return
+    print_command_failure(
+        command,
+        completed,
+        failure_message,
+        failure_hint,
+        expected,
+        proof_path,
+        requirements_path,
+    )
+    raise SystemExit(completed.returncode)
+
+
+def require_executable(name: str) -> None:
+    """Fail with a clear message when an external executable is unavailable."""
+    if shutil.which(name) is None:
+        raise SystemExit(f"required executable not found on PATH: {name}")
+
+
+def check_source(source: Path) -> None:
+    """Compile-check one Python file and its paired Lean proof."""
+    ast_path = ast_path_for_source(source)
+    proof_path = proof_path_for_source(source)
+    requirements_path = requirements_path_for_source(source)
+    namespace = namespace_for_source(source)
+    proof_namespace = proof_namespace_for_source(source)
+    proof_module = lean_module_for_path(proof_path)
+
+    run(
+        ["python3", "-m", "py_compile", str(source)],
+        failure_message=f"Python syntax check failed for {source}",
+        failure_hint="Fix the Python syntax error before running Lean proofs.",
+    )
+    module = ast.parse(source.read_text(), filename=str(source))
+    requirements = collect_requirements(source, module, proof_namespace, namespace)
+    if requirements and not proof_path.exists():
+        first = requirements[0]
+        print(
+            f"error: {first.source_path}:{first.source_line}: "
+            f"missing proof file {proof_path} for `@leanpy: {first.marker}`",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    ast_path.parent.mkdir(parents=True, exist_ok=True)
+    requirements_path.parent.mkdir(parents=True, exist_ok=True)
+    ast_path.write_text(AstEmitter(module, namespace).emit())
+    requirements_path.write_text(
+        RequirementEmitter(proof_path, proof_module, requirements).emit()
+    )
+    require_executable("lake")
+    run(
+        ["lake", "build", "LeanPy"],
+        failure_message="failed to build LeanPy",
+        failure_hint="Fix the LeanPy library error before checking source proofs.",
+    )
+    run([
+        "lake",
+        "env",
+        "lean",
+        "-o",
+        str(olean_path_for_lean(ast_path)),
+        str(ast_path),
+    ],
+        env=lean_env(),
+        failure_message=f"generated AST file failed to compile for {source}",
+        failure_hint=f"This usually means leanpy generated invalid Lean in {ast_path}.",
+    )
+    run([
+        "lake",
+        "env",
+        "lean",
+        "-DwarningAsError=true",
+        "-o",
+        str(olean_path_for_lean(proof_path)),
+        str(proof_path),
+    ],
+        env=lean_env(),
+        failure_message=f"proof check failed for {source}",
+        failure_hint=(
+            f"Complete {proof_path}; remove any `sorry`; and make sure it "
+            "compiles before checking requested proof obligations."
+        ),
+        expected=requirements,
+        proof_path=proof_path,
+        requirements_path=requirements_path,
+    )
+    run([
+        "lake",
+        "env",
+        "lean",
+        "-DwarningAsError=true",
+        "-o",
+        str(olean_path_for_lean(requirements_path)),
+        str(requirements_path),
+    ],
+        env=lean_env(),
+        failure_message=f"proof check failed for {source}",
+        failure_hint=(
+            f"Complete {proof_path}; remove any `sorry`; and make sure every "
+            "`@leanpy:` requirement has a theorem with the expected name and type."
+        ),
+        expected=requirements,
+        proof_path=proof_path,
+        requirements_path=requirements_path,
+    )
+
+
+def iter_python_sources(directory: Path) -> list[Path]:
+    """Return Python sources under a directory, excluding generated/cache trees."""
+    sources = []
+    for path in sorted(directory.rglob("*.py")):
+        if any(part in {".leanpy", "__pycache__"} for part in path.parts):
+            continue
+        sources.append(path)
+    return sources
+
+
+def check_directory(directory: Path) -> None:
+    """Check all Python files under a directory."""
+    sources = iter_python_sources(directory)
+    if not sources:
+        raise SystemExit(f"error: {directory}: no Python files found")
+    failed = False
+    for source in sources:
+        try:
+            check_source(source)
+        except SystemExit as error:
+            failed = True
+            if error.code == 0:
+                continue
+    if failed:
+        raise SystemExit(1)
+
+
+def main() -> None:
+    """Compile-check Python source files against paired Lean proof files."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("source", type=Path)
+    args = parser.parse_args()
+
+    source = args.source
+    if source.is_dir():
+        check_directory(source)
+    else:
+        check_source(source)
+
+
+if __name__ == "__main__":
+    main()

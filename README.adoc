@@ -1,0 +1,268 @@
+= leanpy
+
+Prove properties of Python code in Lean.
+
+== Install
+
+Install the leanpy Python library:
+
+----
+pipx install leanpy
+----
+
+Install Elan, Lean's version manager. On Linux:
+
+----
+curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
+----
+
+Installation details for other systems: https://github.com/leanprover/elan
+
+== Getting started
+
+Consider a `tmp.py` file which contains two alternative implementations of the sum of integers 0 to n:
+
+----
+def sum(n: int) -> int:
+    """Return the closed-form sum of Python's `range(n)` for integer `n`.
+
+    @leanpy: NoThrow
+    @leanpy: Equiv(sum_naive)
+    """
+    if n <= 0:
+        return 0
+    return (n * (n - 1)) // 2
+
+def sum_naive(n: int) -> int:
+    """Return the direct loop sum of Python's `range(n)` for integer `n`.
+
+    @leanpy: NoThrow
+    """
+    total = 0
+    for i in range(n):
+        total += i
+    return total
+----
+
+and suppose that your goal is to formally prove that both functions are the same for every input.
+
+To convey our goal, we have specified on the docstrings which properties we want to prove the functions to have, e.g.:
+
+* `@leanpy: NoThrow`: the function `sum` does not throw any exception for any input
+* `@leanpy: Equiv(sum_naive)`: the function `sum` has the same output for every input
+
+After this is specified, if you run:
+
+----
+leanpy tmp.py
+----
+
+it blows up with:
+
+----
+error: tmp.py:4: missing proof file tmp.py.lean for `@leanpy: NoThrow`
+----
+
+which is good because haven't proven what we said we wanted to prove yet!
+
+To create the required proofs, we must create a tmp.py.lean file containing the following theorems:
+
+----
+import «.leanpy».tests.pass.«range_sum.py.ast»
+import LeanPy
+
+namespace Tmp
+
+theorem sum_noThrow (n : Int) :
+    ∃ value,
+      LeanPy.PyAst.evalUnaryIntFunction
+          RangeSumAst.module "sum" n =
+        some value := by sorry
+
+theorem sumNaive_noThrow (n : Int) :
+    ∃ value,
+      LeanPy.PyAst.evalUnaryIntFunction
+          RangeSumAst.module "sum_naive" n =
+        some value := by sorry
+
+theorem sum_equiv_sumNaive (n : Int) :
+    LeanPy.PyAst.evalUnaryIntFunction
+        RangeSumAst.module "sum" n =
+      LeanPy.PyAst.evalUnaryIntFunction
+        RangeSumAst.module "sum_naive" n := by sorry
+
+end Tmp
+----
+
+And now we can try again:
+
+----
+leanpy tmp.py
+----
+
+but this time it fails with:
+
+----
+error: tmp.py.lean:11: proof uses `sorry`
+----
+
+because we cheated with `sorry` which tells Lean to skip a proof.
+
+The final passing proof is something like the following ungodly file. I don't expect you to read and understand it.
+
+The beauty of is is, and the entire reason for this project existing, of course, that you don't need to write that by yourself. You can just ask an LLM to do it for you! 
+
+You only need to understand the definition of properties that you care about in the comments of the source code.
+
+Then you let the LLM loose, and so long as the LLM does not touch your .py source files during the proof step, only the .lean ones, the our scripts and the Lean formal system ensures that the property is true.
+
+Here's the file:
+
+----
+import «.leanpy».«tmp.py.ast»
+import LeanPy
+
+namespace Tmp
+
+/-- `sum` returns an integer for every integer input. -/
+theorem sum_noThrow (n : Int) :
+    ∃ value,
+      LeanPy.PyAst.evalUnaryIntFunction
+          TmpAst.module "sum" n =
+        some value := by
+  by_cases hn : n <= 0
+  · refine ⟨0, ?_⟩
+    simp [
+      LeanPy.PyAst.evalUnaryIntFunction,
+      LeanPy.PyAst.Module.findFunctionBody,
+      LeanPy.PyAst.findFunctionBodyIn,
+      LeanPy.PyAst.evalIntBlock,
+      LeanPy.PyAst.evalBoolExpr,
+      LeanPy.PyAst.evalIntExpr,
+      LeanPy.PyAst.Env.get?,
+      LeanPy.PyAst.evalCmpOp,
+      TmpAst.module,
+      hn,
+    ]
+  · refine ⟨LeanPy.PyAst.sumRange n.toNat, ?_⟩
+    simp [
+      LeanPy.PyAst.evalUnaryIntFunction,
+      LeanPy.PyAst.Module.findFunctionBody,
+      LeanPy.PyAst.findFunctionBodyIn,
+      LeanPy.PyAst.evalIntBlock,
+      LeanPy.PyAst.evalBoolExpr,
+      LeanPy.PyAst.evalIntExpr,
+      LeanPy.PyAst.Env.get?,
+      LeanPy.PyAst.evalCmpOp,
+      TmpAst.module,
+      hn,
+    ]
+
+/-- `sum_naive` returns an integer for every integer input. -/
+theorem sumNaive_noThrow (n : Int) :
+    ∃ value,
+      LeanPy.PyAst.evalUnaryIntFunction
+          TmpAst.module "sum_naive" n =
+        some value := by
+  refine ⟨LeanPy.PyAst.sumRange n.toNat, ?_⟩
+  simp [
+    LeanPy.PyAst.evalUnaryIntFunction,
+    LeanPy.PyAst.Module.findFunctionBody,
+    LeanPy.PyAst.findFunctionBodyIn,
+    LeanPy.PyAst.evalIntBlock,
+    LeanPy.PyAst.evalIntExpr,
+    LeanPy.PyAst.evalRangeContribution,
+    LeanPy.PyAst.Env.get?,
+    TmpAst.module,
+  ]
+
+/-- `sum` and `sum_naive` give the same result for every integer input. -/
+theorem sum_equiv_sumNaive (n : Int) :
+    LeanPy.PyAst.evalUnaryIntFunction
+        TmpAst.module "sum" n =
+      LeanPy.PyAst.evalUnaryIntFunction
+        TmpAst.module "sum_naive" n := by
+  by_cases hn : n <= 0
+  · simp [
+      LeanPy.PyAst.evalUnaryIntFunction,
+      LeanPy.PyAst.Module.findFunctionBody,
+      LeanPy.PyAst.findFunctionBodyIn,
+      LeanPy.PyAst.evalIntBlock,
+      LeanPy.PyAst.evalBoolExpr,
+      LeanPy.PyAst.evalIntExpr,
+      LeanPy.PyAst.evalRangeContribution,
+      LeanPy.PyAst.sumRange,
+      LeanPy.PyAst.Env.get?,
+      LeanPy.PyAst.evalCmpOp,
+      TmpAst.module,
+      hn,
+      Int.toNat_of_nonpos hn,
+    ]
+  · simp [
+      LeanPy.PyAst.evalUnaryIntFunction,
+      LeanPy.PyAst.Module.findFunctionBody,
+      LeanPy.PyAst.findFunctionBodyIn,
+      LeanPy.PyAst.evalIntBlock,
+      LeanPy.PyAst.evalBoolExpr,
+      LeanPy.PyAst.evalIntExpr,
+      LeanPy.PyAst.evalRangeContribution,
+      LeanPy.PyAst.Env.get?,
+      LeanPy.PyAst.evalCmpOp,
+      TmpAst.module,
+      hn,
+    ]
+
+end Tmp
+----
+
+and now if you run:
+
+----
+leanpy tmp.py
+----
+
+there's no output, which means that all proofs were verified!
+
+== Further usage
+
+Directories are also accepted; every `.py` file under the directory is checked:
+
+[source,sh]
+----
+./leanpy tests/pass
+----
+
+== How it works
+
+The way it all works is as follows. When you run:
+
+----
+leanpy tmp.py
+----
+
+it will determine where to create the `.leanpy` directory. When you are inside a .git repository, `.leanpy` is always placed next to the `.git`. You basically always  want to use Git becuse you want to check that you LLMs haven't mofidifed your specifications in source files.
+
+The, inside the `.leanpy` directory, `leanpy` converts the input Python source code to its AST, and then dumps the AST as a Lean data structure under `.leanpy/tmp.py.ast.lean`.
+
+At the same time, leanpy searches for `@leanpy:` markers in Python docstrings, and when those are found, it dumps them under `.leanpy/tmp.py.reqs.lean` in such a way that unless proof of each requirement is also found, things will blow up when Lean runs.
+
+----
+example :
+    LeanPy.Property.Function.NoThrow TmpAst.module "sum"
+  := Tmp.sum_noThrow
+
+example :
+    LeanPy.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+  := Tmp.sum_equiv_sumNaive
+
+example :
+    LeanPy.Property.Function.NoThrow TmpAst.module "sum_naive"
+  := Tmp.sumNaive_noThrow
+----
+
+Finally, leanpy runs Lean putting everything together:
+
+* `.leanpy/tmp.py.ast.lean` mentioned above with the AST representation
+* `.leanpy/tmp.py.reqs.lean` mentioned above with the proof requirements
+* `tmp.py.lean` which is supposed to contain your proof
+* link:LeanPy.lean[] which defines the Python AST representation and properties of the Python language which are then used in correctness proofs

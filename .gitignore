@@ -1,0 +1,17 @@
+# Python bytecode and test caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Lean/Lake build products.
+.lake/
+*.olean
+*.ilean
+*.c
+.leanpy/
+
+# Local editor and OS metadata.
+*~
+.DS_Store
+
+tmp.*
