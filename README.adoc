@@ -277,3 +277,20 @@ Finally, leanpy runs Lean putting everything together:
 * `.leanpy/tmp.py.reqs.lean` mentioned above with the proof requirements
 * `tmp.py.lean` which is supposed to contain your proof
 * link:LeanPy.lean[] which defines the Python AST representation and properties of the Python language which are then used in correctness proofs
+
+== Development
+
+=== Development installation
+
+Currently leanpy is a single Python file with no dependencies outside of the standard library, so you can just:
+
+----
+./leanpy ...
+----
+
+or:
+
+----
+export PATH="$PWD:$PATH"
+leanpy
+----
