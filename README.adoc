@@ -29,33 +29,38 @@ curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
 
 Installation details for other systems: https://github.com/leanprover/elan
 
+Now test it on a hello world link:tests/pass/range_sum.py[]:
+
+----
+leanpy tests/pass/range_sum.py
+----
+
+and if all went well you should see a message:
+
+----
+All checks passed
+----
+
+and exit status 0.
+
 == Getting started
 
-Consider a `tmp.py` file which contains two alternative implementations of the sum of integers 0 to n:
+Support that you have two alternative implementations of the sum of integers 0 to n, one naive and one optimized:
 
 ----
 def sum(n: int) -> int:
-    """Return the closed-form sum of Python's `range(n)` for integer `n`.
-
-    @leanpy: NoThrow
-    @leanpy: Equiv(sum_naive)
-    """
     if n <= 0:
         return 0
     return (n * (n - 1)) // 2
 
 def sum_naive(n: int) -> int:
-    """Return the direct loop sum of Python's `range(n)` for integer `n`.
-
-    @leanpy: NoThrow
-    """
     total = 0
     for i in range(n):
         total += i
     return total
 ----
 
-and suppose that your goal is to formally prove that both functions are the same for every input.
+and then suppose that your goal is to formally prove that for every possible input both functions return the same output, i.e. that the functions are equivalent.
 
 To convey our goal, we have specified on the docstrings which properties we want to prove the functions to have, e.g.:
 
@@ -293,4 +298,12 @@ or:
 ----
 export PATH="$PWD:$PATH"
 leanpy
+----
+
+=== Test system
+
+Run all tests under link:tests[]:
+
+----
+./test
 ----
