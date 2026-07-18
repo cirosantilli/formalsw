@@ -9,7 +9,7 @@
 :toclevels: 6
 :toc-title:
 
-Prove properties of Python code in Lean.
+Formally prove properties of Python code in Lean.
 
 toc::[]
 
