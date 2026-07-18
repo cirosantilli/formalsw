@@ -5,7 +5,7 @@ These definitions intentionally mirror Python's `ast` module shape more closely
 than executable Lean code. Partial semantic interpretations are defined below.
 -/
 
-namespace LeanPy.PyAst
+namespace CleanXYZ.PyAst
 
 /-- Python constants currently represented by the AST bridge. -/
 inductive Constant where
@@ -112,16 +112,16 @@ structure Module where
   body : List Stmt
 deriving Repr
 
-end LeanPy.PyAst
+end CleanXYZ.PyAst
 
 /-!
-Partial semantic interpreters for `LeanPy.PyAst`.
+Partial semantic interpreters for `CleanXYZ.PyAst`.
 
 This section is intentionally not generated. It is where we define the meaning
 of supported Python AST fragments and prove properties about that meaning.
 -/
 
-namespace LeanPy.PyAst
+namespace CleanXYZ.PyAst
 
 /-- Runtime environment for the current integer-only evaluator. -/
 abbrev Env := List (String × Int)
@@ -283,17 +283,17 @@ def evalUnaryIntFunction (module : Module) (name : String) (arg : Int) :
   let body <- module.findFunctionBody name
   evalIntBlock [("n", arg)] body
 
-end LeanPy.PyAst
+end CleanXYZ.PyAst
 
 /-!
-Reusable proof obligations that `leanpy` docstring markers can request.
+Reusable proof obligations that `cleanxyz` docstring markers can request.
 
 These names are intentionally short and stable so users can discover available
-properties under `LeanPy.Property.Function` and then prove ordinary Lean
+properties under `CleanXYZ.Property.Function` and then prove ordinary Lean
 theorems with the same types.
 -/
 
-namespace LeanPy.Property.Function
+namespace CleanXYZ.Property.Function
 
 /-- A unary integer function evaluates successfully for every integer input. -/
 def NoThrow (module : PyAst.Module) (name : String) : Prop :=
@@ -305,4 +305,4 @@ def Equiv (module : PyAst.Module) (left right : String) : Prop :=
     PyAst.evalUnaryIntFunction module left n =
       PyAst.evalUnaryIntFunction module right n
 
-end LeanPy.Property.Function
+end CleanXYZ.Property.Function

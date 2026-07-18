@@ -1,4 +1,4 @@
-= leanpy
+= CleanXYZ
 :idprefix:
 :idseparator: -
 :sectanchors:
@@ -15,10 +15,10 @@ toc::[]
 
 == Install
 
-Install the leanpy Python library:
+Install the cleanxyz Python library:
 
 ----
-pipx install leanpy
+pipx install cleanxyz
 ----
 
 Install Elan, Lean's version manager. On Linux:
@@ -32,7 +32,7 @@ Installation details for other systems: https://github.com/leanprover/elan
 Now test it on a hello world link:tests/pass/range_sum.py[]:
 
 ----
-leanpy tests/pass/range_sum.py
+cleanxyz tests/pass/range_sum.py
 ----
 
 and if all went well you should see a message:
@@ -64,19 +64,19 @@ and then suppose that your goal is to formally prove that for every possible inp
 
 To convey our goal, we have specified on the docstrings which properties we want to prove the functions to have, e.g.:
 
-* `@leanpy: NoThrow`: the function `sum` does not throw any exception for any input
-* `@leanpy: Equiv(sum_naive)`: the function `sum` has the same output for every input
+* `@cleanxyz: NoThrow`: the function `sum` does not throw any exception for any input
+* `@cleanxyz: Equiv(sum_naive)`: the function `sum` has the same output for every input
 
 After this is specified, if you run:
 
 ----
-leanpy tmp.py
+cleanxyz tmp.py
 ----
 
 it blows up with:
 
 ----
-error: tmp.py:4: missing proof file tmp.py.lean for `@leanpy: NoThrow`
+error: tmp.py:4: missing proof file tmp.py.lean for `@cleanxyz: NoThrow`
 ----
 
 which is good because haven't proven what we said we wanted to prove yet!
@@ -84,27 +84,27 @@ which is good because haven't proven what we said we wanted to prove yet!
 To create the required proofs, we must create a tmp.py.lean file containing the following theorems:
 
 ----
-import «.leanpy».tests.pass.«range_sum.py.ast»
-import LeanPy
+import «.cleanxyz».tests.pass.«range_sum.py.ast»
+import CleanXYZ
 
 namespace Tmp
 
 theorem sum_noThrow (n : Int) :
     ∃ value,
-      LeanPy.PyAst.evalUnaryIntFunction
+      CleanXYZ.PyAst.evalUnaryIntFunction
           RangeSumAst.module "sum" n =
         some value := by sorry
 
 theorem sumNaive_noThrow (n : Int) :
     ∃ value,
-      LeanPy.PyAst.evalUnaryIntFunction
+      CleanXYZ.PyAst.evalUnaryIntFunction
           RangeSumAst.module "sum_naive" n =
         some value := by sorry
 
 theorem sum_equiv_sumNaive (n : Int) :
-    LeanPy.PyAst.evalUnaryIntFunction
+    CleanXYZ.PyAst.evalUnaryIntFunction
         RangeSumAst.module "sum" n =
-      LeanPy.PyAst.evalUnaryIntFunction
+      CleanXYZ.PyAst.evalUnaryIntFunction
         RangeSumAst.module "sum_naive" n := by sorry
 
 end Tmp
@@ -113,7 +113,7 @@ end Tmp
 And now we can try again:
 
 ----
-leanpy tmp.py
+cleanxyz tmp.py
 ----
 
 but this time it fails with:
@@ -135,41 +135,41 @@ Then you let the LLM loose, and so long as the LLM does not touch your .py sourc
 Here's the file:
 
 ----
-import «.leanpy».«tmp.py.ast»
-import LeanPy
+import «.cleanxyz».«tmp.py.ast»
+import CleanXYZ
 
 namespace Tmp
 
 /-- `sum` returns an integer for every integer input. -/
 theorem sum_noThrow (n : Int) :
     ∃ value,
-      LeanPy.PyAst.evalUnaryIntFunction
+      CleanXYZ.PyAst.evalUnaryIntFunction
           TmpAst.module "sum" n =
         some value := by
   by_cases hn : n <= 0
   · refine ⟨0, ?_⟩
     simp [
-      LeanPy.PyAst.evalUnaryIntFunction,
-      LeanPy.PyAst.Module.findFunctionBody,
-      LeanPy.PyAst.findFunctionBodyIn,
-      LeanPy.PyAst.evalIntBlock,
-      LeanPy.PyAst.evalBoolExpr,
-      LeanPy.PyAst.evalIntExpr,
-      LeanPy.PyAst.Env.get?,
-      LeanPy.PyAst.evalCmpOp,
+      CleanXYZ.PyAst.evalUnaryIntFunction,
+      CleanXYZ.PyAst.Module.findFunctionBody,
+      CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlock,
+      CleanXYZ.PyAst.evalBoolExpr,
+      CleanXYZ.PyAst.evalIntExpr,
+      CleanXYZ.PyAst.Env.get?,
+      CleanXYZ.PyAst.evalCmpOp,
       TmpAst.module,
       hn,
     ]
-  · refine ⟨LeanPy.PyAst.sumRange n.toNat, ?_⟩
+  · refine ⟨CleanXYZ.PyAst.sumRange n.toNat, ?_⟩
     simp [
-      LeanPy.PyAst.evalUnaryIntFunction,
-      LeanPy.PyAst.Module.findFunctionBody,
-      LeanPy.PyAst.findFunctionBodyIn,
-      LeanPy.PyAst.evalIntBlock,
-      LeanPy.PyAst.evalBoolExpr,
-      LeanPy.PyAst.evalIntExpr,
-      LeanPy.PyAst.Env.get?,
-      LeanPy.PyAst.evalCmpOp,
+      CleanXYZ.PyAst.evalUnaryIntFunction,
+      CleanXYZ.PyAst.Module.findFunctionBody,
+      CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlock,
+      CleanXYZ.PyAst.evalBoolExpr,
+      CleanXYZ.PyAst.evalIntExpr,
+      CleanXYZ.PyAst.Env.get?,
+      CleanXYZ.PyAst.evalCmpOp,
       TmpAst.module,
       hn,
     ]
@@ -177,53 +177,53 @@ theorem sum_noThrow (n : Int) :
 /-- `sum_naive` returns an integer for every integer input. -/
 theorem sumNaive_noThrow (n : Int) :
     ∃ value,
-      LeanPy.PyAst.evalUnaryIntFunction
+      CleanXYZ.PyAst.evalUnaryIntFunction
           TmpAst.module "sum_naive" n =
         some value := by
-  refine ⟨LeanPy.PyAst.sumRange n.toNat, ?_⟩
+  refine ⟨CleanXYZ.PyAst.sumRange n.toNat, ?_⟩
   simp [
-    LeanPy.PyAst.evalUnaryIntFunction,
-    LeanPy.PyAst.Module.findFunctionBody,
-    LeanPy.PyAst.findFunctionBodyIn,
-    LeanPy.PyAst.evalIntBlock,
-    LeanPy.PyAst.evalIntExpr,
-    LeanPy.PyAst.evalRangeContribution,
-    LeanPy.PyAst.Env.get?,
+    CleanXYZ.PyAst.evalUnaryIntFunction,
+    CleanXYZ.PyAst.Module.findFunctionBody,
+    CleanXYZ.PyAst.findFunctionBodyIn,
+    CleanXYZ.PyAst.evalIntBlock,
+    CleanXYZ.PyAst.evalIntExpr,
+    CleanXYZ.PyAst.evalRangeContribution,
+    CleanXYZ.PyAst.Env.get?,
     TmpAst.module,
   ]
 
 /-- `sum` and `sum_naive` give the same result for every integer input. -/
 theorem sum_equiv_sumNaive (n : Int) :
-    LeanPy.PyAst.evalUnaryIntFunction
+    CleanXYZ.PyAst.evalUnaryIntFunction
         TmpAst.module "sum" n =
-      LeanPy.PyAst.evalUnaryIntFunction
+      CleanXYZ.PyAst.evalUnaryIntFunction
         TmpAst.module "sum_naive" n := by
   by_cases hn : n <= 0
   · simp [
-      LeanPy.PyAst.evalUnaryIntFunction,
-      LeanPy.PyAst.Module.findFunctionBody,
-      LeanPy.PyAst.findFunctionBodyIn,
-      LeanPy.PyAst.evalIntBlock,
-      LeanPy.PyAst.evalBoolExpr,
-      LeanPy.PyAst.evalIntExpr,
-      LeanPy.PyAst.evalRangeContribution,
-      LeanPy.PyAst.sumRange,
-      LeanPy.PyAst.Env.get?,
-      LeanPy.PyAst.evalCmpOp,
+      CleanXYZ.PyAst.evalUnaryIntFunction,
+      CleanXYZ.PyAst.Module.findFunctionBody,
+      CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlock,
+      CleanXYZ.PyAst.evalBoolExpr,
+      CleanXYZ.PyAst.evalIntExpr,
+      CleanXYZ.PyAst.evalRangeContribution,
+      CleanXYZ.PyAst.sumRange,
+      CleanXYZ.PyAst.Env.get?,
+      CleanXYZ.PyAst.evalCmpOp,
       TmpAst.module,
       hn,
       Int.toNat_of_nonpos hn,
     ]
   · simp [
-      LeanPy.PyAst.evalUnaryIntFunction,
-      LeanPy.PyAst.Module.findFunctionBody,
-      LeanPy.PyAst.findFunctionBodyIn,
-      LeanPy.PyAst.evalIntBlock,
-      LeanPy.PyAst.evalBoolExpr,
-      LeanPy.PyAst.evalIntExpr,
-      LeanPy.PyAst.evalRangeContribution,
-      LeanPy.PyAst.Env.get?,
-      LeanPy.PyAst.evalCmpOp,
+      CleanXYZ.PyAst.evalUnaryIntFunction,
+      CleanXYZ.PyAst.Module.findFunctionBody,
+      CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlock,
+      CleanXYZ.PyAst.evalBoolExpr,
+      CleanXYZ.PyAst.evalIntExpr,
+      CleanXYZ.PyAst.evalRangeContribution,
+      CleanXYZ.PyAst.Env.get?,
+      CleanXYZ.PyAst.evalCmpOp,
       TmpAst.module,
       hn,
     ]
@@ -234,7 +234,7 @@ end Tmp
 and now if you run:
 
 ----
-leanpy tmp.py
+cleanxyz tmp.py
 ----
 
 there's no output, which means that all proofs were verified!
@@ -245,7 +245,7 @@ Directories are also accepted; every `.py` file under the directory is checked:
 
 [source,sh]
 ----
-./leanpy tests/pass
+./cleanxyz tests/pass
 ----
 
 == How it works
@@ -253,51 +253,51 @@ Directories are also accepted; every `.py` file under the directory is checked:
 The way it all works is as follows. When you run:
 
 ----
-leanpy tmp.py
+cleanxyz tmp.py
 ----
 
-it will determine where to create the `.leanpy` directory. When you are inside a .git repository, `.leanpy` is always placed next to the `.git`. You basically always  want to use Git becuse you want to check that you LLMs haven't mofidifed your specifications in source files.
+it will determine where to create the `.cleanxyz` directory. When you are inside a .git repository, `.cleanxyz` is always placed next to the `.git`. You basically always  want to use Git becuse you want to check that you LLMs haven't mofidifed your specifications in source files.
 
-The, inside the `.leanpy` directory, `leanpy` converts the input Python source code to its AST, and then dumps the AST as a Lean data structure under `.leanpy/tmp.py.ast.lean`.
+The, inside the `.cleanxyz` directory, `cleanxyz` converts the input Python source code to its AST, and then dumps the AST as a Lean data structure under `.cleanxyz/tmp.py.ast.lean`.
 
-At the same time, leanpy searches for `@leanpy:` markers in Python docstrings, and when those are found, it dumps them under `.leanpy/tmp.py.reqs.lean` in such a way that unless proof of each requirement is also found, things will blow up when Lean runs.
+At the same time, cleanxyz searches for `@cleanxyz:` markers in Python docstrings, and when those are found, it dumps them under `.cleanxyz/tmp.py.reqs.lean` in such a way that unless proof of each requirement is also found, things will blow up when Lean runs.
 
 ----
 example :
-    LeanPy.Property.Function.NoThrow TmpAst.module "sum"
+    CleanXYZ.Property.Function.NoThrow TmpAst.module "sum"
   := Tmp.sum_noThrow
 
 example :
-    LeanPy.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+    CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
   := Tmp.sum_equiv_sumNaive
 
 example :
-    LeanPy.Property.Function.NoThrow TmpAst.module "sum_naive"
+    CleanXYZ.Property.Function.NoThrow TmpAst.module "sum_naive"
   := Tmp.sumNaive_noThrow
 ----
 
-Finally, leanpy runs Lean putting everything together:
+Finally, cleanxyz runs Lean putting everything together:
 
-* `.leanpy/tmp.py.ast.lean` mentioned above with the AST representation
-* `.leanpy/tmp.py.reqs.lean` mentioned above with the proof requirements
+* `.cleanxyz/tmp.py.ast.lean` mentioned above with the AST representation
+* `.cleanxyz/tmp.py.reqs.lean` mentioned above with the proof requirements
 * `tmp.py.lean` which is supposed to contain your proof
-* link:LeanPy.lean[] which defines the Python AST representation and properties of the Python language which are then used in correctness proofs
+* link:CleanXYZ.lean[] which defines the Python AST representation and properties of the Python language which are then used in correctness proofs
 
 == Development
 
 === Development installation
 
-Currently leanpy is a single Python file with no dependencies outside of the standard library, so you can just:
+Currently cleanxyz is a single Python file with no dependencies outside of the standard library, so you can just:
 
 ----
-./leanpy ...
+./cleanxyz ...
 ----
 
 or:
 
 ----
 export PATH="$PWD:$PATH"
-leanpy
+cleanxyz
 ----
 
 === Test system

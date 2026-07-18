@@ -1,6 +1,6 @@
 def f(n: int) -> int:
     """Identity function.
 
-    @leanpy: NoThrow
+    @cleanxyz: NoThrow
     """
     return n

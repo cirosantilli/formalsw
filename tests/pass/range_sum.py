@@ -4,8 +4,8 @@
 def sum(n: int) -> int:
     """Return the closed-form sum of Python's `range(n)` for integer `n`.
 
-    @leanpy: NoThrow
-    @leanpy: Equiv(sum_naive)
+    @cleanxyz: NoThrow
+    @cleanxyz: Equiv(sum_naive)
     """
     if n <= 0:
         return 0
@@ -14,7 +14,7 @@ def sum(n: int) -> int:
 def sum_naive(n: int) -> int:
     """Return the direct loop sum of Python's `range(n)` for integer `n`.
 
-    @leanpy: NoThrow
+    @cleanxyz: NoThrow
     """
     total = 0
     for i in range(n):

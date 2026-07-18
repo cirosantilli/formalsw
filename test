@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run leanpy's end-to-end tests."""
+"""Run cleanxyz's end-to-end tests."""
 
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent
-LEANPY = REPO / "leanpy"
+CLEANXYZ = REPO / "cleanxyz"
 
 
 @dataclass(frozen=True)
 class TestCase:
-    """One leanpy subprocess-backed test case."""
+    """One cleanxyz subprocess-backed test case."""
 
     name: str
     source: Path
@@ -38,10 +38,10 @@ class TestResult:
     elapsed: float
 
 
-def run_leanpy(source: Path) -> subprocess.CompletedProcess[str]:
-    """Run leanpy on a repo-relative source path."""
+def run_cleanxyz(source: Path) -> subprocess.CompletedProcess[str]:
+    """Run cleanxyz on a repo-relative source path."""
     return subprocess.run(
-        [str(LEANPY), str(source)],
+        [str(CLEANXYZ), str(source)],
         cwd=REPO,
         text=True,
         stdout=subprocess.PIPE,
@@ -53,7 +53,7 @@ def run_leanpy(source: Path) -> subprocess.CompletedProcess[str]:
 def run_case(case: TestCase) -> TestResult:
     """Run one test case and compare status plus optional diagnostic text."""
     start = time.perf_counter()
-    completed = run_leanpy(case.source)
+    completed = run_cleanxyz(case.source)
     elapsed = time.perf_counter() - start
     output = completed.stdout + completed.stderr
     passed = completed.returncode == case.expected_returncode

@@ -1,5 +1,5 @@
-import «.leanpy».tests.fail.«missing_required.py.ast»
-import LeanPy
+import «.cleanxyz».tests.fail.«missing_required.py.ast»
+import CleanXYZ
 
 namespace Tests.Fail.MissingRequired
 
