@@ -80,11 +80,21 @@ To specify that we want both function to be proven to be the same, we can add a 
 ----
 def sum(n: int) -> int:
     """
+    @cleanxyz: Not Throws
     @cleanxyz: Equiv(sum_naive)
     """
     if n <= 0:
         return 0
     return (n * (n - 1)) // 2
+
+def sum_naive(n: int) -> int:
+    """
+    @cleanxyz: Not Throws
+    """
+    total = 0
+    for i in range(n):
+        total += i
+    return total
 ----
 
 After this is specified, if you run:
@@ -96,7 +106,7 @@ cleanxyz tmp.py
 it blows up with:
 
 ----
-error: tmp.py:4: missing proof file tmp.py.lean for `@cleanxyz: NoThrow`
+error: tmp.py:4: missing proof file tmp.py.lean for `@cleanxyz: Not Throws`
 ----
 
 which is good because haven't proven what we said we wanted to prove yet!
@@ -109,17 +119,13 @@ import CleanXYZ
 
 namespace Tmp
 
-theorem sum_noThrow (n : Int) :
-    ∃ value,
-      CleanXYZ.PyAst.evalUnaryIntFunction
-          RangeSumAst.module "sum" n =
-        some value := by sorry
+theorem sum_not_throws :
+    Not (CleanXYZ.Property.Function.Throws RangeSumAst.module "sum") := by
+  sorry
 
-theorem sumNaive_noThrow (n : Int) :
-    ∃ value,
-      CleanXYZ.PyAst.evalUnaryIntFunction
-          RangeSumAst.module "sum_naive" n =
-        some value := by sorry
+theorem sumNaive_not_throws :
+    Not (CleanXYZ.Property.Function.Throws RangeSumAst.module "sum_naive") := by
+  sorry
 
 theorem sum_equiv_sumNaive (n : Int) :
     CleanXYZ.PyAst.evalUnaryIntFunction
@@ -161,7 +167,7 @@ import CleanXYZ
 namespace Tmp
 
 /-- `sum` returns an integer for every integer input. -/
-theorem sum_noThrow (n : Int) :
+theorem sum_returns (n : Int) :
     ∃ value,
       CleanXYZ.PyAst.evalUnaryIntFunction
           TmpAst.module "sum" n =
@@ -180,6 +186,7 @@ theorem sum_noThrow (n : Int) :
       TmpAst.module,
       hn,
     ]
+
   · refine ⟨CleanXYZ.PyAst.sumRange n.toNat, ?_⟩
     simp [
       CleanXYZ.PyAst.evalUnaryIntFunction,
@@ -194,8 +201,15 @@ theorem sum_noThrow (n : Int) :
       hn,
     ]
 
+theorem sum_not_throws :
+    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum") := by
+  rintro ⟨n, hthrow⟩
+  obtain ⟨value, hvalue⟩ := sum_returns n
+  rw [hthrow] at hvalue
+  contradiction
+
 /-- `sum_naive` returns an integer for every integer input. -/
-theorem sumNaive_noThrow (n : Int) :
+theorem sumNaive_returns (n : Int) :
     ∃ value,
       CleanXYZ.PyAst.evalUnaryIntFunction
           TmpAst.module "sum_naive" n =
@@ -211,6 +225,13 @@ theorem sumNaive_noThrow (n : Int) :
     CleanXYZ.PyAst.Env.get?,
     TmpAst.module,
   ]
+
+theorem sumNaive_not_throws :
+    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum_naive") := by
+  rintro ⟨n, hthrow⟩
+  obtain ⟨value, hvalue⟩ := sumNaive_returns n
+  rw [hthrow] at hvalue
+  contradiction
 
 /-- `sum` and `sum_naive` give the same result for every integer input. -/
 theorem sum_equiv_sumNaive (n : Int) :
@@ -285,76 +306,82 @@ There are two types of ways to write the specification:
 
 === DSL
 
-==== Equiv
+DSL expressions consist of a property, optionally preceded by one or more `Not` words. For example, `Not Throws` requires a proof of the Lean proposition `Not (Throws ...)`, while `Not Not Throws` negates it twice. The generated theorem name includes each negation, such as `sum_not_throws` or `sum_not_not_throws`.
 
-`Equiv` states that two functions have identical evaluation results for every input.
+==== Not
 
-Example: link:tests/pass/range_sum.py[]
-
-[source,python]
-----
-def sum(n: int) -> int:
-    """Optimized version of sum_naive.
-
-    @cleanxyz: Equiv(sum_naive)
-    """
-    if n <= 0:
-        return 0
-    return (n * (n - 1)) // 2
-
-def sum_naive(n: int) -> int:
-    """Sum of integers from 1 to n. Return 0 if n <= 0.
-
-    @cleanxyz: NoThrow
-    """
-    total = 0
-    for i in range(n):
-        total += i
-    return total
-----
-
-For this example, cleanxyz requires a theorem named `sum_noThrow` in the proof namespace, with a type definitionally equal to:
-
-[source,lean]
-----
-CleanXYZ.Property.Function.NoThrow TmpAst.module "sum"
-----
-
-This expands to:
-
-[source,lean]
-----
-∀ n : Int, ∃ value,
-  CleanXYZ.PyAst.evalUnaryIntFunction TmpAst.module "sum" n = some value
-----
-
-==== NoThrow
-
-`NoThrow` states that a function never throws any exceptions. Example:
+`Not` negates the complete DSL expression following it. It can be applied to any DSL property and can be nested:
 
 [source,python]
 ----
 def sum(n: int) -> int:
     """
-    @cleanxyz: NoThrow
+    @cleanxyz: Not Throws
+    @cleanxyz: Not Equiv(other_sum)
     """
     return n + 1
 ----
 
-For this example, cleanxyz requires a theorem named `sum_noThrow` in the proof namespace, with a type definitionally equal to:
+The first marker above requires `sum_not_throws`; the second requires `sum_not_equiv_otherSum`.
+
+==== Throws
+
+`Throws` states that there is at least one integer input for which evaluation fails. Example: link:tests/pass/throws.py[].
+
+[source,python]
+----
+def reject_odd(n: int) -> int:
+    """
+    @cleanxyz: Throws
+    """
+    if n % 2 != 0:
+        raise ValueError("odd input")
+    return n
+----
+
+This marker requires a theorem named `rejectOdd_throws` with type:
 
 [source,lean]
 ----
-CleanXYZ.Property.Function.NoThrow TmpAst.module "sum"
+CleanXYZ.Property.Function.Throws ThrowsAst.module "reject_odd"
 ----
 
-This expands to:
+which expands to:
 
 [source,lean]
 ----
-∀ n : Int, ∃ value,
-  CleanXYZ.PyAst.evalUnaryIntFunction TmpAst.module "sum" n = some value
+∃ n : Int,
+  CleanXYZ.PyAst.evalUnaryIntFunction ThrowsAst.module "reject_odd" n = none
 ----
+
+Use `Not Throws` to state that no input throws. For a function named `sum`, this requires a theorem named `sum_not_throws` with type:
+
+[source,lean]
+----
+Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
+----
+
+==== Equiv
+
+`Equiv` states that two functions have identical evaluation results for every input. Example: link:tests/pass/range_sum.py[].
+
+[source,python]
+----
+def sum(n: int) -> int:
+    """
+    @cleanxyz: Equiv(sum_naive)
+    """
+    # ...
+----
+
+This marker requires `sum_equiv_sumNaive` with type:
+
+[source,lean]
+----
+CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+----
+
+`Equiv` compares the complete `Option Int` results, so two failures are equal. Combine it with `Not Throws` markers when both functions must also return successfully for every input.
 
 === Raw Lean specification
 
@@ -412,16 +439,16 @@ At the same time, cleanxyz searches for `@cleanxyz:` markers in Python docstring
 
 ----
 example :
-    CleanXYZ.Property.Function.NoThrow TmpAst.module "sum"
-  := Tmp.sum_noThrow
+    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
+  := Tmp.sum_not_throws
 
 example :
     CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
   := Tmp.sum_equiv_sumNaive
 
 example :
-    CleanXYZ.Property.Function.NoThrow TmpAst.module "sum_naive"
-  := Tmp.sumNaive_noThrow
+    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum_naive")
+  := Tmp.sumNaive_not_throws
 ----
 
 Finally, cleanxyz runs Lean putting everything together:

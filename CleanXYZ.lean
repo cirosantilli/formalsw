@@ -464,9 +464,9 @@ theorems with the same types.
 
 namespace CleanXYZ.Property.Function
 
-/-- A unary integer function evaluates successfully for every integer input. -/
-def NoThrow (module : PyAst.Module) (name : String) : Prop :=
-  ∀ n : Int, ∃ value, PyAst.evalUnaryIntFunction module name n = some value
+/-- A unary integer function fails to evaluate for at least one integer input. -/
+def Throws (module : PyAst.Module) (name : String) : Prop :=
+  ∃ n : Int, PyAst.evalUnaryIntFunction module name n = none
 
 /-- Two unary integer functions evaluate to the same result for every input. -/
 def Equiv (module : PyAst.Module) (left right : String) : Prop :=

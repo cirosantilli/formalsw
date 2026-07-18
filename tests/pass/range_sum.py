@@ -4,7 +4,7 @@
 def sum(n: int) -> int:
     """Optimized version of sum_naive.
 
-    @cleanxyz: NoThrow
+    @cleanxyz: Not Throws
     @cleanxyz: Equiv(sum_naive)
     """
     if n <= 0:
@@ -14,7 +14,7 @@ def sum(n: int) -> int:
 def sum_naive(n: int) -> int:
     """Sum of integers from 1 to n. Return 0 if n <= 0.
 
-    @cleanxyz: NoThrow
+    @cleanxyz: Not Throws
     """
     total = 0
     for i in range(n):

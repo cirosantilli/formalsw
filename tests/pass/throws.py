@@ -3,8 +3,7 @@
 def reject_odd(n: int) -> int:
     """Return even inputs and throw for odd inputs.
 
-    @cleanxyz: theorem reject_odd_not_noThrow :
-      ¬ CleanXYZ.Property.Function.NoThrow NothrowAst.module "reject_odd"
+    @cleanxyz: Throws
     """
     if n % 2 != 0:
         raise ValueError("odd input")
