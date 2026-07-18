@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Small range-sum example used by the Lean AST proof test."""
+"""Simple and meaningful example of various basic functionality."""
 
 def sum(n: int) -> int:
-    """Return the closed-form sum of Python's `range(n)` for integer `n`.
+    """Optimized version of sum_naive.
 
     @cleanxyz: NoThrow
     @cleanxyz: Equiv(sum_naive)
@@ -12,7 +12,7 @@ def sum(n: int) -> int:
     return (n * (n - 1)) // 2
 
 def sum_naive(n: int) -> int:
-    """Return the direct loop sum of Python's `range(n)` for integer `n`.
+    """Sum of integers from 1 to n. Return 0 if n <= 0.
 
     @cleanxyz: NoThrow
     """
@@ -24,5 +24,3 @@ def sum_naive(n: int) -> int:
 if __name__ == "__main__":
     for n in [-10, -1, 0, 1, 2, 10]:
         assert sum(n) == sum_naive(n), n
-    print(sum(10))
-    print(sum_naive(10))

@@ -410,6 +410,13 @@ class AstJsonEmitter:
                     "test": self.expr(test),
                     "msg": self.expr(msg) if msg is not None else None,
                 }
+            case ast.Raise(exc=exc, cause=None):
+                return {
+                    "type": "Raise",
+                    "exc": self.expr(exc) if exc is not None else None,
+                }
+            case ast.Raise():
+                raise UnsupportedSyntax("raise ... from ... is unsupported")
             case ast.Expr(value=value):
                 return {"type": "Expr", "value": self.expr(value)}
             case _:
@@ -493,6 +500,8 @@ class AstJsonEmitter:
                 return "Mult"
             case ast.FloorDiv():
                 return "FloorDiv"
+            case ast.Mod():
+                return "Mod"
             case _:
                 raise UnsupportedSyntax(f"unsupported binary operator: {type(op).__name__}")
 

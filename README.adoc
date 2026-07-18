@@ -45,7 +45,7 @@ and exit status 0.
 
 == Getting started
 
-Support that you have two alternative implementations of the sum of integers 0 to n, one naive and one optimized:
+Consider the following two alternative implementations of the sum of integers 0 to n, one naive and one optimized:
 
 ----
 def sum(n: int) -> int:
@@ -302,6 +302,108 @@ Finally, cleanxyz runs Lean putting everything together:
 * `.cleanxyz/tmp.py.reqs.lean` mentioned above with the proof requirements
 * `tmp.py.lean` which is supposed to contain your proof
 * link:CleanXYZ.lean[] which defines the Python AST representation and properties of the Python language which are then used in correctness proofs
+
+== Specification language
+
+The specification language is how you specify the properties of the program which must be proven.
+
+Specifications are written as markers inside Python docstrings in lines starting with:
+
+----
+@cleanxyz
+----
+
+=== Equiv
+
+`Equiv` states that two functions have identical evaluation results for every input.
+
+Example: link:tests/pass/range_sum.py[]
+
+[source,python]
+----
+def sum(n: int) -> int:
+    """Optimized version of sum_naive.
+
+    @cleanxyz: Equiv(sum_naive)
+    """
+    if n <= 0:
+        return 0
+    return (n * (n - 1)) // 2
+
+def sum_naive(n: int) -> int:
+    """Sum of integers from 1 to n. Return 0 if n <= 0.
+
+    @cleanxyz: NoThrow
+    """
+    total = 0
+    for i in range(n):
+        total += i
+    return total
+----
+
+For this example, cleanxyz requires a theorem named `sum_noThrow` in the proof namespace, with a type definitionally equal to:
+
+[source,lean]
+----
+CleanXYZ.Property.Function.NoThrow TmpAst.module "sum"
+----
+
+This expands to:
+
+[source,lean]
+----
+∀ n : Int, ∃ value,
+  CleanXYZ.PyAst.evalUnaryIntFunction TmpAst.module "sum" n = some value
+----
+
+=== NoThrow
+
+`NoThrow` states that a function never throws any exceptions. Example:
+
+[source,python]
+----
+def sum(n: int) -> int:
+    """
+    @cleanxyz: NoThrow
+    """
+    return n + 1
+----
+
+For this example, cleanxyz requires a theorem named `sum_noThrow` in the proof namespace, with a type definitionally equal to:
+
+[source,lean]
+----
+CleanXYZ.Property.Function.NoThrow TmpAst.module "sum"
+----
+
+This expands to:
+
+[source,lean]
+----
+∀ n : Int, ∃ value,
+  CleanXYZ.PyAst.evalUnaryIntFunction TmpAst.module "sum" n = some value
+----
+
+=== Raw Lean theorem
+
+When a built-in shorthand is not expressive enough, a marker can contain a Lean theorem declaration. The declaration's proposition becomes the proof obligation:
+
+[source,python]
+----
+def f(n: int) -> int:
+    """Identity function.
+
+    @cleanxyz: theorem f_returns_input (n : Int) :
+      n = n ∧ RawLeanAst.module.findFunctionBody "f" ≠ none
+    """
+    return n
+----
+
+Continuation lines are included until a blank line or another marker.
+
+An unqualified theorem name is placed in the proof namespace derived from the Python file path.
+
+Raw theorem markers may also appear in a module docstring; module docstrings do not support the function-specific short forms.
 
 == Development
 

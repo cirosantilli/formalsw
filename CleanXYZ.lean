@@ -39,6 +39,8 @@ inductive BinOp where
   | mult
   /-- Python floor division `//`. -/
   | floorDiv
+  /-- Python remainder `%`. -/
+  | mod
 deriving Repr, Lean.ToExpr
 
 /-- Python comparison operators currently represented by the AST bridge. -/
@@ -104,6 +106,8 @@ inductive Stmt where
   | ifThen : Expr -> List Stmt -> List Stmt -> Stmt
   /-- A Python `assert` statement. -/
   | assert : Expr -> Option Expr -> Stmt
+  /-- A Python `raise` statement. -/
+  | raise : Option Expr -> Stmt
   /-- A Python expression statement. -/
   | expr : Expr -> Stmt
 deriving Repr, Lean.ToExpr
@@ -142,6 +146,7 @@ private def BinOp.fromJson? (json : Lean.Json) : Except String BinOp := do
   | "Sub" => return .sub
   | "Mult" => return .mult
   | "FloorDiv" => return .floorDiv
+  | "Mod" => return .mod
   | name => throw s!"unsupported binary operator: {name}"
 
 /-- Decode a comparison operator name from the JSON schema. -/
@@ -237,6 +242,7 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
       return .assert
         (← Expr.fromJson? (← jsonField json "test"))
         (← optionalExpr json "msg")
+  | "Raise" => return .raise (← optionalExpr json "exc")
   | "Expr" => return .expr (← Expr.fromJson? (← jsonField json "value"))
   | type => throw s!"unsupported statement type: {type}"
 
@@ -385,6 +391,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
       | BinOp.sub => some (leftValue - rightValue)
       | BinOp.mult => some (leftValue * rightValue)
       | BinOp.floorDiv => none
+      | BinOp.mod => if rightValue = 0 then none else some (leftValue % rightValue)
   | Expr.compare _ _ => none
   | Expr.call _ _ => none
   | Expr.list _ => none
@@ -400,11 +407,13 @@ def evalBoolExpr (env : Env) : Expr -> Option Bool
 /--
 Evaluate a supported integer-returning statement block.
 
-The current evaluator handles direct returns, `if` statements with fallthrough,
-leading docstrings, and the exact accumulator-loop shape used by `sum_naive`.
+The current evaluator handles direct returns, explicit `raise` failure, `if`
+statements with fallthrough, leading docstrings, and the exact accumulator-loop
+shape used by `sum_naive`.
 -/
 def evalIntBlock (env : Env) : List Stmt -> Option Int
   | Stmt.expr (Expr.constant (Constant.string _)) :: rest => evalIntBlock env rest
+  | Stmt.raise _ :: _ => none
   | [Stmt.return expr] => evalIntExpr env expr
   | Stmt.ifThen condition thenBody [] :: rest => do
       let conditionValue <- evalBoolExpr env condition
