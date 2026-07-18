@@ -102,6 +102,8 @@ def proof_name_for_short_requirement(
         case "Equiv", [other]:
             other_part = theorem_suffix_for_function(other)
             property_part = f"equiv_{other_part}"
+        case "BigO", [_, _]:
+            property_part = "bigO"
         case _:
             raise InvalidRequirement(
                 f"{function_name}: unsupported cleanxyz property marker: "
@@ -130,6 +132,31 @@ def property_type_for_short_requirement(
                 f'CleanXYZ.Property.Function.Equiv {ast_namespace}.module '
                 f'{lean_string(function_name)} {lean_string(other)}'
             )
+        case "BigO", [bound, measure]:
+            parameter = "n" if re.search(r"\bn\b", bound) else "_"
+            list_measure = re.fullmatch(
+                r"len\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", measure
+            )
+            int_measure = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)", measure)
+            if list_measure is not None:
+                input_size = (
+                    "CleanXYZ.PyAst.InputSize.listLength "
+                    f"{lean_string(list_measure.group(1))}"
+                )
+            elif int_measure is not None:
+                input_size = (
+                    "CleanXYZ.PyAst.InputSize.intToNat "
+                    f"{lean_string(int_measure.group(1))}"
+                )
+            else:
+                raise InvalidRequirement(
+                    f"{function_name}: unsupported BigO input size: n = {measure}"
+                )
+            property_type = (
+                f'CleanXYZ.Property.Function.BigO {ast_namespace}.module '
+                f'{lean_string(function_name)} ({input_size}) '
+                f'(fun {parameter} : Nat => {bound})'
+            )
         case _:
             raise InvalidRequirement(
                 f"{function_name}: unsupported cleanxyz property marker: "
@@ -149,11 +176,22 @@ def parse_short_marker(marker: str) -> tuple[str, list[str], int] | None:
     match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\((.*)\))?", marker)
     if match is None:
         return None
+    property_name = match.group(1)
     args_text = match.group(2)
-    args = [] if args_text is None else [
-        arg.strip() for arg in args_text.split(",") if arg.strip()
-    ]
-    return match.group(1), args, negations
+    if args_text is None:
+        args = []
+    elif property_name == "BigO":
+        big_o_match = re.fullmatch(
+            r"(.+),\s*n\s*=\s*(.+)", args_text.strip(), re.DOTALL
+        )
+        args = (
+            [big_o_match.group(1).strip(), big_o_match.group(2).strip()]
+            if big_o_match is not None
+            else [args_text.strip()]
+        )
+    else:
+        args = [arg.strip() for arg in args_text.split(",") if arg.strip()]
+    return property_name, args, negations
 
 
 def strip_marker_prefix(line: str) -> str | None:
@@ -416,6 +454,13 @@ class AstJsonEmitter:
                     "body": [self.stmt(child) for child in body],
                     "orelse": [self.stmt(child) for child in orelse],
                 }
+            case ast.While(test=test, body=body, orelse=orelse):
+                return {
+                    "type": "While",
+                    "test": self.expr(test),
+                    "body": [self.stmt(child) for child in body],
+                    "orelse": [self.stmt(child) for child in orelse],
+                }
             case ast.Assert(test=test, msg=msg):
                 return {
                     "type": "Assert",
@@ -469,6 +514,12 @@ class AstJsonEmitter:
                     "op": self.unaryop(op),
                     "operand": self.expr(operand),
                 }
+            case ast.BoolOp(op=op, values=values):
+                return {
+                    "type": "BoolOp",
+                    "op": self.boolop(op),
+                    "values": [self.expr(value) for value in values],
+                }
             case ast.Compare(left=left, ops=ops, comparators=comparators):
                 return {
                     "type": "Compare",
@@ -481,6 +532,19 @@ class AstJsonEmitter:
                     "type": "Call",
                     "func": self.expr(func),
                     "args": [self.expr(arg) for arg in args],
+                }
+            case ast.Subscript(value=value, slice=slice_expr):
+                return {
+                    "type": "Subscript",
+                    "value": self.expr(value),
+                    "slice": self.expr(slice_expr),
+                }
+            case ast.Slice(lower=lower, upper=upper, step=step):
+                return {
+                    "type": "Slice",
+                    "lower": self.expr(lower) if lower is not None else None,
+                    "upper": self.expr(upper) if upper is not None else None,
+                    "step": self.expr(step) if step is not None else None,
                 }
             case _:
                 raise UnsupportedSyntax(f"unsupported expression: {ast.dump(expr)}")
@@ -500,6 +564,16 @@ class AstJsonEmitter:
                 return "Not"
             case _:
                 raise UnsupportedSyntax(f"unsupported unary operator: {type(op).__name__}")
+
+    def boolop(self, op: ast.boolop) -> str:
+        """Encode a supported Python boolean operator."""
+        match op:
+            case ast.And():
+                return "And"
+            case ast.Or():
+                return "Or"
+            case _:
+                raise UnsupportedSyntax(f"unsupported boolean operator: {type(op).__name__}")
 
     def binop(self, op: ast.operator) -> str:
         """Encode a supported Python binary operator."""

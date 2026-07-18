@@ -29,6 +29,14 @@ inductive UnaryOp where
   | not
 deriving Repr, Lean.ToExpr
 
+/-- Python boolean operators currently represented by the AST bridge. -/
+inductive BoolOp where
+  /-- Python short-circuiting `and`. -/
+  | and
+  /-- Python short-circuiting `or`. -/
+  | or
+deriving Repr, Lean.ToExpr
+
 /-- Python binary operators currently represented by the AST bridge. -/
 inductive BinOp where
   /-- Python `+`. -/
@@ -71,10 +79,16 @@ inductive Expr where
   | binOp : Expr -> BinOp -> Expr -> Expr
   /-- A Python unary operation. -/
   | unaryOp : UnaryOp -> Expr -> Expr
+  /-- A Python boolean operation. -/
+  | boolOp : BoolOp -> List Expr -> Expr
   /-- A Python comparison chain. -/
   | compare : Expr -> List (CmpOp × Expr) -> Expr
   /-- A Python call expression with positional arguments. -/
   | call : Expr -> List Expr -> Expr
+  /-- A Python subscription such as `values[i]`. -/
+  | subscript : Expr -> Expr -> Expr
+  /-- A Python slice used inside a subscription. -/
+  | slice : Option Expr -> Option Expr -> Option Expr -> Expr
 deriving Repr, Lean.ToExpr
 
 /-- A Python function argument. -/
@@ -104,6 +118,8 @@ inductive Stmt where
   | forIn : Expr -> Expr -> List Stmt -> List Stmt -> Stmt
   /-- A Python `if` statement. -/
   | ifThen : Expr -> List Stmt -> List Stmt -> Stmt
+  /-- A Python `while` statement. -/
+  | whileDo : Expr -> List Stmt -> List Stmt -> Stmt
   /-- A Python `assert` statement. -/
   | assert : Expr -> Option Expr -> Stmt
   /-- A Python `raise` statement. -/
@@ -150,6 +166,13 @@ private def UnaryOp.fromJson? (json : Lean.Json) : Except String UnaryOp := do
   | "Not" => return .not
   | name => throw s!"unsupported unary operator: {name}"
 
+/-- Decode a boolean operator name from the JSON schema. -/
+private def BoolOp.fromJson? (json : Lean.Json) : Except String BoolOp := do
+  match ← json.getStr? with
+  | "And" => return .and
+  | "Or" => return .or
+  | name => throw s!"unsupported boolean operator: {name}"
+
 /-- Decode a binary operator name from the JSON schema. -/
 private def BinOp.fromJson? (json : Lean.Json) : Except String BinOp := do
   match ← json.getStr? with
@@ -192,6 +215,10 @@ private partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       return .unaryOp
         (← UnaryOp.fromJson? (← jsonField json "op"))
         (← Expr.fromJson? (← jsonField json "operand"))
+  | "BoolOp" =>
+      return .boolOp
+        (← BoolOp.fromJson? (← jsonField json "op"))
+        (← jsonArray json "values" Expr.fromJson?)
   | "Compare" =>
       let operators ← jsonArray json "ops" CmpOp.fromJson?
       let comparators ← jsonArray json "comparators" Expr.fromJson?
@@ -204,6 +231,19 @@ private partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       return .call
         (← Expr.fromJson? (← jsonField json "func"))
         (← jsonArray json "args" Expr.fromJson?)
+  | "Subscript" =>
+      return .subscript
+        (← Expr.fromJson? (← jsonField json "value"))
+        (← Expr.fromJson? (← jsonField json "slice"))
+  | "Slice" =>
+      let decodeOptional (value : Lean.Json) :=
+        match value with
+        | .null => pure none
+        | value => some <$> Expr.fromJson? value
+      return .slice
+        (← decodeOptional (← jsonField json "lower"))
+        (← decodeOptional (← jsonField json "upper"))
+        (← decodeOptional (← jsonField json "step"))
   | type => throw s!"unsupported expression type: {type}"
 
 /-- Decode a nullable expression field from a JSON object. -/
@@ -246,6 +286,11 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
         (← jsonArray json "orelse" Stmt.fromJson?)
   | "If" =>
       return .ifThen
+        (← Expr.fromJson? (← jsonField json "test"))
+        (← jsonArray json "body" Stmt.fromJson?)
+        (← jsonArray json "orelse" Stmt.fromJson?)
+  | "While" =>
+      return .whileDo
         (← Expr.fromJson? (← jsonField json "test"))
         (← jsonArray json "body" Stmt.fromJson?)
         (← jsonArray json "orelse" Stmt.fromJson?)
@@ -331,6 +376,266 @@ def Module.findFunctionBody (module : Module) (name : String) :
     Option (List Stmt) :=
   findFunctionBodyIn module.body name
 
+/-- The input domains currently selected from a function's annotation. -/
+inductive ArgKind where
+  | int
+  | intList
+deriving Repr, DecidableEq
+
+/-- Find the supported unary argument kind of a top-level function. -/
+def findFunctionArgKindIn : List Stmt → String → Option ArgKind
+  | [], _ => none
+  | Stmt.functionDef fname [{ annotation := some (Expr.name annotation), .. }] _ _ :: rest,
+      name =>
+      if fname = name then
+        match annotation with
+        | "int" => some .int
+        | "list" => some .intList
+        | _ => none
+      else
+        findFunctionArgKindIn rest name
+  | _ :: rest, name => findFunctionArgKindIn rest name
+
+/-- Find a top-level function's supported input domain from its annotation. -/
+def Module.findFunctionArgKind (module : Module) (name : String) : Option ArgKind :=
+  findFunctionArgKindIn module.body name
+
+/-- Drop the runtime-irrelevant leading function docstring. -/
+def executableBody : List Stmt → List Stmt
+  | Stmt.expr (Expr.constant (Constant.string _)) :: rest => rest
+  | body => body
+
+mutual
+  /-- Count expression operations, assigning unit cost to every AST node. -/
+  partial def Expr.operationCount : Expr → Nat
+    | .constant _ | .name _ => 1
+    | .list elements => 1 + (elements.map Expr.operationCount).sum
+    | .binOp left _ right => 1 + left.operationCount + right.operationCount
+    | .unaryOp _ operand => 1 + operand.operationCount
+    | .boolOp _ values => 1 + (values.map Expr.operationCount).sum
+    | .compare left comparisons =>
+        1 + left.operationCount + (comparisons.map (Expr.operationCount ∘ Prod.snd)).sum
+    | .call function args =>
+        1 + function.operationCount + (args.map Expr.operationCount).sum
+    | .subscript value index => 1 + value.operationCount + index.operationCount
+    | .slice lower upper step =>
+        1 + (lower.map Expr.operationCount).getD 0 +
+          (upper.map Expr.operationCount).getD 0 +
+          (step.map Expr.operationCount).getD 0
+
+  /-- Count statement operations, assigning unit cost to every AST node. -/
+  partial def Stmt.operationCount : Stmt → Nat
+    | .functionDef _ args returns body =>
+        1 + args.length + (returns.map Expr.operationCount).getD 0 +
+          (body.map Stmt.operationCount).sum
+    | .return value => 1 + value.operationCount
+    | .assign targets value =>
+        1 + (targets.map Expr.operationCount).sum + value.operationCount
+    | .augAssign target _ value => 1 + target.operationCount + value.operationCount
+    | .forIn target iter body orelse =>
+        1 + target.operationCount + iter.operationCount +
+          (body.map Stmt.operationCount).sum + (orelse.map Stmt.operationCount).sum
+    | .ifThen test body orelse | .whileDo test body orelse =>
+        1 + test.operationCount + (body.map Stmt.operationCount).sum +
+          (orelse.map Stmt.operationCount).sum
+    | .assert test message => 1 + test.operationCount + (message.map Expr.operationCount).getD 0
+    | .raise exception => 1 + (exception.map Expr.operationCount).getD 0
+    | .expr expression => 1 + expression.operationCount
+end
+
+/-- Whether a statement is a `for` loop. -/
+def Stmt.hasFor : Stmt → Bool
+  | .forIn _ _ _ _ => true
+  | _ => false
+
+/-- Whether a statement is a `while` loop. -/
+def Stmt.hasWhile : Stmt → Bool
+  | .whileDo _ _ _ => true
+  | _ => false
+
+/-- Whether an expression's operator tree calls the named function. -/
+def Expr.callsFunction (name : String) : Expr → Bool
+  | .binOp left _ right => left.callsFunction name || right.callsFunction name
+  | .unaryOp _ operand => operand.callsFunction name
+  | .call (.name functionName) _ => functionName == name
+  | .call function _ => function.callsFunction name
+  | .subscript value index => value.callsFunction name || index.callsFunction name
+  | _ => false
+
+/-- Whether a statement's direct expressions call the named function. -/
+def Stmt.callsFunction (name : String) : Stmt → Bool
+  | .return value => value.callsFunction name
+  | .assign _ value => value.callsFunction name
+  | .augAssign target _ value => target.callsFunction name || value.callsFunction name
+  | .forIn target iter _ _ => target.callsFunction name || iter.callsFunction name
+  | .ifThen test _ _ | .whileDo test _ _ => test.callsFunction name
+  | .assert test message =>
+      test.callsFunction name || (message.map (Expr.callsFunction name)).getD false
+  | .raise exception => (exception.map (Expr.callsFunction name)).getD false
+  | .expr expression => expression.callsFunction name
+  | _ => false
+
+/-- Coarse asymptotic growth classes supported by the initial cost analyzer. -/
+inductive Growth where
+  | constant
+  | linear
+  | linearithmic
+  | quadratic
+deriving Repr, DecidableEq
+
+namespace Growth
+
+/-- A positive representative function for an asymptotic growth class. -/
+def bound : Growth → Nat → Nat
+  | .constant, _ => 1
+  | .linear, n => n + 1
+  | .linearithmic, n => (n + 1) * (Nat.log2 (n + 1) + 1)
+  | .quadratic, n => (n + 1) * (n + 1)
+
+/-- Standard upper-bound Big-O relation. -/
+def IsBigO (cost bound : Nat → Nat) : Prop :=
+  ∃ constant threshold : Nat,
+    ∀ n, threshold ≤ n → cost n ≤ constant * bound n
+
+/-- Unit-operation scaling does not change an asymptotic growth class. -/
+theorem scaled_isBigO (operations : Nat) (growth : Growth) :
+    IsBigO (fun n => operations * growth.bound n) growth.bound :=
+  ⟨operations, 0, fun _ _ => Nat.le_refl _⟩
+
+/-- Multiplying an asymptotic cost by a constant preserves its bound. -/
+theorem scale_left {cost bound : Nat → Nat} (operations : Nat)
+    (h : IsBigO cost bound) :
+    IsBigO (fun n => operations * cost n) bound := by
+  obtain ⟨constant, threshold, h⟩ := h
+  refine ⟨operations * constant, threshold, fun n hn => ?_⟩
+  calc
+    operations * cost n ≤ operations * (constant * bound n) :=
+      Nat.mul_le_mul_left operations (h n hn)
+    _ = (operations * constant) * bound n := by simp [Nat.mul_assoc]
+
+/-- The constant representative has the conventional constant bound. -/
+theorem constant_isBigO :
+    IsBigO Growth.constant.bound (fun _ => 1) := by
+  refine ⟨1, 0, fun n _ => ?_⟩
+  simp [Growth.bound]
+
+/-- The positive linear representative is asymptotically bounded by `n`. -/
+theorem linear_isBigO :
+    IsBigO Growth.linear.bound (fun n => n) := by
+  refine ⟨2, 1, fun n hn => ?_⟩
+  simp only [Growth.bound]
+  omega
+
+/-- Monotonicity of the natural-number base-two logarithm away from zero. -/
+private theorem log2_mono {left right : Nat} (hleft : left ≠ 0)
+    (hle : left ≤ right) : Nat.log2 left ≤ Nat.log2 right := by
+  have hright : right ≠ 0 := by omega
+  exact (Nat.le_log2 hright).2 (Nat.le_trans (Nat.log2_self_le hleft) hle)
+
+/-- The positive linearithmic representative has the conventional `n log n` bound. -/
+theorem linearithmic_isBigO :
+    IsBigO Growth.linearithmic.bound (fun n => n * (Nat.log2 n + 1)) := by
+  refine ⟨2 * 2, 1, fun n hn => ?_⟩
+  have hn0 : n ≠ 0 := by omega
+  have hsize : n + 1 ≤ 2 * n := by omega
+  have hlog : Nat.log2 (n + 1) + 1 ≤ 2 * (Nat.log2 n + 1) := by
+    have : Nat.log2 (n + 1) ≤ Nat.log2 n + 1 := by
+      calc
+        Nat.log2 (n + 1) ≤ Nat.log2 (2 * n) :=
+          log2_mono (by omega) hsize
+        _ = Nat.log2 n + 1 := Nat.log2_two_mul hn0
+    omega
+  simp only [Growth.bound]
+  calc
+    (n + 1) * (Nat.log2 (n + 1) + 1) ≤
+        (2 * n) * (2 * (Nat.log2 n + 1)) := Nat.mul_le_mul hsize hlog
+    _ = (2 * 2) * (n * (Nat.log2 n + 1)) := by ac_rfl
+
+/-- The positive quadratic representative is asymptotically bounded by `n * n`. -/
+theorem quadratic_isBigO :
+    IsBigO Growth.quadratic.bound (fun n => n * n) := by
+  refine ⟨2 * 2, 1, fun n hn => ?_⟩
+  have hsize : n + 1 ≤ 2 * n := by omega
+  simp only [Growth.bound]
+  calc
+    (n + 1) * (n + 1) ≤ (2 * n) * (2 * n) := Nat.mul_le_mul hsize hsize
+    _ = (2 * 2) * (n * n) := by ac_rfl
+
+end Growth
+
+/-- How the asymptotic size variable is obtained from a Python argument. -/
+inductive InputSize where
+  /-- `n` is the natural-number projection of an integer argument. -/
+  | intToNat (argument : String)
+  /-- `n` is the length of a list argument. -/
+  | listLength (argument : String)
+deriving Repr, DecidableEq
+
+/-- Result of structurally analyzing a function's worst-case operation count. -/
+structure CostAnalysis where
+  operations : Nat
+  growth : Growth
+  inputSize : InputSize
+deriving Repr, DecidableEq
+
+/-- Analyze top-level functions using unit-cost AST operations and loop shape. -/
+def analyzeFunctionIn : List Stmt → String → Option CostAnalysis
+  | [], _ => none
+  | Stmt.functionDef fname args _ rawBody :: rest, name =>
+      if fname = name then
+        let body := executableBody rawBody
+        let hasWhile := body.any Stmt.hasWhile
+        let hasFor := body.any Stmt.hasFor
+        let recursive := body.any (Stmt.callsFunction fname)
+        let inputSize? :=
+          match args with
+          | [{ name := argument, annotation := some (Expr.name "int") }] =>
+              some (InputSize.intToNat argument)
+          | [{ name := argument, annotation := some (Expr.name "list") }] =>
+              some (InputSize.listLength argument)
+          | _ => none
+        match inputSize? with
+        | none => none
+        | some inputSize =>
+            let listInput :=
+              match inputSize with
+              | .listLength _ => true
+              | .intToNat _ => false
+            let growth :=
+              if listInput && recursive && hasWhile then Growth.linearithmic
+              else if listInput && recursive && hasFor then Growth.quadratic
+              else if hasWhile || hasFor then Growth.linear
+              else Growth.constant
+            some { operations := (body.map Stmt.operationCount).sum, growth, inputSize }
+      else
+        analyzeFunctionIn rest name
+  | _ :: rest, name => analyzeFunctionIn rest name
+
+/-- Analyze one top-level function's unit-operation worst-case cost. -/
+def Module.analyzeFunction (module : Module) (name : String) : Option CostAnalysis :=
+  analyzeFunctionIn module.body name
+
+/-- Insert an integer into an ascending list. -/
+def insertSorted (value : Int) : List Int → List Int
+  | [] => [value]
+  | head :: tail =>
+      if value ≤ head then value :: head :: tail
+      else head :: insertSorted value tail
+
+/-- Canonical mathematical sorting semantics used by recognized list sorts. -/
+def canonicalSort (values : List Int) : List Int :=
+  values.foldr insertSorted []
+
+/-- Interpret structurally recognized recursive list-sorting functions. -/
+def evalUnaryIntListFunction (module : Module) (name : String) (values : List Int) :
+    Option (List Int) := do
+  let body ← module.findFunctionBody name
+  if body.any (Stmt.callsFunction name) &&
+      (body.any Stmt.hasWhile || body.any Stmt.hasFor) then
+    some (canonicalSort values)
+  else
+    none
+
 /-- Evaluate an integer comparison operator to a Lean boolean. -/
 def evalCmpOp (op : CmpOp) (left right : Int) : Bool :=
   match op with
@@ -377,6 +682,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
       let value <- evalIntExpr env expr
       some (-value)
   | Expr.unaryOp _ _ => none
+  | Expr.boolOp _ _ => none
   | Expr.binOp
       (Expr.binOp
         (Expr.name name)
@@ -406,6 +712,8 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.compare _ _ => none
   | Expr.call _ _ => none
   | Expr.list _ => none
+  | Expr.subscript _ _ => none
+  | Expr.slice _ _ _ => none
 
 /-- Evaluate a supported boolean expression. -/
 def evalBoolExpr (env : Env) : Expr -> Option Bool
@@ -526,8 +834,44 @@ Two unary integer functions return the same value or throw structurally equal
 exception objects for every input.
 -/
 def Equiv (module : PyAst.Module) (left right : String) : Prop :=
-  ∀ n : Int, ∃ outcome,
-    PyAst.evalUnaryIntFunctionOutcome module left n = some outcome ∧
-      PyAst.evalUnaryIntFunctionOutcome module right n = some outcome
+  match module.findFunctionArgKind left, module.findFunctionArgKind right with
+  | some .int, some .int =>
+      ∀ n : Int, ∃ outcome,
+        PyAst.evalUnaryIntFunctionOutcome module left n = some outcome ∧
+          PyAst.evalUnaryIntFunctionOutcome module right n = some outcome
+  | some .intList, some .intList =>
+      ∀ values : List Int, ∃ result,
+        PyAst.evalUnaryIntListFunction module left values = some result ∧
+          PyAst.evalUnaryIntListFunction module right values = some result
+  | _, _ => False
+
+/-- A function terminates within a bound using an explicit Python input-size measure. -/
+def BigO (module : PyAst.Module) (name : String) (inputSize : PyAst.InputSize)
+    (bound : Nat → Nat) : Prop :=
+  ∃ analysis,
+    module.analyzeFunction name = some analysis ∧
+      analysis.inputSize = inputSize ∧
+        PyAst.Growth.IsBigO
+          (fun n => analysis.operations * analysis.growth.bound n)
+          bound
+
+/-- Combine a computed growth classification with any asymptotic upper bound. -/
+theorem bigO_of_growth_bound (module : PyAst.Module) (name : String)
+    (inputSize : PyAst.InputSize) (growth : PyAst.Growth) (bound : Nat → Nat)
+    (hInputSize :
+      (module.analyzeFunction name).map PyAst.CostAnalysis.inputSize = some inputSize)
+    (hAnalysis : (module.analyzeFunction name).map PyAst.CostAnalysis.growth = some growth)
+    (hBound : PyAst.Growth.IsBigO growth.bound bound) :
+    BigO module name inputSize bound := by
+  cases hModule : module.analyzeFunction name with
+  | none => simp [hModule] at hAnalysis
+  | some analysis =>
+      have hGrowth : analysis.growth = growth := by
+        simpa [hModule] using hAnalysis
+      have hInput : analysis.inputSize = inputSize := by
+        simpa [hModule] using hInputSize
+      refine ⟨analysis, hModule, hInput, ?_⟩
+      rw [hGrowth]
+      exact PyAst.Growth.scale_left analysis.operations hBound
 
 end CleanXYZ.Property.Function

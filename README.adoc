@@ -38,7 +38,7 @@ cleanxyz tests/pass/range_sum.py
 and if all went well you should see a message:
 
 ----
-All 3 checks passed
+All 4 checks passed
 ----
 
 and exit status 0.
@@ -357,7 +357,7 @@ def sum(n: int) -> int:
     return n + 1
 ----
 
-The first marker above requires `sum_not_throws`; the second requires `sum_not_equiv_otherSum`.
+The marker above requires `sum_not_throws`. `Not` can prefix any other DSL property recursively; for example, `Not Not Throws` has the usual double negation meaning.
 
 ==== Throws
 
@@ -448,6 +448,37 @@ For every input, `Equiv` requires one common exception-aware outcome:
 ----
 
 An outcome is either `.ok value` or `.error exception`. Successful executions must therefore return the same integer, while throwing executions must have structurally equal exception objects: the same exception class name and equal evaluated positional arguments. An unsupported AST evaluates to `none`, which cannot satisfy `Equiv` even when both sides are unsupported. See link:tests/pass/equiv_throw.py[] for an equivalence proof covering both returns and throws.
+
+For functions annotated with one `list` argument, `Equiv` quantifies over every `List Int` input and requires the same output list. See link:tests/pass/sort.py[] for merge-sort and quicksort equivalence.
+
+==== BigO
+
+`BigO` states the worst-case asymptotic termination cost of a function. Its first argument is an arbitrary Lean expression, so the set of bounds is not hardcoded. Variables used by that expression must be introduced by an explicit input-size binding. For example, `n = len(values)` introduces the Lean variable `n : Nat` and binds it to the length of the Python argument `values`:
+
+[source,python]
+----
+def merge_sort(values: list) -> list:
+    """
+    @cleanxyz: BigO(n * (Nat.log2 n + 1), n = len(values))
+    """
+    # ...
+----
+
+This marker requires `mergeSort_bigO` with type:
+
+[source,lean]
+----
+CleanXYZ.Property.Function.BigO
+  SortAst.module "merge_sort"
+    (CleanXYZ.PyAst.InputSize.listLength "values")
+    (fun n : Nat => n * (Nat.log2 n + 1))
+----
+
+The analyzer checks that `values` is the actual `list` argument; changing the binding to another name does not produce a provable obligation. For an integer argument, write `BigO(n, n = input)`. It uses the natural-number projection of the Python integer `input`. The currently supported input measures are thus `n = argument` and `n = len(argument)`.
+
+Other valid bounds include `BigO(1, n = input)`, `BigO(n * n, n = len(values))`, or a call to a user-defined Lean cost function. Because the bound is Lean rather than a second expression DSL, ordinary Lean functions and notation are available.
+
+The cost model assigns cost 1 to every represented statement and expression operation. It then proves a constant multiple of the selected bound beyond some input-size threshold. Calls are unit-cost by default too; later standard-library models can replace that default with operation-specific complexity. The initial structural analyzer recognizes constant and iterative integer functions plus the recursive list-sort shapes demonstrated in link:tests/pass/sort.py[].
 
 === Raw Lean specification
 
