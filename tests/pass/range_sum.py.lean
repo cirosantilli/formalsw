@@ -40,10 +40,32 @@ theorem sum_returns (n : Int) :
 /-- `sum` never throws for an integer input. -/
 theorem sum_not_throws :
     Not (CleanXYZ.Property.Function.Throws RangeSumAst.module "sum") := by
-  rintro ⟨n, hthrow⟩
-  obtain ⟨value, hvalue⟩ := sum_returns n
-  rw [hthrow] at hvalue
-  contradiction
+  rintro ⟨n, exception, hthrow⟩
+  by_cases hn : n <= 0
+  · simp [
+      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
+      CleanXYZ.PyAst.Module.findFunctionBody,
+      CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlockOutcome,
+      CleanXYZ.PyAst.evalBoolExpr,
+      CleanXYZ.PyAst.evalIntExpr,
+      CleanXYZ.PyAst.Env.get?,
+      CleanXYZ.PyAst.evalCmpOp,
+      RangeSumAst.module,
+      hn,
+    ] at hthrow
+  · simp [
+      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
+      CleanXYZ.PyAst.Module.findFunctionBody,
+      CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlockOutcome,
+      CleanXYZ.PyAst.evalBoolExpr,
+      CleanXYZ.PyAst.evalIntExpr,
+      CleanXYZ.PyAst.Env.get?,
+      CleanXYZ.PyAst.evalCmpOp,
+      RangeSumAst.module,
+      hn,
+    ] at hthrow
 
 /-- `sum_naive` returns an integer for every integer input. -/
 theorem sumNaive_returns (n : Int) :
@@ -66,10 +88,18 @@ theorem sumNaive_returns (n : Int) :
 /-- `sum_naive` never throws for an integer input. -/
 theorem sumNaive_not_throws :
     Not (CleanXYZ.Property.Function.Throws RangeSumAst.module "sum_naive") := by
-  rintro ⟨n, hthrow⟩
-  obtain ⟨value, hvalue⟩ := sumNaive_returns n
-  rw [hthrow] at hvalue
-  contradiction
+  rintro ⟨n, exception, hthrow⟩
+  simp [
+    CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
+    CleanXYZ.PyAst.Module.findFunctionBody,
+    CleanXYZ.PyAst.findFunctionBodyIn,
+    CleanXYZ.PyAst.evalIntBlockOutcome,
+    CleanXYZ.PyAst.evalIntBlock,
+    CleanXYZ.PyAst.evalIntExpr,
+    CleanXYZ.PyAst.evalRangeContribution,
+    CleanXYZ.PyAst.Env.get?,
+    RangeSumAst.module,
+  ] at hthrow
 
 /-- Neither range-sum implementation can throw for any integer input. -/
 theorem noException (n : Int) :
@@ -84,16 +114,17 @@ theorem noException (n : Int) :
   ⟨sum_returns n, sumNaive_returns n⟩
 
 /-- `sum` and `sum_naive` give the same result for every integer input. -/
-theorem sum_equiv_sumNaive (n : Int) :
-    CleanXYZ.PyAst.evalUnaryIntFunction
-        RangeSumAst.module "sum" n =
-      CleanXYZ.PyAst.evalUnaryIntFunction
-        RangeSumAst.module "sum_naive" n := by
+theorem sum_equiv_sumNaive :
+    CleanXYZ.Property.Function.Equiv
+      RangeSumAst.module "sum" "sum_naive" := by
+  intro n
   by_cases hn : n <= 0
-  · simp [
-      CleanXYZ.PyAst.evalUnaryIntFunction,
+  · refine ⟨.ok 0, ?_⟩
+    constructor <;> simp [
+      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
       CleanXYZ.PyAst.Module.findFunctionBody,
       CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlockOutcome,
       CleanXYZ.PyAst.evalIntBlock,
       CleanXYZ.PyAst.evalBoolExpr,
       CleanXYZ.PyAst.evalIntExpr,
@@ -105,10 +136,12 @@ theorem sum_equiv_sumNaive (n : Int) :
       hn,
       Int.toNat_of_nonpos hn,
     ]
-  · simp [
-      CleanXYZ.PyAst.evalUnaryIntFunction,
+  · refine ⟨.ok (CleanXYZ.PyAst.sumRange n.toNat), ?_⟩
+    constructor <;> simp [
+      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
       CleanXYZ.PyAst.Module.findFunctionBody,
       CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlockOutcome,
       CleanXYZ.PyAst.evalIntBlock,
       CleanXYZ.PyAst.evalBoolExpr,
       CleanXYZ.PyAst.evalIntExpr,

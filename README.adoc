@@ -127,11 +127,10 @@ theorem sumNaive_not_throws :
     Not (CleanXYZ.Property.Function.Throws RangeSumAst.module "sum_naive") := by
   sorry
 
-theorem sum_equiv_sumNaive (n : Int) :
-    CleanXYZ.PyAst.evalUnaryIntFunction
-        RangeSumAst.module "sum" n =
-      CleanXYZ.PyAst.evalUnaryIntFunction
-        RangeSumAst.module "sum_naive" n := by sorry
+theorem sum_equiv_sumNaive :
+    CleanXYZ.Property.Function.Equiv
+      RangeSumAst.module "sum" "sum_naive" := by
+  sorry
 
 end Tmp
 ----
@@ -203,10 +202,32 @@ theorem sum_returns (n : Int) :
 
 theorem sum_not_throws :
     Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum") := by
-  rintro ⟨n, hthrow⟩
-  obtain ⟨value, hvalue⟩ := sum_returns n
-  rw [hthrow] at hvalue
-  contradiction
+  rintro ⟨n, exception, hthrow⟩
+  by_cases hn : n <= 0
+  · simp [
+      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
+      CleanXYZ.PyAst.Module.findFunctionBody,
+      CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlockOutcome,
+      CleanXYZ.PyAst.evalBoolExpr,
+      CleanXYZ.PyAst.evalIntExpr,
+      CleanXYZ.PyAst.Env.get?,
+      CleanXYZ.PyAst.evalCmpOp,
+      TmpAst.module,
+      hn,
+    ] at hthrow
+  · simp [
+      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
+      CleanXYZ.PyAst.Module.findFunctionBody,
+      CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlockOutcome,
+      CleanXYZ.PyAst.evalBoolExpr,
+      CleanXYZ.PyAst.evalIntExpr,
+      CleanXYZ.PyAst.Env.get?,
+      CleanXYZ.PyAst.evalCmpOp,
+      TmpAst.module,
+      hn,
+    ] at hthrow
 
 /-- `sum_naive` returns an integer for every integer input. -/
 theorem sumNaive_returns (n : Int) :
@@ -228,22 +249,31 @@ theorem sumNaive_returns (n : Int) :
 
 theorem sumNaive_not_throws :
     Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum_naive") := by
-  rintro ⟨n, hthrow⟩
-  obtain ⟨value, hvalue⟩ := sumNaive_returns n
-  rw [hthrow] at hvalue
-  contradiction
+  rintro ⟨n, exception, hthrow⟩
+  simp [
+    CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
+    CleanXYZ.PyAst.Module.findFunctionBody,
+    CleanXYZ.PyAst.findFunctionBodyIn,
+    CleanXYZ.PyAst.evalIntBlockOutcome,
+    CleanXYZ.PyAst.evalIntBlock,
+    CleanXYZ.PyAst.evalIntExpr,
+    CleanXYZ.PyAst.evalRangeContribution,
+    CleanXYZ.PyAst.Env.get?,
+    TmpAst.module,
+  ] at hthrow
 
 /-- `sum` and `sum_naive` give the same result for every integer input. -/
-theorem sum_equiv_sumNaive (n : Int) :
-    CleanXYZ.PyAst.evalUnaryIntFunction
-        TmpAst.module "sum" n =
-      CleanXYZ.PyAst.evalUnaryIntFunction
-        TmpAst.module "sum_naive" n := by
+theorem sum_equiv_sumNaive :
+    CleanXYZ.Property.Function.Equiv
+      TmpAst.module "sum" "sum_naive" := by
+  intro n
   by_cases hn : n <= 0
-  · simp [
-      CleanXYZ.PyAst.evalUnaryIntFunction,
+  · refine ⟨.ok 0, ?_⟩
+    constructor <;> simp [
+      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
       CleanXYZ.PyAst.Module.findFunctionBody,
       CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlockOutcome,
       CleanXYZ.PyAst.evalIntBlock,
       CleanXYZ.PyAst.evalBoolExpr,
       CleanXYZ.PyAst.evalIntExpr,
@@ -255,10 +285,12 @@ theorem sum_equiv_sumNaive (n : Int) :
       hn,
       Int.toNat_of_nonpos hn,
     ]
-  · simp [
-      CleanXYZ.PyAst.evalUnaryIntFunction,
+  · refine ⟨.ok (CleanXYZ.PyAst.sumRange n.toNat), ?_⟩
+    constructor <;> simp [
+      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
       CleanXYZ.PyAst.Module.findFunctionBody,
       CleanXYZ.PyAst.findFunctionBodyIn,
+      CleanXYZ.PyAst.evalIntBlockOutcome,
       CleanXYZ.PyAst.evalIntBlock,
       CleanXYZ.PyAst.evalBoolExpr,
       CleanXYZ.PyAst.evalIntExpr,
@@ -301,23 +333,26 @@ Specifications are written as markers inside Python docstrings in lines starting
 
 There are two types of ways to write the specification:
 
-* <<dsl>>: what most people will use. Easy to learn and obvious.
+* <<dsl>>: what most people will use. Easy to learn and obvious. Gets translated to an equivalent Lean long form behind the scenes.
 * <<raw-lean-specification>>. Hard to learn but more general than the DSL.
 
 === DSL
 
-DSL expressions consist of a property, optionally preceded by one or more `Not` words. For example, `Not Throws` requires a proof of the Lean proposition `Not (Throws ...)`, while `Not Not Throws` negates it twice. The generated theorem name includes each negation, such as `sum_not_throws` or `sum_not_not_throws`.
+The DSL specification is a magic custom and very simple language that allows specifying commonly used properties easily.
+
+The DSL gets converted to corresponding Lean code behind the scenes.
 
 ==== Not
 
-`Not` negates the complete DSL expression following it. It can be applied to any DSL property and can be nested:
+`Not` negates the complete DSL expression following it. For example, to state that a function does not <<throws,throw>> for any input:
+
+my_not_example.py
 
 [source,python]
 ----
 def sum(n: int) -> int:
     """
     @cleanxyz: Not Throws
-    @cleanxyz: Not Equiv(other_sum)
     """
     return n + 1
 ----
@@ -326,7 +361,11 @@ The first marker above requires `sum_not_throws`; the second requires `sum_not_e
 
 ==== Throws
 
-`Throws` states that there is at least one integer input for which evaluation fails. Example: link:tests/pass/throws.py[].
+`Throws` states that there is at least one input for which the function throws.
+
+Example:
+
+my_throws_example.py
 
 [source,python]
 ----
@@ -343,15 +382,16 @@ This marker requires a theorem named `rejectOdd_throws` with type:
 
 [source,lean]
 ----
-CleanXYZ.Property.Function.Throws ThrowsAst.module "reject_odd"
+CleanXYZ.Property.Function.Throws MyThrowsExampleAst.module "reject_odd"
 ----
 
 which expands to:
 
 [source,lean]
 ----
-∃ n : Int,
-  CleanXYZ.PyAst.evalUnaryIntFunction ThrowsAst.module "reject_odd" n = none
+∃ n : Int, ∃ exception,
+  CleanXYZ.PyAst.evalUnaryIntFunctionOutcome ThrowsAst.module "reject_odd" n =
+    some (.error exception)
 ----
 
 Use `Not Throws` to state that no input throws. For a function named `sum`, this requires a theorem named `sum_not_throws` with type:
@@ -363,15 +403,30 @@ Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
 
 ==== Equiv
 
-`Equiv` states that two functions have identical evaluation results for every input. Example: link:tests/pass/range_sum.py[].
+`Equiv` states that two functions have identical evaluation results for every input, i.e. that either:
+
+* both functions return the same value if they return
+* both functions throw the same exception if they throw
+
+Example:
 
 [source,python]
 ----
 def sum(n: int) -> int:
-    """
+    """Optimized version of sum_naive.
+
     @cleanxyz: Equiv(sum_naive)
     """
-    # ...
+    if n <= 0:
+        return 0
+    return (n * (n - 1)) // 2
+
+def sum_naive(n: int) -> int:
+    """Sum of integers from 1 to n. Return 0 if n <= 0."""
+    total = 0
+    for i in range(n):
+        total += i
+    return total
 ----
 
 This marker requires `sum_equiv_sumNaive` with type:
@@ -381,7 +436,18 @@ This marker requires `sum_equiv_sumNaive` with type:
 CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
 ----
 
-`Equiv` compares the complete `Option Int` results, so two failures are equal. Combine it with `Not Throws` markers when both functions must also return successfully for every input.
+For every input, `Equiv` requires one common exception-aware outcome:
+
+[source,lean]
+----
+∀ n : Int, ∃ outcome,
+  CleanXYZ.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum" n =
+      some outcome ∧
+    CleanXYZ.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum_naive" n =
+      some outcome
+----
+
+An outcome is either `.ok value` or `.error exception`. Successful executions must therefore return the same integer, while throwing executions must have structurally equal exception objects: the same exception class name and equal evaluated positional arguments. An unsupported AST evaluates to `none`, which cannot satisfy `Equiv` even when both sides are unsupported. See link:tests/pass/equiv_throw.py[] for an equivalence proof covering both returns and throws.
 
 === Raw Lean specification
 

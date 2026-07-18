@@ -19,7 +19,7 @@ inductive Constant where
   | bool : Bool -> Constant
   /-- The Python `None` constant. -/
   | none : Constant
-deriving Repr, Lean.ToExpr
+deriving Repr, DecidableEq, Lean.ToExpr
 
 /-- Python unary operators currently represented by the AST bridge. -/
 inductive UnaryOp where
@@ -117,6 +117,17 @@ structure Module where
   /-- Top-level statements in source order. -/
   body : List Stmt
 deriving Repr, Lean.ToExpr
+
+/-- A modeled Python exception object. -/
+structure ExceptionObject where
+  /-- Exception class name, such as `ValueError`. -/
+  typeName : String
+  /-- Evaluated positional constructor arguments. -/
+  args : List Constant
+deriving Repr, DecidableEq
+
+/-- A successful return value or a thrown exception object. -/
+abbrev Outcome := Except ExceptionObject Int
 
 /-- Read a required field from a JSON object. -/
 private def jsonField (json : Lean.Json) (name : String) : Except String Lean.Json :=
@@ -446,11 +457,52 @@ def evalIntBlock (env : Env) : List Stmt -> Option Int
         none
   | _ => none
 
+/-- Evaluate a supported exception-constructor argument. -/
+def evalExceptionArg (env : Env) : Expr → Option Constant
+  | Expr.constant value => some value
+  | Expr.name name => Constant.int <$> Env.get? env name
+  | expr => Constant.int <$> evalIntExpr env expr
+
+/-- Evaluate a supported Python exception object construction. -/
+def evalExceptionObject (env : Env) : Expr → Option ExceptionObject
+  | Expr.call (Expr.name typeName) args => do
+      let args ← args.mapM (evalExceptionArg env)
+      some { typeName, args }
+  | Expr.name typeName => some { typeName, args := [] }
+  | _ => none
+
+/--
+Evaluate a statement block while preserving returned values and thrown objects.
+
+`none` is reserved for AST shapes outside the current partial semantics, so two
+unsupported evaluations are not considered equivalent outcomes.
+-/
+def evalIntBlockOutcome (env : Env) : List Stmt → Option Outcome
+  | Stmt.expr (Expr.constant (Constant.string _)) :: rest =>
+      evalIntBlockOutcome env rest
+  | Stmt.raise (some exception) :: _ =>
+      Except.error <$> evalExceptionObject env exception
+  | Stmt.raise none :: _ => none
+  | [Stmt.return expr] => Except.ok <$> evalIntExpr env expr
+  | Stmt.ifThen condition thenBody [] :: rest => do
+      let conditionValue ← evalBoolExpr env condition
+      if conditionValue then
+        evalIntBlockOutcome env thenBody
+      else
+        evalIntBlockOutcome env rest
+  | statements => Except.ok <$> evalIntBlock env statements
+
 /-- Evaluate a supported unary integer function from a module. -/
 def evalUnaryIntFunction (module : Module) (name : String) (arg : Int) :
     Option Int := do
   let body <- module.findFunctionBody name
   evalIntBlock [("n", arg)] body
+
+/-- Evaluate a unary integer function while preserving thrown exception objects. -/
+def evalUnaryIntFunctionOutcome (module : Module) (name : String) (arg : Int) :
+    Option Outcome := do
+  let body ← module.findFunctionBody name
+  evalIntBlockOutcome [("n", arg)] body
 
 end CleanXYZ.PyAst
 
@@ -464,14 +516,18 @@ theorems with the same types.
 
 namespace CleanXYZ.Property.Function
 
-/-- A unary integer function fails to evaluate for at least one integer input. -/
+/-- A unary integer function throws a modeled exception for at least one input. -/
 def Throws (module : PyAst.Module) (name : String) : Prop :=
-  ∃ n : Int, PyAst.evalUnaryIntFunction module name n = none
+  ∃ n : Int, ∃ exception,
+    PyAst.evalUnaryIntFunctionOutcome module name n = some (.error exception)
 
-/-- Two unary integer functions evaluate to the same result for every input. -/
+/--
+Two unary integer functions return the same value or throw structurally equal
+exception objects for every input.
+-/
 def Equiv (module : PyAst.Module) (left right : String) : Prop :=
-  ∀ n : Int,
-    PyAst.evalUnaryIntFunction module left n =
-      PyAst.evalUnaryIntFunction module right n
+  ∀ n : Int, ∃ outcome,
+    PyAst.evalUnaryIntFunctionOutcome module left n = some outcome ∧
+      PyAst.evalUnaryIntFunctionOutcome module right n = some outcome
 
 end CleanXYZ.Property.Function
