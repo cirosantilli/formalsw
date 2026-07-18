@@ -390,6 +390,32 @@ class RequirementEmitter:
         return "\n".join(lines)
 
 
+class ProofStubEmitter:
+    """Render a proof file containing every requested theorem with `sorry`."""
+
+    def __init__(self, ast_module: str, requirements: list[Requirement]):
+        """Store the generated AST import and requested proof obligations."""
+        self.ast_module = ast_module
+        self.requirements = requirements
+
+    def emit(self) -> str:
+        """Render a complete Lean proof-file stub."""
+        lines = [
+            f"import {self.ast_module}",
+            "import CleanXYZ",
+            "",
+        ]
+        for requirement in self.requirements:
+            lines.extend([
+                f"theorem {requirement.theorem_name} :",
+                indent(requirement.property_type, 4),
+                "  := by",
+                "  sorry",
+                "",
+            ])
+        return "\n".join(lines)
+
+
 class AstJsonEmitter:
     """Translate Python `ast` nodes into the versioned cleanxyz JSON schema."""
 
@@ -998,6 +1024,22 @@ def check_source(source: Path) -> int:
     return len(requirements)
 
 
+def stub_source(source: Path) -> str:
+    """Return a complete Lean proof stub for one Python source file."""
+    module = ast.parse(source.read_text(), filename=str(source))
+    AstJsonEmitter(module).emit()
+    requirements = collect_requirements(
+        source,
+        module,
+        proof_namespace_for_source(source),
+        namespace_for_source(source),
+    )
+    return ProofStubEmitter(
+        lean_module_for_path(ast_path_for_source(source)),
+        requirements,
+    ).emit()
+
+
 def iter_python_sources(directory: Path) -> list[Path]:
     """Return Python sources under a directory, excluding generated/cache trees."""
     sources = []
@@ -1030,10 +1072,21 @@ def check_directory(directory: Path) -> int:
 def main() -> None:
     """Compile-check Python source files against paired Lean proof files."""
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-S",
+        "--stub",
+        action="store_true",
+        help="print a Lean proof-file stub to stdout",
+    )
     parser.add_argument("source", type=Path)
     args = parser.parse_args()
 
     source = args.source
+    if args.stub:
+        if not source.is_file():
+            parser.error("--stub requires one Python source file")
+        print(stub_source(source), end="")
+        return
     if source.is_dir():
         checks = check_directory(source)
     else:

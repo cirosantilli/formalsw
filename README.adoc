@@ -111,7 +111,13 @@ error: tmp.py:4: missing proof file tmp.py.lean for `@cleanxyz: Not Throws`
 
 which is good because haven't proven what we said we wanted to prove yet!
 
-To create the required proofs, we must create a tmp.py.lean file containing the following theorems:
+To create the required proofs, we must create a tmp.py.lean file containing the required theorems. Theorem stubs can be generated automatically with:
+
+----
+./cleanxyz --stub tmp.py > tmp.py.lean
+----
+
+which produces:
 
 ----
 import «.cleanxyz».tests.pass.«range_sum.py.ast»
@@ -320,6 +326,15 @@ Directories are also accepted; every `.py` file under the directory is checked:
 ----
 ./cleanxyz tests/pass
 ----
+
+Generate a complete Lean proof-file stub on standard output with `-S` or `--stub`:
+
+[source,sh]
+----
+./cleanxyz --stub myfile.py > myfile.py.lean
+----
+
+The stub imports the generated AST module and declares every requested theorem with `by sorry`. Replace each `sorry` with a proof before running the normal check.
 
 == Specification language
 
