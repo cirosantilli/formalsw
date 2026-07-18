@@ -111,7 +111,7 @@ error: tmp.py:4: missing proof file tmp.py.lean for `@cleanxyz: Not Throws`
 
 which is good because haven't proven what we said we wanted to prove yet!
 
-To create the required proofs, we must create a tmp.py.lean file containing the required theorems. Theorem stubs can be generated automatically with:
+To create the required proofs, we must create a tmp.py.lean file containing the required theorems. The stubs can be generated automatically with:
 
 ----
 ./cleanxyz --stub tmp.py > tmp.py.lean
@@ -120,28 +120,21 @@ To create the required proofs, we must create a tmp.py.lean file containing the 
 which produces:
 
 ----
-import «.cleanxyz».tests.pass.«range_sum.py.ast»
+import «.cleanxyz».«tmp.py.ast»
 import CleanXYZ
 
-namespace Tmp
-
-theorem sum_not_throws :
-    Not (CleanXYZ.Property.Function.Throws RangeSumAst.module "sum") := by
+theorem Tmp.sum_not_throws :
+    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
+  := by
   sorry
 
-theorem sumNaive_not_throws :
-    Not (CleanXYZ.Property.Function.Throws RangeSumAst.module "sum_naive") := by
+theorem Tmp.sum_equiv_sumNaive :
+    CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+  := by
   sorry
-
-theorem sum_equiv_sumNaive :
-    CleanXYZ.Property.Function.Equiv
-      RangeSumAst.module "sum" "sum_naive" := by
-  sorry
-
-end Tmp
 ----
 
-And now we can try again:
+And now if we try again:
 
 ----
 cleanxyz tmp.py
@@ -150,12 +143,24 @@ cleanxyz tmp.py
 but this time it fails with:
 
 ----
-error: tmp.py.lean:11: proof uses `sorry`
+proof check failed for tmp.py
+Complete tmp.py.lean; remove any `sorry`; and make sure it compiles before checking requested proof obligations.
+Expected proof obligations:
+  Tmp.sum_not_throws :
+    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
+  Tmp.sum_equiv_sumNaive :
+    CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+Lean diagnostic:
+  tmp.py.lean:4:8: error: declaration uses `sorry`
+  tmp.py.lean:9:8: error: declaration uses `sorry`
+error: tmp.py.lean:7: proof uses `sorry`
 ----
 
 because we cheated with `sorry` which tells Lean to skip a proof.
 
-The final passing proof is something like the following ungodly file. I don't expect you to read and understand it.
+The final passing proof is an ungodly long file.
+
+But I don't expect you to read and understand and even less write it.
 
 The beauty of is is, and the entire reason for this project existing, of course, that you don't need to write that by yourself. You can just ask an LLM to do it for you! 
 
@@ -163,160 +168,23 @@ You only need to understand the definition of properties that you care about in 
 
 Then you let the LLM loose, and so long as the LLM does not touch your .py source files during the proof step, only the .lean ones, the our scripts and the Lean formal system ensures that the property is true.
 
-Here's the file:
-
-----
-import «.cleanxyz».«tmp.py.ast»
-import CleanXYZ
-
-namespace Tmp
-
-/-- `sum` returns an integer for every integer input. -/
-theorem sum_returns (n : Int) :
-    ∃ value,
-      CleanXYZ.PyAst.evalUnaryIntFunction
-          TmpAst.module "sum" n =
-        some value := by
-  by_cases hn : n <= 0
-  · refine ⟨0, ?_⟩
-    simp [
-      CleanXYZ.PyAst.evalUnaryIntFunction,
-      CleanXYZ.PyAst.Module.findFunctionBody,
-      CleanXYZ.PyAst.findFunctionBodyIn,
-      CleanXYZ.PyAst.evalIntBlock,
-      CleanXYZ.PyAst.evalBoolExpr,
-      CleanXYZ.PyAst.evalIntExpr,
-      CleanXYZ.PyAst.Env.get?,
-      CleanXYZ.PyAst.evalCmpOp,
-      TmpAst.module,
-      hn,
-    ]
-
-  · refine ⟨CleanXYZ.PyAst.sumRange n.toNat, ?_⟩
-    simp [
-      CleanXYZ.PyAst.evalUnaryIntFunction,
-      CleanXYZ.PyAst.Module.findFunctionBody,
-      CleanXYZ.PyAst.findFunctionBodyIn,
-      CleanXYZ.PyAst.evalIntBlock,
-      CleanXYZ.PyAst.evalBoolExpr,
-      CleanXYZ.PyAst.evalIntExpr,
-      CleanXYZ.PyAst.Env.get?,
-      CleanXYZ.PyAst.evalCmpOp,
-      TmpAst.module,
-      hn,
-    ]
-
-theorem sum_not_throws :
-    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum") := by
-  rintro ⟨n, exception, hthrow⟩
-  by_cases hn : n <= 0
-  · simp [
-      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
-      CleanXYZ.PyAst.Module.findFunctionBody,
-      CleanXYZ.PyAst.findFunctionBodyIn,
-      CleanXYZ.PyAst.evalIntBlockOutcome,
-      CleanXYZ.PyAst.evalBoolExpr,
-      CleanXYZ.PyAst.evalIntExpr,
-      CleanXYZ.PyAst.Env.get?,
-      CleanXYZ.PyAst.evalCmpOp,
-      TmpAst.module,
-      hn,
-    ] at hthrow
-  · simp [
-      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
-      CleanXYZ.PyAst.Module.findFunctionBody,
-      CleanXYZ.PyAst.findFunctionBodyIn,
-      CleanXYZ.PyAst.evalIntBlockOutcome,
-      CleanXYZ.PyAst.evalBoolExpr,
-      CleanXYZ.PyAst.evalIntExpr,
-      CleanXYZ.PyAst.Env.get?,
-      CleanXYZ.PyAst.evalCmpOp,
-      TmpAst.module,
-      hn,
-    ] at hthrow
-
-/-- `sum_naive` returns an integer for every integer input. -/
-theorem sumNaive_returns (n : Int) :
-    ∃ value,
-      CleanXYZ.PyAst.evalUnaryIntFunction
-          TmpAst.module "sum_naive" n =
-        some value := by
-  refine ⟨CleanXYZ.PyAst.sumRange n.toNat, ?_⟩
-  simp [
-    CleanXYZ.PyAst.evalUnaryIntFunction,
-    CleanXYZ.PyAst.Module.findFunctionBody,
-    CleanXYZ.PyAst.findFunctionBodyIn,
-    CleanXYZ.PyAst.evalIntBlock,
-    CleanXYZ.PyAst.evalIntExpr,
-    CleanXYZ.PyAst.evalRangeContribution,
-    CleanXYZ.PyAst.Env.get?,
-    TmpAst.module,
-  ]
-
-theorem sumNaive_not_throws :
-    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum_naive") := by
-  rintro ⟨n, exception, hthrow⟩
-  simp [
-    CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
-    CleanXYZ.PyAst.Module.findFunctionBody,
-    CleanXYZ.PyAst.findFunctionBodyIn,
-    CleanXYZ.PyAst.evalIntBlockOutcome,
-    CleanXYZ.PyAst.evalIntBlock,
-    CleanXYZ.PyAst.evalIntExpr,
-    CleanXYZ.PyAst.evalRangeContribution,
-    CleanXYZ.PyAst.Env.get?,
-    TmpAst.module,
-  ] at hthrow
-
-/-- `sum` and `sum_naive` give the same result for every integer input. -/
-theorem sum_equiv_sumNaive :
-    CleanXYZ.Property.Function.Equiv
-      TmpAst.module "sum" "sum_naive" := by
-  intro n
-  by_cases hn : n <= 0
-  · refine ⟨.ok 0, ?_⟩
-    constructor <;> simp [
-      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
-      CleanXYZ.PyAst.Module.findFunctionBody,
-      CleanXYZ.PyAst.findFunctionBodyIn,
-      CleanXYZ.PyAst.evalIntBlockOutcome,
-      CleanXYZ.PyAst.evalIntBlock,
-      CleanXYZ.PyAst.evalBoolExpr,
-      CleanXYZ.PyAst.evalIntExpr,
-      CleanXYZ.PyAst.evalRangeContribution,
-      CleanXYZ.PyAst.sumRange,
-      CleanXYZ.PyAst.Env.get?,
-      CleanXYZ.PyAst.evalCmpOp,
-      TmpAst.module,
-      hn,
-      Int.toNat_of_nonpos hn,
-    ]
-  · refine ⟨.ok (CleanXYZ.PyAst.sumRange n.toNat), ?_⟩
-    constructor <;> simp [
-      CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
-      CleanXYZ.PyAst.Module.findFunctionBody,
-      CleanXYZ.PyAst.findFunctionBodyIn,
-      CleanXYZ.PyAst.evalIntBlockOutcome,
-      CleanXYZ.PyAst.evalIntBlock,
-      CleanXYZ.PyAst.evalBoolExpr,
-      CleanXYZ.PyAst.evalIntExpr,
-      CleanXYZ.PyAst.evalRangeContribution,
-      CleanXYZ.PyAst.Env.get?,
-      CleanXYZ.PyAst.evalCmpOp,
-      TmpAst.module,
-      hn,
-    ]
-
-end Tmp
-----
-
-and now if you run:
+Once the proof is complete, when you run:
 
 ----
 cleanxyz tmp.py
 ----
 
 there's no output, which means that all proofs were verified!
+
+You can check this with the following example contained in-tree:
+
+link:tests/pass/range_sum.py[]
+
+----
+cleanxyz tests/pass/range_sum.py
+----
+
+which has a proof at link:tests/pass/range_sum.py.lean[].
 
 == Further usage
 
