@@ -612,15 +612,25 @@ def requirements_path_for_source(source: Path) -> Path:
 
 
 def olean_path_for_lean(source: Path) -> Path:
-    """Return the object-file path Lean uses for a `.lean` file."""
-    return source.with_suffix(".olean")
+    """Return a cached object path mirroring a Lean module's source path."""
+    try:
+        relative = source.resolve().relative_to(Path.cwd().resolve())
+    except ValueError as error:
+        raise SystemExit(
+            f"error: {source}: Lean files outside the current directory "
+            "cannot be cached by cleanxyz"
+        ) from error
+    return Path.cwd() / ".cleanxyz" / "olean" / relative.with_suffix(".olean")
 
 
 def lean_env() -> dict[str, str]:
-    """Return an environment that lets Lean import generated files from cwd."""
+    """Return an environment that lets Lean import cached and source modules."""
     env = os.environ.copy()
     existing = env.get("LEAN_PATH")
-    env["LEAN_PATH"] = "." if not existing else f".:{existing}"
+    paths = [str(Path.cwd() / ".cleanxyz" / "olean"), "."]
+    if existing:
+        paths.append(existing)
+    env["LEAN_PATH"] = ":".join(paths)
     return env
 
 
@@ -821,6 +831,16 @@ def check_source(source: Path) -> int:
     requirements_path.write_text(
         RequirementEmitter(proof_path, proof_module, requirements).emit()
     )
+    ast_olean_path = olean_path_for_lean(ast_path)
+    proof_olean_path = olean_path_for_lean(proof_path)
+    requirements_olean_path = olean_path_for_lean(requirements_path)
+    for lean_path, olean_path in [
+        (ast_path, ast_olean_path),
+        (proof_path, proof_olean_path),
+        (requirements_path, requirements_olean_path),
+    ]:
+        olean_path.parent.mkdir(parents=True, exist_ok=True)
+        lean_path.with_suffix(".olean").unlink(missing_ok=True)
     require_executable("lake")
     run(
         ["lake", "build", "CleanXYZ"],
@@ -832,7 +852,7 @@ def check_source(source: Path) -> int:
         "env",
         "lean",
         "-o",
-        str(olean_path_for_lean(ast_path)),
+        str(ast_olean_path),
         str(ast_path),
     ],
         env=lean_env(),
@@ -848,7 +868,7 @@ def check_source(source: Path) -> int:
         "lean",
         "-DwarningAsError=true",
         "-o",
-        str(olean_path_for_lean(proof_path)),
+        str(proof_olean_path),
         str(proof_path),
     ],
         env=lean_env(),
@@ -867,7 +887,7 @@ def check_source(source: Path) -> int:
         "lean",
         "-DwarningAsError=true",
         "-o",
-        str(olean_path_for_lean(requirements_path)),
+        str(requirements_olean_path),
         str(requirements_path),
     ],
         env=lean_env(),

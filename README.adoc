@@ -262,6 +262,8 @@ Then, inside the `.cleanxyz` directory, `cleanxyz` converts the input Python sou
 
 The adjacent `.cleanxyz/tmp.py.ast.lean` is only a small import bridge. Lean reads the JSON with `include_str`, validates `schema_version`, and elaborates it into a typed `CleanXYZ.PyAst.Module`. Proofs therefore continue to use `TmpAst.module` and operate on the typed data structure, not on untrusted claims made by the converter.
 
+Compiled Lean `.olean` files are written to a mirrored cache under `.cleanxyz/olean/`. `LEAN_PATH` includes that cache, so later proof imports use the compiled modules without placing build artifacts beside checked-in `.lean` proofs.
+
 The top-level JSON shape is:
 
 [source,json]
@@ -325,3 +327,7 @@ Run all tests under link:tests[]:
 ----
 ./test
 ----
+
+== Bibliography
+
+* https://github.com/arsalan0c/dafny-of-python[]: converts Python to Dafny
