@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import textwrap
@@ -125,7 +126,24 @@ def main() -> int:
         result = run_case(case)
         results.append(result)
         print_result(result)
-    return 0 if all(result.passed for result in results) else 1
+
+    ast_json_path = REPO / ".cleanxyz/tests/pass/range_sum.py.ast.json"
+    ast_bridge_path = REPO / ".cleanxyz/tests/pass/range_sum.py.ast.lean"
+    try:
+        ast_document = json.loads(ast_json_path.read_text())
+        json_ast_passed = (
+            ast_document["schema_version"] == 1
+            and ast_document["ast"]["type"] == "Module"
+            and ast_document["ast"]["body"][1]["type"] == "FunctionDef"
+            and "pyast_from_json%" in ast_bridge_path.read_text()
+        )
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, IndexError, TypeError):
+        json_ast_passed = False
+    print(
+        f"{'PASS' if json_ast_passed else 'FAIL'} generated JSON AST import",
+        flush=True,
+    )
+    return 0 if all(result.passed for result in results) and json_ast_passed else 1
 
 
 if __name__ == "__main__":

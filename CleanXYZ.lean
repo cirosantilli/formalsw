@@ -1,3 +1,5 @@
+import Lean
+
 /-!
 Core Lean datatypes and semantics for representing a small Python AST.
 
@@ -17,7 +19,7 @@ inductive Constant where
   | bool : Bool -> Constant
   /-- The Python `None` constant. -/
   | none : Constant
-deriving Repr
+deriving Repr, Lean.ToExpr
 
 /-- Python unary operators currently represented by the AST bridge. -/
 inductive UnaryOp where
@@ -25,7 +27,7 @@ inductive UnaryOp where
   | uSub
   /-- Python logical `not`. -/
   | not
-deriving Repr
+deriving Repr, Lean.ToExpr
 
 /-- Python binary operators currently represented by the AST bridge. -/
 inductive BinOp where
@@ -37,7 +39,7 @@ inductive BinOp where
   | mult
   /-- Python floor division `//`. -/
   | floorDiv
-deriving Repr
+deriving Repr, Lean.ToExpr
 
 /-- Python comparison operators currently represented by the AST bridge. -/
 inductive CmpOp where
@@ -53,7 +55,7 @@ inductive CmpOp where
   | gt
   /-- Python `>=`. -/
   | gtE
-deriving Repr
+deriving Repr, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
 inductive Expr where
@@ -71,7 +73,7 @@ inductive Expr where
   | compare : Expr -> List (CmpOp × Expr) -> Expr
   /-- A Python call expression with positional arguments. -/
   | call : Expr -> List Expr -> Expr
-deriving Repr
+deriving Repr, Lean.ToExpr
 
 /-- A Python function argument. -/
 structure Arg where
@@ -79,7 +81,7 @@ structure Arg where
   name : String
   /-- The optional source annotation expression. -/
   annotation : Option Expr
-deriving Repr
+deriving Repr, Lean.ToExpr
 
 /-- Python statements currently represented by the AST bridge. -/
 inductive Stmt where
@@ -104,15 +106,173 @@ inductive Stmt where
   | assert : Expr -> Option Expr -> Stmt
   /-- A Python expression statement. -/
   | expr : Expr -> Stmt
-deriving Repr
+deriving Repr, Lean.ToExpr
 
 /-- A Python module represented as a list of top-level statements. -/
 structure Module where
   /-- Top-level statements in source order. -/
   body : List Stmt
-deriving Repr
+deriving Repr, Lean.ToExpr
+
+/-- Read a required field from a JSON object. -/
+private def jsonField (json : Lean.Json) (name : String) : Except String Lean.Json :=
+  json.getObjVal? name
+
+/-- Read a required string field from a JSON object. -/
+private def jsonString (json : Lean.Json) (name : String) : Except String String := do
+  (← jsonField json name).getStr?
+
+/-- Read a required array field and decode each of its elements. -/
+private def jsonArray (json : Lean.Json) (name : String)
+    (decode : Lean.Json → Except String α) : Except String (List α) := do
+  let values ← (← jsonField json name).getArr?
+  values.toList.mapM decode
+
+/-- Decode a unary operator name from the JSON schema. -/
+private def UnaryOp.fromJson? (json : Lean.Json) : Except String UnaryOp := do
+  match ← json.getStr? with
+  | "USub" => return .uSub
+  | "Not" => return .not
+  | name => throw s!"unsupported unary operator: {name}"
+
+/-- Decode a binary operator name from the JSON schema. -/
+private def BinOp.fromJson? (json : Lean.Json) : Except String BinOp := do
+  match ← json.getStr? with
+  | "Add" => return .add
+  | "Sub" => return .sub
+  | "Mult" => return .mult
+  | "FloorDiv" => return .floorDiv
+  | name => throw s!"unsupported binary operator: {name}"
+
+/-- Decode a comparison operator name from the JSON schema. -/
+private def CmpOp.fromJson? (json : Lean.Json) : Except String CmpOp := do
+  match ← json.getStr? with
+  | "Eq" => return .eq
+  | "NotEq" => return .notEq
+  | "Lt" => return .lt
+  | "LtE" => return .ltE
+  | "Gt" => return .gt
+  | "GtE" => return .gtE
+  | name => throw s!"unsupported comparison operator: {name}"
+
+/-- Decode one expression from the version 1 JSON schema. -/
+private partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
+  match ← jsonString json "type" with
+  | "Constant" =>
+      match ← jsonField json "value" with
+      | .num number => return .constant (.int (← (Lean.Json.num number).getInt?))
+      | .str value => return .constant (.string value)
+      | .bool value => return .constant (.bool value)
+      | .null => return .constant .none
+      | _ => throw "unsupported Constant.value"
+  | "Name" => return .name (← jsonString json "id")
+  | "List" => return .list (← jsonArray json "elts" Expr.fromJson?)
+  | "BinOp" =>
+      return .binOp
+        (← Expr.fromJson? (← jsonField json "left"))
+        (← BinOp.fromJson? (← jsonField json "op"))
+        (← Expr.fromJson? (← jsonField json "right"))
+  | "UnaryOp" =>
+      return .unaryOp
+        (← UnaryOp.fromJson? (← jsonField json "op"))
+        (← Expr.fromJson? (← jsonField json "operand"))
+  | "Compare" =>
+      let operators ← jsonArray json "ops" CmpOp.fromJson?
+      let comparators ← jsonArray json "comparators" Expr.fromJson?
+      if operators.length != comparators.length then
+        throw "Compare.ops and Compare.comparators must have equal lengths"
+      return .compare
+        (← Expr.fromJson? (← jsonField json "left"))
+        (operators.zip comparators)
+  | "Call" =>
+      return .call
+        (← Expr.fromJson? (← jsonField json "func"))
+        (← jsonArray json "args" Expr.fromJson?)
+  | type => throw s!"unsupported expression type: {type}"
+
+/-- Decode a nullable expression field from a JSON object. -/
+private def optionalExpr (json : Lean.Json) (name : String) : Except String (Option Expr) := do
+  match ← jsonField json name with
+  | .null => return none
+  | value => return some (← Expr.fromJson? value)
+
+/-- Decode one function argument from the version 1 JSON schema. -/
+private def Arg.fromJson? (json : Lean.Json) : Except String Arg := do
+  return {
+    name := ← jsonString json "name"
+    annotation := ← optionalExpr json "annotation"
+  }
+
+/-- Decode one statement from the version 1 JSON schema. -/
+private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
+  match ← jsonString json "type" with
+  | "FunctionDef" =>
+      return .functionDef
+        (← jsonString json "name")
+        (← jsonArray json "args" Arg.fromJson?)
+        (← optionalExpr json "returns")
+        (← jsonArray json "body" Stmt.fromJson?)
+  | "Return" => return .return (← Expr.fromJson? (← jsonField json "value"))
+  | "Assign" =>
+      return .assign
+        (← jsonArray json "targets" Expr.fromJson?)
+        (← Expr.fromJson? (← jsonField json "value"))
+  | "AugAssign" =>
+      return .augAssign
+        (← Expr.fromJson? (← jsonField json "target"))
+        (← BinOp.fromJson? (← jsonField json "op"))
+        (← Expr.fromJson? (← jsonField json "value"))
+  | "For" =>
+      return .forIn
+        (← Expr.fromJson? (← jsonField json "target"))
+        (← Expr.fromJson? (← jsonField json "iter"))
+        (← jsonArray json "body" Stmt.fromJson?)
+        (← jsonArray json "orelse" Stmt.fromJson?)
+  | "If" =>
+      return .ifThen
+        (← Expr.fromJson? (← jsonField json "test"))
+        (← jsonArray json "body" Stmt.fromJson?)
+        (← jsonArray json "orelse" Stmt.fromJson?)
+  | "Assert" =>
+      return .assert
+        (← Expr.fromJson? (← jsonField json "test"))
+        (← optionalExpr json "msg")
+  | "Expr" => return .expr (← Expr.fromJson? (← jsonField json "value"))
+  | type => throw s!"unsupported statement type: {type}"
+
+/--
+Decode a complete cleanxyz JSON AST document.
+
+The schema version is checked before the JSON data is turned into the typed
+`PyAst.Module` on which proofs operate.
+-/
+def Module.fromJsonDocument? (json : Lean.Json) : Except String Module := do
+  let version ← (← jsonField json "schema_version").getNat?
+  if version != 1 then
+    throw s!"unsupported cleanxyz AST schema version: {version}"
+  let ast ← jsonField json "ast"
+  if (← jsonString ast "type") != "Module" then
+    throw "the top-level AST node must have type Module"
+  return { body := ← jsonArray ast "body" Stmt.fromJson? }
 
 end CleanXYZ.PyAst
+
+/-- Import a cleanxyz JSON AST as a reducible, typed `CleanXYZ.PyAst.Module`. -/
+syntax "pyast_from_json% " term : term
+
+open Lean Elab Term Meta in
+elab_rules : term
+  | `(pyast_from_json% $jsonSource:term) => do
+      let sourceExpr ← elabTerm jsonSource (some (mkConst ``String))
+      let some source := getStringValue? sourceExpr
+        | throwError "pyast_from_json% expects a string literal, usually from include_str"
+      let json ← match Json.parse source with
+        | .ok value => pure value
+        | .error message => throwError "invalid cleanxyz AST JSON: {message}"
+      let module ← match CleanXYZ.PyAst.Module.fromJsonDocument? json with
+        | .ok value => pure value
+        | .error message => throwError "invalid cleanxyz AST document: {message}"
+      return Lean.toExpr module
 
 /-!
 Partial semantic interpreters for `CleanXYZ.PyAst`.

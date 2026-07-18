@@ -258,7 +258,24 @@ cleanxyz tmp.py
 
 it will determine where to create the `.cleanxyz` directory. When you are inside a .git repository, `.cleanxyz` is always placed next to the `.git`. You basically always  want to use Git becuse you want to check that you LLMs haven't mofidifed your specifications in source files.
 
-The, inside the `.cleanxyz` directory, `cleanxyz` converts the input Python source code to its AST, and then dumps the AST as a Lean data structure under `.cleanxyz/tmp.py.ast.lean`.
+Then, inside the `.cleanxyz` directory, `cleanxyz` converts the input Python source code to a versioned JSON AST under `.cleanxyz/tmp.py.ast.json`. This is the language-neutral interchange artifact, so a future converter only needs to produce the same JSON schema.
+
+The adjacent `.cleanxyz/tmp.py.ast.lean` is only a small import bridge. Lean reads the JSON with `include_str`, validates `schema_version`, and elaborates it into a typed `CleanXYZ.PyAst.Module`. Proofs therefore continue to use `TmpAst.module` and operate on the typed data structure, not on untrusted claims made by the converter.
+
+The top-level JSON shape is:
+
+[source,json]
+----
+{
+  "schema_version": 1,
+  "ast": {
+    "type": "Module",
+    "body": []
+  }
+}
+----
+
+Nodes use a `type` discriminator and fields close to Python's `ast` names. For example, a name expression is `{"type": "Name", "id": "n"}` and a constant is `{"type": "Constant", "value": 1}`.
 
 At the same time, cleanxyz searches for `@cleanxyz:` markers in Python docstrings, and when those are found, it dumps them under `.cleanxyz/tmp.py.reqs.lean` in such a way that unless proof of each requirement is also found, things will blow up when Lean runs.
 
@@ -278,7 +295,8 @@ example :
 
 Finally, cleanxyz runs Lean putting everything together:
 
-* `.cleanxyz/tmp.py.ast.lean` mentioned above with the AST representation
+* `.cleanxyz/tmp.py.ast.json` with the language-neutral AST representation
+* `.cleanxyz/tmp.py.ast.lean` with the small JSON-to-Lean import bridge
 * `.cleanxyz/tmp.py.reqs.lean` mentioned above with the proof requirements
 * `tmp.py.lean` which is supposed to contain your proof
 * link:CleanXYZ.lean[] which defines the Python AST representation and properties of the Python language which are then used in correctness proofs
