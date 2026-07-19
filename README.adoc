@@ -38,7 +38,7 @@ cleanxy tests/range_sum.py
 and if all went well you should see a message:
 
 ----
-All 4 checks passed
+All 5 checks passed
 ----
 
 and exit status 0.
@@ -353,6 +353,37 @@ def sum(n: int) -> int:
 ----
 
 The marker above requires `sum.«Not Throws»`. `Not` can prefix any other DSL property recursively; for example, `Not Not Throws` has the usual double negation meaning.
+
+==== ReturnType
+
+`ReturnType` states that every modeled invocation either throws an exception or returns a value matching the function's return annotation. For example:
+
+[source,python]
+----
+def sum(n: int) -> int:
+    """
+    @cleanxy: ReturnType
+    """
+    # ...
+----
+
+This marker requires `sum.«ReturnType»` with type:
+
+[source,lean]
+----
+CleanXY.Property.Function.ReturnType TmpAst.module "sum"
+----
+
+For the supported `int -> int` case, this expands to:
+
+[source,lean]
+----
+∀ n : Int, ∃ outcome,
+  CleanXY.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum" n =
+    some outcome
+----
+
+A successful outcome contains an `Int`, while an exception outcome is also accepted because it has no return value. An unsupported evaluation, including a modeled return value that does not match the annotation, produces `none` and cannot satisfy `ReturnType`. Unary `list -> list` functions are also supported by the current structural list evaluator.
 
 ==== Throws
 

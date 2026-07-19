@@ -152,6 +152,13 @@ theorem sum.«Equiv(sum_naive)» :
       hn,
     ]
 
+/-- `sum` returns its annotated integer type whenever it does not throw. -/
+theorem sum.«ReturnType» :
+    CleanXY.Property.Function.ReturnType RangeSumAst.module "sum" := by
+  intro n
+  obtain ⟨outcome, hsum, _⟩ := sum.«Equiv(sum_naive)» n
+  exact ⟨outcome, hsum⟩
+
 /-- The closed-form implementation has constant worst-case cost. -/
 theorem sum.«BigO(1)» :
     CleanXY.Property.Function.BigO RangeSumAst.module "sum"

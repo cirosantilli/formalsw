@@ -4,9 +4,10 @@
 def sum(n: int) -> int:
     """Optimized version of sum_naive.
 
+    @cleanxy: BigO(1)
     @cleanxy: Equiv(sum_naive)
     @cleanxy: Not Throws
-    @cleanxy: BigO(1)
+    @cleanxy: ReturnType
     """
     if n <= 0:
         return 0

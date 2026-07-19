@@ -376,14 +376,14 @@ def Module.findFunctionBody (module : Module) (name : String) :
     Option (List Stmt) :=
   findFunctionBodyIn module.body name
 
-/-- The input domains currently selected from a function's annotation. -/
-inductive ArgKind where
+/-- The value kinds currently selected from Python type annotations. -/
+inductive TypeKind where
   | int
   | intList
 deriving Repr, DecidableEq
 
 /-- Find the supported unary argument kind of a top-level function. -/
-def findFunctionArgKindIn : List Stmt → String → Option ArgKind
+def findFunctionArgKindIn : List Stmt → String → Option TypeKind
   | [], _ => none
   | Stmt.functionDef fname [{ annotation := some (Expr.name annotation), .. }] _ _ :: rest,
       name =>
@@ -397,8 +397,25 @@ def findFunctionArgKindIn : List Stmt → String → Option ArgKind
   | _ :: rest, name => findFunctionArgKindIn rest name
 
 /-- Find a top-level function's supported input domain from its annotation. -/
-def Module.findFunctionArgKind (module : Module) (name : String) : Option ArgKind :=
+def Module.findFunctionArgKind (module : Module) (name : String) : Option TypeKind :=
   findFunctionArgKindIn module.body name
+
+/-- Find the supported return kind of a top-level function. -/
+def findFunctionReturnKindIn : List Stmt → String → Option TypeKind
+  | [], _ => none
+  | Stmt.functionDef fname _ (some (Expr.name annotation)) _ :: rest, name =>
+      if fname = name then
+        match annotation with
+        | "int" => some .int
+        | "list" => some .intList
+        | _ => none
+      else
+        findFunctionReturnKindIn rest name
+  | _ :: rest, name => findFunctionReturnKindIn rest name
+
+/-- Find a top-level function's supported return kind from its annotation. -/
+def Module.findFunctionReturnKind (module : Module) (name : String) : Option TypeKind :=
+  findFunctionReturnKindIn module.body name
 
 /-- Drop the runtime-irrelevant leading function docstring. -/
 def executableBody : List Stmt → List Stmt
@@ -888,6 +905,20 @@ theorems with the same types.
 -/
 
 namespace CleanXY.Property.Function
+
+/--
+A function either throws or successfully returns a value of its annotated type
+for every input in its annotated domain.
+-/
+def ReturnType (module : PyAst.Module) (name : String) : Prop :=
+  match module.findFunctionArgKind name, module.findFunctionReturnKind name with
+  | some .int, some .int =>
+      ∀ n : Int, ∃ outcome,
+        PyAst.evalUnaryIntFunctionOutcome module name n = some outcome
+  | some .intList, some .intList =>
+      ∀ values : List Int, ∃ result,
+        PyAst.evalUnaryIntListFunction module name values = some result
+  | _, _ => False
 
 /-- A unary integer function throws a modeled exception for at least one input. -/
 def Throws (module : PyAst.Module) (name : String) : Prop :=

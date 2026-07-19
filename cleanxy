@@ -87,6 +87,8 @@ def proof_name_for_short_requirement(
 ) -> str:
     """Return a source-oriented theorem name for a short property marker."""
     match property_name, args:
+        case "ReturnType", []:
+            pass
         case "Throws", []:
             pass
         case "Equiv", [_]:
@@ -117,6 +119,11 @@ def property_type_for_short_requirement(
 ) -> str:
     """Return the Lean property type for a short property marker."""
     match property_name, args:
+        case "ReturnType", []:
+            property_type = (
+                f'CleanXY.Property.Function.ReturnType {ast_namespace}.module '
+                f'{lean_string(function_name)}'
+            )
         case "Throws", []:
             property_type = (
                 f'CleanXY.Property.Function.Throws {ast_namespace}.module '

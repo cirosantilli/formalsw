@@ -146,9 +146,10 @@ def main() -> int:
         and "namespace tests.range_sum" in stub_completed.stdout
         and "theorem sum.«Equiv(sum_naive)» :" in stub_completed.stdout
         and "theorem sum.«BigO(1)» :" in stub_completed.stdout
+        and "theorem sum.«ReturnType» :" in stub_completed.stdout
         and "theorem sum_naive.«BigO(n)» :" in stub_completed.stdout
         and "end tests.range_sum" in stub_completed.stdout
-        and stub_completed.stdout.count("  sorry") == 4
+        and stub_completed.stdout.count("  sorry") == 5
     )
     print(f"{'PASS' if stub_passed else 'FAIL'} Lean proof stub generation", flush=True)
 
