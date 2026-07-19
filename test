@@ -145,7 +145,8 @@ def main() -> int:
         and 'import «.cleanxyz».tests.pass.«range_sum.py.ast»' in stub_completed.stdout
         and "namespace tests.pass.range_sum" in stub_completed.stdout
         and "theorem sum.«Equiv(sum_naive)» :" in stub_completed.stdout
-        and "theorem sum.«BigO(1, n = n)» :" in stub_completed.stdout
+        and "theorem sum.«BigO(1)» :" in stub_completed.stdout
+        and "theorem sum_naive.«BigO(n)» :" in stub_completed.stdout
         and "end tests.pass.range_sum" in stub_completed.stdout
         and stub_completed.stdout.count("  sorry") == 4
     )

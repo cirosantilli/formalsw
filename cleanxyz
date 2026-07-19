@@ -91,6 +91,8 @@ def proof_name_for_short_requirement(
             pass
         case "Equiv", [_]:
             pass
+        case "BigO", [_]:
+            pass
         case "BigO", [_, _]:
             pass
         case _:
@@ -111,6 +113,7 @@ def property_type_for_short_requirement(
     property_name: str,
     args: list[str],
     negations: int,
+    function: ast.FunctionDef,
 ) -> str:
     """Return the Lean property type for a short property marker."""
     match property_name, args:
@@ -123,6 +126,26 @@ def property_type_for_short_requirement(
             property_type = (
                 f'CleanXYZ.Property.Function.Equiv {ast_namespace}.module '
                 f'{lean_string(function_name)} {lean_string(other)}'
+            )
+        case "BigO", [bound]:
+            int_arguments = [
+                argument.arg
+                for argument in function.args.args
+                if isinstance(argument.annotation, ast.Name)
+                and argument.annotation.id == "int"
+            ]
+            if len(int_arguments) != 1:
+                raise InvalidRequirement(
+                    f"{function_name}: BigO without an explicit input-size binding "
+                    "requires exactly one int argument"
+                )
+            argument = int_arguments[0]
+            parameter = argument if re.search(rf"\b{re.escape(argument)}\b", bound) else "_"
+            property_type = (
+                f'CleanXYZ.Property.Function.BigO {ast_namespace}.module '
+                f'{lean_string(function_name)} '
+                f'(CleanXYZ.PyAst.InputSize.intToNat {lean_string(argument)}) '
+                f'(fun {parameter} : Nat => {bound})'
             )
         case "BigO", [bound, measure]:
             parameter = "n" if re.search(r"\bn\b", bound) else "_"
@@ -336,6 +359,7 @@ def collect_requirements(
                     property_name,
                     args,
                     negations,
+                    stmt,
                 ),
                 source_path,
                 marker.line,

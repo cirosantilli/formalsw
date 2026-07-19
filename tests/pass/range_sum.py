@@ -6,7 +6,7 @@ def sum(n: int) -> int:
 
     @cleanxyz: Equiv(sum_naive)
     @cleanxyz: Not Throws
-    @cleanxyz: BigO(1, n = n)
+    @cleanxyz: BigO(1)
     """
     if n <= 0:
         return 0
@@ -15,7 +15,7 @@ def sum(n: int) -> int:
 def sum_naive(n: int) -> int:
     """Sum of integers from 1 to n. Return 0 if n <= 0.
 
-    @cleanxyz: BigO(n, n = n)
+    @cleanxyz: BigO(n)
     """
     total = 0
     for i in range(n):

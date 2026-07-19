@@ -340,7 +340,7 @@ For functions annotated with one `list` argument, `Equiv` quantifies over every 
 
 ==== BigO
 
-`BigO` states the worst-case asymptotic termination cost of a function. Its first argument is an arbitrary Lean expression, so the set of bounds is not hardcoded. Variables used by that expression must be introduced by an explicit input-size binding. For example, `n = len(values)` introduces the Lean variable `n : Nat` and binds it to the length of the Python argument `values`:
+`BigO` states the worst-case asymptotic termination cost of a function. Its first argument is an arbitrary Lean expression, so the set of bounds is not hardcoded. A unary Python argument annotated as `int` is automatically available in Lean under the same name, so `def f(n: int)` can use `BigO(n)` directly. Derived measures still use an explicit input-size binding; for example, `n = len(values)` introduces the Lean variable `n : Nat` and binds it to the length of the Python argument `values`:
 
 [source,python]
 ----
@@ -361,9 +361,9 @@ CleanXYZ.Property.Function.BigO
     (fun n : Nat => n * (Nat.log2 n + 1))
 ----
 
-The analyzer checks that `values` is the actual `list` argument; changing the binding to another name does not produce a provable obligation. For an integer argument, write `BigO(n, n = input)`. It uses the natural-number projection of the Python integer `input`. The currently supported input measures are thus `n = argument` and `n = len(argument)`.
+The analyzer checks that `values` is the actual `list` argument; changing the binding to another name does not produce a provable obligation. Integer arguments use their natural-number projection automatically. Because the current cost relation is one-dimensional, omitting the binding requires exactly one `int` argument.
 
-Other valid bounds include `BigO(1, n = input)`, `BigO(n * n, n = len(values))`, or a call to a user-defined Lean cost function. Because the bound is Lean rather than a second expression DSL, ordinary Lean functions and notation are available.
+Other valid bounds include `BigO(1)`, `BigO(n)`, `BigO(n * n, n = len(values))`, or a call to a user-defined Lean cost function. Because the bound is Lean rather than a second expression DSL, ordinary Lean functions and notation are available.
 
 The cost model assigns cost 1 to every represented statement and expression operation. It then proves a constant multiple of the selected bound beyond some input-size threshold. Calls are unit-cost by default too; later standard-library models can replace that default with operation-specific complexity. The initial structural analyzer recognizes constant and iterative integer functions plus the recursive list-sort shapes demonstrated in link:tests/pass/sort.py[].
 

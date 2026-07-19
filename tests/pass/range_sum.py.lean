@@ -153,7 +153,7 @@ theorem sum.«Equiv(sum_naive)» :
     ]
 
 /-- The closed-form implementation has constant worst-case cost. -/
-theorem sum.«BigO(1, n = n)» :
+theorem sum.«BigO(1)» :
     CleanXYZ.Property.Function.BigO RangeSumAst.module "sum"
       (.intToNat "n") (fun _ => 1) := by
   apply CleanXYZ.Property.Function.bigO_of_growth_bound
@@ -163,7 +163,7 @@ theorem sum.«BigO(1, n = n)» :
   · exact CleanXYZ.PyAst.Growth.constant_isBigO
 
 /-- The loop implementation has linear worst-case cost. -/
-theorem sum_naive.«BigO(n, n = n)» :
+theorem sum_naive.«BigO(n)» :
     CleanXYZ.Property.Function.BigO RangeSumAst.module "sum_naive"
       (.intToNat "n") (fun n => n) := by
   apply CleanXYZ.Property.Function.bigO_of_growth_bound
