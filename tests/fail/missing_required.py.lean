@@ -1,6 +1,6 @@
 import «.cleanxyz».tests.fail.«missing_required.py.ast»
 import CleanXYZ
 
-namespace Tests.Fail.MissingRequired
+namespace tests.fail.missing_required
 
-end Tests.Fail.MissingRequired
+end tests.fail.missing_required

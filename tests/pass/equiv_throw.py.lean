@@ -1,10 +1,10 @@
 import «.cleanxyz».tests.pass.«equiv_throw.py.ast»
 import CleanXYZ
 
-namespace Tests.Pass.EquivThrow
+namespace tests.pass.equiv_throw
 
 /-- Both implementations return and throw equivalent objects for every input. -/
-theorem doubleOrThrow.equiv_doubleOrThrowAlt :
+theorem double_or_throw.«Equiv(double_or_throw_alt)» :
     CleanXYZ.Property.Function.Equiv
       EquivThrowAst.module "double_or_throw" "double_or_throw_alt" := by
   intro n
@@ -41,4 +41,4 @@ theorem doubleOrThrow.equiv_doubleOrThrowAlt :
       even,
     ]
 
-end Tests.Pass.EquivThrow
+end tests.pass.equiv_throw

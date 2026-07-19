@@ -1,10 +1,10 @@
 import «.cleanxyz».tests.pass.«range_sum.py.ast»
 import CleanXYZ
 
-namespace Tests.Pass.RangeSum
+namespace tests.pass.range_sum
 
 /-- `sum` returns an integer for every integer input. -/
-theorem sum_returns (n : Int) :
+theorem sum.returns (n : Int) :
     ∃ value,
       CleanXYZ.PyAst.evalUnaryIntFunction
           RangeSumAst.module "sum" n =
@@ -38,7 +38,7 @@ theorem sum_returns (n : Int) :
     ]
 
 /-- `sum` never throws for an integer input. -/
-theorem sum.not_throws :
+theorem sum.«Not Throws» :
     Not (CleanXYZ.Property.Function.Throws RangeSumAst.module "sum") := by
   rintro ⟨n, exception, hthrow⟩
   by_cases hn : n <= 0
@@ -68,7 +68,7 @@ theorem sum.not_throws :
     ] at hthrow
 
 /-- `sum_naive` returns an integer for every integer input. -/
-theorem sumNaive_returns (n : Int) :
+theorem sum_naive.returns (n : Int) :
     ∃ value,
       CleanXYZ.PyAst.evalUnaryIntFunction
           RangeSumAst.module "sum_naive" n =
@@ -86,7 +86,7 @@ theorem sumNaive_returns (n : Int) :
   ]
 
 /-- `sum_naive` never throws for an integer input. -/
-theorem sumNaive_not_throws :
+theorem sum_naive.not_throws :
     Not (CleanXYZ.Property.Function.Throws RangeSumAst.module "sum_naive") := by
   rintro ⟨n, exception, hthrow⟩
   simp [
@@ -111,10 +111,10 @@ theorem noException (n : Int) :
       CleanXYZ.PyAst.evalUnaryIntFunction
           RangeSumAst.module "sum_naive" n =
         some value) :=
-  ⟨sum_returns n, sumNaive_returns n⟩
+  ⟨sum.returns n, sum_naive.returns n⟩
 
 /-- `sum` and `sum_naive` give the same result for every integer input. -/
-theorem sum.equiv_sumNaive :
+theorem sum.«Equiv(sum_naive)» :
     CleanXYZ.Property.Function.Equiv
       RangeSumAst.module "sum" "sum_naive" := by
   intro n
@@ -153,7 +153,7 @@ theorem sum.equiv_sumNaive :
     ]
 
 /-- The closed-form implementation has constant worst-case cost. -/
-theorem sum.bigO :
+theorem sum.«BigO(1, n = n)» :
     CleanXYZ.Property.Function.BigO RangeSumAst.module "sum"
       (.intToNat "n") (fun _ => 1) := by
   apply CleanXYZ.Property.Function.bigO_of_growth_bound
@@ -163,7 +163,7 @@ theorem sum.bigO :
   · exact CleanXYZ.PyAst.Growth.constant_isBigO
 
 /-- The loop implementation has linear worst-case cost. -/
-theorem sumNaive.bigO :
+theorem sum_naive.«BigO(n, n = n)» :
     CleanXYZ.Property.Function.BigO RangeSumAst.module "sum_naive"
       (.intToNat "n") (fun n => n) := by
   apply CleanXYZ.Property.Function.bigO_of_growth_bound
@@ -172,4 +172,4 @@ theorem sumNaive.bigO :
   · rfl
   · exact CleanXYZ.PyAst.Growth.linear_isBigO
 
-end Tests.Pass.RangeSum
+end tests.pass.range_sum

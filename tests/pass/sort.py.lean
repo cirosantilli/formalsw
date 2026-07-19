@@ -1,10 +1,10 @@
 import «.cleanxyz».tests.pass.«sort.py.ast»
 import CleanXYZ
 
-namespace Tests.Pass.Sort
+namespace tests.pass.sort
 
 /-- The two recognized sorting implementations have the same result. -/
-theorem mergeSort.equiv_quickSort :
+theorem merge_sort.«Equiv(quick_sort)» :
     CleanXYZ.Property.Function.Equiv
       SortAst.module "merge_sort" "quick_sort" := by
   intro values
@@ -12,7 +12,7 @@ theorem mergeSort.equiv_quickSort :
   constructor <;> rfl
 
 /-- Merge sort has linearithmic worst-case cost. -/
-theorem mergeSort.bigO :
+theorem merge_sort.«BigO(n * (Nat.log2 n + 1), n = len(values))» :
     CleanXYZ.Property.Function.BigO
       SortAst.module "merge_sort" (.listLength "values")
         (fun n => n * (Nat.log2 n + 1)) := by
@@ -23,7 +23,7 @@ theorem mergeSort.bigO :
   · exact CleanXYZ.PyAst.Growth.linearithmic_isBigO
 
 /-- This first-element-pivot quicksort has quadratic worst-case cost. -/
-theorem quickSort.bigO :
+theorem quick_sort.«BigO(n * n, n = len(values))» :
     CleanXYZ.Property.Function.BigO
       SortAst.module "quick_sort" (.listLength "values") (fun n => n * n) := by
   apply CleanXYZ.Property.Function.bigO_of_growth_bound
@@ -32,4 +32,4 @@ theorem quickSort.bigO :
   · rfl
   · exact CleanXYZ.PyAst.Growth.quadratic_isBigO
 
-end Tests.Pass.Sort
+end tests.pass.sort

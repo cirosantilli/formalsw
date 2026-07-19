@@ -1,6 +1,6 @@
 import «.cleanxyz».tests.fail.dir.«fail.py.ast»
 import CleanXYZ
 
-namespace Tests.Fail.Dir.Fail
+namespace tests.fail.dir.fail
 
-end Tests.Fail.Dir.Fail
+end tests.fail.dir.fail

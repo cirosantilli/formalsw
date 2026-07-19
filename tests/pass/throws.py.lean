@@ -1,10 +1,10 @@
 import «.cleanxyz».tests.pass.«throws.py.ast»
 import CleanXYZ
 
-namespace Tests.Pass.Throws
+namespace tests.pass.throws
 
 /-- `reject_odd` throws for at least one integer input. -/
-theorem rejectOdd.throws :
+theorem reject_odd.«Throws» :
     CleanXYZ.Property.Function.Throws ThrowsAst.module "reject_odd" := by
   refine ⟨1, { typeName := "ValueError", args := [.string "odd input"] }, ?_⟩
   simp [
@@ -21,4 +21,4 @@ theorem rejectOdd.throws :
     ThrowsAst.module,
   ]
 
-end Tests.Pass.Throws
+end tests.pass.throws

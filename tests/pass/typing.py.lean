@@ -1,10 +1,10 @@
 import «.cleanxyz».tests.pass.«typing.py.ast»
 import CleanXYZ
 
-namespace Tests.Pass.Typing
+namespace tests.pass.typing
 
 /-- An unrestricted comparison can receive incompatible runtime types. -/
-theorem mergeSortUntyped.throws :
+theorem merge_sort_untyped.«Throws» :
     CleanXYZ.Property.Function.Throws TypingAst.module "merge_sort_untyped" := by
   refine ⟨.int 0, .string "", { typeName := "TypeError", args := [] }, ?_⟩
   constructor
@@ -14,7 +14,7 @@ theorem mergeSortUntyped.throws :
   · rfl
 
 /-- Two integer arguments are always mutually comparable. -/
-theorem mergeSortInt.not_throws :
+theorem merge_sort_int.«Not Throws» :
     Not (CleanXYZ.Property.Function.Throws TypingAst.module "merge_sort_int") := by
   rintro ⟨left, right, exception, hleft, hright, houtcome⟩
   cases left <;> cases right <;> simp [
@@ -28,7 +28,7 @@ theorem mergeSortInt.not_throws :
   ] at hleft hright houtcome
 
 /-- Two string arguments are always mutually comparable. -/
-theorem mergeSortStr.not_throws :
+theorem merge_sort_str.«Not Throws» :
     Not (CleanXYZ.Property.Function.Throws TypingAst.module "merge_sort_str") := by
   rintro ⟨left, right, exception, hleft, hright, houtcome⟩
   cases left <;> cases right <;> simp [
@@ -41,4 +41,4 @@ theorem mergeSortStr.not_throws :
     TypingAst.module,
   ] at hleft hright houtcome
 
-end Tests.Pass.Typing
+end tests.pass.typing

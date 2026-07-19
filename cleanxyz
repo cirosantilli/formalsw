@@ -66,25 +66,16 @@ def indent(text: str, spaces: int) -> str:
     return "\n".join(prefix + line if line else line for line in text.splitlines())
 
 
-def lower_camel_component(component: str) -> str:
-    """Convert one path/name component into a lower-camel Lean name part."""
-    camel = camel_component(component)
-    return camel[:1].lower() + camel[1:] if camel else ""
-
-
-def theorem_suffix_for_function(function_name: str) -> str:
-    """Return the conventional theorem-name component for a Python function."""
-    return lower_camel_component(function_name)
-
-
 def proof_namespace_for_source(source: Path) -> str:
-    """Return the conventional namespace for proof theorems for a source file."""
+    """Return a source-oriented namespace for proof theorems."""
     try:
         source = source.resolve().relative_to(Path.cwd().resolve())
     except ValueError:
         pass
     path_without_suffix = source.with_suffix("")
-    return ".".join(camel_component(component) for component in path_without_suffix.parts)
+    return ".".join(
+        lean_import_component(component) for component in path_without_suffix.parts
+    )
 
 
 def proof_name_for_short_requirement(
@@ -92,25 +83,26 @@ def proof_name_for_short_requirement(
     function_name: str,
     property_name: str,
     args: list[str],
-    negations: int,
+    marker: str,
 ) -> str:
-    """Return the conventional theorem name for a short property marker."""
-    function_part = theorem_suffix_for_function(function_name)
+    """Return a source-oriented theorem name for a short property marker."""
     match property_name, args:
         case "Throws", []:
-            property_part = "throws"
-        case "Equiv", [other]:
-            other_part = theorem_suffix_for_function(other)
-            property_part = f"equiv_{other_part}"
+            pass
+        case "Equiv", [_]:
+            pass
         case "BigO", [_, _]:
-            property_part = "bigO"
+            pass
         case _:
             raise InvalidRequirement(
                 f"{function_name}: unsupported cleanxyz property marker: "
                 f"{property_name}({', '.join(args)})"
             )
-    local_name = f"{function_part}.{'not_' * negations}{property_part}"
-    return f"{proof_namespace}.{local_name}"
+    if "«" in marker or "»" in marker:
+        raise InvalidRequirement(
+            f"{function_name}: cleanxyz marker cannot contain `«` or `»`: {marker}"
+        )
+    return f"{proof_namespace}.{lean_import_component(function_name)}.«{marker}»"
 
 
 def property_type_for_short_requirement(
@@ -336,7 +328,7 @@ def collect_requirements(
                     stmt.name,
                     property_name,
                     args,
-                    negations,
+                    marker.text,
                 ),
                 property_type_for_short_requirement(
                     ast_namespace,
