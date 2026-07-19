@@ -340,7 +340,14 @@ For functions annotated with one `list` argument, `Equiv` quantifies over every 
 
 ==== BigO
 
-`BigO` states the worst-case asymptotic termination cost of a function. Its first argument is an arbitrary Lean expression, so the set of bounds is not hardcoded. A unary Python argument annotated as `int` is automatically available in Lean under the same name, so `def f(n: int)` can use `BigO(n)` directly. Derived measures still use an explicit input-size binding; for example, `n = len(values)` introduces the Lean variable `n : Nat` and binds it to the length of the Python argument `values`:
+`BigO` states the worst-case asymptotic termination cost of a function, i.e. https://en.wikipedia.org/wiki/Big_O_notation[Big O notation].
+
+It takes two inputs:
+
+* arbitrary Lean expression
+* optional definition of lean variables from python expressions
+
+Example:
 
 [source,python]
 ----
@@ -351,7 +358,29 @@ def merge_sort(values: list) -> list:
     # ...
 ----
 
-This marker requires `merge_sort.«BigO(n * (Nat.log2 n + 1), n = len(values))»` with type:
+Here:
+
+* `n` is a lean variable
+* `len(values)` is a Python expression that maps the Python into the lean variable
+
+Python arguments annotated as `int` are automatically available in Lean under the same name, e.g. we can write the following:
+
+[source,python]
+----
+def sum_naive(n: int) -> int:
+    """Sum of integers from 1 to n. Return 0 if n <= 0.
+
+    @cleanxy: BigO(n)
+    """
+----
+
+rather than the more tedious:
+
+----
+@cleanxy: BigO(n, n = n)
+----
+
+The merge_sort example above requires `merge_sort.«BigO(n * (Nat.log2 n + 1), n = len(values))»` with type:
 
 [source,lean]
 ----
