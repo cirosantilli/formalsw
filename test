@@ -97,6 +97,7 @@ def main() -> int:
         TestCase("sorts are equivalent with proved costs", Path("tests/pass/sort.py"), 0),
         TestCase("equivalent throws pass", Path("tests/pass/equiv_throw.py"), 0),
         TestCase("Throws can be proved", Path("tests/pass/throws.py"), 0),
+        TestCase("annotations restrict comparison inputs", Path("tests/pass/typing.py"), 0),
         TestCase("raw Lean requirement passes", Path("tests/pass/raw_lean.py"), 0),
         TestCase(
             "sorrys are rejected",

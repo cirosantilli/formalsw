@@ -405,6 +405,71 @@ def executableBody : List Stmt → List Stmt
   | Stmt.expr (Expr.constant (Constant.string _)) :: rest => rest
   | body => body
 
+/-- Scalar Python values used by the modeled binary-comparison safety semantics. -/
+inductive ScalarValue where
+  | int (value : Int)
+  | string (value : String)
+deriving Repr, DecidableEq
+
+/-- An optional Python annotation restricting a scalar argument's runtime values. -/
+inductive ScalarKind where
+  | any
+  | int
+  | string
+deriving Repr, DecidableEq
+
+/-- Whether a modeled scalar value satisfies a Python argument annotation. -/
+def ScalarKind.accepts : ScalarKind → ScalarValue → Bool
+  | .any, _ => true
+  | .int, .int _ => true
+  | .string, .string _ => true
+  | _, _ => false
+
+/-- The input annotations of a recognized binary less-than expression. -/
+structure BinaryComparison where
+  left : ScalarKind
+  right : ScalarKind
+deriving Repr, DecidableEq
+
+/-- Decode a supported scalar annotation; no annotation means unrestricted. -/
+def scalarKindFromAnnotation : Option Expr → Option ScalarKind
+  | none => some .any
+  | some (.name "int") => some .int
+  | some (.name "str") => some .string
+  | _ => none
+
+/-- Find a top-level two-argument function whose body evaluates `left < right`. -/
+def findBinaryComparisonIn : List Stmt → String → Option BinaryComparison
+  | [], _ => none
+  | Stmt.functionDef fname [leftArg, rightArg] _ rawBody :: rest, name =>
+      if fname = name then do
+        let [.expr (.compare (.name leftName) [(.lt, .name rightName)])] :=
+          executableBody rawBody | none
+        if leftName != leftArg.name || rightName != rightArg.name then none
+        else
+          return {
+            left := ← scalarKindFromAnnotation leftArg.annotation
+            right := ← scalarKindFromAnnotation rightArg.annotation
+          }
+      else
+        findBinaryComparisonIn rest name
+  | _ :: rest, name => findBinaryComparisonIn rest name
+
+/-- Find a recognized top-level binary less-than function. -/
+def Module.findBinaryComparison (module : Module) (name : String) :
+    Option BinaryComparison :=
+  findBinaryComparisonIn module.body name
+
+/-- Whether a recognized binary comparison returns normally or raises `TypeError`. -/
+def evalBinaryComparisonOutcome (module : Module) (name : String)
+    (left right : ScalarValue) : Option (Except ExceptionObject Unit) := do
+  let signature ← module.findBinaryComparison name
+  if !signature.left.accepts left || !signature.right.accepts right then none
+  else
+    match left, right with
+    | .int _, .int _ | .string _, .string _ => some (.ok ())
+    | _, _ => some (.error { typeName := "TypeError", args := [] })
+
 mutual
   /-- Count expression operations, assigning unit cost to every AST node. -/
   partial def Expr.operationCount : Expr → Nat
@@ -826,8 +891,16 @@ namespace CleanXYZ.Property.Function
 
 /-- A unary integer function throws a modeled exception for at least one input. -/
 def Throws (module : PyAst.Module) (name : String) : Prop :=
-  ∃ n : Int, ∃ exception,
-    PyAst.evalUnaryIntFunctionOutcome module name n = some (.error exception)
+  match module.findBinaryComparison name with
+  | some signature =>
+      ∃ left right exception,
+        signature.left.accepts left = true ∧
+          signature.right.accepts right = true ∧
+          PyAst.evalBinaryComparisonOutcome module name left right =
+            some (.error exception)
+  | none =>
+      ∃ n : Int, ∃ exception,
+        PyAst.evalUnaryIntFunctionOutcome module name n = some (.error exception)
 
 /--
 Two unary integer functions return the same value or throw structurally equal
