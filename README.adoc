@@ -229,6 +229,114 @@ The DSL specification is a magic custom and very simple language that allows spe
 
 The DSL gets converted to corresponding Lean code behind the scenes.
 
+==== BigO
+
+`BigO` states the worst-case asymptotic termination cost of a function, i.e. https://en.wikipedia.org/wiki/Big_O_notation[Big O notation].
+
+It takes two inputs:
+
+* arbitrary Lean expression
+* optional definition of lean variables from python expressions
+
+Example:
+
+[source,python]
+----
+def merge_sort(values: list) -> list:
+    """
+    @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
+    """
+    # ...
+----
+
+Here:
+
+* `n` is a lean variable
+* `len(values)` is a Python expression that maps the Python into the lean variable
+
+Python arguments annotated as `int` are automatically available in Lean under the same name, e.g. we can write the following:
+
+[source,python]
+----
+def sum_naive(n: int) -> int:
+    """Sum of integers from 1 to n. Return 0 if n <= 0.
+
+    @cleanxy: BigO(n)
+    """
+----
+
+rather than the more tedious:
+
+----
+@cleanxy: BigO(n, n = n)
+----
+
+The merge_sort example above requires `merge_sort.«BigO(n * (Nat.log2 n + 1), n = len(values))»` with type:
+
+[source,lean]
+----
+CleanXY.Property.Function.BigO
+  SortAst.module "merge_sort"
+    (CleanXY.PyAst.InputSize.listLength "values")
+    (fun n : Nat => n * (Nat.log2 n + 1))
+----
+
+The analyzer checks that `values` is the actual `list` argument; changing the binding to another name does not produce a provable obligation. Integer arguments use their natural-number projection automatically. Because the current cost relation is one-dimensional, omitting the binding requires exactly one `int` argument.
+
+Other valid bounds include `BigO(1)`, `BigO(n)`, `BigO(n * n, n = len(values))`, or a call to a user-defined Lean cost function. Because the bound is Lean rather than a second expression DSL, ordinary Lean functions and notation are available.
+
+The cost model assigns cost 1 to every represented statement and expression operation. It then proves a constant multiple of the selected bound beyond some input-size threshold. Calls are unit-cost by default too; later standard-library models can replace that default with operation-specific complexity. The initial structural analyzer recognizes constant and iterative integer functions plus the recursive list-sort shapes demonstrated in link:tests/sort.py[].
+
+==== Equiv
+
+`Equiv` states that two functions have identical evaluation results for every input, i.e. that either:
+
+* both functions return the same value if they return
+* both functions throw the same exception if they throw
+
+Example:
+
+[source,python]
+----
+def sum(n: int) -> int:
+    """Optimized version of sum_naive.
+
+    @cleanxy: Equiv(sum_naive)
+    """
+    if n <= 0:
+        return 0
+    return (n * (n - 1)) // 2
+
+def sum_naive(n: int) -> int:
+    """Sum of integers from 1 to n. Return 0 if n <= 0."""
+    total = 0
+    for i in range(n):
+        total += i
+    return total
+----
+
+This marker requires `sum.«Equiv(sum_naive)»` with type:
+
+[source,lean]
+----
+CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+----
+
+For every input, `Equiv` requires one common exception-aware outcome:
+
+[source,lean]
+----
+∀ n : Int, ∃ outcome,
+  CleanXY.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum" n =
+      some outcome ∧
+    CleanXY.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum_naive" n =
+      some outcome
+----
+
+An outcome is either `.ok value` or `.error exception`. Successful executions must therefore return the same integer, while throwing executions must have structurally equal exception objects: the same exception class name and equal evaluated positional arguments. An unsupported AST evaluates to `none`, which cannot satisfy `Equiv` even when both sides are unsupported. See link:tests/equiv_throw.py[] for an equivalence proof covering both returns and throws.
+
+For functions annotated with one `list` argument, `Equiv` quantifies over every `List Int` input and requires the same output list. See link:tests/sort.py[] for merge-sort and quicksort equivalence.
+
 ==== Not
 
 `Not` negates the complete DSL expression following it. For example, to state that a function does not <<throws,throw>> for any input:
@@ -287,114 +395,6 @@ Use `Not Throws` to state that no input throws. For a function named `sum`, this
 ----
 Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
 ----
-
-==== Equiv
-
-`Equiv` states that two functions have identical evaluation results for every input, i.e. that either:
-
-* both functions return the same value if they return
-* both functions throw the same exception if they throw
-
-Example:
-
-[source,python]
-----
-def sum(n: int) -> int:
-    """Optimized version of sum_naive.
-
-    @cleanxy: Equiv(sum_naive)
-    """
-    if n <= 0:
-        return 0
-    return (n * (n - 1)) // 2
-
-def sum_naive(n: int) -> int:
-    """Sum of integers from 1 to n. Return 0 if n <= 0."""
-    total = 0
-    for i in range(n):
-        total += i
-    return total
-----
-
-This marker requires `sum.«Equiv(sum_naive)»` with type:
-
-[source,lean]
-----
-CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
-----
-
-For every input, `Equiv` requires one common exception-aware outcome:
-
-[source,lean]
-----
-∀ n : Int, ∃ outcome,
-  CleanXY.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum" n =
-      some outcome ∧
-    CleanXY.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum_naive" n =
-      some outcome
-----
-
-An outcome is either `.ok value` or `.error exception`. Successful executions must therefore return the same integer, while throwing executions must have structurally equal exception objects: the same exception class name and equal evaluated positional arguments. An unsupported AST evaluates to `none`, which cannot satisfy `Equiv` even when both sides are unsupported. See link:tests/equiv_throw.py[] for an equivalence proof covering both returns and throws.
-
-For functions annotated with one `list` argument, `Equiv` quantifies over every `List Int` input and requires the same output list. See link:tests/sort.py[] for merge-sort and quicksort equivalence.
-
-==== BigO
-
-`BigO` states the worst-case asymptotic termination cost of a function, i.e. https://en.wikipedia.org/wiki/Big_O_notation[Big O notation].
-
-It takes two inputs:
-
-* arbitrary Lean expression
-* optional definition of lean variables from python expressions
-
-Example:
-
-[source,python]
-----
-def merge_sort(values: list) -> list:
-    """
-    @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
-    """
-    # ...
-----
-
-Here:
-
-* `n` is a lean variable
-* `len(values)` is a Python expression that maps the Python into the lean variable
-
-Python arguments annotated as `int` are automatically available in Lean under the same name, e.g. we can write the following:
-
-[source,python]
-----
-def sum_naive(n: int) -> int:
-    """Sum of integers from 1 to n. Return 0 if n <= 0.
-
-    @cleanxy: BigO(n)
-    """
-----
-
-rather than the more tedious:
-
-----
-@cleanxy: BigO(n, n = n)
-----
-
-The merge_sort example above requires `merge_sort.«BigO(n * (Nat.log2 n + 1), n = len(values))»` with type:
-
-[source,lean]
-----
-CleanXY.Property.Function.BigO
-  SortAst.module "merge_sort"
-    (CleanXY.PyAst.InputSize.listLength "values")
-    (fun n : Nat => n * (Nat.log2 n + 1))
-----
-
-The analyzer checks that `values` is the actual `list` argument; changing the binding to another name does not produce a provable obligation. Integer arguments use their natural-number projection automatically. Because the current cost relation is one-dimensional, omitting the binding requires exactly one `int` argument.
-
-Other valid bounds include `BigO(1)`, `BigO(n)`, `BigO(n * n, n = len(values))`, or a call to a user-defined Lean cost function. Because the bound is Lean rather than a second expression DSL, ordinary Lean functions and notation are available.
-
-The cost model assigns cost 1 to every represented statement and expression operation. It then proves a constant multiple of the selected bound beyond some input-size threshold. Calls are unit-cost by default too; later standard-library models can replace that default with operation-specific complexity. The initial structural analyzer recognizes constant and iterative integer functions plus the recursive list-sort shapes demonstrated in link:tests/sort.py[].
 
 === Raw Lean specification
 
