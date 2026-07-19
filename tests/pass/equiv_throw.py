@@ -3,7 +3,7 @@
 def double_or_throw(n: int) -> int:
     """Double even inputs and throw for odd inputs.
 
-    @cleanxyz: Equiv(double_or_throw_alt)
+    @cleanxy: Equiv(double_or_throw_alt)
     """
     if n % 2 != 0:
         raise ValueError("odd input", n)

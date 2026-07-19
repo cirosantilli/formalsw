@@ -1,23 +1,23 @@
-import «.cleanxyz».tests.pass.«throws.py.ast»
-import CleanXYZ
+import «.cleanxy».tests.pass.«throws.py.ast»
+import CleanXY
 
 namespace tests.pass.throws
 
 /-- `reject_odd` throws for at least one integer input. -/
 theorem reject_odd.«Throws» :
-    CleanXYZ.Property.Function.Throws ThrowsAst.module "reject_odd" := by
+    CleanXY.Property.Function.Throws ThrowsAst.module "reject_odd" := by
   refine ⟨1, { typeName := "ValueError", args := [.string "odd input"] }, ?_⟩
   simp [
-    CleanXYZ.PyAst.evalUnaryIntFunctionOutcome,
-    CleanXYZ.PyAst.Module.findFunctionBody,
-    CleanXYZ.PyAst.findFunctionBodyIn,
-    CleanXYZ.PyAst.evalIntBlockOutcome,
-    CleanXYZ.PyAst.evalBoolExpr,
-    CleanXYZ.PyAst.evalIntExpr,
-    CleanXYZ.PyAst.evalExceptionObject,
-    CleanXYZ.PyAst.evalExceptionArg,
-    CleanXYZ.PyAst.Env.get?,
-    CleanXYZ.PyAst.evalCmpOp,
+    CleanXY.PyAst.evalUnaryIntFunctionOutcome,
+    CleanXY.PyAst.Module.findFunctionBody,
+    CleanXY.PyAst.findFunctionBodyIn,
+    CleanXY.PyAst.evalIntBlockOutcome,
+    CleanXY.PyAst.evalBoolExpr,
+    CleanXY.PyAst.evalIntExpr,
+    CleanXY.PyAst.evalExceptionObject,
+    CleanXY.PyAst.evalExceptionArg,
+    CleanXY.PyAst.Env.get?,
+    CleanXY.PyAst.evalCmpOp,
     ThrowsAst.module,
   ]
 

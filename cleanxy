@@ -22,7 +22,7 @@ class UnsupportedSyntax(Exception):
 
 
 class InvalidRequirement(Exception):
-    """Raised when a `cleanxyz` proof marker is malformed."""
+    """Raised when a `cleanxy` proof marker is malformed."""
 
     pass
 
@@ -97,12 +97,12 @@ def proof_name_for_short_requirement(
             pass
         case _:
             raise InvalidRequirement(
-                f"{function_name}: unsupported cleanxyz property marker: "
+                f"{function_name}: unsupported cleanxy property marker: "
                 f"{property_name}({', '.join(args)})"
             )
     if "«" in marker or "»" in marker:
         raise InvalidRequirement(
-            f"{function_name}: cleanxyz marker cannot contain `«` or `»`: {marker}"
+            f"{function_name}: cleanxy marker cannot contain `«` or `»`: {marker}"
         )
     return f"{proof_namespace}.{lean_import_component(function_name)}.«{marker}»"
 
@@ -119,12 +119,12 @@ def property_type_for_short_requirement(
     match property_name, args:
         case "Throws", []:
             property_type = (
-                f'CleanXYZ.Property.Function.Throws {ast_namespace}.module '
+                f'CleanXY.Property.Function.Throws {ast_namespace}.module '
                 f'{lean_string(function_name)}'
             )
         case "Equiv", [other]:
             property_type = (
-                f'CleanXYZ.Property.Function.Equiv {ast_namespace}.module '
+                f'CleanXY.Property.Function.Equiv {ast_namespace}.module '
                 f'{lean_string(function_name)} {lean_string(other)}'
             )
         case "BigO", [bound]:
@@ -142,9 +142,9 @@ def property_type_for_short_requirement(
             argument = int_arguments[0]
             parameter = argument if re.search(rf"\b{re.escape(argument)}\b", bound) else "_"
             property_type = (
-                f'CleanXYZ.Property.Function.BigO {ast_namespace}.module '
+                f'CleanXY.Property.Function.BigO {ast_namespace}.module '
                 f'{lean_string(function_name)} '
-                f'(CleanXYZ.PyAst.InputSize.intToNat {lean_string(argument)}) '
+                f'(CleanXY.PyAst.InputSize.intToNat {lean_string(argument)}) '
                 f'(fun {parameter} : Nat => {bound})'
             )
         case "BigO", [bound, measure]:
@@ -155,12 +155,12 @@ def property_type_for_short_requirement(
             int_measure = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)", measure)
             if list_measure is not None:
                 input_size = (
-                    "CleanXYZ.PyAst.InputSize.listLength "
+                    "CleanXY.PyAst.InputSize.listLength "
                     f"{lean_string(list_measure.group(1))}"
                 )
             elif int_measure is not None:
                 input_size = (
-                    "CleanXYZ.PyAst.InputSize.intToNat "
+                    "CleanXY.PyAst.InputSize.intToNat "
                     f"{lean_string(int_measure.group(1))}"
                 )
             else:
@@ -168,13 +168,13 @@ def property_type_for_short_requirement(
                     f"{function_name}: unsupported BigO input size: n = {measure}"
                 )
             property_type = (
-                f'CleanXYZ.Property.Function.BigO {ast_namespace}.module '
+                f'CleanXY.Property.Function.BigO {ast_namespace}.module '
                 f'{lean_string(function_name)} ({input_size}) '
                 f'(fun {parameter} : Nat => {bound})'
             )
         case _:
             raise InvalidRequirement(
-                f"{function_name}: unsupported cleanxyz property marker: "
+                f"{function_name}: unsupported cleanxy property marker: "
                 f"{property_name}({', '.join(args)})"
             )
     for _ in range(negations):
@@ -212,7 +212,7 @@ def parse_short_marker(marker: str) -> tuple[str, list[str], int] | None:
 def strip_marker_prefix(line: str) -> str | None:
     """Return a proof marker line without its marker prefix."""
     stripped = line.strip()
-    match = re.fullmatch(r"(?:@cleanxyz|@lean|cleanxyz:)\s*:?\s*(.*)", stripped)
+    match = re.fullmatch(r"(?:@cleanxy|@lean|cleanxy:)\s*:?\s*(.*)", stripped)
     if match is not None:
         return match.group(1).strip()
     return None
@@ -252,7 +252,7 @@ def raw_theorem_type(requirement: RawTheoremRequirement) -> str:
 
 
 def docstring_markers(docstring: str | None, start_line: int | None) -> list[Marker]:
-    """Extract `cleanxyz` marker blocks from a Python docstring."""
+    """Extract `cleanxy` marker blocks from a Python docstring."""
     if docstring is None:
         return []
     markers: list[Marker] = []
@@ -308,7 +308,7 @@ def collect_requirements(
     ):
         raw_theorem = parse_raw_theorem(marker.text)
         if raw_theorem is None:
-            raise InvalidRequirement(f"module docstring: unsupported cleanxyz marker: {marker.text}")
+            raise InvalidRequirement(f"module docstring: unsupported cleanxy marker: {marker.text}")
         theorem_name = raw_theorem.theorem_name
         if "." not in theorem_name:
             theorem_name = f"{proof_namespace}.{theorem_name}"
@@ -342,7 +342,7 @@ def collect_requirements(
             parsed = parse_short_marker(marker.text)
             if parsed is None:
                 raise InvalidRequirement(
-                    f"{stmt.name}: unsupported cleanxyz marker: {marker.text}"
+                    f"{stmt.name}: unsupported cleanxy marker: {marker.text}"
                 )
             property_name, args, negations = parsed
             requirements.append(Requirement(
@@ -388,12 +388,12 @@ class RequirementEmitter:
             f"import {self.proof_module}",
             "",
             "/-!",
-            "Generated by cleanxyz. Do not edit by hand.",
+            "Generated by cleanxy. Do not edit by hand.",
             "",
             f"This file checks `{self.proof_path}` and its requested proof obligations.",
             "-/",
             "",
-            "/- cleanxyz proof obligations -/",
+            "/- cleanxy proof obligations -/",
             "",
         ]
         for requirement in self.requirements:
@@ -424,7 +424,7 @@ class ProofStubEmitter:
         """Render a complete Lean proof-file stub."""
         lines = [
             f"import {self.ast_module}",
-            "import CleanXYZ",
+            "import CleanXY",
             "",
             f"namespace {self.proof_namespace}",
             "",
@@ -455,7 +455,7 @@ class ProofStubEmitter:
 
 
 class AstJsonEmitter:
-    """Translate Python `ast` nodes into the versioned cleanxyz JSON schema."""
+    """Translate Python `ast` nodes into the versioned cleanxy JSON schema."""
 
     def __init__(self, module: ast.Module):
         """Store the parsed Python module."""
@@ -685,12 +685,12 @@ class AstLeanBridgeEmitter:
     def emit(self) -> str:
         """Render a Lean definition loaded from the adjacent JSON file."""
         return "\n".join([
-            "import CleanXYZ",
+            "import CleanXY",
             "",
-            "/-! Generated by cleanxyz. Do not edit by hand. -/",
+            "/-! Generated by cleanxy. Do not edit by hand. -/",
             "",
             f"namespace {self.namespace}",
-            "open CleanXYZ.PyAst",
+            "open CleanXY.PyAst",
             "",
             "/-- The Python AST imported from the adjacent JSON document. -/",
             "def module : Module :=",
@@ -721,7 +721,7 @@ def lean_module_for_path(path: Path) -> str:
     except ValueError as error:
         raise SystemExit(
             f"error: {path}: proof files outside the current directory "
-            "cannot be imported by cleanxyz"
+            "cannot be imported by cleanxy"
         ) from error
     without_suffix = relative.with_suffix("")
     return ".".join(lean_import_component(component) for component in without_suffix.parts)
@@ -746,8 +746,8 @@ def generated_path_for_source(source: Path, suffix: str) -> Path:
     git_root = git_root_for_source(source)
     if git_root is not None:
         relative_source = source.resolve().relative_to(git_root)
-        return git_root / ".cleanxyz" / relative_source.parent / f"{source.name}{suffix}"
-    return source.parent / ".cleanxyz" / f"{source.name}{suffix}"
+        return git_root / ".cleanxy" / relative_source.parent / f"{source.name}{suffix}"
+    return source.parent / ".cleanxy" / f"{source.name}{suffix}"
 
 
 def ast_path_for_source(source: Path) -> Path:
@@ -777,16 +777,16 @@ def olean_path_for_lean(source: Path) -> Path:
     except ValueError as error:
         raise SystemExit(
             f"error: {source}: Lean files outside the current directory "
-            "cannot be cached by cleanxyz"
+            "cannot be cached by cleanxy"
         ) from error
-    return Path.cwd() / ".cleanxyz" / "olean" / relative.with_suffix(".olean")
+    return Path.cwd() / ".cleanxy" / "olean" / relative.with_suffix(".olean")
 
 
 def lean_env() -> dict[str, str]:
     """Return an environment that lets Lean import cached and source modules."""
     env = os.environ.copy()
     existing = env.get("LEAN_PATH")
-    paths = [str(Path.cwd() / ".cleanxyz" / "olean"), "."]
+    paths = [str(Path.cwd() / ".cleanxy" / "olean"), "."]
     if existing:
         paths.append(existing)
     env["LEAN_PATH"] = ":".join(paths)
@@ -872,7 +872,7 @@ def final_error_line(
                 return (
                     f"error: {requirement.source_path}:{requirement.source_line}: "
                     f"missing proof `{requirement.theorem_name}` for "
-                    f"`@cleanxyz: {requirement.marker}`"
+                    f"`@cleanxy: {requirement.marker}`"
                 )
     if "declaration uses `sorry`" in output and proof_path is not None:
         line = first_sorry_line(proof_path)
@@ -979,7 +979,7 @@ def check_source(source: Path) -> int:
         first = requirements[0]
         print(
             f"error: {first.source_path}:{first.source_line}: "
-            f"missing proof file {proof_path} for `@cleanxyz: {first.marker}`",
+            f"missing proof file {proof_path} for `@cleanxy: {first.marker}`",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -1002,9 +1002,9 @@ def check_source(source: Path) -> int:
         lean_path.with_suffix(".olean").unlink(missing_ok=True)
     require_executable("lake")
     run(
-        ["lake", "build", "CleanXYZ"],
-        failure_message="failed to build CleanXYZ",
-        failure_hint="Fix the CleanXYZ library error before checking source proofs.",
+        ["lake", "build", "CleanXY"],
+        failure_message="failed to build CleanXY",
+        failure_hint="Fix the CleanXY library error before checking source proofs.",
     )
     run([
         "lake",
@@ -1017,7 +1017,7 @@ def check_source(source: Path) -> int:
         env=lean_env(),
         failure_message=f"generated JSON AST failed to import for {source}",
         failure_hint=(
-            f"This usually means cleanxyz generated invalid JSON in {ast_json_path} "
+            f"This usually means cleanxy generated invalid JSON in {ast_json_path} "
             f"or an invalid Lean import bridge in {ast_path}."
         ),
     )
@@ -1053,7 +1053,7 @@ def check_source(source: Path) -> int:
         failure_message=f"proof check failed for {source}",
         failure_hint=(
             f"Complete {proof_path}; remove any `sorry`; and make sure every "
-            "`@cleanxyz:` requirement has a theorem with the expected name and type."
+            "`@cleanxy:` requirement has a theorem with the expected name and type."
         ),
         expected=requirements,
         proof_path=proof_path,
@@ -1084,7 +1084,7 @@ def iter_python_sources(directory: Path) -> list[Path]:
     """Return Python sources under a directory, excluding generated/cache trees."""
     sources = []
     for path in sorted(directory.rglob("*.py")):
-        if any(part in {".cleanxyz", "__pycache__"} for part in path.parts):
+        if any(part in {".cleanxy", "__pycache__"} for part in path.parts):
             continue
         sources.append(path)
     return sources

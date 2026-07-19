@@ -1,4 +1,4 @@
-= CleanXYZ
+= CleanXY
 :idprefix:
 :idseparator: -
 :sectanchors:
@@ -15,10 +15,10 @@ toc::[]
 
 == Install
 
-Install the cleanxyz Python library:
+Install the cleanxy Python library:
 
 ----
-pipx install cleanxyz
+pipx install cleanxy
 ----
 
 Install Elan, Lean's version manager. On Linux:
@@ -32,7 +32,7 @@ Installation details for other systems: https://github.com/leanprover/elan
 Now test it on a hello world link:tests/pass/range_sum.py[]:
 
 ----
-cleanxyz tests/pass/range_sum.py
+cleanxy tests/pass/range_sum.py
 ----
 
 and if all went well you should see a message:
@@ -80,8 +80,8 @@ To specify that we want both function to be proven to be the same, we can add a 
 ----
 def sum(n: int) -> int:
     """
-    @cleanxyz: Not Throws
-    @cleanxyz: Equiv(sum_naive)
+    @cleanxy: Not Throws
+    @cleanxy: Equiv(sum_naive)
     """
     if n <= 0:
         return 0
@@ -89,7 +89,7 @@ def sum(n: int) -> int:
 
 def sum_naive(n: int) -> int:
     """
-    @cleanxyz: Not Throws
+    @cleanxy: Not Throws
     """
     total = 0
     for i in range(n):
@@ -100,13 +100,13 @@ def sum_naive(n: int) -> int:
 After this is specified, if you run:
 
 ----
-cleanxyz tmp.py
+cleanxy tmp.py
 ----
 
 it blows up with:
 
 ----
-error: tmp.py:4: missing proof file tmp.py.lean for `@cleanxyz: Not Throws`
+error: tmp.py:4: missing proof file tmp.py.lean for `@cleanxy: Not Throws`
 ----
 
 which is good because haven't proven what we said we wanted to prove yet!
@@ -114,24 +114,24 @@ which is good because haven't proven what we said we wanted to prove yet!
 To create the required proofs, we must create a tmp.py.lean file containing the required theorems. The stubs can be generated automatically with:
 
 ----
-./cleanxyz --stub tmp.py > tmp.py.lean
+./cleanxy --stub tmp.py > tmp.py.lean
 ----
 
 which produces:
 
 ----
-import «.cleanxyz».«tmp.py.ast»
-import CleanXYZ
+import «.cleanxy».«tmp.py.ast»
+import CleanXY
 
 namespace tmp
 
 theorem sum.«Not Throws» :
-    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
+    Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
   := by
   sorry
 
 theorem sum.«Equiv(sum_naive)» :
-    CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+    CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
   := by
   sorry
 
@@ -141,7 +141,7 @@ end tmp
 And now if we try again:
 
 ----
-cleanxyz tmp.py
+cleanxy tmp.py
 ----
 
 but this time it fails with:
@@ -151,9 +151,9 @@ proof check failed for tmp.py
 Complete tmp.py.lean; remove any `sorry`; and make sure it compiles before checking requested proof obligations.
 Expected proof obligations:
   tmp.sum.«Not Throws» :
-    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
+    Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
   tmp.sum.«Equiv(sum_naive)» :
-    CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+    CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
 Lean diagnostic:
   tmp.py.lean:4:8: error: declaration uses `sorry`
   tmp.py.lean:9:8: error: declaration uses `sorry`
@@ -175,7 +175,7 @@ Then you let the LLM loose, and so long as the LLM does not touch your .py sourc
 Once the proof is complete, when you run:
 
 ----
-cleanxyz tmp.py
+cleanxy tmp.py
 ----
 
 there's no output, which means that all proofs were verified!
@@ -185,7 +185,7 @@ You can check this with the following example contained in-tree:
 link:tests/pass/range_sum.py[]
 
 ----
-cleanxyz tests/pass/range_sum.py
+cleanxy tests/pass/range_sum.py
 ----
 
 which has a proof at link:tests/pass/range_sum.py.lean[].
@@ -196,14 +196,14 @@ Directories are also accepted; every `.py` file under the directory is checked:
 
 [source,sh]
 ----
-./cleanxyz tests/pass
+./cleanxy tests/pass
 ----
 
 Generate a complete Lean proof-file stub on standard output with `-S` or `--stub`:
 
 [source,sh]
 ----
-./cleanxyz --stub myfile.py > myfile.py.lean
+./cleanxy --stub myfile.py > myfile.py.lean
 ----
 
 The stub imports the generated AST module and declares every requested theorem with `by sorry`. Replace each `sorry` with a proof before running the normal check.
@@ -215,7 +215,7 @@ The specification language is how you specify the properties of the program whic
 Specifications are written as markers inside Python docstrings in lines starting with:
 
 ----
-@cleanxyz
+@cleanxy
 ----
 
 There are two types of ways to write the specification:
@@ -239,7 +239,7 @@ my_not_example.py
 ----
 def sum(n: int) -> int:
     """
-    @cleanxyz: Not Throws
+    @cleanxy: Not Throws
     """
     return n + 1
 ----
@@ -258,7 +258,7 @@ my_throws_example.py
 ----
 def reject_odd(n: int) -> int:
     """
-    @cleanxyz: Throws
+    @cleanxy: Throws
     """
     if n % 2 != 0:
         raise ValueError("odd input")
@@ -269,7 +269,7 @@ This marker requires a theorem named `reject_odd.«Throws»` with type:
 
 [source,lean]
 ----
-CleanXYZ.Property.Function.Throws MyThrowsExampleAst.module "reject_odd"
+CleanXY.Property.Function.Throws MyThrowsExampleAst.module "reject_odd"
 ----
 
 which expands to:
@@ -277,7 +277,7 @@ which expands to:
 [source,lean]
 ----
 ∃ n : Int, ∃ exception,
-  CleanXYZ.PyAst.evalUnaryIntFunctionOutcome ThrowsAst.module "reject_odd" n =
+  CleanXY.PyAst.evalUnaryIntFunctionOutcome ThrowsAst.module "reject_odd" n =
     some (.error exception)
 ----
 
@@ -285,7 +285,7 @@ Use `Not Throws` to state that no input throws. For a function named `sum`, this
 
 [source,lean]
 ----
-Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
+Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
 ----
 
 ==== Equiv
@@ -302,7 +302,7 @@ Example:
 def sum(n: int) -> int:
     """Optimized version of sum_naive.
 
-    @cleanxyz: Equiv(sum_naive)
+    @cleanxy: Equiv(sum_naive)
     """
     if n <= 0:
         return 0
@@ -320,7 +320,7 @@ This marker requires `sum.«Equiv(sum_naive)»` with type:
 
 [source,lean]
 ----
-CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
 ----
 
 For every input, `Equiv` requires one common exception-aware outcome:
@@ -328,9 +328,9 @@ For every input, `Equiv` requires one common exception-aware outcome:
 [source,lean]
 ----
 ∀ n : Int, ∃ outcome,
-  CleanXYZ.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum" n =
+  CleanXY.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum" n =
       some outcome ∧
-    CleanXYZ.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum_naive" n =
+    CleanXY.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum_naive" n =
       some outcome
 ----
 
@@ -346,7 +346,7 @@ For functions annotated with one `list` argument, `Equiv` quantifies over every 
 ----
 def merge_sort(values: list) -> list:
     """
-    @cleanxyz: BigO(n * (Nat.log2 n + 1), n = len(values))
+    @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
     """
     # ...
 ----
@@ -355,9 +355,9 @@ This marker requires `merge_sort.«BigO(n * (Nat.log2 n + 1), n = len(values))»
 
 [source,lean]
 ----
-CleanXYZ.Property.Function.BigO
+CleanXY.Property.Function.BigO
   SortAst.module "merge_sort"
-    (CleanXYZ.PyAst.InputSize.listLength "values")
+    (CleanXY.PyAst.InputSize.listLength "values")
     (fun n : Nat => n * (Nat.log2 n + 1))
 ----
 
@@ -376,7 +376,7 @@ If the specification starts with "theorem", then it is interpretred as an arbitr
 def f(n: int) -> int:
     """Identity function.
 
-    @cleanxyz: theorem f_returns_input (n : Int) :
+    @cleanxy: theorem f_returns_input (n : Int) :
       n = n ∧ RawLeanAst.module.findFunctionBody "f" ≠ none
     """
     return n
@@ -393,16 +393,16 @@ Raw theorem markers may also appear in a module docstring; module docstrings do 
 The way it all works is as follows. When you run:
 
 ----
-cleanxyz tmp.py
+cleanxy tmp.py
 ----
 
-it will determine where to create the `.cleanxyz` directory. When you are inside a .git repository, `.cleanxyz` is always placed next to the `.git`. You basically always  want to use Git becuse you want to check that you LLMs haven't mofidifed your specifications in source files.
+it will determine where to create the `.cleanxy` directory. When you are inside a .git repository, `.cleanxy` is always placed next to the `.git`. You basically always  want to use Git becuse you want to check that you LLMs haven't mofidifed your specifications in source files.
 
-Then, inside the `.cleanxyz` directory, `cleanxyz` converts the input Python source code to a versioned JSON AST under `.cleanxyz/tmp.py.ast.json`. This is the language-neutral interchange artifact, so a future converter only needs to produce the same JSON schema.
+Then, inside the `.cleanxy` directory, `cleanxy` converts the input Python source code to a versioned JSON AST under `.cleanxy/tmp.py.ast.json`. This is the language-neutral interchange artifact, so a future converter only needs to produce the same JSON schema.
 
-The adjacent `.cleanxyz/tmp.py.ast.lean` is only a small import bridge. Lean reads the JSON with `include_str`, validates `schema_version`, and elaborates it into a typed `CleanXYZ.PyAst.Module`. Proofs therefore continue to use `TmpAst.module` and operate on the typed data structure, not on untrusted claims made by the converter.
+The adjacent `.cleanxy/tmp.py.ast.lean` is only a small import bridge. Lean reads the JSON with `include_str`, validates `schema_version`, and elaborates it into a typed `CleanXY.PyAst.Module`. Proofs therefore continue to use `TmpAst.module` and operate on the typed data structure, not on untrusted claims made by the converter.
 
-Compiled Lean `.olean` files are written to a mirrored cache under `.cleanxyz/olean/`. `LEAN_PATH` includes that cache, so later proof imports use the compiled modules without placing build artifacts beside checked-in `.lean` proofs.
+Compiled Lean `.olean` files are written to a mirrored cache under `.cleanxy/olean/`. `LEAN_PATH` includes that cache, so later proof imports use the compiled modules without placing build artifacts beside checked-in `.lean` proofs.
 
 The top-level JSON shape is:
 
@@ -419,45 +419,45 @@ The top-level JSON shape is:
 
 Nodes use a `type` discriminator and fields close to Python's `ast` names. For example, a name expression is `{"type": "Name", "id": "n"}` and a constant is `{"type": "Constant", "value": 1}`.
 
-At the same time, cleanxyz searches for `@cleanxyz:` markers in Python docstrings, and when those are found, it dumps them under `.cleanxyz/tmp.py.reqs.lean` in such a way that unless proof of each requirement is also found, things will blow up when Lean runs.
+At the same time, cleanxy searches for `@cleanxy:` markers in Python docstrings, and when those are found, it dumps them under `.cleanxy/tmp.py.reqs.lean` in such a way that unless proof of each requirement is also found, things will blow up when Lean runs.
 
 ----
 example :
-    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
+    Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
   := tmp.sum.«Not Throws»
 
 example :
-    CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+    CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
   := tmp.sum.«Equiv(sum_naive)»
 
 example :
-    Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum_naive")
+    Not (CleanXY.Property.Function.Throws TmpAst.module "sum_naive")
   := tmp.sum_naive.«Not Throws»
 ----
 
-Finally, cleanxyz runs Lean putting everything together:
+Finally, cleanxy runs Lean putting everything together:
 
-* `.cleanxyz/tmp.py.ast.json` with the language-neutral AST representation
-* `.cleanxyz/tmp.py.ast.lean` with the small JSON-to-Lean import bridge
-* `.cleanxyz/tmp.py.reqs.lean` mentioned above with the proof requirements
+* `.cleanxy/tmp.py.ast.json` with the language-neutral AST representation
+* `.cleanxy/tmp.py.ast.lean` with the small JSON-to-Lean import bridge
+* `.cleanxy/tmp.py.reqs.lean` mentioned above with the proof requirements
 * `tmp.py.lean` which is supposed to contain your proof
-* link:CleanXYZ.lean[] which defines the Python AST representation and properties of the Python language which are then used in correctness proofs
+* link:CleanXY.lean[] which defines the Python AST representation and properties of the Python language which are then used in correctness proofs
 
 == Development
 
 === Development installation
 
-Currently cleanxyz is a single Python file with no dependencies outside of the standard library, so you can just:
+Currently cleanxy is a single Python file with no dependencies outside of the standard library, so you can just:
 
 ----
-./cleanxyz ...
+./cleanxy ...
 ----
 
 or:
 
 ----
 export PATH="$PWD:$PATH"
-cleanxyz
+cleanxy
 ----
 
 === Test system

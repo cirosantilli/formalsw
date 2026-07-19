@@ -3,8 +3,8 @@
 
 def merge_sort(values: list) -> list:
     """
-    @cleanxyz: Equiv(quick_sort)
-    @cleanxyz: BigO(n * (Nat.log2 n + 1), n = len(values))
+    @cleanxy: Equiv(quick_sort)
+    @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
     """
     if len(values) <= 1:
         return values
@@ -25,7 +25,7 @@ def merge_sort(values: list) -> list:
 
 
 def quick_sort(values: list) -> list:
-    """@cleanxyz: BigO(n * n, n = len(values))"""
+    """@cleanxy: BigO(n * n, n = len(values))"""
     if len(values) <= 1:
         return values
     pivot = values[0]

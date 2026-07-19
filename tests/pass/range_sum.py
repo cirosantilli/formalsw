@@ -4,9 +4,9 @@
 def sum(n: int) -> int:
     """Optimized version of sum_naive.
 
-    @cleanxyz: Equiv(sum_naive)
-    @cleanxyz: Not Throws
-    @cleanxyz: BigO(1)
+    @cleanxy: Equiv(sum_naive)
+    @cleanxy: Not Throws
+    @cleanxy: BigO(1)
     """
     if n <= 0:
         return 0
@@ -15,7 +15,7 @@ def sum(n: int) -> int:
 def sum_naive(n: int) -> int:
     """Sum of integers from 1 to n. Return 0 if n <= 0.
 
-    @cleanxyz: BigO(n)
+    @cleanxy: BigO(n)
     """
     total = 0
     for i in range(n):

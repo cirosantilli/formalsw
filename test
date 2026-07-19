@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run cleanxyz's end-to-end tests."""
+"""Run cleanxy's end-to-end tests."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent
-CLEANXYZ = REPO / "cleanxyz"
+CLEANXY = REPO / "cleanxy"
 
 
 @dataclass(frozen=True)
 class TestCase:
-    """One cleanxyz subprocess-backed test case."""
+    """One cleanxy subprocess-backed test case."""
 
     name: str
     source: Path
@@ -39,10 +39,10 @@ class TestResult:
     elapsed: float
 
 
-def run_cleanxyz(source: Path) -> subprocess.CompletedProcess[str]:
-    """Run cleanxyz on a repo-relative source path."""
+def run_cleanxy(source: Path) -> subprocess.CompletedProcess[str]:
+    """Run cleanxy on a repo-relative source path."""
     return subprocess.run(
-        [str(CLEANXYZ), str(source)],
+        [str(CLEANXY), str(source)],
         cwd=REPO,
         text=True,
         stdout=subprocess.PIPE,
@@ -54,7 +54,7 @@ def run_cleanxyz(source: Path) -> subprocess.CompletedProcess[str]:
 def run_case(case: TestCase) -> TestResult:
     """Run one test case and compare status plus optional diagnostic text."""
     start = time.perf_counter()
-    completed = run_cleanxyz(case.source)
+    completed = run_cleanxy(case.source)
     elapsed = time.perf_counter() - start
     output = completed.stdout + completed.stderr
     passed = completed.returncode == case.expected_returncode
@@ -132,7 +132,7 @@ def main() -> int:
         print_result(result)
 
     stub_completed = subprocess.run(
-        [str(CLEANXYZ), "--stub", "tests/pass/range_sum.py"],
+        [str(CLEANXY), "--stub", "tests/pass/range_sum.py"],
         cwd=REPO,
         text=True,
         stdout=subprocess.PIPE,
@@ -142,7 +142,7 @@ def main() -> int:
     stub_passed = (
         stub_completed.returncode == 0
         and not stub_completed.stderr
-        and 'import «.cleanxyz».tests.pass.«range_sum.py.ast»' in stub_completed.stdout
+        and 'import «.cleanxy».tests.pass.«range_sum.py.ast»' in stub_completed.stdout
         and "namespace tests.pass.range_sum" in stub_completed.stdout
         and "theorem sum.«Equiv(sum_naive)» :" in stub_completed.stdout
         and "theorem sum.«BigO(1)» :" in stub_completed.stdout
@@ -152,8 +152,8 @@ def main() -> int:
     )
     print(f"{'PASS' if stub_passed else 'FAIL'} Lean proof stub generation", flush=True)
 
-    ast_json_path = REPO / ".cleanxyz/tests/pass/range_sum.py.ast.json"
-    ast_bridge_path = REPO / ".cleanxyz/tests/pass/range_sum.py.ast.lean"
+    ast_json_path = REPO / ".cleanxy/tests/pass/range_sum.py.ast.json"
+    ast_bridge_path = REPO / ".cleanxy/tests/pass/range_sum.py.ast.lean"
     try:
         ast_document = json.loads(ast_json_path.read_text())
         json_ast_passed = (

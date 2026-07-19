@@ -1,8 +1,8 @@
 # Lake package configuration for the Python-to-Lean AST framework.
-name = "cleanxyz"
+name = "cleanxy"
 version = "0.1.0"
-defaultTargets = ["CleanXYZ"]
+defaultTargets = ["CleanXY"]
 
-# The reusable Lean library lives in `CleanXYZ.lean`.
+# The reusable Lean library lives in `CleanXY.lean`.
 [[lean_lib]]
-name = "CleanXYZ"
+name = "CleanXY"

@@ -3,6 +3,6 @@
 def f(n: int) -> int:
     """Identity function.
 
-    @cleanxyz: Not Throws
+    @cleanxy: Not Throws
     """
     return n

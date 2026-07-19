@@ -8,7 +8,7 @@ __pycache__/
 *.olean
 *.ilean
 *.c
-.cleanxyz/
+.cleanxy/
 
 # Local editor and OS metadata.
 *~

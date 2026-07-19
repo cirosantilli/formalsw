@@ -7,7 +7,7 @@ These definitions intentionally mirror Python's `ast` module shape more closely
 than executable Lean code. Partial semantic interpretations are defined below.
 -/
 
-namespace CleanXYZ.PyAst
+namespace CleanXY.PyAst
 
 /-- Python constants currently represented by the AST bridge. -/
 inductive Constant where
@@ -303,7 +303,7 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
   | type => throw s!"unsupported statement type: {type}"
 
 /--
-Decode a complete cleanxyz JSON AST document.
+Decode a complete cleanxy JSON AST document.
 
 The schema version is checked before the JSON data is turned into the typed
 `PyAst.Module` on which proofs operate.
@@ -311,15 +311,15 @@ The schema version is checked before the JSON data is turned into the typed
 def Module.fromJsonDocument? (json : Lean.Json) : Except String Module := do
   let version ← (← jsonField json "schema_version").getNat?
   if version != 1 then
-    throw s!"unsupported cleanxyz AST schema version: {version}"
+    throw s!"unsupported cleanxy AST schema version: {version}"
   let ast ← jsonField json "ast"
   if (← jsonString ast "type") != "Module" then
     throw "the top-level AST node must have type Module"
   return { body := ← jsonArray ast "body" Stmt.fromJson? }
 
-end CleanXYZ.PyAst
+end CleanXY.PyAst
 
-/-- Import a cleanxyz JSON AST as a reducible, typed `CleanXYZ.PyAst.Module`. -/
+/-- Import a cleanxy JSON AST as a reducible, typed `CleanXY.PyAst.Module`. -/
 syntax "pyast_from_json% " term : term
 
 open Lean Elab Term Meta in
@@ -330,20 +330,20 @@ elab_rules : term
         | throwError "pyast_from_json% expects a string literal, usually from include_str"
       let json ← match Json.parse source with
         | .ok value => pure value
-        | .error message => throwError "invalid cleanxyz AST JSON: {message}"
-      let module ← match CleanXYZ.PyAst.Module.fromJsonDocument? json with
+        | .error message => throwError "invalid cleanxy AST JSON: {message}"
+      let module ← match CleanXY.PyAst.Module.fromJsonDocument? json with
         | .ok value => pure value
-        | .error message => throwError "invalid cleanxyz AST document: {message}"
+        | .error message => throwError "invalid cleanxy AST document: {message}"
       return Lean.toExpr module
 
 /-!
-Partial semantic interpreters for `CleanXYZ.PyAst`.
+Partial semantic interpreters for `CleanXY.PyAst`.
 
 This section is intentionally not generated. It is where we define the meaning
 of supported Python AST fragments and prove properties about that meaning.
 -/
 
-namespace CleanXYZ.PyAst
+namespace CleanXY.PyAst
 
 /-- Runtime environment for the current integer-only evaluator. -/
 abbrev Env := List (String × Int)
@@ -877,17 +877,17 @@ def evalUnaryIntFunctionOutcome (module : Module) (name : String) (arg : Int) :
   let body ← module.findFunctionBody name
   evalIntBlockOutcome [("n", arg)] body
 
-end CleanXYZ.PyAst
+end CleanXY.PyAst
 
 /-!
-Reusable proof obligations that `cleanxyz` docstring markers can request.
+Reusable proof obligations that `cleanxy` docstring markers can request.
 
 These names are intentionally short and stable so users can discover available
-properties under `CleanXYZ.Property.Function` and then prove ordinary Lean
+properties under `CleanXY.Property.Function` and then prove ordinary Lean
 theorems with the same types.
 -/
 
-namespace CleanXYZ.Property.Function
+namespace CleanXY.Property.Function
 
 /-- A unary integer function throws a modeled exception for at least one input. -/
 def Throws (module : PyAst.Module) (name : String) : Prop :=
@@ -947,4 +947,4 @@ theorem bigO_of_growth_bound (module : PyAst.Module) (name : String)
       rw [hGrowth]
       exact PyAst.Growth.scale_left analysis.operations hBound
 
-end CleanXYZ.Property.Function
+end CleanXY.Property.Function

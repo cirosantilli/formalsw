@@ -1,5 +1,5 @@
-import «.cleanxyz».tests.fail.dir.«pass.py.ast»
-import CleanXYZ
+import «.cleanxy».tests.fail.dir.«pass.py.ast»
+import CleanXY
 
 namespace tests.fail.dir.pass
 
