@@ -470,4 +470,4 @@ Run all tests under link:tests[]:
 
 == Bibliography
 
-* https://github.com/arsalan0c/dafny-of-python[]: converts Python to Dafny
+* https://github.com/arsalan0c/dafny-of-python[]: converts Python to https://github.com/dafny-lang/dafny[Dafny]. Specifications seem to be Dafny code in Python comments.
