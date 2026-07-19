@@ -393,9 +393,15 @@ class RequirementEmitter:
 class ProofStubEmitter:
     """Render a proof file containing every requested theorem with `sorry`."""
 
-    def __init__(self, ast_module: str, requirements: list[Requirement]):
+    def __init__(
+        self,
+        ast_module: str,
+        proof_namespace: str,
+        requirements: list[Requirement],
+    ):
         """Store the generated AST import and requested proof obligations."""
         self.ast_module = ast_module
+        self.proof_namespace = proof_namespace
         self.requirements = requirements
 
     def emit(self) -> str:
@@ -404,15 +410,31 @@ class ProofStubEmitter:
             f"import {self.ast_module}",
             "import CleanXYZ",
             "",
+            f"namespace {self.proof_namespace}",
+            "",
         ]
-        for requirement in self.requirements:
+
+        def append_theorem(name: str, requirement: Requirement) -> None:
+            """Append one theorem stub under its rendered declaration name."""
             lines.extend([
-                f"theorem {requirement.theorem_name} :",
+                f"theorem {name} :",
                 indent(requirement.property_type, 4),
                 "  := by",
                 "  sorry",
                 "",
             ])
+
+        prefix = self.proof_namespace + "."
+        for requirement in self.requirements:
+            if requirement.theorem_name.startswith(prefix):
+                append_theorem(requirement.theorem_name.removeprefix(prefix), requirement)
+        lines.extend([
+            f"end {self.proof_namespace}",
+            "",
+        ])
+        for requirement in self.requirements:
+            if not requirement.theorem_name.startswith(prefix):
+                append_theorem(requirement.theorem_name, requirement)
         return "\n".join(lines)
 
 
@@ -1028,14 +1050,16 @@ def stub_source(source: Path) -> str:
     """Return a complete Lean proof stub for one Python source file."""
     module = ast.parse(source.read_text(), filename=str(source))
     AstJsonEmitter(module).emit()
+    proof_namespace = proof_namespace_for_source(source)
     requirements = collect_requirements(
         source,
         module,
-        proof_namespace_for_source(source),
+        proof_namespace,
         namespace_for_source(source),
     )
     return ProofStubEmitter(
         lean_module_for_path(ast_path_for_source(source)),
+        proof_namespace,
         requirements,
     ).emit()
 

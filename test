@@ -143,8 +143,10 @@ def main() -> int:
         stub_completed.returncode == 0
         and not stub_completed.stderr
         and 'import «.cleanxyz».tests.pass.«range_sum.py.ast»' in stub_completed.stdout
-        and "theorem Tests.Pass.RangeSum.sum.equiv_sumNaive :" in stub_completed.stdout
-        and "theorem Tests.Pass.RangeSum.sum.bigO :" in stub_completed.stdout
+        and "namespace Tests.Pass.RangeSum" in stub_completed.stdout
+        and "theorem sum.equiv_sumNaive :" in stub_completed.stdout
+        and "theorem sum.bigO :" in stub_completed.stdout
+        and "end Tests.Pass.RangeSum" in stub_completed.stdout
         and stub_completed.stdout.count("  sorry") == 4
     )
     print(f"{'PASS' if stub_passed else 'FAIL'} Lean proof stub generation", flush=True)
