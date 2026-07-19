@@ -1,7 +1,7 @@
-import «.cleanxy».tests.pass.«throws.py.ast»
+import «.cleanxy».tests.«throws.py.ast»
 import CleanXY
 
-namespace tests.pass.throws
+namespace tests.throws
 
 /-- `reject_odd` throws for at least one integer input. -/
 theorem reject_odd.«Throws» :
@@ -21,4 +21,4 @@ theorem reject_odd.«Throws» :
     ThrowsAst.module,
   ]
 
-end tests.pass.throws
+end tests.throws

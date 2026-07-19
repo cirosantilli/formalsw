@@ -1,7 +1,7 @@
-import «.cleanxy».tests.pass.«sort.py.ast»
+import «.cleanxy».tests.«sort.py.ast»
 import CleanXY
 
-namespace tests.pass.sort
+namespace tests.sort
 
 /-- The two recognized sorting implementations have the same result. -/
 theorem merge_sort.«Equiv(quick_sort)» :
@@ -32,4 +32,4 @@ theorem quick_sort.«BigO(n * n, n = len(values))» :
   · rfl
   · exact CleanXY.PyAst.Growth.quadratic_isBigO
 
-end tests.pass.sort
+end tests.sort

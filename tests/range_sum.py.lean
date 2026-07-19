@@ -1,7 +1,7 @@
-import «.cleanxy».tests.pass.«range_sum.py.ast»
+import «.cleanxy».tests.«range_sum.py.ast»
 import CleanXY
 
-namespace tests.pass.range_sum
+namespace tests.range_sum
 
 /-- `sum` returns an integer for every integer input. -/
 theorem sum.returns (n : Int) :
@@ -172,4 +172,4 @@ theorem sum_naive.«BigO(n)» :
   · rfl
   · exact CleanXY.PyAst.Growth.linear_isBigO
 
-end tests.pass.range_sum
+end tests.range_sum
