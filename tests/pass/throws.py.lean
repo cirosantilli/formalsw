@@ -4,7 +4,7 @@ import CleanXYZ
 namespace Tests.Pass.Throws
 
 /-- `reject_odd` throws for at least one integer input. -/
-theorem rejectOdd_throws :
+theorem rejectOdd.throws :
     CleanXYZ.Property.Function.Throws ThrowsAst.module "reject_odd" := by
   refine ⟨1, { typeName := "ValueError", args := [.string "odd input"] }, ?_⟩
   simp [

@@ -4,7 +4,7 @@ import CleanXYZ
 namespace Tests.Pass.EquivThrow
 
 /-- Both implementations return and throw equivalent objects for every input. -/
-theorem doubleOrThrow_equiv_doubleOrThrowAlt :
+theorem doubleOrThrow.equiv_doubleOrThrowAlt :
     CleanXYZ.Property.Function.Equiv
       EquivThrowAst.module "double_or_throw" "double_or_throw_alt" := by
   intro n

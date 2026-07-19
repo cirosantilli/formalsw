@@ -109,7 +109,7 @@ def proof_name_for_short_requirement(
                 f"{function_name}: unsupported cleanxyz property marker: "
                 f"{property_name}({', '.join(args)})"
             )
-    local_name = f"{function_part}_{'not_' * negations}{property_part}"
+    local_name = f"{function_part}.{'not_' * negations}{property_part}"
     return f"{proof_namespace}.{local_name}"
 
 

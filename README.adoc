@@ -123,12 +123,12 @@ which produces:
 import «.cleanxyz».«tmp.py.ast»
 import CleanXYZ
 
-theorem Tmp.sum_not_throws :
+theorem Tmp.sum.not_throws :
     Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
   := by
   sorry
 
-theorem Tmp.sum_equiv_sumNaive :
+theorem Tmp.sum.equiv_sumNaive :
     CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
   := by
   sorry
@@ -146,9 +146,9 @@ but this time it fails with:
 proof check failed for tmp.py
 Complete tmp.py.lean; remove any `sorry`; and make sure it compiles before checking requested proof obligations.
 Expected proof obligations:
-  Tmp.sum_not_throws :
+  Tmp.sum.not_throws :
     Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
-  Tmp.sum_equiv_sumNaive :
+  Tmp.sum.equiv_sumNaive :
     CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
 Lean diagnostic:
   tmp.py.lean:4:8: error: declaration uses `sorry`
@@ -240,7 +240,7 @@ def sum(n: int) -> int:
     return n + 1
 ----
 
-The marker above requires `sum_not_throws`. `Not` can prefix any other DSL property recursively; for example, `Not Not Throws` has the usual double negation meaning.
+The marker above requires `sum.not_throws`. `Not` can prefix any other DSL property recursively; for example, `Not Not Throws` has the usual double negation meaning.
 
 ==== Throws
 
@@ -261,7 +261,7 @@ def reject_odd(n: int) -> int:
     return n
 ----
 
-This marker requires a theorem named `rejectOdd_throws` with type:
+This marker requires a theorem named `rejectOdd.throws` with type:
 
 [source,lean]
 ----
@@ -277,7 +277,7 @@ which expands to:
     some (.error exception)
 ----
 
-Use `Not Throws` to state that no input throws. For a function named `sum`, this requires a theorem named `sum_not_throws` with type:
+Use `Not Throws` to state that no input throws. For a function named `sum`, this requires a theorem named `sum.not_throws` with type:
 
 [source,lean]
 ----
@@ -312,7 +312,7 @@ def sum_naive(n: int) -> int:
     return total
 ----
 
-This marker requires `sum_equiv_sumNaive` with type:
+This marker requires `sum.equiv_sumNaive` with type:
 
 [source,lean]
 ----
@@ -347,7 +347,7 @@ def merge_sort(values: list) -> list:
     # ...
 ----
 
-This marker requires `mergeSort_bigO` with type:
+This marker requires `mergeSort.bigO` with type:
 
 [source,lean]
 ----
@@ -420,15 +420,15 @@ At the same time, cleanxyz searches for `@cleanxyz:` markers in Python docstring
 ----
 example :
     Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum")
-  := Tmp.sum_not_throws
+  := Tmp.sum.not_throws
 
 example :
     CleanXYZ.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
-  := Tmp.sum_equiv_sumNaive
+  := Tmp.sum.equiv_sumNaive
 
 example :
     Not (CleanXYZ.Property.Function.Throws TmpAst.module "sum_naive")
-  := Tmp.sumNaive_not_throws
+  := Tmp.sumNaive.not_throws
 ----
 
 Finally, cleanxyz runs Lean putting everything together:

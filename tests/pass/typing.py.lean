@@ -4,7 +4,7 @@ import CleanXYZ
 namespace Tests.Pass.Typing
 
 /-- An unrestricted comparison can receive incompatible runtime types. -/
-theorem mergeSortUntyped_throws :
+theorem mergeSortUntyped.throws :
     CleanXYZ.Property.Function.Throws TypingAst.module "merge_sort_untyped" := by
   refine ⟨.int 0, .string "", { typeName := "TypeError", args := [] }, ?_⟩
   constructor
@@ -14,7 +14,7 @@ theorem mergeSortUntyped_throws :
   · rfl
 
 /-- Two integer arguments are always mutually comparable. -/
-theorem mergeSortInt_not_throws :
+theorem mergeSortInt.not_throws :
     Not (CleanXYZ.Property.Function.Throws TypingAst.module "merge_sort_int") := by
   rintro ⟨left, right, exception, hleft, hright, houtcome⟩
   cases left <;> cases right <;> simp [
@@ -28,7 +28,7 @@ theorem mergeSortInt_not_throws :
   ] at hleft hright houtcome
 
 /-- Two string arguments are always mutually comparable. -/
-theorem mergeSortStr_not_throws :
+theorem mergeSortStr.not_throws :
     Not (CleanXYZ.Property.Function.Throws TypingAst.module "merge_sort_str") := by
   rintro ⟨left, right, exception, hleft, hright, houtcome⟩
   cases left <;> cases right <;> simp [
