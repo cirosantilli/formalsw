@@ -41,4 +41,22 @@ theorem double_or_throw.«Equiv(double_or_throw_alt)» :
       even,
     ]
 
+/-- The functions throw exception objects with different messages. -/
+theorem throw_msg_1.«Not Equiv(throw_msg_2)» :
+    Not (CleanXY.Property.Function.Equiv
+      EquivThrowAst.module "throw_msg_1" "throw_msg_2") := by
+  intro equivalent
+  obtain ⟨outcome, left, right⟩ := equivalent 0
+  simp [
+    CleanXY.PyAst.evalUnaryIntFunctionOutcome,
+    CleanXY.PyAst.Module.findFunctionBody,
+    CleanXY.PyAst.findFunctionBodyIn,
+    CleanXY.PyAst.evalIntBlockOutcome,
+    CleanXY.PyAst.evalExceptionObject,
+    CleanXY.PyAst.evalExceptionArg,
+    EquivThrowAst.module,
+  ] at left right
+  rw [← left] at right
+  simp at right
+
 end tests.equiv_throw
