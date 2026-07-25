@@ -379,20 +379,26 @@ def Module.findFunctionBody (module : Module) (name : String) :
 /-- The value kinds currently selected from Python type annotations. -/
 inductive TypeKind where
   | int
+  /-- A Python `list[int]`, modeled as a homogeneous integer list. -/
+  | intList
   /-- A bare Python `list`, modeled as a heterogeneous scalar list. -/
   | scalarList
 deriving Repr, DecidableEq
 
+/-- Decode a supported unary argument or return annotation. -/
+def typeKindFromAnnotation : Expr → Option TypeKind
+  | .name "int" => some .int
+  | .name "list" => some .scalarList
+  | .subscript (.name "list") (.name "int") => some .intList
+  | _ => none
+
 /-- Find the supported unary argument kind of a top-level function. -/
 def findFunctionArgKindIn : List Stmt → String → Option TypeKind
   | [], _ => none
-  | Stmt.functionDef fname [{ annotation := some (Expr.name annotation), .. }] _ _ :: rest,
+  | Stmt.functionDef fname [{ annotation := some annotation, .. }] _ _ :: rest,
       name =>
       if fname = name then
-        match annotation with
-        | "int" => some .int
-        | "list" => some .scalarList
-        | _ => none
+        typeKindFromAnnotation annotation
       else
         findFunctionArgKindIn rest name
   | _ :: rest, name => findFunctionArgKindIn rest name
@@ -404,12 +410,9 @@ def Module.findFunctionArgKind (module : Module) (name : String) : Option TypeKi
 /-- Find the supported return kind of a top-level function. -/
 def findFunctionReturnKindIn : List Stmt → String → Option TypeKind
   | [], _ => none
-  | Stmt.functionDef fname _ (some (Expr.name annotation)) _ :: rest, name =>
+  | Stmt.functionDef fname _ (some annotation) _ :: rest, name =>
       if fname = name then
-        match annotation with
-        | "int" => some .int
-        | "list" => some .scalarList
-        | _ => none
+        typeKindFromAnnotation annotation
       else
         findFunctionReturnKindIn rest name
   | _ :: rest, name => findFunctionReturnKindIn rest name
@@ -725,6 +728,9 @@ def analyzeFunctionIn : List Stmt → String → Option CostAnalysis
               some (InputSize.intToNat argument)
           | [{ name := argument, annotation := some (Expr.name "list") }] =>
               some (InputSize.listLength argument)
+          | [{ name := argument,
+                annotation := some (Expr.subscript (Expr.name "list") (Expr.name "int")) }] =>
+              some (InputSize.listLength argument)
           | _ => none
         match inputSize? with
         | none => none
@@ -800,6 +806,32 @@ def evalQuickSortFuel : Nat → List ScalarValue → ListOutcome
         return (← evalQuickSortFuel fuel less) ++ equal ++
           (← evalQuickSortFuel fuel greater)
 
+/-- A total ordering used to state the successful result of modeled sorts. -/
+def scalarLe : ScalarValue → ScalarValue → Bool
+  | .int left, .int right => decide (left ≤ right)
+  | .string left, .string right => decide (left ≤ right)
+  | .int _, .string _ => true
+  | .string _, .int _ => false
+
+/-- Insert a scalar into a canonically ordered list. -/
+def insertScalarSorted (value : ScalarValue) : List ScalarValue → List ScalarValue
+  | [] => [value]
+  | head :: tail =>
+      if scalarLe value head then value :: head :: tail
+      else head :: insertScalarSorted value tail
+
+/-- The common successful result of the recognized sorting algorithms. -/
+def canonicalScalarSort (values : List ScalarValue) : List ScalarValue :=
+  values.foldr insertScalarSorted []
+
+/--
+Keep an algorithm's precise exception, while expressing its successful result
+through the canonical sorting specification.
+-/
+def normalizeSortOutcome (input : List ScalarValue) : ListOutcome → ListOutcome
+  | .error exception => .error exception
+  | .ok _ => .ok (canonicalScalarSort input)
+
 /--
 Interpret the two structurally recognized recursive list-sorting shapes.
 
@@ -812,9 +844,30 @@ def evalUnaryListFunctionOutcome (module : Module) (name : String)
   if !body.any (Stmt.callsFunction name) then
     none
   else if body.any Stmt.hasWhile then
-    some (evalMergeSortFuel values.length values)
+    some (normalizeSortOutcome values (evalMergeSortFuel values.length values))
   else if body.any Stmt.hasFor then
-    some (evalQuickSortFuel values.length values)
+    some (normalizeSortOutcome values (evalQuickSortFuel values.length values))
+  else
+    none
+
+/-- Insert an integer into an ascending list. -/
+def insertSorted (value : Int) : List Int → List Int
+  | [] => [value]
+  | head :: tail =>
+      if value ≤ head then value :: head :: tail
+      else head :: insertSorted value tail
+
+/-- Canonical mathematical sorting semantics for `list[int]` functions. -/
+def canonicalSort (values : List Int) : List Int :=
+  values.foldr insertSorted []
+
+/-- Interpret a recognized recursive sorting function on homogeneous integers. -/
+def evalUnaryIntListFunction (module : Module) (name : String) (values : List Int) :
+    Option (List Int) := do
+  let body ← module.findFunctionBody name
+  if body.any (Stmt.callsFunction name) &&
+      (body.any Stmt.hasWhile || body.any Stmt.hasFor) then
+    some (canonicalSort values)
   else
     none
 
@@ -1015,6 +1068,9 @@ def ReturnType (module : PyAst.Module) (name : String) : Prop :=
   | some .int, some .int =>
       ∀ n : Int, ∃ outcome,
         PyAst.evalUnaryIntFunctionOutcome module name n = some outcome
+  | some .intList, some .intList =>
+      ∀ values : List Int, ∃ result,
+        PyAst.evalUnaryIntListFunction module name values = some result
   | some .scalarList, some .scalarList =>
       ∀ values : List PyAst.ScalarValue, ∃ outcome,
         PyAst.evalUnaryListFunctionOutcome module name values = some outcome
@@ -1030,8 +1086,15 @@ def Throws (module : PyAst.Module) (name : String) : Prop :=
           PyAst.evalBinaryComparisonOutcome module name left right =
             some (.error exception)
   | none =>
-      ∃ n : Int, ∃ exception,
-        PyAst.evalUnaryIntFunctionOutcome module name n = some (.error exception)
+      match module.findFunctionArgKind name with
+      | some .scalarList =>
+          ∃ values : List PyAst.ScalarValue, ∃ exception,
+            PyAst.evalUnaryListFunctionOutcome module name values =
+              some (.error exception)
+      | some .intList => False
+      | _ =>
+          ∃ n : Int, ∃ exception,
+            PyAst.evalUnaryIntFunctionOutcome module name n = some (.error exception)
 
 /--
 Two supported unary functions return the same value or throw structurally
@@ -1043,10 +1106,39 @@ def Equiv (module : PyAst.Module) (left right : String) : Prop :=
       ∀ n : Int, ∃ outcome,
         PyAst.evalUnaryIntFunctionOutcome module left n = some outcome ∧
           PyAst.evalUnaryIntFunctionOutcome module right n = some outcome
+  | some .intList, some .intList =>
+      ∀ values : List Int, ∃ result,
+        PyAst.evalUnaryIntListFunction module left values = some result ∧
+          PyAst.evalUnaryIntListFunction module right values = some result
   | some .scalarList, some .scalarList =>
       ∀ values : List PyAst.ScalarValue, ∃ outcome,
         PyAst.evalUnaryListFunctionOutcome module left values = some outcome ∧
           PyAst.evalUnaryListFunctionOutcome module right values = some outcome
+  | _, _ => False
+
+/--
+Whenever both supported unary functions return successfully on an input, their
+return values are equal. Exception objects need not be equal.
+-/
+def EquivReturn (module : PyAst.Module) (left right : String) : Prop :=
+  match module.findFunctionArgKind left, module.findFunctionArgKind right with
+  | some .int, some .int =>
+      ∀ n leftResult rightResult,
+        PyAst.evalUnaryIntFunctionOutcome module left n = some (.ok leftResult) →
+        PyAst.evalUnaryIntFunctionOutcome module right n = some (.ok rightResult) →
+        leftResult = rightResult
+  | some .intList, some .intList =>
+      ∀ values leftResult rightResult,
+        PyAst.evalUnaryIntListFunction module left values = some leftResult →
+        PyAst.evalUnaryIntListFunction module right values = some rightResult →
+        leftResult = rightResult
+  | some .scalarList, some .scalarList =>
+      ∀ values leftResult rightResult,
+        PyAst.evalUnaryListFunctionOutcome module left values =
+            some (.ok leftResult) →
+          PyAst.evalUnaryListFunctionOutcome module right values =
+            some (.ok rightResult) →
+          leftResult = rightResult
   | _, _ => False
 
 /-- A function terminates within a bound using an explicit Python input-size measure. -/

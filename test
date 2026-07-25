@@ -94,7 +94,7 @@ def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
         TestCase("range_sum passes", Path("tests/range_sum.py"), 0),
-        TestCase("sorts differ on mixed values with proved costs", Path("tests/sort.py"), 0),
+        TestCase("typed and return sort equivalence with proved costs", Path("tests/sort.py"), 0),
         TestCase("equivalent throws pass", Path("tests/equiv_throw.py"), 0),
         TestCase("Throws can be proved", Path("tests/throws.py"), 0),
         TestCase("annotations restrict comparison inputs", Path("tests/typing.py"), 0),

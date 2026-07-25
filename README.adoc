@@ -341,8 +341,41 @@ same exception-aware outcome. The structural sort evaluator preserves the
 comparison order of the recognized merge-sort and first-pivot quicksort
 shapes. Consequently, mixed inputs can distinguish them: on `[0, ""]`,
 merge-sort attempts `0 <= ""`, while quicksort attempts `"" < 0`, producing
-different `TypeError` objects. See link:tests/sort.py[] for the corresponding
-`Not Equiv` proof.
+different `TypeError` objects.
+
+An annotation of `list[int]` instead selects the homogeneous integer-list
+domain. On that domain the two recognized sorting implementations have the
+same canonical sorted result. See link:tests/sort.py[] for both the typed
+`Equiv` proof and the untyped behavior.
+
+==== EquivReturn
+
+`EquivReturn(other)` states that whenever both functions return successfully
+on the same modeled input, their return values are equal. Unlike `Equiv`, it
+does not require their exception objects to agree:
+
+[source,python]
+----
+def merge_sort_untyped(values: list) -> list:
+    """
+    @cleanxy: EquivReturn(quick_sort)
+    """
+    # ...
+----
+
+For list functions, the generated proposition is equivalent to:
+
+[source,lean]
+----
+∀ values leftResult rightResult,
+  eval left values = some (.ok leftResult) →
+  eval right values = some (.ok rightResult) →
+  leftResult = rightResult
+----
+
+The implication is vacuously true on an input where either function throws.
+This makes `EquivReturn` useful when successful results agree but exception
+details or evaluation order differ.
 
 ==== Not
 
@@ -390,7 +423,7 @@ For the supported `int -> int` case, this expands to:
     some outcome
 ----
 
-A successful outcome contains an `Int`, while an exception outcome is also accepted because it has no return value. An unsupported evaluation, including a modeled return value that does not match the annotation, produces `none` and cannot satisfy `ReturnType`. Unary `list -> list` functions are also supported by the structural list evaluator, with heterogeneous `int` and `str` inputs and exception-aware list outcomes.
+A successful outcome contains an `Int`, while an exception outcome is also accepted because it has no return value. An unsupported evaluation, including a modeled return value that does not match the annotation, produces `none` and cannot satisfy `ReturnType`. Unary `list -> list` functions are also supported by the structural list evaluator, with heterogeneous `int` and `str` inputs and exception-aware list outcomes. `list[int] -> list[int]` selects the homogeneous integer-list model.
 
 ==== Throws
 
@@ -433,6 +466,10 @@ Use `Not Throws` to state that no input throws. For a function named `sum`, this
 ----
 Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
 ----
+
+For a bare-list function, `Throws` instead provides a modeled scalar-list input
+and an exception produced by the list evaluator. The mixed input `[0, ""]` in
+link:tests/sort.py[] is one example.
 
 === Raw Lean specification
 

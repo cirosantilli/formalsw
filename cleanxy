@@ -93,6 +93,8 @@ def proof_name_for_short_requirement(
             pass
         case "Equiv", [_]:
             pass
+        case "EquivReturn", [_]:
+            pass
         case "BigO", [_]:
             pass
         case "BigO", [_, _]:
@@ -132,6 +134,11 @@ def property_type_for_short_requirement(
         case "Equiv", [other]:
             property_type = (
                 f'CleanXY.Property.Function.Equiv {ast_namespace}.module '
+                f'{lean_string(function_name)} {lean_string(other)}'
+            )
+        case "EquivReturn", [other]:
+            property_type = (
+                f'CleanXY.Property.Function.EquivReturn {ast_namespace}.module '
                 f'{lean_string(function_name)} {lean_string(other)}'
             )
         case "BigO", [bound]:

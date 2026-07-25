@@ -3,14 +3,14 @@
 
 def merge_sort_int(values: list[int]) -> list[int]:
     """
-    @cleanxy: Equiv(quick_sort)
+    @cleanxy: Equiv(quick_sort_int)
     @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
     """
     if len(values) <= 1:
         return values
     middle = len(values) // 2
-    left = merge_sort(values[:middle])
-    right = merge_sort(values[middle:])
+    left = merge_sort_int(values[:middle])
+    right = merge_sort_int(values[middle:])
     merged = []
     left_index = 0
     right_index = 0
@@ -24,7 +24,7 @@ def merge_sort_int(values: list[int]) -> list[int]:
     return merged + left[left_index:] + right[right_index:]
 
 
-def quick_sort_int(values: list) -> list:
+def quick_sort_int(values: list[int]) -> list[int]:
     """@cleanxy: BigO(n * n, n = len(values))"""
     if len(values) <= 1:
         return values
@@ -40,20 +40,20 @@ def quick_sort_int(values: list) -> list:
                 greater += [value]
             else:
                 equal += [value]
-    return quick_sort(less) + equal + quick_sort(greater)
+    return quick_sort_int(less) + equal + quick_sort_int(greater)
 
 
 def merge_sort_untyped(values: list) -> list:
     """
     @cleanxy: Throws
-    @cleanxy: ReturnEquiv(quick_sort)
+    @cleanxy: EquivReturn(quick_sort)
     @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
     """
     if len(values) <= 1:
         return values
     middle = len(values) // 2
-    left = merge_sort(values[:middle])
-    right = merge_sort(values[middle:])
+    left = merge_sort_untyped(values[:middle])
+    right = merge_sort_untyped(values[middle:])
     merged = []
     left_index = 0
     right_index = 0
