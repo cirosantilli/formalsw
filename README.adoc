@@ -335,7 +335,14 @@ For every input, `Equiv` requires one common exception-aware outcome:
 
 An outcome is either `.ok value` or `.error exception`. Successful executions must therefore return the same integer, while throwing executions must have structurally equal exception objects: the same exception class name and equal evaluated positional arguments. An unsupported AST evaluates to `none`, which cannot satisfy `Equiv` even when both sides are unsupported. See link:tests/equiv_throw.py[] for an equivalence proof covering both returns and throws.
 
-For functions annotated with one `list` argument, `Equiv` quantifies over every `List Int` input and requires the same output list. See link:tests/sort.py[] for merge-sort and quicksort equivalence.
+For functions annotated with one bare `list` argument, `Equiv` quantifies over
+lists of the modeled Python scalar values (`int` and `str`) and requires the
+same exception-aware outcome. The structural sort evaluator preserves the
+comparison order of the recognized merge-sort and first-pivot quicksort
+shapes. Consequently, mixed inputs can distinguish them: on `[0, ""]`,
+merge-sort attempts `0 <= ""`, while quicksort attempts `"" < 0`, producing
+different `TypeError` objects. See link:tests/sort.py[] for the corresponding
+`Not Equiv` proof.
 
 ==== Not
 
@@ -383,7 +390,7 @@ For the supported `int -> int` case, this expands to:
     some outcome
 ----
 
-A successful outcome contains an `Int`, while an exception outcome is also accepted because it has no return value. An unsupported evaluation, including a modeled return value that does not match the annotation, produces `none` and cannot satisfy `ReturnType`. Unary `list -> list` functions are also supported by the current structural list evaluator.
+A successful outcome contains an `Int`, while an exception outcome is also accepted because it has no return value. An unsupported evaluation, including a modeled return value that does not match the annotation, produces `none` and cannot satisfy `ReturnType`. Unary `list -> list` functions are also supported by the structural list evaluator, with heterogeneous `int` and `str` inputs and exception-aware list outcomes.
 
 ==== Throws
 

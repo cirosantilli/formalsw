@@ -379,7 +379,8 @@ def Module.findFunctionBody (module : Module) (name : String) :
 /-- The value kinds currently selected from Python type annotations. -/
 inductive TypeKind where
   | int
-  | intList
+  /-- A bare Python `list`, modeled as a heterogeneous scalar list. -/
+  | scalarList
 deriving Repr, DecidableEq
 
 /-- Find the supported unary argument kind of a top-level function. -/
@@ -390,7 +391,7 @@ def findFunctionArgKindIn : List Stmt → String → Option TypeKind
       if fname = name then
         match annotation with
         | "int" => some .int
-        | "list" => some .intList
+        | "list" => some .scalarList
         | _ => none
       else
         findFunctionArgKindIn rest name
@@ -407,7 +408,7 @@ def findFunctionReturnKindIn : List Stmt → String → Option TypeKind
       if fname = name then
         match annotation with
         | "int" => some .int
-        | "list" => some .intList
+        | "list" => some .scalarList
         | _ => none
       else
         findFunctionReturnKindIn rest name
@@ -427,6 +428,55 @@ inductive ScalarValue where
   | int (value : Int)
   | string (value : String)
 deriving Repr, DecidableEq
+
+/-- A successful list return value or a thrown exception object. -/
+abbrev ListOutcome := Except ExceptionObject (List ScalarValue)
+
+/-- The Python runtime type name of a modeled scalar value. -/
+def ScalarValue.typeName : ScalarValue → String
+  | .int _ => "int"
+  | .string _ => "str"
+
+/-- The source spelling of a modeled Python comparison operator. -/
+def CmpOp.symbol : CmpOp → String
+  | .eq => "=="
+  | .notEq => "!="
+  | .lt => "<"
+  | .ltE => "<="
+  | .gt => ">"
+  | .gtE => ">="
+
+/-- Python's `TypeError` for an ordering comparison between incompatible values. -/
+def unsupportedOrdering (op : CmpOp) (left right : ScalarValue) : ExceptionObject :=
+  {
+    typeName := "TypeError"
+    args := [.string s!"'{op.symbol}' not supported between instances of \
+'{left.typeName}' and '{right.typeName}'"]
+  }
+
+/-- Evaluate a comparison on modeled Python scalar values. -/
+def evalScalarCmp (op : CmpOp) (left right : ScalarValue) :
+    Except ExceptionObject Bool :=
+  match op with
+  | .eq => .ok (decide (left = right))
+  | .notEq => .ok (decide (left ≠ right))
+  | .lt | .ltE | .gt | .gtE =>
+      match left, right with
+      | .int left, .int right =>
+          .ok <| match op with
+            | .lt => decide (left < right)
+            | .ltE => decide (left ≤ right)
+            | .gt => decide (left > right)
+            | .gtE => decide (left ≥ right)
+            | _ => false
+      | .string left, .string right =>
+          .ok <| match op with
+            | .lt => decide (left < right)
+            | .ltE => decide (left ≤ right)
+            | .gt => decide (left > right)
+            | .gtE => decide (left ≥ right)
+            | _ => false
+      | left, right => .error (unsupportedOrdering op left right)
 
 /-- An optional Python annotation restricting a scalar argument's runtime values. -/
 inductive ScalarKind where
@@ -697,24 +747,74 @@ def analyzeFunctionIn : List Stmt → String → Option CostAnalysis
 def Module.analyzeFunction (module : Module) (name : String) : Option CostAnalysis :=
   analyzeFunctionIn module.body name
 
-/-- Insert an integer into an ascending list. -/
-def insertSorted (value : Int) : List Int → List Int
-  | [] => [value]
-  | head :: tail =>
-      if value ≤ head then value :: head :: tail
-      else head :: insertSorted value tail
+/-- Merge two sorted lists, propagating Python comparison exceptions. -/
+def mergeSortedFuel : Nat → List ScalarValue → List ScalarValue → ListOutcome
+  | 0, left, right => .ok (left ++ right)
+  | _ + 1, [], right => .ok right
+  | _ + 1, left, [] => .ok left
+  | fuel + 1, leftHead :: leftTail, rightHead :: rightTail => do
+      if ← evalScalarCmp .ltE leftHead rightHead then
+        return leftHead ::
+          (← mergeSortedFuel fuel leftTail (rightHead :: rightTail))
+      else
+        return rightHead ::
+          (← mergeSortedFuel fuel (leftHead :: leftTail) rightTail)
 
-/-- Canonical mathematical sorting semantics used by recognized list sorts. -/
-def canonicalSort (values : List Int) : List Int :=
-  values.foldr insertSorted []
+/-- Evaluate the merge-sort shape used by the supported Python subset. -/
+def evalMergeSortFuel : Nat → List ScalarValue → ListOutcome
+  | 0, values => .ok values
+  | fuel + 1, values =>
+      if values.length ≤ 1 then
+        .ok values
+      else do
+        let middle := values.length / 2
+        let left ← evalMergeSortFuel fuel (values.take middle)
+        let right ← evalMergeSortFuel fuel (values.drop middle)
+        mergeSortedFuel values.length left right
 
-/-- Interpret structurally recognized recursive list-sorting functions. -/
-def evalUnaryIntListFunction (module : Module) (name : String) (values : List Int) :
-    Option (List Int) := do
+/-- Partition values exactly as the modeled first-pivot quicksort does. -/
+def quickPartition (pivot : ScalarValue) :
+    List ScalarValue →
+      Except ExceptionObject (List ScalarValue × List ScalarValue × List ScalarValue)
+  | [] => .ok ([], [], [])
+  | value :: rest => do
+      if ← evalScalarCmp .lt value pivot then
+        let (less, equal, greater) ← quickPartition pivot rest
+        return (value :: less, equal, greater)
+      else if ← evalScalarCmp .gt value pivot then
+        let (less, equal, greater) ← quickPartition pivot rest
+        return (less, equal, value :: greater)
+      else
+        let (less, equal, greater) ← quickPartition pivot rest
+        return (less, value :: equal, greater)
+
+/-- Evaluate the first-element-pivot quick-sort shape used by the Python subset. -/
+def evalQuickSortFuel : Nat → List ScalarValue → ListOutcome
+  | 0, values => .ok values
+  | _ + 1, [] => .ok []
+  | fuel + 1, values@(pivot :: _) => do
+      if values.length ≤ 1 then
+        .ok values
+      else
+        let (less, equal, greater) ← quickPartition pivot values
+        return (← evalQuickSortFuel fuel less) ++ equal ++
+          (← evalQuickSortFuel fuel greater)
+
+/--
+Interpret the two structurally recognized recursive list-sorting shapes.
+
+Unlike the old canonical-sort shortcut, this preserves each algorithm's
+comparison order and exception outcome on heterogeneous lists.
+-/
+def evalUnaryListFunctionOutcome (module : Module) (name : String)
+    (values : List ScalarValue) : Option ListOutcome := do
   let body ← module.findFunctionBody name
-  if body.any (Stmt.callsFunction name) &&
-      (body.any Stmt.hasWhile || body.any Stmt.hasFor) then
-    some (canonicalSort values)
+  if !body.any (Stmt.callsFunction name) then
+    none
+  else if body.any Stmt.hasWhile then
+    some (evalMergeSortFuel values.length values)
+  else if body.any Stmt.hasFor then
+    some (evalQuickSortFuel values.length values)
   else
     none
 
@@ -915,9 +1015,9 @@ def ReturnType (module : PyAst.Module) (name : String) : Prop :=
   | some .int, some .int =>
       ∀ n : Int, ∃ outcome,
         PyAst.evalUnaryIntFunctionOutcome module name n = some outcome
-  | some .intList, some .intList =>
-      ∀ values : List Int, ∃ result,
-        PyAst.evalUnaryIntListFunction module name values = some result
+  | some .scalarList, some .scalarList =>
+      ∀ values : List PyAst.ScalarValue, ∃ outcome,
+        PyAst.evalUnaryListFunctionOutcome module name values = some outcome
   | _, _ => False
 
 /-- A unary integer function throws a modeled exception for at least one input. -/
@@ -934,8 +1034,8 @@ def Throws (module : PyAst.Module) (name : String) : Prop :=
         PyAst.evalUnaryIntFunctionOutcome module name n = some (.error exception)
 
 /--
-Two unary integer functions return the same value or throw structurally equal
-exception objects for every input.
+Two supported unary functions return the same value or throw structurally
+equal exception objects for every input in their modeled domain.
 -/
 def Equiv (module : PyAst.Module) (left right : String) : Prop :=
   match module.findFunctionArgKind left, module.findFunctionArgKind right with
@@ -943,10 +1043,10 @@ def Equiv (module : PyAst.Module) (left right : String) : Prop :=
       ∀ n : Int, ∃ outcome,
         PyAst.evalUnaryIntFunctionOutcome module left n = some outcome ∧
           PyAst.evalUnaryIntFunctionOutcome module right n = some outcome
-  | some .intList, some .intList =>
-      ∀ values : List Int, ∃ result,
-        PyAst.evalUnaryIntListFunction module left values = some result ∧
-          PyAst.evalUnaryIntListFunction module right values = some result
+  | some .scalarList, some .scalarList =>
+      ∀ values : List PyAst.ScalarValue, ∃ outcome,
+        PyAst.evalUnaryListFunctionOutcome module left values = some outcome ∧
+          PyAst.evalUnaryListFunctionOutcome module right values = some outcome
   | _, _ => False
 
 /-- A function terminates within a bound using an explicit Python input-size measure. -/

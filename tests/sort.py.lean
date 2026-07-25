@@ -3,13 +3,25 @@ import CleanXY
 
 namespace tests.sort
 
-/-- The two recognized sorting implementations have the same result. -/
-theorem merge_sort.«Equiv(quick_sort)» :
-    CleanXY.Property.Function.Equiv
-      SortAst.module "merge_sort" "quick_sort" := by
-  intro values
-  refine ⟨CleanXY.PyAst.canonicalSort values, ?_⟩
-  constructor <;> rfl
+/-- Mixed values expose the algorithms' different comparison behavior. -/
+theorem merge_sort.«Not Equiv(quick_sort)» :
+    Not (CleanXY.Property.Function.Equiv
+      SortAst.module "merge_sort" "quick_sort") := by
+  intro equivalent
+  obtain ⟨outcome, mergeOutcome, quickOutcome⟩ :=
+    equivalent [.int 0, .string ""]
+  change some (.error {
+    typeName := "TypeError"
+    args := [.string "'<=' not supported between instances of 'int' and 'str'"]
+  }) = some outcome at mergeOutcome
+  change some (.error {
+    typeName := "TypeError"
+    args := [.string "'<' not supported between instances of 'str' and 'int'"]
+  }) = some outcome at quickOutcome
+  injection mergeOutcome with mergeOutcome
+  injection quickOutcome with quickOutcome
+  rw [← mergeOutcome] at quickOutcome
+  simp at quickOutcome
 
 /-- Merge sort has linearithmic worst-case cost. -/
 theorem merge_sort.«BigO(n * (Nat.log2 n + 1), n = len(values))» :
