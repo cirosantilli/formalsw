@@ -489,6 +489,14 @@ class AstJsonEmitter:
     def stmt(self, stmt: ast.stmt) -> dict[str, object]:
         """Encode one Python statement."""
         match stmt:
+            case ast.ClassDef(name=name, bases=[], keywords=[], body=body):
+                if stmt.decorator_list:
+                    raise UnsupportedSyntax(f"{name}: decorators are unsupported")
+                return {
+                    "type": "ClassDef",
+                    "name": name,
+                    "body": [self.stmt(child) for child in body],
+                }
             case ast.FunctionDef(name=name, args=args, returns=returns, body=body):
                 if stmt.decorator_list:
                     raise UnsupportedSyntax(f"{name}: decorators are unsupported")
@@ -577,6 +585,12 @@ class AstJsonEmitter:
                 return self.constant(value)
             case ast.Name(id=name):
                 return {"type": "Name", "id": name}
+            case ast.Attribute(value=value, attr=attr):
+                return {
+                    "type": "Attribute",
+                    "value": self.expr(value),
+                    "attr": attr,
+                }
             case ast.List(elts=elts):
                 return {"type": "List", "elts": [self.expr(elt) for elt in elts]}
             case ast.BinOp(left=left, op=op, right=right):
@@ -972,6 +986,25 @@ def require_executable(name: str) -> None:
         raise SystemExit(f"required executable not found on PATH: {name}")
 
 
+def module_with_pystdlib(source: Path, module: ast.Module) -> ast.Module:
+    """Append plain-Python standard-class definitions to a program AST."""
+    stdlib_source = Path.cwd() / "pystdlib/class/str.py"
+    if source.resolve() == stdlib_source.resolve():
+        return module
+    if not stdlib_source.exists():
+        raise SystemExit(
+            f"required Python standard-library model not found: {stdlib_source}"
+        )
+    stdlib_module = ast.parse(
+        stdlib_source.read_text(),
+        filename=str(stdlib_source),
+    )
+    return ast.Module(
+        body=[*module.body, *stdlib_module.body],
+        type_ignores=[*module.type_ignores, *stdlib_module.type_ignores],
+    )
+
+
 def check_source(source: Path) -> int:
     """Compile-check one Python file and its paired Lean proof."""
     ast_path = ast_path_for_source(source)
@@ -989,6 +1022,7 @@ def check_source(source: Path) -> int:
     )
     module = ast.parse(source.read_text(), filename=str(source))
     requirements = collect_requirements(source, module, proof_namespace, namespace)
+    semantic_module = module_with_pystdlib(source, module)
     if requirements and not proof_path.exists():
         first = requirements[0]
         print(
@@ -999,7 +1033,7 @@ def check_source(source: Path) -> int:
         raise SystemExit(1)
     ast_path.parent.mkdir(parents=True, exist_ok=True)
     requirements_path.parent.mkdir(parents=True, exist_ok=True)
-    ast_json_path.write_text(AstJsonEmitter(module).emit())
+    ast_json_path.write_text(AstJsonEmitter(semantic_module).emit())
     ast_path.write_text(AstLeanBridgeEmitter(ast_json_path, namespace).emit())
     requirements_path.write_text(
         RequirementEmitter(proof_path, proof_module, requirements).emit()

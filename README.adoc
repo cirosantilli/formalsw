@@ -335,19 +335,6 @@ For every input, `Equiv` requires one common exception-aware outcome:
 
 An outcome is either `.ok value` or `.error exception`. Successful executions must therefore return the same integer, while throwing executions must have structurally equal exception objects: the same exception class name and equal evaluated positional arguments. An unsupported AST evaluates to `none`, which cannot satisfy `Equiv` even when both sides are unsupported. See link:tests/equiv_throw.py[] for an equivalence proof covering both returns and throws.
 
-For functions annotated with one bare `list` argument, `Equiv` quantifies over
-lists of the modeled Python scalar values (`int` and `str`) and requires the
-same exception-aware outcome. The structural sort evaluator preserves the
-comparison order of the recognized merge-sort and first-pivot quicksort
-shapes. Consequently, mixed inputs can distinguish them: on `[0, ""]`,
-merge-sort attempts `0 <= ""`, while quicksort attempts `"" < 0`, producing
-different `TypeError` objects.
-
-An annotation of `list[int]` instead selects the homogeneous integer-list
-domain. On that domain the two recognized sorting implementations have the
-same canonical sorted result. See link:tests/sort.py[] for both the typed
-`Equiv` proof and the untyped behavior.
-
 ==== EquivReturn
 
 `EquivReturn(other)` states that whenever both functions return successfully
@@ -502,7 +489,7 @@ cleanxy tmp.py
 
 it will determine where to create the `.cleanxy` directory. When you are inside a .git repository, `.cleanxy` is always placed next to the `.git`. You basically always  want to use Git becuse you want to check that you LLMs haven't mofidifed your specifications in source files.
 
-Then, inside the `.cleanxy` directory, `cleanxy` converts the input Python source code to a versioned JSON AST under `.cleanxy/tmp.py.ast.json`. This is the language-neutral interchange artifact, so a future converter only needs to produce the same JSON schema.
+Then, inside the `.cleanxy` directory, `cleanxy` converts the input Python source code to a versioned JSON AST under `.cleanxy/tmp.py.ast.json`.
 
 The adjacent `.cleanxy/tmp.py.ast.lean` is only a small import bridge. Lean reads the JSON with `include_str`, validates `schema_version`, and elaborates it into a typed `CleanXY.PyAst.Module`. Proofs therefore continue to use `TmpAst.module` and operate on the typed data structure, not on untrusted claims made by the converter.
 
@@ -539,6 +526,8 @@ example :
   := tmp.sum_naive.«Not Throws»
 ----
 
+
+
 Finally, cleanxy runs Lean putting everything together:
 
 * `.cleanxy/tmp.py.ast.json` with the language-neutral AST representation
@@ -571,6 +560,10 @@ Run all tests under link:tests[]:
 ----
 ./test
 ----
+
+=== Coding guidelines
+
+Asciidoc: don't wrap lines.
 
 == Bibliography
 

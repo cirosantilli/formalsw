@@ -65,7 +65,7 @@ inductive CmpOp where
   | gt
   /-- Python `>=`. -/
   | gtE
-deriving Repr, Lean.ToExpr
+deriving Repr, DecidableEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
 inductive Expr where
@@ -73,6 +73,8 @@ inductive Expr where
   | constant : Constant -> Expr
   /-- A Python identifier reference. -/
   | name : String -> Expr
+  /-- Attribute access such as `self.value`. -/
+  | attribute : Expr -> String -> Expr
   /-- A Python list literal. -/
   | list : List Expr -> Expr
   /-- A Python binary operation. -/
@@ -101,6 +103,8 @@ deriving Repr, Lean.ToExpr
 
 /-- Python statements currently represented by the AST bridge. -/
 inductive Stmt where
+  /-- A Python class definition. -/
+  | classDef : (name : String) -> (body : List Stmt) -> Stmt
   /-- A Python function definition. -/
   | functionDef :
       (name : String) ->
@@ -205,6 +209,10 @@ private partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       | .null => return .constant .none
       | _ => throw "unsupported Constant.value"
   | "Name" => return .name (← jsonString json "id")
+  | "Attribute" =>
+      return .attribute
+        (← Expr.fromJson? (← jsonField json "value"))
+        (← jsonString json "attr")
   | "List" => return .list (← jsonArray json "elts" Expr.fromJson?)
   | "BinOp" =>
       return .binOp
@@ -262,6 +270,10 @@ private def Arg.fromJson? (json : Lean.Json) : Except String Arg := do
 /-- Decode one statement from the version 1 JSON schema. -/
 private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
   match ← jsonString json "type" with
+  | "ClassDef" =>
+      return .classDef
+        (← jsonString json "name")
+        (← jsonArray json "body" Stmt.fromJson?)
   | "FunctionDef" =>
       return .functionDef
         (← jsonString json "name")
@@ -376,6 +388,77 @@ def Module.findFunctionBody (module : Module) (name : String) :
     Option (List Stmt) :=
   findFunctionBodyIn module.body name
 
+/-- Find the body of a top-level class definition. -/
+def findClassBodyIn : List Stmt → String → Option (List Stmt)
+  | [], _ => none
+  | Stmt.classDef className body :: rest, name =>
+      if className = name then some body else findClassBodyIn rest name
+  | _ :: rest, name => findClassBodyIn rest name
+
+/-- Find a top-level class definition by name. -/
+def Module.findClassBody (module : Module) (name : String) : Option (List Stmt) :=
+  findClassBodyIn module.body name
+
+/-- Recognize a wrapper constructor that stores one annotated scalar field. -/
+def isScalarWrapperInit (payloadAnnotation : String) : Stmt → Bool
+  | .functionDef "__init__"
+      [{ name := selfName, .. },
+       { name := valueName, annotation := some (.name annotation) }]
+      _ [.assign [.attribute (.name targetSelf) "value"] (.name sourceValue)] =>
+      annotation == payloadAnnotation &&
+        selfName == targetSelf && valueName == sourceValue
+  | _ => false
+
+/-- Recognize a comparison method delegated to the wrapper's `value` field. -/
+def isValueComparison (methodName : String) (op : CmpOp) : Stmt → Bool
+  | .functionDef name [{ name := selfName, .. }, { name := otherName, .. }]
+      _ [.return (.compare
+        (.attribute (.name leftSelf) "value")
+        [(actualOp, .attribute (.name rightOther) "value")])] =>
+      name == methodName && actualOp == op &&
+        selfName == leftSelf && otherName == rightOther
+  | _ => false
+
+/-- Recognize a string wrapper storing Unicode code points as `list[int]`. -/
+def isCodepointStringInit : Stmt → Bool
+  | .functionDef "__init__"
+      [{ name := selfName, .. },
+       { name := valueName,
+         annotation := some (.subscript (.name "list") (.name "int")) }]
+      _ [.assign [.attribute (.name targetSelf) "value"] (.name sourceValue)] =>
+      selfName == targetSelf && valueName == sourceValue
+  | _ => false
+
+/-- Whether all modeled comparison methods delegate to the `value` field. -/
+def hasValueComparisons (body : List Stmt) : Bool :=
+  body.any (isValueComparison "__eq__" .eq) &&
+    body.any (isValueComparison "__lt__" .lt) &&
+    body.any (isValueComparison "__le__" .ltE) &&
+    body.any (isValueComparison "__gt__" .gt) &&
+    body.any (isValueComparison "__ge__" .gtE)
+
+/-- Whether a class is a one-field scalar wrapper with its own total comparisons. -/
+def isComparableScalarClassBody (payloadAnnotation : String) (body : List Stmt) : Bool :=
+  body.any (isScalarWrapperInit payloadAnnotation) &&
+    hasValueComparisons body
+
+/-- Whether a class implements strings as comparable Unicode code-point lists. -/
+def isCodepointStringClassBody (body : List Stmt) : Bool :=
+  body.any isCodepointStringInit && hasValueComparisons body
+
+/-- Check a top-level class against the modeled scalar-wrapper definition. -/
+def Module.isComparableScalarClass (module : Module) (name payloadAnnotation : String) :
+    Bool :=
+  match module.findClassBody name with
+  | some body => isComparableScalarClassBody payloadAnnotation body
+  | none => false
+
+/-- Check a class against the modeled code-point-list string definition. -/
+def Module.isCodepointStringClass (module : Module) (name : String) : Bool :=
+  match module.findClassBody name with
+  | some body => isCodepointStringClassBody body
+  | none => false
+
 /-- The value kinds currently selected from Python type annotations. -/
 inductive TypeKind where
   | int
@@ -383,6 +466,8 @@ inductive TypeKind where
   | intList
   /-- A bare Python `list`, modeled as a heterogeneous scalar list. -/
   | scalarList
+  /-- A list of locally defined scalar-wrapper objects. -/
+  | objectList (className : String)
 deriving Repr, DecidableEq
 
 /-- Decode a supported unary argument or return annotation. -/
@@ -390,6 +475,7 @@ def typeKindFromAnnotation : Expr → Option TypeKind
   | .name "int" => some .int
   | .name "list" => some .scalarList
   | .subscript (.name "list") (.name "int") => some .intList
+  | .subscript (.name "list") (.name className) => some (.objectList className)
   | _ => none
 
 /-- Find the supported unary argument kind of a top-level function. -/
@@ -429,7 +515,8 @@ def executableBody : List Stmt → List Stmt
 /-- Scalar Python values used by the modeled binary-comparison safety semantics. -/
 inductive ScalarValue where
   | int (value : Int)
-  | string (value : String)
+  /-- A Python `str`, represented by its Unicode integer code points. -/
+  | string (value : List Int)
 deriving Repr, DecidableEq
 
 /-- A successful list return value or a thrown exception object. -/
@@ -533,6 +620,7 @@ def Module.findBinaryComparison (module : Module) (name : String) :
 /-- Whether a recognized binary comparison returns normally or raises `TypeError`. -/
 def evalBinaryComparisonOutcome (module : Module) (name : String)
     (left right : ScalarValue) : Option (Except ExceptionObject Unit) := do
+  if !module.isCodepointStringClass "str" then none
   let signature ← module.findBinaryComparison name
   if !signature.left.accepts left || !signature.right.accepts right then none
   else
@@ -544,6 +632,7 @@ mutual
   /-- Count expression operations, assigning unit cost to every AST node. -/
   partial def Expr.operationCount : Expr → Nat
     | .constant _ | .name _ => 1
+    | .attribute value _ => 1 + value.operationCount
     | .list elements => 1 + (elements.map Expr.operationCount).sum
     | .binOp left _ right => 1 + left.operationCount + right.operationCount
     | .unaryOp _ operand => 1 + operand.operationCount
@@ -560,6 +649,7 @@ mutual
 
   /-- Count statement operations, assigning unit cost to every AST node. -/
   partial def Stmt.operationCount : Stmt → Nat
+    | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
     | .functionDef _ args returns body =>
         1 + args.length + (returns.map Expr.operationCount).getD 0 +
           (body.map Stmt.operationCount).sum
@@ -590,6 +680,7 @@ def Stmt.hasWhile : Stmt → Bool
 
 /-- Whether an expression's operator tree calls the named function. -/
 def Expr.callsFunction (name : String) : Expr → Bool
+  | .attribute value _ => value.callsFunction name
   | .binOp left _ right => left.callsFunction name || right.callsFunction name
   | .unaryOp _ operand => operand.callsFunction name
   | .call (.name functionName) _ => functionName == name
@@ -609,6 +700,12 @@ def Stmt.callsFunction (name : String) : Stmt → Bool
   | .raise exception => (exception.map (Expr.callsFunction name)).getD false
   | .expr expression => expression.callsFunction name
   | _ => false
+
+/-- Recognize a wrapper returning one direct call with its sole argument. -/
+def delegatedUnaryFunction : List Stmt → Option String
+  | [.return (.call (.name target) [.name _])] => some target
+  | .expr (.constant (.string _)) :: rest => delegatedUnaryFunction rest
+  | _ => none
 
 /-- Coarse asymptotic growth classes supported by the initial cost analyzer. -/
 inductive Growth where
@@ -751,7 +848,12 @@ def analyzeFunctionIn : List Stmt → String → Option CostAnalysis
 
 /-- Analyze one top-level function's unit-operation worst-case cost. -/
 def Module.analyzeFunction (module : Module) (name : String) : Option CostAnalysis :=
-  analyzeFunctionIn module.body name
+  match module.findFunctionBody name with
+  | some body =>
+      match delegatedUnaryFunction body with
+      | some target => analyzeFunctionIn module.body target
+      | none => analyzeFunctionIn module.body name
+  | none => none
 
 /-- Merge two sorted lists, propagating Python comparison exceptions. -/
 def mergeSortedFuel : Nat → List ScalarValue → List ScalarValue → ListOutcome
@@ -840,15 +942,18 @@ comparison order and exception outcome on heterogeneous lists.
 -/
 def evalUnaryListFunctionOutcome (module : Module) (name : String)
     (values : List ScalarValue) : Option ListOutcome := do
-  let body ← module.findFunctionBody name
-  if !body.any (Stmt.callsFunction name) then
+  if !module.isCodepointStringClass "str" then
     none
-  else if body.any Stmt.hasWhile then
-    some (normalizeSortOutcome values (evalMergeSortFuel values.length values))
-  else if body.any Stmt.hasFor then
-    some (normalizeSortOutcome values (evalQuickSortFuel values.length values))
   else
-    none
+    let body ← module.findFunctionBody name
+    if !body.any (Stmt.callsFunction name) then
+      none
+    else if body.any Stmt.hasWhile then
+      some (normalizeSortOutcome values (evalMergeSortFuel values.length values))
+    else if body.any Stmt.hasFor then
+      some (normalizeSortOutcome values (evalQuickSortFuel values.length values))
+    else
+      none
 
 /-- Insert an integer into an ascending list. -/
 def insertSorted (value : Int) : List Int → List Int
@@ -861,15 +966,50 @@ def insertSorted (value : Int) : List Int → List Int
 def canonicalSort (values : List Int) : List Int :=
   values.foldr insertSorted []
 
+/-- Factor equivalence proofs for functions implementing the canonical integer sort. -/
+theorem canonicalSort_equiv
+    (left right : List Int → Option (List Int))
+    (leftCanonical : ∀ values, left values = some (canonicalSort values))
+    (rightCanonical : ∀ values, right values = some (canonicalSort values)) :
+    ∀ values, ∃ result,
+      left values = some result ∧ right values = some result := by
+  intro values
+  exact ⟨canonicalSort values, leftCanonical values, rightCanonical values⟩
+
+/-- Whether a body has one of the two supported recursive sorting shapes. -/
+def isRecognizedSortBody (name : String) (body : List Stmt) : Bool :=
+  body.any (Stmt.callsFunction name) &&
+    (body.any Stmt.hasWhile || body.any Stmt.hasFor)
+
+/-- Resolve either a sorting implementation or a direct wrapper around one. -/
+def Module.findSortImplementation (module : Module) (name : String) :
+    Option (String × List Stmt) := do
+  let body ← module.findFunctionBody name
+  if isRecognizedSortBody name body then
+    some (name, body)
+  else
+    let target ← delegatedUnaryFunction body
+    let targetBody ← module.findFunctionBody target
+    if isRecognizedSortBody target targetBody then
+      some (target, targetBody)
+    else
+      none
+
 /-- Interpret a recognized recursive sorting function on homogeneous integers. -/
 def evalUnaryIntListFunction (module : Module) (name : String) (values : List Int) :
     Option (List Int) := do
-  let body ← module.findFunctionBody name
-  if body.any (Stmt.callsFunction name) &&
-      (body.any Stmt.hasWhile || body.any Stmt.hasFor) then
-    some (canonicalSort values)
+  let _ ← module.findSortImplementation name
+  some (canonicalSort values)
+
+/--
+Interpret sorting a list of locally defined objects whose sole payload is an
+integer and whose comparison methods delegate to that payload.
+-/
+def evalUnaryObjectIntListFunction (module : Module) (className name : String)
+    (values : List Int) : Option (List Int) := do
+  if !module.isComparableScalarClass className "int" then none
   else
-    none
+    evalUnaryIntListFunction module name values
 
 /-- Evaluate an integer comparison operator to a Lean boolean. -/
 def evalCmpOp (op : CmpOp) (left right : Int) : Bool :=
@@ -913,6 +1053,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.constant (Constant.int value) => some value
   | Expr.constant _ => none
   | Expr.name name => Env.get? env name
+  | Expr.attribute _ _ => none
   | Expr.unaryOp UnaryOp.uSub expr => do
       let value <- evalIntExpr env expr
       some (-value)
@@ -1074,6 +1215,11 @@ def ReturnType (module : PyAst.Module) (name : String) : Prop :=
   | some .scalarList, some .scalarList =>
       ∀ values : List PyAst.ScalarValue, ∃ outcome,
         PyAst.evalUnaryListFunctionOutcome module name values = some outcome
+  | some (.objectList className), some (.objectList returnClass) =>
+      className = returnClass ∧
+        ∀ values : List Int, ∃ result,
+          PyAst.evalUnaryObjectIntListFunction module className name values =
+            some result
   | _, _ => False
 
 /-- A unary integer function throws a modeled exception for at least one input. -/
@@ -1092,6 +1238,7 @@ def Throws (module : PyAst.Module) (name : String) : Prop :=
             PyAst.evalUnaryListFunctionOutcome module name values =
               some (.error exception)
       | some .intList => False
+      | some (.objectList _) => False
       | _ =>
           ∃ n : Int, ∃ exception,
             PyAst.evalUnaryIntFunctionOutcome module name n = some (.error exception)
@@ -1114,6 +1261,14 @@ def Equiv (module : PyAst.Module) (left right : String) : Prop :=
       ∀ values : List PyAst.ScalarValue, ∃ outcome,
         PyAst.evalUnaryListFunctionOutcome module left values = some outcome ∧
           PyAst.evalUnaryListFunctionOutcome module right values = some outcome
+  | some (.objectList leftClass), some (.objectList rightClass) =>
+      if leftClass = rightClass then
+        ∀ values : List Int, ∃ result,
+          PyAst.evalUnaryObjectIntListFunction module leftClass left values =
+              some result ∧
+            PyAst.evalUnaryObjectIntListFunction module rightClass right values =
+              some result
+      else False
   | _, _ => False
 
 /--
@@ -1139,6 +1294,15 @@ def EquivReturn (module : PyAst.Module) (left right : String) : Prop :=
           PyAst.evalUnaryListFunctionOutcome module right values =
             some (.ok rightResult) →
           leftResult = rightResult
+  | some (.objectList leftClass), some (.objectList rightClass) =>
+      if leftClass = rightClass then
+        ∀ values leftResult rightResult,
+          PyAst.evalUnaryObjectIntListFunction module leftClass left values =
+              some leftResult →
+            PyAst.evalUnaryObjectIntListFunction module rightClass right values =
+              some rightResult →
+            leftResult = rightResult
+      else False
   | _, _ => False
 
 /-- A function terminates within a bound using an explicit Python input-size measure. -/

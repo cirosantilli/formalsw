@@ -7,9 +7,11 @@ namespace tests.sort
 theorem merge_sort_int.«Equiv(quick_sort_int)» :
     CleanXY.Property.Function.Equiv
       SortAst.module "merge_sort_int" "quick_sort_int" := by
-  intro values
-  refine ⟨CleanXY.PyAst.canonicalSort values, ?_⟩
-  constructor <;> rfl
+  apply CleanXY.PyAst.canonicalSort_equiv
+  · intro values
+    rfl
+  · intro values
+    rfl
 
 /-- Integer merge sort has linearithmic worst-case cost. -/
 theorem merge_sort_int.«BigO(n * (Nat.log2 n + 1), n = len(values))» :
@@ -32,11 +34,21 @@ theorem quick_sort_int.«BigO(n * n, n = len(values))» :
   · rfl
   · exact CleanXY.PyAst.Growth.quadratic_isBigO
 
+/-- Sorting the one-integer wrapper factors through the integer sort model. -/
+theorem merge_sort_dummy_int.«Equiv(quick_sort_dummy_int)» :
+    CleanXY.Property.Function.Equiv
+      SortAst.module "merge_sort_dummy_int" "quick_sort_dummy_int" := by
+  apply CleanXY.PyAst.canonicalSort_equiv
+  · intro values
+    rfl
+  · intro values
+    rfl
+
 /-- A mixed integer/string input makes untyped merge sort throw. -/
 theorem merge_sort_untyped.«Throws» :
     CleanXY.Property.Function.Throws
       SortAst.module "merge_sort_untyped" := by
-  refine ⟨[.int 0, .string ""], {
+  refine ⟨[.int 0, .string []], {
     typeName := "TypeError"
     args := [.string "'<=' not supported between instances of 'int' and 'str'"]
   }, ?_⟩

@@ -94,7 +94,8 @@ def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
         TestCase("range_sum passes", Path("tests/range_sum.py"), 0),
-        TestCase("typed and return sort equivalence with proved costs", Path("tests/sort.py"), 0),
+        TestCase("plain-Python string class model", Path("pystdlib/class/str.py"), 0),
+        TestCase("typed, object, and return sort equivalence", Path("tests/sort.py"), 0),
         TestCase("equivalent throws pass", Path("tests/equiv_throw.py"), 0),
         TestCase("Throws can be proved", Path("tests/throws.py"), 0),
         TestCase("annotations restrict comparison inputs", Path("tests/typing.py"), 0),
@@ -155,13 +156,20 @@ def main() -> int:
 
     ast_json_path = REPO / ".cleanxy/tests/range_sum.py.ast.json"
     ast_bridge_path = REPO / ".cleanxy/tests/range_sum.py.ast.lean"
+    sort_ast_json_path = REPO / ".cleanxy/tests/sort.py.ast.json"
     try:
         ast_document = json.loads(ast_json_path.read_text())
+        sort_ast_document = json.loads(sort_ast_json_path.read_text())
         json_ast_passed = (
             ast_document["schema_version"] == 1
             and ast_document["ast"]["type"] == "Module"
             and ast_document["ast"]["body"][1]["type"] == "FunctionDef"
             and "pyast_from_json%" in ast_bridge_path.read_text()
+            and any(
+                statement.get("type") == "ClassDef"
+                and statement.get("name") == "str"
+                for statement in sort_ast_document["ast"]["body"]
+            )
         )
     except (FileNotFoundError, json.JSONDecodeError, KeyError, IndexError, TypeError):
         json_ast_passed = False

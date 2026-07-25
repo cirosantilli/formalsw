@@ -6,7 +6,7 @@ namespace tests.typing
 /-- An unrestricted comparison can receive incompatible runtime types. -/
 theorem merge_sort_untyped.«Throws» :
     CleanXY.Property.Function.Throws TypingAst.module "merge_sort_untyped" := by
-  refine ⟨.int 0, .string "", { typeName := "TypeError", args := [] }, ?_⟩
+  refine ⟨.int 0, .string [], { typeName := "TypeError", args := [] }, ?_⟩
   constructor
   · rfl
   constructor
