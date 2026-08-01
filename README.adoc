@@ -29,10 +29,10 @@ curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
 
 Installation details for other systems: https://github.com/leanprover/elan
 
-Now test it on a hello world link:tests/range_sum.py[]:
+Now test it on a hello world link:tests/py/range_sum.py[]:
 
 ----
-cleanxy tests/range_sum.py
+cleanxy tests/py/range_sum.py
 ----
 
 and if all went well you should see a message:
@@ -182,13 +182,13 @@ there's no output, which means that all proofs were verified!
 
 You can check this with the following example contained in-tree:
 
-link:tests/range_sum.py[]
+link:tests/py/range_sum.py[]
 
 ----
-cleanxy tests/range_sum.py
+cleanxy tests/py/range_sum.py
 ----
 
-which has a proof at link:tests/range_sum.py.lean[].
+which has a proof at link:tests/py/range_sum.py.lean[].
 
 == Further usage
 
@@ -285,7 +285,7 @@ The analyzer checks that `values` is the actual `list` argument; changing the bi
 
 Other valid bounds include `BigO(1)`, `BigO(n)`, `BigO(n * n, n = len(values))`, or a call to a user-defined Lean cost function. Because the bound is Lean rather than a second expression DSL, ordinary Lean functions and notation are available.
 
-The cost model assigns cost 1 to every represented statement and expression operation. It then proves a constant multiple of the selected bound beyond some input-size threshold. Calls are unit-cost by default too; later standard-library models can replace that default with operation-specific complexity. The initial structural analyzer recognizes constant and iterative integer functions plus the recursive list-sort shapes demonstrated in link:tests/sort.py[].
+The cost model assigns cost 1 to every represented statement and expression operation. It then proves a constant multiple of the selected bound beyond some input-size threshold. Calls are unit-cost by default too; later standard-library models can replace that default with operation-specific complexity. The initial structural analyzer recognizes constant and iterative integer functions plus the recursive list-sort shapes demonstrated in link:tests/py/sort.py[].
 
 ==== Equiv
 
@@ -333,7 +333,7 @@ For every input, `Equiv` requires one common exception-aware outcome:
       some outcome
 ----
 
-An outcome is either `.ok value` or `.error exception`. Successful executions must therefore return the same integer, while throwing executions must have structurally equal exception objects: the same exception class name and equal evaluated positional arguments. An unsupported AST evaluates to `none`, which cannot satisfy `Equiv` even when both sides are unsupported. See link:tests/equiv_throw.py[] for an equivalence proof covering both returns and throws.
+An outcome is either `.ok value` or `.error exception`. Successful executions must therefore return the same integer, while throwing executions must have structurally equal exception objects: the same exception class name and equal evaluated positional arguments. An unsupported AST evaluates to `none`, which cannot satisfy `Equiv` even when both sides are unsupported. See link:tests/py/equiv_throw.py[] for an equivalence proof covering both returns and throws.
 
 ==== EquivReturn
 
@@ -456,7 +456,7 @@ Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
 
 For a bare-list function, `Throws` instead provides a modeled scalar-list input
 and an exception produced by the list evaluator. The mixed input `[0, ""]` in
-link:tests/sort.py[] is one example.
+link:tests/py/sort.py[] is one example.
 
 === Raw Lean specification
 
@@ -530,11 +530,15 @@ example :
 
 Finally, cleanxy runs Lean putting everything together:
 
-* `.cleanxy/tmp.py.ast.json` with the language-neutral AST representation
+* `.cleanxy/tmp.py.ast.json` with the Python AST representation
 * `.cleanxy/tmp.py.ast.lean` with the small JSON-to-Lean import bridge
 * `.cleanxy/tmp.py.reqs.lean` mentioned above with the proof requirements
 * `tmp.py.lean` which is supposed to contain your proof
-* link:CleanXY.lean[] which defines the Python AST representation and properties of the Python language which are then used in correctness proofs
+* link:CleanXY.lean[] as the language-neutral package facade
+* link:lang/py/CleanXY/Model.lean[] which defines the Python AST,
+  evaluator, and Python proof properties
+* link:lang/py/builtin/str.py[] and adjacent Lean proof for the
+  plain-Python builtin string model
 
 == Development
 

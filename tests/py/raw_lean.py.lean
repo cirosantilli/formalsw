@@ -1,7 +1,7 @@
-import «.cleanxy».tests.«raw_lean.py.ast»
+import «.cleanxy».tests.py.«raw_lean.py.ast»
 import CleanXY
 
-namespace tests.raw_lean
+namespace tests.py.raw_lean
 
 theorem f_returns_input (n : Int) :
     n = n ∧ RawLeanAst.module.findFunctionBody "f" ≠ none := by
@@ -11,4 +11,4 @@ theorem f_returns_input (n : Int) :
     RawLeanAst.module,
   ]
 
-end tests.raw_lean
+end tests.py.raw_lean

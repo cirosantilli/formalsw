@@ -1,7 +1,7 @@
-import «.cleanxy».tests.«typing.py.ast»
+import «.cleanxy».tests.py.«typing.py.ast»
 import CleanXY
 
-namespace tests.typing
+namespace tests.py.typing
 
 /-- An unrestricted comparison can receive incompatible runtime types. -/
 theorem merge_sort_untyped.«Throws» :
@@ -41,4 +41,4 @@ theorem merge_sort_str.«Not Throws» :
     TypingAst.module,
   ] at hleft hright houtcome
 
-end tests.typing
+end tests.py.typing

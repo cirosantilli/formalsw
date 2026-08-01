@@ -1,11 +1,11 @@
-import «.cleanxy».pystdlib.«class».«str.py.ast»
+import «.cleanxy».lang.py.builtin.«str.py.ast»
 import CleanXY
 
-namespace pystdlibClassStr
+namespace lang.py.builtin.str
 
 /-- The Python definition has the expected code-point payload and comparisons. -/
 theorem modeled :
     StrAst.module.isCodepointStringClass "str" = true := by
   rfl
 
-end pystdlibClassStr
+end lang.py.builtin.str

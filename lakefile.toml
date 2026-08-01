@@ -1,8 +1,13 @@
 # Lake package configuration for the Python-to-Lean AST framework.
 name = "cleanxy"
 version = "0.1.0"
-defaultTargets = ["CleanXY"]
+defaultTargets = ["CleanXY", "lang.py.CleanXY"]
 
-# The reusable Lean library lives in `CleanXY.lean`.
+# Umbrella module re-exporting installed language models.
 [[lean_lib]]
 name = "CleanXY"
+
+# Language-specific models live below `lang/`.
+[[lean_lib]]
+name = "lang.py.CleanXY"
+roots = ["lang.py.CleanXY.Model"]

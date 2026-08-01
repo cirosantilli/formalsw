@@ -93,36 +93,40 @@ def print_result(result: TestResult) -> None:
 def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
-        TestCase("range_sum passes", Path("tests/range_sum.py"), 0),
-        TestCase("plain-Python string class model", Path("pystdlib/class/str.py"), 0),
-        TestCase("typed, object, and return sort equivalence", Path("tests/sort.py"), 0),
-        TestCase("equivalent throws pass", Path("tests/equiv_throw.py"), 0),
-        TestCase("Throws can be proved", Path("tests/throws.py"), 0),
-        TestCase("annotations restrict comparison inputs", Path("tests/typing.py"), 0),
-        TestCase("raw Lean requirement passes", Path("tests/raw_lean.py"), 0),
+        TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
+        TestCase(
+            "plain-Python string builtin model",
+            Path("lang/py/builtin/str.py"),
+            0,
+        ),
+        TestCase("typed, object, and return sort equivalence", Path("tests/py/sort.py"), 0),
+        TestCase("equivalent throws pass", Path("tests/py/equiv_throw.py"), 0),
+        TestCase("Throws can be proved", Path("tests/py/throws.py"), 0),
+        TestCase("annotations restrict comparison inputs", Path("tests/py/typing.py"), 0),
+        TestCase("raw Lean requirement passes", Path("tests/py/raw_lean.py"), 0),
         TestCase(
             "sorrys are rejected",
-            Path("tests/fail/sorry.py"),
+            Path("tests/py/fail/sorry.py"),
             1,
             "declaration uses `sorry`",
         ),
         TestCase(
             "unproven properties are rejected",
-            Path("tests/fail/missing_required.py"),
+            Path("tests/py/fail/missing_required.py"),
             1,
             "missing proof",
         ),
         TestCase(
             "missing proof files are rejected",
-            Path("tests/fail/missing_lean.py"),
+            Path("tests/py/fail/missing_lean.py"),
             1,
             "missing proof file",
         ),
         TestCase(
             "directories check all Python files",
-            Path("tests/fail/dir"),
+            Path("tests/py/fail/dir"),
             1,
-            "tests/fail/dir/fail.py",
+            "tests/py/fail/dir/fail.py",
         ),
     ]
     results = []
@@ -133,7 +137,7 @@ def main() -> int:
         print_result(result)
 
     stub_completed = subprocess.run(
-        [str(CLEANXY), "--stub", "tests/range_sum.py"],
+        [str(CLEANXY), "--stub", "tests/py/range_sum.py"],
         cwd=REPO,
         text=True,
         stdout=subprocess.PIPE,
@@ -143,20 +147,20 @@ def main() -> int:
     stub_passed = (
         stub_completed.returncode == 0
         and not stub_completed.stderr
-        and 'import «.cleanxy».tests.«range_sum.py.ast»' in stub_completed.stdout
-        and "namespace tests.range_sum" in stub_completed.stdout
+        and 'import «.cleanxy».tests.py.«range_sum.py.ast»' in stub_completed.stdout
+        and "namespace tests.py.range_sum" in stub_completed.stdout
         and "theorem sum.«Equiv(sum_naive)» :" in stub_completed.stdout
         and "theorem sum.«BigO(1)» :" in stub_completed.stdout
         and "theorem sum.«ReturnType» :" in stub_completed.stdout
         and "theorem sum_naive.«BigO(n)» :" in stub_completed.stdout
-        and "end tests.range_sum" in stub_completed.stdout
+        and "end tests.py.range_sum" in stub_completed.stdout
         and stub_completed.stdout.count("  sorry") == 5
     )
     print(f"{'PASS' if stub_passed else 'FAIL'} Lean proof stub generation", flush=True)
 
-    ast_json_path = REPO / ".cleanxy/tests/range_sum.py.ast.json"
-    ast_bridge_path = REPO / ".cleanxy/tests/range_sum.py.ast.lean"
-    sort_ast_json_path = REPO / ".cleanxy/tests/sort.py.ast.json"
+    ast_json_path = REPO / ".cleanxy/tests/py/range_sum.py.ast.json"
+    ast_bridge_path = REPO / ".cleanxy/tests/py/range_sum.py.ast.lean"
+    sort_ast_json_path = REPO / ".cleanxy/tests/py/sort.py.ast.json"
     try:
         ast_document = json.loads(ast_json_path.read_text())
         sort_ast_document = json.loads(sort_ast_json_path.read_text())
@@ -177,7 +181,7 @@ def main() -> int:
         f"{'PASS' if json_ast_passed else 'FAIL'} generated JSON AST import",
         flush=True,
     )
-    source_tree_clean = not any((REPO / "tests").rglob("*.olean"))
+    source_tree_clean = not any((REPO / "tests/py").rglob("*.olean"))
     print(
         f"{'PASS' if source_tree_clean else 'FAIL'} no Lean objects in source tree",
         flush=True,

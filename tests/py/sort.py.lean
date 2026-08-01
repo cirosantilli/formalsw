@@ -1,7 +1,7 @@
-import «.cleanxy».tests.«sort.py.ast»
+import «.cleanxy».tests.py.«sort.py.ast»
 import CleanXY
 
-namespace tests.sort
+namespace tests.py.sort
 
 /-- The integer-only sorting implementations have the same result. -/
 theorem merge_sort_int.«Equiv(quick_sort_int)» :
@@ -95,4 +95,4 @@ theorem quick_sort.«BigO(n * n, n = len(values))» :
   · rfl
   · exact CleanXY.PyAst.Growth.quadratic_isBigO
 
-end tests.sort
+end tests.py.sort

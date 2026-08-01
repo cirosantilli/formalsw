@@ -1,7 +1,7 @@
-import «.cleanxy».tests.«equiv_throw.py.ast»
+import «.cleanxy».tests.py.«equiv_throw.py.ast»
 import CleanXY
 
-namespace tests.equiv_throw
+namespace tests.py.equiv_throw
 
 /-- Both implementations return and throw equivalent objects for every input. -/
 theorem double_or_throw.«Equiv(double_or_throw_alt)» :
@@ -59,4 +59,4 @@ theorem throw_msg_1.«Not Equiv(throw_msg_2)» :
   rw [← left] at right
   simp at right
 
-end tests.equiv_throw
+end tests.py.equiv_throw

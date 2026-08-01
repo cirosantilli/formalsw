@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plain-Python model of the comparable part of `str`.
+"""Plain-Python model of the comparable part of Python's `str`.
 
 Unicode text is represented as a list of integer code points. Python's list
 comparison is lexicographic, matching string comparison on code points.
