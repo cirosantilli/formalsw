@@ -537,7 +537,7 @@ Finally, cleanxy runs Lean putting everything together:
 * link:CleanXY.lean[] as the language-neutral package facade
 * link:lang/py/CleanXY/Model.lean[] which defines the Python AST,
   evaluator, and Python proof properties
-* link:lang/py/builtin/str.py[] and adjacent Lean proof for the
+* link:lang/py/builtin/type/str.py[] and adjacent Lean proof for the
   plain-Python builtin string model
 
 == Development

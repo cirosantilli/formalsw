@@ -993,7 +993,7 @@ def require_executable(name: str) -> None:
 
 def module_with_python_builtins(source: Path, module: ast.Module) -> ast.Module:
     """Append plain-Python builtin-class definitions to a program AST."""
-    stdlib_source = Path.cwd() / "lang/py/builtin/str.py"
+    stdlib_source = Path.cwd() / "lang/py/builtin/type/str.py"
     if source.resolve() == stdlib_source.resolve():
         return module
     if not stdlib_source.exists():

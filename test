@@ -96,7 +96,7 @@ def main() -> int:
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
         TestCase(
             "plain-Python string builtin model",
-            Path("lang/py/builtin/str.py"),
+            Path("lang/py/builtin/type/str.py"),
             0,
         ),
         TestCase("typed, object, and return sort equivalence", Path("tests/py/sort.py"), 0),
