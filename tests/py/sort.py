@@ -51,7 +51,6 @@ def merge_sort_untyped(values: list) -> list:
     @cleanxy: EquivReturn(quick_sort)
     @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
     @cleanxy: theorem merge_sort_untyped_not_throws_of_lt_safe
-      (values : List CleanXY.PyAst.Value)
       (_safe : ∀ left ∈ values, ∀ right ∈ values,
         ∃ result, CleanXY.PyAst.evalValueCmp .lt left right = .ok result) :
       ∃ result, CleanXY.PyAst.evalUnaryListFunctionOutcome

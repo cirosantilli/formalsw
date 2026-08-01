@@ -265,6 +265,61 @@ def raw_theorem_type(requirement: RawTheoremRequirement) -> str:
     return requirement.property_type
 
 
+def lean_type_for_python_annotation(annotation: ast.expr | None) -> str | None:
+    """Translate a supported Python argument annotation to its modeled Lean domain."""
+    if isinstance(annotation, ast.Name):
+        return {
+            "int": "Int",
+            "bool": "Bool",
+            "str": "CleanXY.Py.Builtin.Str.Str",
+            "list": "List CleanXY.PyAst.Value",
+        }.get(annotation.id)
+    if (
+        isinstance(annotation, ast.Subscript)
+        and isinstance(annotation.value, ast.Name)
+        and annotation.value.id == "list"
+        and isinstance(annotation.slice, ast.Name)
+    ):
+        if annotation.slice.id == "int":
+            return "List Int"
+        return "List Int"
+    return None
+
+
+def explicitly_bound_names(params: str) -> set[str]:
+    """Find names introduced by ordinary parenthesized Lean binders."""
+    names: set[str] = set()
+    for match in re.finditer(r"[({[]\s*([^:(){}\[\]]+?)\s*:", params):
+        names.update(re.findall(r"[A-Za-z_][A-Za-z0-9_']*", match.group(1)))
+    return names
+
+
+def raw_theorem_type_for_function(
+    requirement: RawTheoremRequirement,
+    function: ast.FunctionDef,
+) -> str:
+    """Infer referenced, unbound Python arguments in a function-level theorem."""
+    referenced_text = f"{requirement.params}\n{requirement.property_type}"
+    bound = explicitly_bound_names(requirement.params)
+    inferred = []
+    for argument in function.args.args:
+        if argument.arg in bound:
+            continue
+        if re.search(rf"\b{re.escape(argument.arg)}\b", referenced_text) is None:
+            continue
+        lean_type = lean_type_for_python_annotation(argument.annotation)
+        if lean_type is None:
+            raise InvalidRequirement(
+                f"{function.name}: cannot infer a Lean domain for Python argument "
+                f"{argument.arg!r}; bind it explicitly in the raw theorem"
+            )
+        inferred.append(f"({argument.arg} : {lean_type})")
+    params = " ".join([*inferred, requirement.params]).strip()
+    if params:
+        return f"∀ {params},\n{requirement.property_type}"
+    return requirement.property_type
+
+
 def docstring_markers(docstring: str | None, start_line: int | None) -> list[Marker]:
     """Extract `cleanxy` marker blocks from a Python docstring."""
     if docstring is None:
@@ -347,7 +402,7 @@ def collect_requirements(
                     theorem_name = f"{proof_namespace}.{theorem_name}"
                 requirements.append(Requirement(
                     theorem_name,
-                    raw_theorem_type(raw_theorem),
+                    raw_theorem_type_for_function(raw_theorem, stmt),
                     source_path,
                     marker.line,
                     marker.text,
