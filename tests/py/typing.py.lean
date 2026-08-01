@@ -22,8 +22,8 @@ theorem merge_sort_int.«Not Throws» :
     CleanXY.PyAst.Module.findBinaryComparison,
     CleanXY.PyAst.findBinaryComparisonIn,
     CleanXY.PyAst.executableBody,
-    CleanXY.PyAst.scalarKindFromAnnotation,
-    CleanXY.PyAst.ScalarKind.accepts,
+    CleanXY.PyAst.annotationKindFromAnnotation,
+    CleanXY.PyAst.AnnotationKind.accepts,
     TypingAst.module,
   ] at hleft hright houtcome
 
@@ -36,8 +36,8 @@ theorem merge_sort_str.«Not Throws» :
     CleanXY.PyAst.Module.findBinaryComparison,
     CleanXY.PyAst.findBinaryComparisonIn,
     CleanXY.PyAst.executableBody,
-    CleanXY.PyAst.scalarKindFromAnnotation,
-    CleanXY.PyAst.ScalarKind.accepts,
+    CleanXY.PyAst.annotationKindFromAnnotation,
+    CleanXY.PyAst.AnnotationKind.accepts,
     TypingAst.module,
   ] at hleft hright houtcome
 

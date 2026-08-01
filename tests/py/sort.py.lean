@@ -5,25 +5,62 @@ namespace tests.py.sort
 
 open CleanXY.PyAst
 
-private def sameScalarKind : ScalarValue → ScalarValue → Prop
+private def sameValueKind : Value → Value → Prop
   | .int _, .int _ => True
   | .string _, .string _ => True
+  | .object leftType _, .object rightType _ => leftType = rightType
   | _, _ => False
 
-private theorem sameScalarKind_of_lt_ok {left right : ScalarValue} {result : Bool}
-    (h : evalScalarCmp .lt left right = .ok result) :
-    sameScalarKind left right := by
-  cases left <;> cases right <;> simp [evalScalarCmp, sameScalarKind] at h ⊢
+private theorem sameValueKind_of_lt_ok {left right : Value} {result : Bool}
+    (h : evalValueCmp .lt left right = .ok result) :
+    sameValueKind left right := by
+  cases left with
+  | int left =>
+      cases right with
+      | int right => simp [sameValueKind]
+      | string right => simp [evalValueCmp] at h
+      | object rightType right => simp [evalValueCmp] at h
+  | string left =>
+      cases right with
+      | int right => simp [evalValueCmp] at h
+      | string right => simp [sameValueKind]
+      | object rightType right => simp [evalValueCmp] at h
+  | object leftType left =>
+      cases right with
+      | int right => simp [evalValueCmp] at h
+      | string right => simp [evalValueCmp] at h
+      | object rightType right =>
+          by_cases same : leftType = rightType
+          · simpa [sameValueKind] using same
+          · simp [evalValueCmp, same] at h
 
-private theorem ltE_ok_of_sameScalarKind {left right : ScalarValue}
-    (h : sameScalarKind left right) :
-    ∃ result, evalScalarCmp .ltE left right = .ok result := by
-  cases left <;> cases right <;> simp [evalScalarCmp, sameScalarKind] at h ⊢
+private theorem ltE_ok_of_sameValueKind {left right : Value}
+    (h : sameValueKind left right) :
+    ∃ result, evalValueCmp .ltE left right = .ok result := by
+  cases left with
+  | int left =>
+      cases right with
+      | int right => simp [evalValueCmp]
+      | string right => simp [sameValueKind] at h
+      | object rightType right => simp [sameValueKind] at h
+  | string left =>
+      cases right with
+      | int right => simp [sameValueKind] at h
+      | string right => simp [evalValueCmp]
+      | object rightType right => simp [sameValueKind] at h
+  | object leftType left =>
+      cases right with
+      | int right => simp [sameValueKind] at h
+      | string right => simp [sameValueKind] at h
+      | object rightType right =>
+          simp only [sameValueKind] at h
+          subst rightType
+          simp [evalValueCmp]
 
 private theorem mergeSortedFuel_safe :
     ∀ fuel left right,
       (∀ leftValue ∈ left, ∀ rightValue ∈ right,
-        sameScalarKind leftValue rightValue) →
+        sameValueKind leftValue rightValue) →
       ∃ result,
         mergeSortedFuel fuel left right = .ok result ∧
         ∀ value ∈ result, value ∈ left ∨ value ∈ right := by
@@ -42,7 +79,7 @@ private theorem mergeSortedFuel_safe :
         | nil => exact ⟨leftHead :: leftTail, rfl, by simp⟩
         | cons rightHead rightTail =>
           obtain ⟨comparison, comparison_eq⟩ :=
-            ltE_ok_of_sameScalarKind (safe leftHead (by simp) rightHead (by simp))
+            ltE_ok_of_sameValueKind (safe leftHead (by simp) rightHead (by simp))
           cases comparison with
           | false =>
               obtain ⟨result, result_eq, result_mem⟩ :=
@@ -75,7 +112,7 @@ private theorem mergeSortedFuel_safe :
 
 private theorem evalMergeSortFuel_safe :
     ∀ fuel values,
-      (∀ left ∈ values, ∀ right ∈ values, sameScalarKind left right) →
+      (∀ left ∈ values, ∀ right ∈ values, sameValueKind left right) →
       ∃ result,
         evalMergeSortFuel fuel values = .ok result ∧
         ∀ value ∈ result, value ∈ values := by
@@ -164,22 +201,29 @@ theorem merge_sort_untyped.«Throws» :
 
 /-- Untyped merge sort succeeds when `<` is defined for every input pair. -/
 theorem merge_sort_untyped_not_throws_of_lt_safe
-    (values : List CleanXY.PyAst.ScalarValue)
+    (values : List CleanXY.PyAst.Value)
     (_safe : ∀ left ∈ values, ∀ right ∈ values,
-      ∃ result, CleanXY.PyAst.evalScalarCmp .lt left right = .ok result) :
+      ∃ result, CleanXY.PyAst.evalValueCmp .lt left right = .ok result) :
     ∃ result, CleanXY.PyAst.evalUnaryListFunctionOutcome
       SortAst.module "merge_sort_untyped" values = some (.ok result) := by
   have homogeneous :
-      ∀ left ∈ values, ∀ right ∈ values, sameScalarKind left right := by
+      ∀ left ∈ values, ∀ right ∈ values, sameValueKind left right := by
     intro left leftMem right rightMem
     obtain ⟨comparison, comparison_eq⟩ := _safe left leftMem right rightMem
-    exact sameScalarKind_of_lt_ok comparison_eq
+    exact sameValueKind_of_lt_ok comparison_eq
   obtain ⟨result, result_eq, _⟩ :=
     evalMergeSortFuel_safe values.length values homogeneous
-  refine ⟨canonicalScalarSort values, ?_⟩
+  refine ⟨canonicalValueSort values, ?_⟩
   change some (normalizeSortOutcome values
-    (evalMergeSortFuel values.length values)) = some (.ok (canonicalScalarSort values))
+    (evalMergeSortFuel values.length values)) = some (.ok (canonicalValueSort values))
   rw [result_eq]
+  rfl
+
+/-- The generic untyped semantics also sort comparable modeled objects. -/
+example :
+    CleanXY.PyAst.evalUnaryListFunctionOutcome SortAst.module "merge_sort_untyped"
+      [.object "DummyInt" 2, .object "DummyInt" 1] =
+        some (.ok [.object "DummyInt" 1, .object "DummyInt" 2]) := by
   rfl
 
 /-- Whenever both untyped sorting implementations return, their results agree. -/
