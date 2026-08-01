@@ -94,11 +94,6 @@ def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
-        TestCase(
-            "plain-Python string builtin model",
-            Path("lang/py/builtin/type/str.py"),
-            0,
-        ),
         TestCase("typed, object, and return sort equivalence", Path("tests/py/sort.py"), 0),
         TestCase("equivalent throws pass", Path("tests/py/equiv_throw.py"), 0),
         TestCase("Throws can be proved", Path("tests/py/throws.py"), 0),
@@ -129,6 +124,13 @@ def main() -> int:
             "tests/py/fail/dir/fail.py",
         ),
     ]
+    for builtin_model in sorted(Path("lang/py/builtin/type").glob("*.py")):
+        cases.append(TestCase(f"plain-Python builtin model {builtin_model.stem}", builtin_model, 0))
+    cases.append(TestCase(
+        "plain-Python builtin function model",
+        Path("lang/py/builtin/function.py"),
+        0,
+    ))
     results = []
     for case in cases:
         print(f"RUN  {case.source}", flush=True)
@@ -221,6 +223,23 @@ def main() -> int:
         output = builtin_models.stdout + builtin_models.stderr
         if output:
             print(textwrap.indent(output.rstrip(), "  "))
+    builtin_python_models = subprocess.run(
+        [sys.executable, "tests/py/builtin_python_models.py"],
+        cwd=REPO,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    builtin_python_models_passed = builtin_python_models.returncode == 0
+    print(
+        f"{'PASS' if builtin_python_models_passed else 'FAIL'} plain-Python builtin behavior",
+        flush=True,
+    )
+    if not builtin_python_models_passed:
+        output = builtin_python_models.stdout + builtin_python_models.stderr
+        if output:
+            print(textwrap.indent(output.rstrip(), "  "))
     return 0 if (
         all(result.passed for result in results)
         and stub_passed
@@ -228,6 +247,7 @@ def main() -> int:
         and source_tree_clean
         and builtin_coverage_passed
         and builtin_models_passed
+        and builtin_python_models_passed
     ) else 1
 
 

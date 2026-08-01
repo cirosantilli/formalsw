@@ -537,12 +537,14 @@ Finally, cleanxy runs Lean putting everything together:
 * link:CleanXY.lean[] as the language-neutral package facade
 * link:lang/py/CleanXY/Model.lean[] which defines the Python AST,
   evaluator, and Python proof properties
-* link:lang/py/builtin/type/str.py[] and adjacent Lean proof for the
-  plain-Python builtin string model
+* plain-Python builtin models under link:lang/py/builtin/type[] and their
+  adjacent, generated-AST-bound Lean proofs
 
 === Python builtin model
 
-The reusable non-floating-point builtin semantics live under link:lang/py/builtin/type[]. Type models cover truth and comparison protocols, arbitrary-precision integers, iterators, sequences, strings, bytes, byte arrays, memory views, dictionaries and dictionary views, sets and frozen sets, context managers, object/type metadata, descriptors, generic aliases, unions, code/function/module objects, and Python's singleton object types. Builtin functions live under link:lang/py/builtin/type/function[].
+The reusable non-floating-point builtin semantics live under link:lang/py/builtin/type[]. Builtins that can be expressed faithfully in Python have a `.py` implementation and an adjacent `.py.lean` proof. Each source requests explicit structural and complete-AST-fingerprint theorems, so the proofs are checked against the generated AST of that exact Python file. Builtin functions are grouped in link:lang/py/builtin/function.lean[], with feasible pure and protocol-delegating implementations in link:lang/py/builtin/function.py[] and its adjacent proof.
+
+The Lean-only primitive boundary contains arbitrary-precision `int`, mutable `list`, balanced-tree storage, object identity and the runtime type/MRO machinery, the buffer protocol behind `memoryview`, and runtime code/module/function/singleton objects. Boolean value semantics are modeled in Python as an integer restricted to zero or one; CPython singleton identity remains outside that value model. Strings, bytes, byte arrays, tuples, ranges, slices, iterators, dictionaries and their views, sets and frozen sets, context managers, descriptors, and pure or protocol-delegating builtin functions have ordinary Python models layered over those primitives. Environment-dependent functions such as `eval`, `exec`, `compile`, `open`, import, terminal I/O, help, and breakpoint remain explicit Lean effect interfaces.
 
 Mappings preserve Python insertion order while using a size-balanced binary search tree for key lookup. Sets and frozen sets use the corresponding size-balanced tree-set representation. The Lean types bundle their tree well-formedness invariants, and link:tests/py/builtin_models.lean[] checks that the dictionary and set facades expose those proofs.
 

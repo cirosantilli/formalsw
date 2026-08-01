@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Plain-Python model of the comparable part of Python's `str`.
 
+@cleanxy theorem modeled : StrAst.module.isCodepointStringClass "str" = true
+@cleanxy theorem source_fingerprint : StrAst.module.fingerprint = 5533158025547653472
+
 Unicode text is represented as a list of integer code points. Python's list
 comparison is lexicographic, matching string comparison on code points.
 """

@@ -388,6 +388,16 @@ def Module.findFunctionBody (module : Module) (name : String) :
     Option (List Stmt) :=
   findFunctionBodyIn module.body name
 
+/-- Names of all top-level functions in source order. -/
+def Module.functionNames (module : Module) : List String :=
+  module.body.filterMap fun
+    | .functionDef name _ _ _ => some name
+    | _ => none
+
+/-- Check the complete function surface of a plain-Python module. -/
+def Module.hasExactlyFunctions (module : Module) (names : List String) : Bool :=
+  module.functionNames == names
+
 /-- Find the body of a top-level class definition. -/
 def findClassBodyIn : List Stmt → String → Option (List Stmt)
   | [], _ => none
@@ -398,6 +408,37 @@ def findClassBodyIn : List Stmt → String → Option (List Stmt)
 /-- Find a top-level class definition by name. -/
 def Module.findClassBody (module : Module) (name : String) : Option (List Stmt) :=
   findClassBodyIn module.body name
+
+/-- The name of a method statement, ignoring non-method class-body entries. -/
+def Stmt.methodName? : Stmt → Option String
+  | .functionDef name _ _ _ => some name
+  | _ => none
+
+/-- Method names defined directly by a class, in source order. -/
+def Module.classMethodNames (module : Module) (name : String) : Option (List String) := do
+  let body ← module.findClassBody name
+  return body.filterMap Stmt.methodName?
+
+/-- Check the complete public model surface of a Python class.
+
+This is deliberately exact: adding, removing, or renaming a method in the
+Python source changes the generated AST and invalidates the adjacent proof.
+-/
+def Module.hasExactlyClassMethods (module : Module) (name : String)
+    (methods : List String) : Bool :=
+  module.classMethodNames name == some methods
+
+/-- A deterministic digest of the complete typed AST used to bind a proof to source.
+
+The structural predicates describe the intended model, while this digest makes
+every parsed detail part of the checked obligation. It is not a trust boundary:
+the generated JSON has already been decoded into `Module` before hashing.
+-/
+def Module.fingerprint (module : Module) : UInt64 :=
+  let body := match module.body with
+    | .expr (.constant (.string _)) :: rest => rest
+    | body => body
+  hash (reprStr ({ body } : Module))
 
 /-- Recognize a wrapper constructor that stores one annotated scalar field. -/
 def isScalarWrapperInit (payloadAnnotation : String) : Stmt → Bool

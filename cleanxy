@@ -815,6 +815,23 @@ def olean_path_for_lean(source: Path) -> Path:
     return Path.cwd() / ".cleanxy" / "olean" / relative.with_suffix(".olean")
 
 
+def lake_olean_path_for_lean(source: Path) -> Path:
+    """Return Lake's object path for an importable project source module.
+
+    Proof files such as `range.py.lean` can share a prefix with `range.lean`.
+    Lake resolves that project module in its own build tree before `LEAN_PATH`,
+    so requirement wrappers can import the proof only when its object is here.
+    """
+    try:
+        relative = source.resolve().relative_to(Path.cwd().resolve())
+    except ValueError as error:
+        raise SystemExit(
+            f"error: {source}: Lean files outside the current directory "
+            "cannot be cached by cleanxy"
+        ) from error
+    return Path.cwd() / ".lake/build/lib/lean" / relative.with_suffix(".olean")
+
+
 def lean_env() -> dict[str, str]:
     """Return an environment that lets Lean import cached and source modules."""
     env = os.environ.copy()
@@ -994,7 +1011,7 @@ def require_executable(name: str) -> None:
 def module_with_python_builtins(source: Path, module: ast.Module) -> ast.Module:
     """Append plain-Python builtin-class definitions to a program AST."""
     stdlib_source = Path.cwd() / "lang/py/builtin/type/str.py"
-    if source.resolve() == stdlib_source.resolve():
+    if source.resolve().parent == stdlib_source.resolve().parent:
         return module
     if not stdlib_source.exists():
         raise SystemExit(
@@ -1044,7 +1061,7 @@ def check_source(source: Path) -> int:
         RequirementEmitter(proof_path, proof_module, requirements).emit()
     )
     ast_olean_path = olean_path_for_lean(ast_path)
-    proof_olean_path = olean_path_for_lean(proof_path)
+    proof_olean_path = lake_olean_path_for_lean(proof_path)
     requirements_olean_path = olean_path_for_lean(requirements_path)
     for lean_path, olean_path in [
         (ast_path, ast_olean_path),

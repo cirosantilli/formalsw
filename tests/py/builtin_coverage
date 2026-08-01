@@ -26,14 +26,7 @@ def definitions(paths: list[str]) -> set[str]:
     }
 
 
-FUNCTION_FILES = [
-    "function/conversion.lean",
-    "function/iterable.lean",
-    "function/numeric.lean",
-    "function/protocol.lean",
-    "function/reflection.lean",
-    "function/runtime.lean",
-]
+FUNCTION_FILE = REPO / "lang/py/builtin/function.lean"
 
 TYPE_FILES = {
     "bool": ["bool.lean"],
@@ -182,7 +175,14 @@ def audit_functions() -> list[str]:
         )
         if match:
             documented.append(match.group(2).split(".")[0])
-    modeled = definitions(FUNCTION_FILES)
+    modeled = {
+        quoted or ordinary
+        for quoted, ordinary in re.findall(
+            r"^def\s+(?:(?:[A-Za-z_][\w]*\.)?«([^»]+)»|(?:[A-Za-z_][\w]*\.)?([A-Za-z_][\w?]*))",
+            FUNCTION_FILE.read_text(),
+            re.MULTILINE,
+        )
+    }
     return [f"function {name}" for name in dict.fromkeys(documented) if name not in modeled]
 
 

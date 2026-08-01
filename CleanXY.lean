@@ -9,12 +9,7 @@ import lang.py.builtin.type.contextmanager
 import lang.py.builtin.type.descriptor
 import lang.py.builtin.type.dict
 import lang.py.builtin.type.dictview
-import lang.py.builtin.type.function.numeric
-import lang.py.builtin.type.function.protocol
-import lang.py.builtin.type.function.iterable
-import lang.py.builtin.type.function.conversion
-import lang.py.builtin.type.function.reflection
-import lang.py.builtin.type.function.runtime
+import lang.py.builtin.function
 import lang.py.builtin.type.int
 import lang.py.builtin.type.iterator
 import lang.py.builtin.type.list
