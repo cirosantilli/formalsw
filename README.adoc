@@ -540,6 +540,16 @@ Finally, cleanxy runs Lean putting everything together:
 * link:lang/py/builtin/type/str.py[] and adjacent Lean proof for the
   plain-Python builtin string model
 
+=== Python builtin model
+
+The reusable non-floating-point builtin semantics live under link:lang/py/builtin/type[]. Type models cover truth and comparison protocols, arbitrary-precision integers, iterators, sequences, strings, bytes, byte arrays, memory views, dictionaries and dictionary views, sets and frozen sets, context managers, object/type metadata, descriptors, generic aliases, unions, code/function/module objects, and Python's singleton object types. Builtin functions live under link:lang/py/builtin/type/function[].
+
+Mappings preserve Python insertion order while using a size-balanced binary search tree for key lookup. Sets and frozen sets use the corresponding size-balanced tree-set representation. The Lean types bundle their tree well-formedness invariants, and link:tests/py/builtin_models.lean[] checks that the dictionary and set facades expose those proofs.
+
+Floating-point and complex-number semantics are deliberately excluded for now. Integer operations that would necessarily produce a float, such as two-argument `pow` with a negative exponent, return an explicit `floatingPointExcluded` result; integer-only branches such as negative modular powers and negative-digit rounding remain modeled.
+
+link:tests/py/builtin_coverage[] derives callable coverage from the CPython `functions.rst` and `stdtypes.rst` documentation, with `CPYTHON_ROOT` selecting the CPython checkout. It also checks operations and runtime types documented only in prose or tables. The normal `./test` command runs this audit and the executable Lean behavior suite.
+
 == Development
 
 === Development installation

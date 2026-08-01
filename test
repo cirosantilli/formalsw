@@ -186,11 +186,48 @@ def main() -> int:
         f"{'PASS' if source_tree_clean else 'FAIL'} no Lean objects in source tree",
         flush=True,
     )
+    builtin_coverage = subprocess.run(
+        [sys.executable, "tests/py/builtin_coverage"],
+        cwd=REPO,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    builtin_coverage_passed = builtin_coverage.returncode == 0
+    print(
+        f"{'PASS' if builtin_coverage_passed else 'FAIL'} builtin documentation coverage",
+        flush=True,
+    )
+    if not builtin_coverage_passed:
+        if builtin_coverage.stdout:
+            print(textwrap.indent(builtin_coverage.stdout.rstrip(), "  "))
+        if builtin_coverage.stderr:
+            print(textwrap.indent(builtin_coverage.stderr.rstrip(), "  "))
+    builtin_models = subprocess.run(
+        ["lake", "env", "lean", "tests/py/builtin_models.lean"],
+        cwd=REPO,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    builtin_models_passed = builtin_models.returncode == 0
+    print(
+        f"{'PASS' if builtin_models_passed else 'FAIL'} builtin model behavior",
+        flush=True,
+    )
+    if not builtin_models_passed:
+        output = builtin_models.stdout + builtin_models.stderr
+        if output:
+            print(textwrap.indent(output.rstrip(), "  "))
     return 0 if (
         all(result.passed for result in results)
         and stub_passed
         and json_ast_passed
         and source_tree_clean
+        and builtin_coverage_passed
+        and builtin_models_passed
     ) else 1
 
 

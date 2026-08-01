@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Audit CPython builtin documentation directives against CleanXY model symbols."""
+
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+
+
+REPO = Path(__file__).resolve().parents[2]
+CPYTHON = Path(os.environ.get("CPYTHON_ROOT", Path.home() / "git/cpython"))
+DOCS = CPYTHON / "Doc/library"
+MODEL_ROOT = REPO / "lang/py/builtin/type"
+
+
+def definitions(paths: list[str]) -> set[str]:
+    text = "\n".join((MODEL_ROOT / path).read_text() for path in paths)
+    return {
+        quoted or ordinary
+        for quoted, ordinary in re.findall(
+            r"^def\s+(?:(?:[A-Za-z_][\w]*\.)?«([^»]+)»|(?:[A-Za-z_][\w]*\.)?([A-Za-z_][\w?]*))",
+            text,
+            re.MULTILINE,
+        )
+    }
+
+
+FUNCTION_FILES = [
+    "function/conversion.lean",
+    "function/iterable.lean",
+    "function/numeric.lean",
+    "function/protocol.lean",
+    "function/reflection.lean",
+    "function/runtime.lean",
+]
+
+TYPE_FILES = {
+    "bool": ["bool.lean"],
+    "bytearray": ["bytearray.lean", "bytes.lean"],
+    "bytes": ["bytes.lean"],
+    "dict": ["dict.lean", "dictview.lean"],
+    "frozenset": ["set.lean"],
+    "int": ["int.lean"],
+    "list": ["list.lean", "sequence.lean"],
+    "memoryview": ["memoryview.lean"],
+    "object": ["object.lean"],
+    "property": ["descriptor.lean"],
+    "range": ["range.lean", "sequence.lean"],
+    "set": ["set.lean"],
+    "slice": ["slice.lean"],
+    "str": ["str.lean"],
+    "super": ["super.lean"],
+    "tuple": ["tuple.lean", "sequence.lean"],
+    "type": ["type.lean"],
+}
+
+METHOD_FILES = {
+    "int": ["int.lean"],
+    "iterator": ["iterator.lean"],
+    "sequence": ["sequence.lean", "list.lean", "tuple.lean", "range.lean"],
+    "list": ["list.lean", "sequence.lean"],
+    "tuple": ["tuple.lean", "sequence.lean"],
+    "range": ["range.lean", "sequence.lean"],
+    "str": ["str.lean"],
+    "bytes": ["bytes.lean"],
+    "bytearray": ["bytearray.lean", "bytes.lean"],
+    "memoryview": ["memoryview.lean"],
+    "set": ["set.lean"],
+    "dict": ["dict.lean", "dictview.lean"],
+    "contextmanager": ["contextmanager.lean", "memoryview.lean"],
+    "special": ["special.lean", "type.lean"],
+}
+
+METHOD_NAMES = {
+    "__eq__": "equivalent",
+    "__enter__": "enter",
+    "__exit__": "exit",
+    "__iter__": "iter",
+    "__next__": "next",
+    "as_integer_ratio": "asIntegerRatio",
+    "bit_count": "bitCount",
+    "bit_length": "bitLength",
+    "difference_update": "differenceUpdate",
+    "endswith": "endsWith",
+    "expandtabs": "expandTabs",
+    "find": "find?",
+    "format_map": "formatMap",
+    "from_bytes": "fromBytes",
+    "fromhex": "fromHex",
+    "fromkeys": "fromKeys",
+    "get": "get?",
+    "index": "index",
+    "intersection_update": "intersectionUpdate",
+    "isalnum": "isAlnum",
+    "isalpha": "isAlpha",
+    "isascii": "isAscii",
+    "isdecimal": "isDecimal",
+    "isdigit": "isDigit",
+    "isdisjoint": "isDisjoint",
+    "isidentifier": "isIdentifier",
+    "islower": "isLower",
+    "isnumeric": "isNumeric",
+    "isprintable": "isPrintable",
+    "isspace": "isSpace",
+    "issubset": "isSubset",
+    "issuperset": "isSuperset",
+    "istitle": "isTitle",
+    "isupper": "isUpper",
+    "is_integer": "isInteger",
+    "popitem": "popItem?",
+    "removeprefix": "removePrefix",
+    "removesuffix": "removeSuffix",
+    "rfind": "rfind?",
+    "setdefault": "setDefault",
+    "splitlines": "splitLines",
+    "startswith": "startsWith",
+    "swapcase": "swapCase",
+    "symmetric_difference": "symmetricDifference",
+    "symmetric_difference_update": "symmetricDifferenceUpdate",
+    "to_bytes": "toBytes",
+    "tobytes": "toBytes",
+    "tolist": "toList",
+    "toreadonly": "toReadonly",
+}
+
+# Operations documented in tables or prose rather than RST callable directives.
+PROSE_SYMBOLS = {
+    "truth.lean": {"test", "andValue", "orValue", "notValue"},
+    "comparison.lean": {
+        "eq", "ne", "lt", "le", "gt", "ge", "is", "isNot", "mem", "notMem", "richCompare",
+    },
+    "int.lean": {
+        "add", "sub", "mul", "floorDiv", "mod", "divMod", "pow", "neg", "pos",
+        "abs", "bitAnd", "bitOr", "bitXor", "bitNot", "shiftLeft", "shiftRight",
+        "truth", "equal", "lessThan", "lessEqual", "greaterThan", "greaterEqual", "parse",
+    },
+    "sequence.lean": {"contains", "concat", "repeated", "get", "slice", "count", "index?"},
+    "list.lean": {
+        "append", "clear", "copy", "extend", "insert", "pop", "remove", "reverse", "sort",
+        "setAt", "deleteAt", "setSlice", "deleteSlice",
+    },
+    "range.lean": {"length", "get?", "contains", "index?", "count", "equivalent"},
+    "str.lean": {
+        "contains", "join", "replace", "split", "rsplit", "translate", "encode", "percentFormat",
+    },
+    "bytes.lean": {
+        "contains", "join", "replace", "split", "rsplit", "translate", "decode", "percentFormat",
+    },
+    "bytearray.lean": {"append", "clear", "copy", "extend", "insert", "pop", "remove", "reverse", "resize"},
+    "set.lean": {
+        "contains", "isSubset", "isProperSubset", "isSuperset", "isProperSuperset", "union",
+        "intersection", "difference", "symmetricDifference", "update", "intersectionUpdate",
+        "differenceUpdate", "symmetricDifferenceUpdate", "add", "remove", "discard", "pop?", "clear",
+    },
+    "dict.lean": {
+        "size", "contains", "get?", "set", "erase", "clear", "copy", "fromKeys", "items",
+        "keys", "values", "pop?", "popItem?", "setDefault", "update", "union", "equivalent",
+    },
+    "contextmanager.lean": {"withContext"},
+    "special.lean": {"normalize", "containsType"},
+}
+
+PROSE_TYPES = {
+    "iterator.lean": {"Iterator", "AsyncIterator"},
+    "contextmanager.lean": {"ContextManager"},
+    "dictview.lean": {"View", "MappingProxy"},
+    "descriptor.lean": {"BoundMethod"},
+    "special.lean": {
+        "GenericAlias", "UnionType", "ModuleObject", "CodeObject", "FunctionObject",
+        "BuiltinFunctionObject", "NoneType", "EllipsisType", "NotImplementedType",
+    },
+}
+
+
+def audit_functions() -> list[str]:
+    documented = []
+    for line in (DOCS / "functions.rst").read_text().splitlines():
+        match = re.match(
+            r"^\.\. (function|awaitablefunction|decorator)::\s*([A-Za-z_][\w.]*)",
+            line,
+        )
+        if match:
+            documented.append(match.group(2).split(".")[0])
+    modeled = definitions(FUNCTION_FILES)
+    return [f"function {name}" for name in dict.fromkeys(documented) if name not in modeled]
+
+
+def audit_types() -> list[str]:
+    documented = []
+    for line in (DOCS / "functions.rst").read_text().splitlines():
+        match = re.match(r"^\.\. class::\s*([A-Za-z_][\w.]*)", line)
+        if match:
+            documented.append(match.group(1))
+    exclusions = {"float", "complex"}
+    return [
+        f"type {name}"
+        for name in dict.fromkeys(documented)
+        if name not in exclusions and name not in TYPE_FILES
+    ]
+
+
+def section_owner(line_number: int) -> str | None:
+    ranges = [
+        (207, 643, "int"),
+        (896, 971, "iterator"),
+        (972, 1728, "sequence"),
+        (1729, 3241, "str"),
+        (3242, 3376, "bytes"),
+        (3377, 4521, "bytearray"),
+        (4522, 5017, "memoryview"),
+        (5018, 5233, "set"),
+        (5234, 5635, "dict"),
+        (5636, 5710, "contextmanager"),
+        (5711, 6097, "special"),
+    ]
+    return next((owner for start, end, owner in ranges if start <= line_number <= end), None)
+
+
+def audit_methods() -> list[str]:
+    aliases = {"container": "iterator", "frozenset": "set"}
+    known_owners = set(METHOD_FILES) | {"container", "frozenset"}
+    missing = []
+    lines = (DOCS / "stdtypes.rst").read_text().splitlines()
+    for line_number, line in enumerate(lines, start=1):
+        match = re.match(
+            r"\s*\.\. (method|classmethod|staticmethod)::\s*([A-Za-z_][\w.]*)",
+            line,
+        )
+        if not match:
+            continue
+        owner = section_owner(line_number)
+        parts = match.group(2).split(".")
+        if len(parts) > 1 and parts[-2] in known_owners:
+            owner = aliases.get(parts[-2], parts[-2])
+        if owner is None:  # float and complex section, intentionally excluded
+            continue
+        method = parts[-1]
+        symbol = METHOD_NAMES.get(method, method)
+        if method == "pop" and owner in {"dict", "set"}:
+            symbol = "pop?"
+        if method == "index" and owner == "memoryview":
+            symbol = "index?"
+        if symbol not in definitions(METHOD_FILES[owner]):
+            missing.append(f"stdtypes.rst:{line_number} {owner}.{method} -> {symbol}")
+    return missing
+
+
+def audit_prose_operations() -> list[str]:
+    missing = []
+    for path, required in PROSE_SYMBOLS.items():
+        modeled = definitions([path])
+        for symbol in sorted(required - modeled):
+            missing.append(f"prose/table operation {path}:{symbol}")
+    return missing
+
+
+def audit_prose_types() -> list[str]:
+    missing = []
+    for path, required in PROSE_TYPES.items():
+        text = (MODEL_ROOT / path).read_text()
+        declared = set(
+            re.findall(r"^(?:structure|inductive|abbrev)\s+([A-Za-z_][\w]*)", text, re.MULTILINE)
+        )
+        for name in sorted(required - declared):
+            missing.append(f"prose-defined type {path}:{name}")
+    return missing
+
+
+def main() -> int:
+    if not DOCS.exists():
+        print(f"CPython documentation not found: {DOCS}")
+        return 2
+    missing = (
+        audit_functions()
+        + audit_types()
+        + audit_methods()
+        + audit_prose_operations()
+        + audit_prose_types()
+    )
+    if missing:
+        print("Missing builtin models:")
+        for item in missing:
+            print(f"  {item}")
+        return 1
+    print("All documented non-floating builtin directives and prose operations have model symbols.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

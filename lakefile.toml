@@ -10,4 +10,37 @@ name = "CleanXY"
 # Language-specific models live below `lang/`.
 [[lean_lib]]
 name = "lang.py.CleanXY"
-roots = ["lang.py.CleanXY.Model"]
+roots = [
+  "lang.py.CleanXY.Model",
+  "lang.py.builtin.type.bool",
+  "lang.py.builtin.type.bytearray",
+  "lang.py.builtin.type.bytes",
+  "lang.py.builtin.type.comparison",
+  "lang.py.builtin.type.core",
+  "lang.py.builtin.type.contextmanager",
+  "lang.py.builtin.type.descriptor",
+  "lang.py.builtin.type.dict",
+  "lang.py.builtin.type.dictview",
+  "lang.py.builtin.type.function.numeric",
+  "lang.py.builtin.type.function.protocol",
+  "lang.py.builtin.type.function.iterable",
+  "lang.py.builtin.type.function.conversion",
+  "lang.py.builtin.type.function.reflection",
+  "lang.py.builtin.type.function.runtime",
+  "lang.py.builtin.type.int",
+  "lang.py.builtin.type.iterator",
+  "lang.py.builtin.type.list",
+  "lang.py.builtin.type.memoryview",
+  "lang.py.builtin.type.object",
+  "lang.py.builtin.type.range",
+  "lang.py.builtin.type.sequence",
+  "lang.py.builtin.type.set",
+  "lang.py.builtin.type.slice",
+  "lang.py.builtin.type.subsequence",
+  "lang.py.builtin.type.str",
+  "lang.py.builtin.type.special",
+  "lang.py.builtin.type.super",
+  "lang.py.builtin.type.tuple",
+  "lang.py.builtin.type.type",
+  "lang.py.builtin.type.truth",
+]
