@@ -1,7 +1,7 @@
-import lang.py.CleanXY.Concurrent
-import lang.py.CleanXY.ParallelLiveness
+import lang.py.FormalSW.Concurrent
+import lang.py.FormalSW.ParallelLiveness
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 /-- Values at the Python/Lean boundary. Lists are materialized as shared mutable
 arrays when passed to a trial; theorem variables describe their initial contents. -/
@@ -289,4 +289,4 @@ theorem halts_deadlockFree {call : Call} (h : call.Halts) : call.DeadlockFree :=
 end Call
 
 end PyTrial
-end CleanXY.PyAst
+end FormalSW.PyAst

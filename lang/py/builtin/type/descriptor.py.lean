@@ -1,9 +1,9 @@
-import «.cleanxy».lang.py.builtin.type.«descriptor.py.ast»
+import «.formalsw».lang.py.builtin.type.«descriptor.py.ast»
 import lang.py.builtin.type.descriptor
 
 namespace lang.py.builtin.type.descriptor
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 theorem modeled :
     DescriptorAst.module.hasExactlyClassMethods "property"
@@ -12,7 +12,7 @@ theorem modeled :
     DescriptorAst.module.hasExactlyClassMethods "staticmethod" ["__init__", "__get__"] = true := by
   decide
 
-theorem source_fingerprint : DescriptorAst.module.fingerprint = 6012450843489875384 := by
+theorem source_fingerprint : DescriptorAst.module.fingerprint = 531026127595171168 := by
   native_decide
 
 end lang.py.builtin.type.descriptor

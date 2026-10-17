@@ -2,7 +2,7 @@
 """A shared counter and the classic lost-update race.
 
 Run: python3 tests/py/parallel_shared_counter.py
-Prove: ./cleanxy tests/py/parallel_shared_counter.py
+Prove: ./formalsw tests/py/parallel_shared_counter.py
 
 The counter is the first element of a nonempty integer list. The proof covers
 any initial contents and any nonnegative worker count; main demonstrates two workers.
@@ -17,7 +17,7 @@ from time import sleep
 def increment_unsafe(counter: list[int], mutex: Lock) -> None:
     """Increment using an unprotected read-modify-write operation.
 
-    @cleanxy: theorem loses_an_update :
+    @formalsw: theorem loses_an_update :
       ∃ (counter worker_count : PyValue),
         py("valid_trial_input(counter, worker_count)") ∧
         Throws(py("run_trial(this_function, counter, worker_count)"))
@@ -30,7 +30,7 @@ def increment_unsafe(counter: list[int], mutex: Lock) -> None:
 def increment_safe(counter: list[int], mutex: Lock) -> None:
     """Hold the shared mutex for the whole read-modify-write operation.
 
-    @cleanxy: theorem preserves_updates :
+    @formalsw: theorem preserves_updates :
       ∀ (counter worker_count : PyValue),
         py("valid_trial_input(counter, worker_count)") →
         Returns(py("run_trial(this_function, counter, worker_count)"))

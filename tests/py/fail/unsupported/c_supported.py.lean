@@ -1,8 +1,8 @@
-import «.cleanxy».tests.py.fail.unsupported.«c_supported.py.ast»
-import CleanXY
+import «.formalsw».tests.py.fail.unsupported.«c_supported.py.ast»
+import FormalSW
 
 namespace tests.py.fail.unsupported.c_supported
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 theorem identity.«Returns» (n : Int) :
     (scalarFunction CSupportedAst.module "identity" [.int n]).Returns := by

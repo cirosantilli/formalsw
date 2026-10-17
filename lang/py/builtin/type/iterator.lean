@@ -2,9 +2,9 @@ import lang.py.builtin.type.core
 
 /-! Python's iterator and asynchronous-iterator protocols as explicit state machines. -/
 
-namespace CleanXY.Py.Builtin.Iterator
+namespace FormalSW.Py.Builtin.Iterator
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 /-- A finite iterator state.  Containers construct one from their current traversal order. -/
 structure Iterator (α : Type u) where
@@ -48,4 +48,4 @@ def anextD (iterator : AsyncIterator α) (default : α) : α × AsyncIterator α
   | [] => (default, iterator)
   | value :: rest => (value, ⟨rest⟩)
 
-end CleanXY.Py.Builtin.Iterator
+end FormalSW.Py.Builtin.Iterator

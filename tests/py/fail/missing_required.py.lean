@@ -1,5 +1,5 @@
-import «.cleanxy».tests.py.fail.«missing_required.py.ast»
-import CleanXY
+import «.formalsw».tests.py.fail.«missing_required.py.ast»
+import FormalSW
 
 namespace tests.py.fail.missing_required
 

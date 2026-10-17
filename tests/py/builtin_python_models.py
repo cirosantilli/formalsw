@@ -13,7 +13,7 @@ MODEL_ROOT = ROOT / "lang/py/builtin/type"
 
 def load(name: str):
     path = MODEL_ROOT / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(f"cleanxy_builtin_{name}", path)
+    spec = importlib.util.spec_from_file_location(f"formalsw_builtin_{name}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -62,7 +62,7 @@ def main() -> None:
         raise AssertionError("iterator did not raise StopIteration")
 
     functions = load_path(
-        "cleanxy_builtin_functions",
+        "formalsw_builtin_functions",
         ROOT / "lang/py/builtin/function.py",
     )
     assert functions.bin(-10) == [45, 48, 98, 49, 48, 49, 48]

@@ -1,8 +1,8 @@
-import CleanXY
+import FormalSW
 
 namespace tests.py.builtinModels
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 example : Int.floorDiv (-3) 2 = .ok (-2) := rfl
 example : Int.mod 3 (-2) = .ok (-1) := rfl

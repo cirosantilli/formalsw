@@ -2,5 +2,5 @@
 
 
 def identity(n: int) -> int:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     return n

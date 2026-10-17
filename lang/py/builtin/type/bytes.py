@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plain-Python model of bytes over the primitive list model.
 
-@cleanxy theorem modeled : BytesAst.module.hasExactlyClassMethods "bytes" ["__init__", "__eq__", "__lt__", "__le__", "__gt__", "__ge__", "__len__", "__getitem__"] = true
-@cleanxy theorem source_fingerprint : BytesAst.module.fingerprint = 863951668132063301
+@formalsw theorem modeled : BytesAst.module.hasExactlyClassMethods "bytes" ["__init__", "__eq__", "__lt__", "__le__", "__gt__", "__ge__", "__len__", "__getitem__"] = true
+@formalsw theorem source_fingerprint : BytesAst.module.fingerprint = 2670698971279142105
 """
 
 

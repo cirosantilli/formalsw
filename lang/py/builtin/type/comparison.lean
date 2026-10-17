@@ -2,9 +2,9 @@ import lang.py.builtin.type.core
 
 /-! Rich comparison delegation, identity, and membership protocols. -/
 
-namespace CleanXY.Py.Builtin.Comparison
+namespace FormalSW.Py.Builtin.Comparison
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 inductive Operator where
   | eq | ne | lt | le | gt | ge
@@ -57,4 +57,4 @@ def mem (model : Container ContainerType Element) (element : Element)
 def notMem (model : Container ContainerType Element) (element : Element)
     (container : ContainerType) : Result Bool := (!·) <$> model.contains container element
 
-end CleanXY.Py.Builtin.Comparison
+end FormalSW.Py.Builtin.Comparison

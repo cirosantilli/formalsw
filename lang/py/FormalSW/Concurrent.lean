@@ -1,10 +1,10 @@
-import lang.py.CleanXY.Parallel
+import lang.py.FormalSW.Parallel
 
 /-! Unbounded reference-object programs protected by one common mutex.
 `LockedEnsures` exposes acquire, every individual body operation, and release.
 While a worker owns the mutex, all other workers are blocked at acquire.
 Its inductive proof requires termination and covers every choice of next owner. -/
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 /-- Follow a reference path. A missing field or dereferencing None fails, so a
 scenario assertion cannot pass merely because its expression raised. -/
 def SharedState.readPath (state : SharedState) : SharedValue → List String → Option SharedValue
@@ -160,4 +160,4 @@ def Ensures {Job : Type} (module : Module) (function : String)
     LockedEnsures (fun job => (ops, parameters.zip (arguments job))) post jobs none heap
 
 end Concurrent
-end CleanXY.PyAst
+end FormalSW.PyAst

@@ -23,7 +23,7 @@ atexit.register(_close)
 def parse_theorem(text):
     global _parser
     if _parser is None:
-        built = subprocess.run(['lake', 'build', 'CleanXY'], capture_output=True, text=True)
+        built = subprocess.run(['lake', 'build', 'FormalSW'], capture_output=True, text=True)
         if built.returncode:
             raise ScenarioError('failed to build Lean specification parser:\n' + built.stdout + built.stderr)
         _parser = subprocess.Popen(['lake', 'env', 'lean', '--run', 'lang/py/spec_frontend.lean'],

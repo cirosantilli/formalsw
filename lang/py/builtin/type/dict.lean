@@ -6,7 +6,7 @@ binary search tree.  The list records Python's observable insertion order;
 lookup, insertion, replacement, and deletion use the balanced tree.
 -/
 
-namespace CleanXY.Py.Builtin.Dict
+namespace FormalSW.Py.Builtin.Dict
 
 universe u v
 
@@ -101,4 +101,4 @@ theorem tree_wellFormed (d : Dict α β cmp) :
     (letI : Ord α := ⟨cmp⟩; d.tree.inner.inner.WF) := by
   exact d.tree.inner.wf
 
-end CleanXY.Py.Builtin.Dict
+end FormalSW.Py.Builtin.Dict

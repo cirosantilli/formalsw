@@ -7,11 +7,11 @@ def push(n: int) -> None:
     """
     Append for every initial list and integer, preserving aliases.
 
-    @cleanxy: Returns
-    @cleanxy: Halts
-    @cleanxy: Not Throws
-    @cleanxy: ReturnType
-    @cleanxy: theorem returns_on_heap :
+    @formalsw: Returns
+    @formalsw: Halts
+    @formalsw: Not Throws
+    @formalsw: ReturnType
+    @formalsw: theorem returns_on_heap :
       Mutable.Heap.Valid heap →
       Mutable.Value.HasType heap (.ref items) "list[int]" →
       Returns(this_function(n))
@@ -21,8 +21,8 @@ def push(n: int) -> None:
 
 def push_via_alias(n: int) -> None:
     """
-    @cleanxy: Equiv(push)
-    @cleanxy: EquivReturn(push)
+    @formalsw: Equiv(push)
+    @formalsw: EquivReturn(push)
     """
     local = items
     local.append(n)
@@ -31,8 +31,8 @@ def push_via_alias(n: int) -> None:
 def replace(n: int) -> None:
     """Rebinding differs from mutation, even when the values match.
 
-    @cleanxy: Returns
-    @cleanxy: Not Equiv(push)
+    @formalsw: Returns
+    @formalsw: Not Equiv(push)
     """
     global items
     items = items + [n]
@@ -41,9 +41,9 @@ def replace(n: int) -> None:
 def push_then_raise(n: int) -> None:
     """Mutations survive exceptions.
 
-    @cleanxy: Halts
-    @cleanxy: Throws
-    @cleanxy: Not Equiv(raise_without_push)
+    @formalsw: Halts
+    @formalsw: Throws
+    @formalsw: Not Equiv(raise_without_push)
     """
     items.append(n)
     raise ValueError("failure")
@@ -56,7 +56,7 @@ def raise_without_push(n: int) -> None:
 def read_first(n: int) -> int:
     """Empty entry lists are included in the domain.
 
-    @cleanxy: Throws
+    @formalsw: Throws
     """
     return items[0] + n
 
@@ -73,7 +73,7 @@ def read_alias(n: int) -> int:
 def push_argument(other: list[int], n: int) -> int:
     """The argument and global may refer to the same list.
 
-    @cleanxy: Returns
+    @formalsw: Returns
     """
     other.append(n)
     return len(items)

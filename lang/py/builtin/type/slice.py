@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plain-Python data model for slice.
 
-@cleanxy theorem modeled : SliceAst.module.hasExactlyClassMethods "slice" ["__init__"] = true
-@cleanxy theorem source_fingerprint : SliceAst.module.fingerprint = 18103686344632525824
+@formalsw theorem modeled : SliceAst.module.hasExactlyClassMethods "slice" ["__init__"] = true
+@formalsw theorem source_fingerprint : SliceAst.module.fingerprint = 13788410798301299466
 """
 
 

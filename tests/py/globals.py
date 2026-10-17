@@ -8,23 +8,23 @@ enabled: bool = True
 
 def add_offset(n: int) -> int:
     """
-    @cleanxy: Returns
-    @cleanxy: Halts
-    @cleanxy: Not Throws
-    @cleanxy: ReturnType
-    @cleanxy: theorem returns_with_offset (n offset : Int) :
+    @formalsw: Returns
+    @formalsw: Halts
+    @formalsw: Not Throws
+    @formalsw: ReturnType
+    @formalsw: theorem returns_with_offset (n offset : Int) :
       Returns(this_function(n))
     """
     return n + offset
 
 
 def add_offset_commuted(n: int) -> int:
-    """@cleanxy: Equiv(add_offset)"""
+    """@formalsw: Equiv(add_offset)"""
     return offset + n
 
 
 def advance(n: int) -> int:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     global total
     total += n
     return total
@@ -32,8 +32,8 @@ def advance(n: int) -> int:
 
 def advance_explicit(n: int) -> int:
     """
-    @cleanxy: Equiv(advance)
-    @cleanxy: EquivReturn(advance)
+    @formalsw: Equiv(advance)
+    @formalsw: EquivReturn(advance)
     """
     global total
     total = total + n
@@ -43,7 +43,7 @@ def advance_explicit(n: int) -> int:
 def advance_declared_in_branch(n: int) -> int:
     """Scope declarations apply to the whole function, even in a dead branch.
 
-    @cleanxy: Equiv(advance)
+    @formalsw: Equiv(advance)
     """
     if False:
         global total
@@ -54,7 +54,7 @@ def advance_declared_in_branch(n: int) -> int:
 def return_only(n: int) -> int:
     """Same returned number, but omitting the update changes behavior.
 
-    @cleanxy: Not Equiv(advance)
+    @formalsw: Not Equiv(advance)
     """
     return total + n
 
@@ -66,9 +66,9 @@ def raise_before(n: int) -> int:
 def raise_after(n: int) -> int:
     """An exception does not roll back global assignments.
 
-    @cleanxy: Halts
-    @cleanxy: Throws
-    @cleanxy: Not Equiv(raise_before)
+    @formalsw: Halts
+    @formalsw: Throws
+    @formalsw: Not Equiv(raise_before)
     """
     global total
     total += n
@@ -77,14 +77,14 @@ def raise_after(n: int) -> int:
 
 def read_label() -> str:
     """
-    @cleanxy: Returns
-    @cleanxy: ReturnType
+    @formalsw: Returns
+    @formalsw: ReturnType
     """
     return label
 
 
 def read_enabled() -> bool:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     return enabled
 
 
@@ -101,7 +101,7 @@ def read_total(n: int) -> int:
 def parameter_named_total(total: int) -> int:
     """The argument and the other function's global are separate inputs.
 
-    @cleanxy: Not Equiv(read_total)
+    @formalsw: Not Equiv(read_total)
     """
     return total
 

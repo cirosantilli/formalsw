@@ -1,6 +1,6 @@
-import CleanXY
+import FormalSW
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 private def _this_module : Module := ⟨[]⟩
 private def low : Value := .int 1

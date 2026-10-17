@@ -2,9 +2,9 @@ import lang.py.builtin.type.core
 
 /-! The synchronous context-manager protocol and `with` state transition. -/
 
-namespace CleanXY.Py.Builtin.ContextManager
+namespace FormalSW.Py.Builtin.ContextManager
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 structure ContextManager (State : Type u) (Value : Type v) where
   enter : State → Result (Value × State)
@@ -22,4 +22,4 @@ def withContext (manager : ContextManager State Value) (initial : State)
       let (suppressed, exited) ← manager.exit entered (some error)
       if suppressed then return (none, exited) else throw error
 
-end CleanXY.Py.Builtin.ContextManager
+end FormalSW.Py.Builtin.ContextManager

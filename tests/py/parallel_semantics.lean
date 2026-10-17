@@ -1,5 +1,5 @@
-import CleanXY
-open CleanXY.PyAst
+import FormalSW
+open FormalSW.PyAst
 
 private def cell : SharedLocation := .item (.name "data") (.constant (.int 0))
 private def increment : List ParallelOp :=

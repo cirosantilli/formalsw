@@ -1,11 +1,11 @@
-import CleanXY
+import FormalSW
 
 /-! A line-oriented JSON service for the CLI. All theorem/header/quotation
 recognition below uses Lean's parser and syntax trees, including comments,
 strings, raw strings, nested binders and parentheses. It does not elaborate
 proofs; native quotation elaborators do that when checking the generated file. -/
 
-open Lean CleanXY.PyAst
+open Lean FormalSW.PyAst
 
 private partial def quotes (stx : Syntax) : Array Json := Id.run do
   let recognized := match stx with
@@ -35,7 +35,7 @@ private def parseSpec (env : Environment) (text : String) : Except String Json :
 unsafe def main : IO Unit := do
   enableInitializersExecution
   initSearchPath (← findSysroot)
-  let env ← importModules #[{ module := `CleanXY }] {} (loadExts := true)
+  let env ← importModules #[{ module := `FormalSW }] {} (loadExts := true)
   let input ← IO.getStdin
   let output ← IO.getStdout
   repeat

@@ -13,9 +13,9 @@ import lang.py.builtin.type.type
 
 
 
-namespace CleanXY.Py.Builtin.Function.Conversion
+namespace FormalSW.Py.Builtin.Function.Conversion
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 private def digit (value : Nat) : Nat := if value < 10 then 48 + value else 87 + value
 
@@ -70,12 +70,12 @@ def format (representation : Representation α) (object : α) (specification : S
 example : bin (-10) = [45, 48, 98, 49, 48, 49, 48] := rfl
 example : hex 255 = [48, 120, 102, 102] := rfl
 
-end CleanXY.Py.Builtin.Function.Conversion
+end FormalSW.Py.Builtin.Function.Conversion
 
 
-namespace CleanXY.Py.Builtin.Function.Iterable
+namespace FormalSW.Py.Builtin.Function.Iterable
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 def all (truth : α → Bool) (values : List α) : Bool := values.all truth
 def any (truth : α → Bool) (values : List α) : Bool := values.any truth
@@ -200,12 +200,12 @@ example : enumerate [10, 20] 3 = ⟨[(3, 10), (4, 20)]⟩ := rfl
 example : zip [[1, 2], [3, 4]] = .ok ⟨[[1, 3], [2, 4]]⟩ := rfl
 example : zip [[1], [2, 3]] true = .error (.valueError "zip() arguments have different lengths") := rfl
 
-end CleanXY.Py.Builtin.Function.Iterable
+end FormalSW.Py.Builtin.Function.Iterable
 
 
-namespace CleanXY.Py.Builtin.Function.Numeric
+namespace FormalSW.Py.Builtin.Function.Numeric
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 def abs (number : Int) : Int := Int.natAbs number
 def divmod (left right : Int) : Result (Int × Int) := Int.divMod left right
@@ -235,12 +235,12 @@ example : round 25 (some (-1)) = .ok 20 := rfl
 example : round 35 (some (-1)) = .ok 40 := rfl
 example : round (-25) (some (-1)) = .ok (-20) := rfl
 
-end CleanXY.Py.Builtin.Function.Numeric
+end FormalSW.Py.Builtin.Function.Numeric
 
 
-namespace CleanXY.Py.Builtin.Function.Protocol
+namespace FormalSW.Py.Builtin.Function.Protocol
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 structure IndexProtocol (α : Type u) where
   index : α → Result Int
@@ -288,12 +288,12 @@ def divmodObject (protocol : BinaryNumericProtocol α ResultType) (left right : 
 def powObject (protocol : BinaryNumericProtocol α ResultType) (base exponent : α)
     (modulus : Option α := none) := protocol.pow base exponent modulus
 
-end CleanXY.Py.Builtin.Function.Protocol
+end FormalSW.Py.Builtin.Function.Protocol
 
 
-namespace CleanXY.Py.Builtin.Function.Reflection
+namespace FormalSW.Py.Builtin.Function.Reflection
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 def callable (object : Object.Object α) : Bool := Object.isCallable object
 def delattr (object : Object.Object α) (name : String) := Object.delAttr object name
@@ -328,12 +328,12 @@ def classmethod (function : Class → Args → ResultType) :
 def staticmethod (function : Args → ResultType) : Descriptor.StaticMethod Args ResultType :=
   ⟨function⟩
 
-end CleanXY.Py.Builtin.Function.Reflection
+end FormalSW.Py.Builtin.Function.Reflection
 
 
-namespace CleanXY.Py.Builtin.Function.Runtime
+namespace FormalSW.Py.Builtin.Function.Runtime
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 abbrev Namespace (α : Type u) := Dict.Dict String α
 
@@ -409,4 +409,4 @@ structure BreakpointHook (Args : Type u) (ResultType : Type v) where
 def breakpoint (hook : BreakpointHook Args ResultType) (args : Args) : Result ResultType :=
   hook.call args
 
-end CleanXY.Py.Builtin.Function.Runtime
+end FormalSW.Py.Builtin.Function.Runtime

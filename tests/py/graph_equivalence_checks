@@ -136,7 +136,7 @@ def main():
         assert not same_snapshot(left, changed)
         pairs.append((left, changed, False))
 
-    lines = ["import CleanXY", "open CleanXY.PyAst", "set_option maxRecDepth 4096"]
+    lines = ["import FormalSW", "open FormalSW.PyAst", "set_option maxRecDepth 4096"]
     for left, right, expected in pairs:
         lines += [
             "example : Graph.observedBool ((Graph.compare",
@@ -153,13 +153,13 @@ def main():
         'example : Graph.observedBool ((Graph.compare (.scalar (.int 3))',
         '  (.scalar (.int 3))).observe 0) = none := by native_decide',
     ]
-    with tempfile.TemporaryDirectory(prefix="cleanxy-graph-") as directory:
+    with tempfile.TemporaryDirectory(prefix="formalsw-graph-") as directory:
         path = Path(directory) / "Check.lean"
         path.write_text("\n".join(lines))
         subprocess.run(["lake", "env", "lean", "-DwarningAsError=true", str(path)], cwd=ROOT, check=True)
         # The Lean import must reject unsupported code even in a dead branch.
         unsupported = source.replace("    # Scalars", "    if False:\n        print(left)\n    # Scalars")
-        path.write_text("import CleanXY\ndef broken : CleanXY.PyAst.Module := python_data% " + json.dumps(unsupported))
+        path.write_text("import FormalSW\ndef broken : FormalSW.PyAst.Module := python_data% " + json.dumps(unsupported))
         failed = subprocess.run(["lake", "env", "lean", str(path)], cwd=ROOT, text=True, capture_output=True)
         assert failed.returncode != 0 and "unsupported Python constructs" in failed.stdout
 

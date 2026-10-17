@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plain-Python set facades over the primitive balanced-tree store.
 
-@cleanxy theorem modeled : SetAst.module.hasExactlyClassMethods "set" ["__init__", "__len__", "__contains__", "add", "discard", "clear", "copy"] = true ∧ SetAst.module.hasExactlyClassMethods "frozenset" ["__init__", "__len__", "__contains__", "copy"] = true
-@cleanxy theorem source_fingerprint : SetAst.module.fingerprint = 2446208541726633312
+@formalsw theorem modeled : SetAst.module.hasExactlyClassMethods "set" ["__init__", "__len__", "__contains__", "add", "discard", "clear", "copy"] = true ∧ SetAst.module.hasExactlyClassMethods "frozenset" ["__init__", "__len__", "__contains__", "copy"] = true
+@formalsw theorem source_fingerprint : SetAst.module.fingerprint = 9047637200955768486
 """
 
 

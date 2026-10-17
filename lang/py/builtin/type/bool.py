@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plain-Python value model of bool as an integer restricted to zero or one.
 
-@cleanxy theorem modeled : BoolAst.module.hasExactlyClassMethods "bool" ["__init__", "__bool__", "__int__", "__index__", "__eq__", "__hash__"] = true
-@cleanxy theorem source_fingerprint : BoolAst.module.fingerprint = 9167620621366789578
+@formalsw theorem modeled : BoolAst.module.hasExactlyClassMethods "bool" ["__init__", "__bool__", "__int__", "__index__", "__eq__", "__hash__"] = true
+@formalsw theorem source_fingerprint : BoolAst.module.fingerprint = 2967357878154818410
 """
 
 

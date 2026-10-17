@@ -3,9 +3,9 @@ import lang.py.builtin.type.sequence
 
 /-! Constant-space semantics for Python's immutable integer `range`. -/
 
-namespace CleanXY.Py.Builtin.Range
+namespace FormalSW.Py.Builtin.Range
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 structure Range where
   start : Int
@@ -59,4 +59,4 @@ example : toList (fromStop 4) = [0, 1, 2, 3] := rfl
 example : toList (⟨3, -1, -1⟩ : Range) = [3, 2, 1, 0] := rfl
 example : equivalent ⟨0, 0, 1⟩ ⟨2, 1, 3⟩ = true := rfl
 
-end CleanXY.Py.Builtin.Range
+end FormalSW.Py.Builtin.Range

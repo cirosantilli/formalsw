@@ -2,9 +2,9 @@ import lang.py.builtin.type.core
 
 /-! Generic contiguous-subsequence algorithms shared by `str`, `bytes`, and `bytearray`. -/
 
-namespace CleanXY.Py.Builtin.Subsequence
+namespace FormalSW.Py.Builtin.Subsequence
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 def startsWith [BEq α] (values prefixValue : List α) : Bool :=
   values.take prefixValue.length == prefixValue
@@ -121,4 +121,4 @@ example : count [1, 1, 1] [1, 1] = 1 := rfl
 example : split [1, 0, 2, 0] [0] = .ok [[1], [2], []] := rfl
 example : replace [1, 2] [] [0] 2 = [0, 1, 0, 2] := rfl
 
-end CleanXY.Py.Builtin.Subsequence
+end FormalSW.Py.Builtin.Subsequence

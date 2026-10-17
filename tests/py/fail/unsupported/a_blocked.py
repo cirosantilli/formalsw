@@ -3,20 +3,20 @@
 
 def unsupported_call(n: int) -> int:
     """
-    @cleanxy: Not Halts
-    @cleanxy: Not Throws
-    @cleanxy: theorem irrelevant : True
+    @formalsw: Not Halts
+    @formalsw: Not Throws
+    @formalsw: theorem irrelevant : True
     """
     return abs(n)
 
 
 def unreachable(n: int) -> int:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     if False:
         print(n)
     return n
 
 
 def equivalent(n: int) -> int:
-    """@cleanxy: Not Equiv(unsupported_call)"""
+    """@formalsw: Not Equiv(unsupported_call)"""
     return n

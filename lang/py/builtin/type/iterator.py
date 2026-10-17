@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plain-Python finite iterator state machine.
 
-@cleanxy theorem modeled : IteratorAst.module.hasExactlyClassMethods "iterator" ["__init__", "__iter__", "__next__"] = true ∧ IteratorAst.module.hasExactlyClassMethods "async_iterator" ["__init__", "__aiter__", "__anext__"] = true
-@cleanxy theorem source_fingerprint : IteratorAst.module.fingerprint = 5805620590057890466
+@formalsw theorem modeled : IteratorAst.module.hasExactlyClassMethods "iterator" ["__init__", "__iter__", "__next__"] = true ∧ IteratorAst.module.hasExactlyClassMethods "async_iterator" ["__init__", "__aiter__", "__anext__"] = true
+@formalsw theorem source_fingerprint : IteratorAst.module.fingerprint = 17427386455943285696
 """
 
 

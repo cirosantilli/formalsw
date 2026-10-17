@@ -1,20 +1,20 @@
-import «.cleanxy».tests.py.«equiv_throw.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«equiv_throw.py.ast»
+import FormalSW
 
 namespace tests.py.equiv_throw
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 /-- Matching bodies have matching finite normal and exceptional executions. -/
 theorem double_or_throw.«Equiv(double_or_throw_alt)» :
-    CleanXY.Property.Function.Equiv
+    FormalSW.Property.Function.Equiv
       EquivThrowAst.module "double_or_throw" "double_or_throw_alt" := by
   intro n outcome
   rfl
 
 /-- Structurally different exception objects are different outcomes. -/
 theorem throw_msg_1.«Not Equiv(throw_msg_2)» :
-    Not (CleanXY.Property.Function.Equiv
+    Not (FormalSW.Property.Function.Equiv
       EquivThrowAst.module "throw_msg_1" "throw_msg_2") := by
   intro equivalent
   have left : Finishes (scalarFunction EquivThrowAst.module "throw_msg_1" [.int 0]).step

@@ -1,30 +1,30 @@
 # Lake package configuration for the Python-to-Lean AST framework.
-name = "cleanxy"
+name = "formalsw"
 version = "0.1.0"
-defaultTargets = ["CleanXY", "lang.py.CleanXY"]
+defaultTargets = ["FormalSW", "lang.py.FormalSW"]
 
 # Umbrella module re-exporting installed language models.
 [[lean_lib]]
-name = "CleanXY"
+name = "FormalSW"
 
 # Language-specific models live below `lang/`.
 [[lean_lib]]
-name = "lang.py.CleanXY"
+name = "lang.py.FormalSW"
 roots = [
-  "lang.py.CleanXY.Model",
-  "lang.py.CleanXY.Execution",
-  "lang.py.CleanXY.Runtime",
-  "lang.py.CleanXY.Globals",
-  "lang.py.CleanXY.MutableGlobals",
-  "lang.py.CleanXY.DataRuntime",
-  "lang.py.CleanXY.GraphEquivalence",
-  "lang.py.CleanXY.Sorting",
-  "lang.py.CleanXY.Syntax",
-  "lang.py.CleanXY.Parallel",
-  "lang.py.CleanXY.ParallelLiveness",
-  "lang.py.CleanXY.Concurrent",
-  "lang.py.CleanXY.PyValue",
-  "lang.py.CleanXY.Quotation",
+  "lang.py.FormalSW.Model",
+  "lang.py.FormalSW.Execution",
+  "lang.py.FormalSW.Runtime",
+  "lang.py.FormalSW.Globals",
+  "lang.py.FormalSW.MutableGlobals",
+  "lang.py.FormalSW.DataRuntime",
+  "lang.py.FormalSW.GraphEquivalence",
+  "lang.py.FormalSW.Sorting",
+  "lang.py.FormalSW.Syntax",
+  "lang.py.FormalSW.Parallel",
+  "lang.py.FormalSW.ParallelLiveness",
+  "lang.py.FormalSW.Concurrent",
+  "lang.py.FormalSW.PyValue",
+  "lang.py.FormalSW.Quotation",
   "lang.py.builtin.type.bool",
   "lang.py.builtin.type.bytearray",
   "lang.py.builtin.type.bytes",

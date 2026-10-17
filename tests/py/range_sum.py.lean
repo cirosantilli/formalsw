@@ -1,68 +1,68 @@
-import «.cleanxy».tests.py.«range_sum.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«range_sum.py.ast»
+import FormalSW
 
 namespace tests.py.range_sum
 
 /-- `sum` returns an integer for every integer input. -/
 theorem sum.returns (n : Int) :
     ∃ value,
-      CleanXY.PyAst.evalUnaryIntFunction
+      FormalSW.PyAst.evalUnaryIntFunction
           RangeSumAst.module "sum" n =
         some value := by
   by_cases hn : n <= 0
   · refine ⟨0, ?_⟩
     simp [
-      CleanXY.PyAst.evalUnaryIntFunction,
-      CleanXY.PyAst.Module.findFunctionBody,
-      CleanXY.PyAst.findFunctionBodyIn,
-      CleanXY.PyAst.evalIntBlock,
-      CleanXY.PyAst.evalBoolExpr,
-      CleanXY.PyAst.evalIntExpr,
-      CleanXY.PyAst.Env.get?,
-      CleanXY.PyAst.evalCmpOp,
+      FormalSW.PyAst.evalUnaryIntFunction,
+      FormalSW.PyAst.Module.findFunctionBody,
+      FormalSW.PyAst.findFunctionBodyIn,
+      FormalSW.PyAst.evalIntBlock,
+      FormalSW.PyAst.evalBoolExpr,
+      FormalSW.PyAst.evalIntExpr,
+      FormalSW.PyAst.Env.get?,
+      FormalSW.PyAst.evalCmpOp,
       RangeSumAst.module,
       hn,
     ]
-  · refine ⟨CleanXY.PyAst.sumRange n.toNat, ?_⟩
+  · refine ⟨FormalSW.PyAst.sumRange n.toNat, ?_⟩
     simp [
-      CleanXY.PyAst.evalUnaryIntFunction,
-      CleanXY.PyAst.Module.findFunctionBody,
-      CleanXY.PyAst.findFunctionBodyIn,
-      CleanXY.PyAst.evalIntBlock,
-      CleanXY.PyAst.evalBoolExpr,
-      CleanXY.PyAst.evalIntExpr,
-      CleanXY.PyAst.Env.get?,
-      CleanXY.PyAst.evalCmpOp,
+      FormalSW.PyAst.evalUnaryIntFunction,
+      FormalSW.PyAst.Module.findFunctionBody,
+      FormalSW.PyAst.findFunctionBodyIn,
+      FormalSW.PyAst.evalIntBlock,
+      FormalSW.PyAst.evalBoolExpr,
+      FormalSW.PyAst.evalIntExpr,
+      FormalSW.PyAst.Env.get?,
+      FormalSW.PyAst.evalCmpOp,
       RangeSumAst.module,
       hn,
     ]
 
 /-- `sum` never throws for an integer input. -/
 theorem sum.«Not Throws» :
-    Not (CleanXY.Property.Function.AbstractThrows RangeSumAst.module "sum") := by
+    Not (FormalSW.Property.Function.AbstractThrows RangeSumAst.module "sum") := by
   rintro ⟨n, exception, hthrow⟩
   by_cases hn : n <= 0
   · simp [
-      CleanXY.PyAst.evalUnaryIntFunctionOutcome,
-      CleanXY.PyAst.Module.findFunctionBody,
-      CleanXY.PyAst.findFunctionBodyIn,
-      CleanXY.PyAst.evalIntBlockOutcome,
-      CleanXY.PyAst.evalBoolExpr,
-      CleanXY.PyAst.evalIntExpr,
-      CleanXY.PyAst.Env.get?,
-      CleanXY.PyAst.evalCmpOp,
+      FormalSW.PyAst.evalUnaryIntFunctionOutcome,
+      FormalSW.PyAst.Module.findFunctionBody,
+      FormalSW.PyAst.findFunctionBodyIn,
+      FormalSW.PyAst.evalIntBlockOutcome,
+      FormalSW.PyAst.evalBoolExpr,
+      FormalSW.PyAst.evalIntExpr,
+      FormalSW.PyAst.Env.get?,
+      FormalSW.PyAst.evalCmpOp,
       RangeSumAst.module,
       hn,
     ] at hthrow
   · simp [
-      CleanXY.PyAst.evalUnaryIntFunctionOutcome,
-      CleanXY.PyAst.Module.findFunctionBody,
-      CleanXY.PyAst.findFunctionBodyIn,
-      CleanXY.PyAst.evalIntBlockOutcome,
-      CleanXY.PyAst.evalBoolExpr,
-      CleanXY.PyAst.evalIntExpr,
-      CleanXY.PyAst.Env.get?,
-      CleanXY.PyAst.evalCmpOp,
+      FormalSW.PyAst.evalUnaryIntFunctionOutcome,
+      FormalSW.PyAst.Module.findFunctionBody,
+      FormalSW.PyAst.findFunctionBodyIn,
+      FormalSW.PyAst.evalIntBlockOutcome,
+      FormalSW.PyAst.evalBoolExpr,
+      FormalSW.PyAst.evalIntExpr,
+      FormalSW.PyAst.Env.get?,
+      FormalSW.PyAst.evalCmpOp,
       RangeSumAst.module,
       hn,
     ] at hthrow
@@ -70,109 +70,109 @@ theorem sum.«Not Throws» :
 /-- `sum_naive` returns an integer for every integer input. -/
 theorem sum_naive.returns (n : Int) :
     ∃ value,
-      CleanXY.PyAst.evalUnaryIntFunction
+      FormalSW.PyAst.evalUnaryIntFunction
           RangeSumAst.module "sum_naive" n =
         some value := by
-  refine ⟨CleanXY.PyAst.sumRange n.toNat, ?_⟩
+  refine ⟨FormalSW.PyAst.sumRange n.toNat, ?_⟩
   simp [
-    CleanXY.PyAst.evalUnaryIntFunction,
-    CleanXY.PyAst.Module.findFunctionBody,
-    CleanXY.PyAst.findFunctionBodyIn,
-    CleanXY.PyAst.evalIntBlock,
-    CleanXY.PyAst.evalIntExpr,
-    CleanXY.PyAst.evalRangeContribution,
-    CleanXY.PyAst.Env.get?,
+    FormalSW.PyAst.evalUnaryIntFunction,
+    FormalSW.PyAst.Module.findFunctionBody,
+    FormalSW.PyAst.findFunctionBodyIn,
+    FormalSW.PyAst.evalIntBlock,
+    FormalSW.PyAst.evalIntExpr,
+    FormalSW.PyAst.evalRangeContribution,
+    FormalSW.PyAst.Env.get?,
     RangeSumAst.module,
   ]
 
 /-- `sum_naive` never throws for an integer input. -/
 theorem sum_naive.not_throws :
-    Not (CleanXY.Property.Function.AbstractThrows RangeSumAst.module "sum_naive") := by
+    Not (FormalSW.Property.Function.AbstractThrows RangeSumAst.module "sum_naive") := by
   rintro ⟨n, exception, hthrow⟩
   simp [
-    CleanXY.PyAst.evalUnaryIntFunctionOutcome,
-    CleanXY.PyAst.Module.findFunctionBody,
-    CleanXY.PyAst.findFunctionBodyIn,
-    CleanXY.PyAst.evalIntBlockOutcome,
-    CleanXY.PyAst.evalIntBlock,
-    CleanXY.PyAst.evalIntExpr,
-    CleanXY.PyAst.evalRangeContribution,
-    CleanXY.PyAst.Env.get?,
+    FormalSW.PyAst.evalUnaryIntFunctionOutcome,
+    FormalSW.PyAst.Module.findFunctionBody,
+    FormalSW.PyAst.findFunctionBodyIn,
+    FormalSW.PyAst.evalIntBlockOutcome,
+    FormalSW.PyAst.evalIntBlock,
+    FormalSW.PyAst.evalIntExpr,
+    FormalSW.PyAst.evalRangeContribution,
+    FormalSW.PyAst.Env.get?,
     RangeSumAst.module,
   ] at hthrow
 
 /-- Neither range-sum implementation can throw for any integer input. -/
 theorem noException (n : Int) :
     (∃ value,
-      CleanXY.PyAst.evalUnaryIntFunction
+      FormalSW.PyAst.evalUnaryIntFunction
           RangeSumAst.module "sum" n =
         some value) ∧
     (∃ value,
-      CleanXY.PyAst.evalUnaryIntFunction
+      FormalSW.PyAst.evalUnaryIntFunction
           RangeSumAst.module "sum_naive" n =
         some value) :=
   ⟨sum.returns n, sum_naive.returns n⟩
 
 /-- `sum` and `sum_naive` give the same result for every integer input. -/
 private theorem sum.abstract_equiv :
-    CleanXY.Property.Function.AbstractEquiv
+    FormalSW.Property.Function.AbstractEquiv
       RangeSumAst.module "sum" "sum_naive" := by
   intro n
   by_cases hn : n <= 0
   · refine ⟨.ok 0, ?_⟩
     constructor <;> simp [
-      CleanXY.PyAst.evalUnaryIntFunctionOutcome,
-      CleanXY.PyAst.Module.findFunctionBody,
-      CleanXY.PyAst.findFunctionBodyIn,
-      CleanXY.PyAst.evalIntBlockOutcome,
-      CleanXY.PyAst.evalIntBlock,
-      CleanXY.PyAst.evalBoolExpr,
-      CleanXY.PyAst.evalIntExpr,
-      CleanXY.PyAst.evalRangeContribution,
-      CleanXY.PyAst.sumRange,
-      CleanXY.PyAst.Env.get?,
-      CleanXY.PyAst.evalCmpOp,
+      FormalSW.PyAst.evalUnaryIntFunctionOutcome,
+      FormalSW.PyAst.Module.findFunctionBody,
+      FormalSW.PyAst.findFunctionBodyIn,
+      FormalSW.PyAst.evalIntBlockOutcome,
+      FormalSW.PyAst.evalIntBlock,
+      FormalSW.PyAst.evalBoolExpr,
+      FormalSW.PyAst.evalIntExpr,
+      FormalSW.PyAst.evalRangeContribution,
+      FormalSW.PyAst.sumRange,
+      FormalSW.PyAst.Env.get?,
+      FormalSW.PyAst.evalCmpOp,
       RangeSumAst.module,
       hn,
       Int.toNat_of_nonpos hn,
     ]
-  · refine ⟨.ok (CleanXY.PyAst.sumRange n.toNat), ?_⟩
+  · refine ⟨.ok (FormalSW.PyAst.sumRange n.toNat), ?_⟩
     constructor <;> simp [
-      CleanXY.PyAst.evalUnaryIntFunctionOutcome,
-      CleanXY.PyAst.Module.findFunctionBody,
-      CleanXY.PyAst.findFunctionBodyIn,
-      CleanXY.PyAst.evalIntBlockOutcome,
-      CleanXY.PyAst.evalIntBlock,
-      CleanXY.PyAst.evalBoolExpr,
-      CleanXY.PyAst.evalIntExpr,
-      CleanXY.PyAst.evalRangeContribution,
-      CleanXY.PyAst.Env.get?,
-      CleanXY.PyAst.evalCmpOp,
+      FormalSW.PyAst.evalUnaryIntFunctionOutcome,
+      FormalSW.PyAst.Module.findFunctionBody,
+      FormalSW.PyAst.findFunctionBodyIn,
+      FormalSW.PyAst.evalIntBlockOutcome,
+      FormalSW.PyAst.evalIntBlock,
+      FormalSW.PyAst.evalBoolExpr,
+      FormalSW.PyAst.evalIntExpr,
+      FormalSW.PyAst.evalRangeContribution,
+      FormalSW.PyAst.Env.get?,
+      FormalSW.PyAst.evalCmpOp,
       RangeSumAst.module,
       hn,
     ]
 
 /-- The closed-form implementation has constant worst-case cost. -/
 theorem sum.«BigO(1)» :
-    CleanXY.Property.Function.BigO RangeSumAst.module "sum"
+    FormalSW.Property.Function.BigO RangeSumAst.module "sum"
       (.intToNat "n") (fun _ => 1) := by
-  apply CleanXY.Property.Function.bigO_of_growth_bound
+  apply FormalSW.Property.Function.bigO_of_growth_bound
     (inputSize := .intToNat "n") (growth := .constant)
   · rfl
   · rfl
-  · exact CleanXY.PyAst.Growth.constant_isBigO
+  · exact FormalSW.PyAst.Growth.constant_isBigO
 
 /-- The loop implementation has linear worst-case cost. -/
 theorem sum_naive.«BigO(n)» :
-    CleanXY.Property.Function.BigO RangeSumAst.module "sum_naive"
+    FormalSW.Property.Function.BigO RangeSumAst.module "sum_naive"
       (.intToNat "n") (fun n => n) := by
-  apply CleanXY.Property.Function.bigO_of_growth_bound
+  apply FormalSW.Property.Function.bigO_of_growth_bound
     (inputSize := .intToNat "n") (growth := .linear)
   · rfl
   · rfl
-  · exact CleanXY.PyAst.Growth.linear_isBigO
+  · exact FormalSW.PyAst.Growth.linear_isBigO
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 private def sumLoop (index stop : Int) : Stmt :=
   .rangeLoop "i" index stop [.augAssign (.name "total") .add (.name "i")] []
@@ -279,13 +279,13 @@ private theorem sum.result (n : Int) :
 
 /-- The closed form finishes with an integer of its annotated return type. -/
 theorem sum.«ReturnType» :
-    CleanXY.Property.Function.ReturnType RangeSumAst.module "sum" := by
+    FormalSW.Property.Function.ReturnType RangeSumAst.module "sum" := by
   intro n
   exact Or.inl ⟨_, sum.result n⟩
 
 /-- Actual execution outcomes agree, so termination contracts transfer too. -/
 theorem sum.«Equiv(sum_naive)» :
-    CleanXY.Property.Function.Equiv RangeSumAst.module "sum" "sum_naive" := by
+    FormalSW.Property.Function.Equiv RangeSumAst.module "sum" "sum_naive" := by
   intro n outcome
   constructor
   · intro h

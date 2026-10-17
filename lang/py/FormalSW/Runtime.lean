@@ -1,6 +1,6 @@
-import lang.py.CleanXY.Execution
+import lang.py.FormalSW.Execution
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 /-- Scalar environments distinguish an unbound name from Python `None`. -/
 abbrev ScalarEnv := String → Option Constant
@@ -204,9 +204,9 @@ def comparison (module : Module) (op : CmpOp) (left right : Value) : Execution B
   | .object _ _, _ | _, .object _ _ => Execution.unsupported
   | _, _ => Execution.ofExcept (evalValueCmp op left right)
 
-end CleanXY.PyAst
+end FormalSW.PyAst
 
-namespace CleanXY.Property.Function
+namespace FormalSW.Property.Function
 
 /-- A unary integer function finishes with an integer or a Python exception.
 The scalar case uses execution semantics, including arbitrary supported loops.
@@ -239,4 +239,4 @@ def Equiv (module : PyAst.Module) (left right : String) : Prop :=
         (PyAst.scalarFunction module right [.int n])
   | _, _ => AbstractEquiv module left right
 
-end CleanXY.Property.Function
+end FormalSW.Property.Function

@@ -1,6 +1,6 @@
-import lang.py.CleanXY.DataRuntime
+import lang.py.FormalSW.DataRuntime
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 namespace Execution
 
@@ -203,4 +203,4 @@ theorem scalar_equiv_iff (left right : Execution Constant) :
   exact Execution.equivBy_eq_iff left right
 
 end Graph
-end CleanXY.PyAst
+end FormalSW.PyAst

@@ -1,7 +1,7 @@
-import «.cleanxy».tests.py.«parallel_doubly_linked_list.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«parallel_doubly_linked_list.py.ast»
+import FormalSW
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 open Concurrent
 

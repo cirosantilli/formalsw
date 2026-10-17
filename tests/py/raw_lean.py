@@ -1,17 +1,17 @@
 #!/usr/bin/env python
-"""@cleanxy: theorem module_fact : True"""
+"""@formalsw: theorem module_fact : True"""
 
 def f(n: int) -> int:
     """Identity function.
 
-    @cleanxy: theorem returns_input (n : Int) :
+    @formalsw: theorem returns_input (n : Int) :
       n = n ∧ RawLeanAst.module.findFunctionBody "f" ≠ none
 
-    @cleanxy: theorem tests.py.raw_lean.explicit_fact : True
+    @formalsw: theorem tests.py.raw_lean.explicit_fact : True
 
-    @cleanxy: Returns
+    @formalsw: Returns
 
-    @cleanxy: theorem does_not_throw : Not Throws(this_function(n))
+    @formalsw: theorem does_not_throw : Not Throws(this_function(n))
     """
     return n
 
@@ -19,7 +19,7 @@ def f(n: int) -> int:
 def g(n: int) -> int:
     """A second function can reuse the same short theorem name.
 
-    @cleanxy: theorem returns_input : n = n
-    @cleanxy: Returns
+    @formalsw: theorem returns_input : n = n
+    @formalsw: Returns
     """
     return n

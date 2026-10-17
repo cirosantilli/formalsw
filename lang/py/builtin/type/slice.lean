@@ -2,9 +2,9 @@ import lang.py.builtin.type.core
 
 /-! Python slice normalization, shared by all modeled sequence types. -/
 
-namespace CleanXY.Py.Builtin.Slice
+namespace FormalSW.Py.Builtin.Slice
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 structure Slice where
   start : Option Int := none
@@ -63,4 +63,4 @@ def indexList (slice : Slice) (length : Nat) : Result (List Nat) := do
 example : indexList {} 4 = .ok [0, 1, 2, 3] := rfl
 example : indexList { step := some (-1) } 4 = .ok [3, 2, 1, 0] := rfl
 
-end CleanXY.Py.Builtin.Slice
+end FormalSW.Py.Builtin.Slice

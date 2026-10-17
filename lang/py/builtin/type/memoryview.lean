@@ -2,9 +2,9 @@ import lang.py.builtin.type.bytes
 
 /-! A typed, multidimensional view over an exporter buffer. -/
 
-namespace CleanXY.Py.Builtin.MemoryView
+namespace FormalSW.Py.Builtin.MemoryView
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 /-- Buffer metadata and a logical C-order byte snapshot. -/
 structure MemoryView where
@@ -105,4 +105,4 @@ def exit (view : MemoryView) : Bool × MemoryView := (false, release view)
 example : nbytes (create 1 [1, 2, 3]) = 3 := rfl
 example : toList (create 1 [1, 2]) = .ok [1, 2] := rfl
 
-end CleanXY.Py.Builtin.MemoryView
+end FormalSW.Py.Builtin.MemoryView

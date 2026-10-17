@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plain-Python model of the synchronous context-manager protocol.
 
-@cleanxy theorem modeled : ContextmanagerAst.module.hasExactlyClassMethods "contextmanager" ["__init__", "__enter__", "__exit__"] = true
-@cleanxy theorem source_fingerprint : ContextmanagerAst.module.fingerprint = 2344344226781193825
+@formalsw theorem modeled : ContextmanagerAst.module.hasExactlyClassMethods "contextmanager" ["__init__", "__enter__", "__exit__"] = true
+@formalsw theorem source_fingerprint : ContextmanagerAst.module.fingerprint = 129784840927964959
 """
 
 

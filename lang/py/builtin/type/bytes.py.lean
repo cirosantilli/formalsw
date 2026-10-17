@@ -1,20 +1,20 @@
-import «.cleanxy».lang.py.builtin.type.«bytes.py.ast»
+import «.formalsw».lang.py.builtin.type.«bytes.py.ast»
 import lang.py.builtin.type.bytes
 
 namespace lang.py.builtin.type.bytes
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 theorem modeled :
     BytesAst.module.hasExactlyClassMethods "bytes"
       ["__init__", "__eq__", "__lt__", "__le__", "__gt__", "__ge__", "__len__", "__getitem__"] = true := by
   rfl
 
-theorem source_fingerprint : BytesAst.module.fingerprint = 863951668132063301 := by
+theorem source_fingerprint : BytesAst.module.fingerprint = 2670698971279142105 := by
   native_decide
 
-theorem length_equivalent (value : CleanXY.Py.Builtin.Bytes.ByteString) :
-    CleanXY.Py.Builtin.Bytes.size value = value.length := by
+theorem length_equivalent (value : FormalSW.Py.Builtin.Bytes.ByteString) :
+    FormalSW.Py.Builtin.Bytes.size value = value.length := by
   rfl
 
 end lang.py.builtin.type.bytes

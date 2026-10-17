@@ -1,6 +1,6 @@
 /-! Exact non-object-identity semantics of Python's two Boolean values. -/
 
-namespace CleanXY.Py.Builtin.Bool
+namespace FormalSW.Py.Builtin.Bool
 
 /-- Python has exactly two Boolean values. -/
 abbrev BoolValue := Bool
@@ -24,4 +24,4 @@ def orValue (left : BoolValue) (trueValue right : α) : α :=
 @[simp] theorem false_toInt : toInt false = 0 := rfl
 @[simp] theorem true_toInt : toInt true = 1 := rfl
 
-end CleanXY.Py.Builtin.Bool
+end FormalSW.Py.Builtin.Bool

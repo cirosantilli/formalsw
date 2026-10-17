@@ -1,13 +1,13 @@
 import Lean
-import lang.py.CleanXY.Syntax
-import lang.py.CleanXY.PyValue
+import lang.py.FormalSW.Syntax
+import lang.py.FormalSW.PyValue
 
 /-! Lean parses the surrounding specification and the string literal. Python
 parses only the decoded string. Captures are resolved by Lean's elaborator;
 the Python compiler returns a closed lambda, so generated locals cannot capture
 variables in the surrounding theorem. No theorem text is rewritten. -/
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 open Lean Elab Term Meta
 
@@ -24,11 +24,11 @@ syntax (name := pythonContext) "python_context " str str term " in " term : term
 
 private def compileQuote (source : TSyntax `str) (mode : String) : TermElabM Lean.Expr := do
   let options ← getOptions
-  let path := options.get `cleanxy.pythonSource ""
-  let function := options.get `cleanxy.pythonFunction ""
+  let path := options.get `formalsw.pythonSource ""
+  let function := options.get `formalsw.pythonFunction ""
   if path.isEmpty then
     throwError "py requires python_context with a Python source file and enclosing function"
-  let moduleName := options.get `cleanxy.pythonModuleName Name.anonymous
+  let moduleName := options.get `formalsw.pythonModuleName Name.anonymous
   let some context := (← getLCtx).findFromUserName? moduleName
     | throwError "missing Python module context"
   let request := Json.mkObj [
@@ -48,7 +48,7 @@ private def compileQuote (source : TSyntax `str) (mode : String) : TermElabM Lea
   let stx ← ofExcept (Parser.runParserCategory (← getEnv) `term code)
   let compiled ← withoutAutoBoundImplicit <| withLCtx {} #[] <|
     withTheReader Core.Context (fun ctx =>
-      { ctx with currNamespace := `CleanXY.PyAst, openDecls := [] }) <|
+      { ctx with currNamespace := `FormalSW.PyAst, openDecls := [] }) <|
       elabTerm stx none
   let mut arguments := #[context.toExpr]
   for name in captures do
@@ -84,13 +84,13 @@ elab_rules (kind := pythonCanDiverge) : term
 elab_rules (kind := pythonContext) : term
   | `(python_context $source:str $function:str $module:term in $body:term) => do
       let module ← elabTermEnsuringType module (some (mkConst ``Module))
-      let moduleName ← mkFreshUserName `_cleanxy_python_module
-      let options := (← getOptions).set `cleanxy.pythonSource source.getString
-        |>.set `cleanxy.pythonFunction function.getString
-        |>.set `cleanxy.pythonModuleName moduleName
+      let moduleName ← mkFreshUserName `_formalsw_python_module
+      let options := (← getOptions).set `formalsw.pythonSource source.getString
+        |>.set `formalsw.pythonFunction function.getString
+        |>.set `formalsw.pythonModuleName moduleName
       withOptions (fun _ => options) do
         withLetDecl moduleName (mkConst ``Module) module fun moduleLocal => do
           let result ← elabTerm body none
           return result.replaceFVar moduleLocal module
 
-end CleanXY.PyAst
+end FormalSW.PyAst

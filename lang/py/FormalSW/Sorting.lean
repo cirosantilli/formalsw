@@ -1,6 +1,6 @@
-import lang.py.CleanXY.Runtime
+import lang.py.FormalSW.Runtime
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 /-- Merge with comparisons that may return, throw, diverge, or be unsupported.
 Each successful comparison removes one head; it does not consume an arbitrary
@@ -199,9 +199,9 @@ def listFunction (module : Module) (name : String) (values : List Value) : Execu
     mergeSortExecution (comparison module .ltE) values
   else Execution.unsupported
 
-end CleanXY.PyAst
+end FormalSW.PyAst
 
-namespace CleanXY.Property.Function
+namespace FormalSW.Property.Function
 
 /-- At least one input ends by raising an exception. Bare lists and unary integers
 use execution semantics; untyped binary comparison demos use the abstract model. -/
@@ -211,4 +211,4 @@ def Throws (module : PyAst.Module) (name : String) : Prop :=
   | some .valueList => ∃ values : List PyAst.Value, (PyAst.listFunction module name values).Throws
   | _ => AbstractThrows module name
 
-end CleanXY.Property.Function
+end FormalSW.Property.Function

@@ -1,8 +1,8 @@
-import «.cleanxy».tests.py.fail.unsupported.«b_mixed.py.ast»
-import CleanXY
+import «.formalsw».tests.py.fail.unsupported.«b_mixed.py.ast»
+import FormalSW
 
 namespace tests.py.fail.unsupported.b_mixed
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 theorem identity.«Returns» (n : Int) :
     (scalarFunction BMixedAst.module "identity" [.int n]).Returns := by

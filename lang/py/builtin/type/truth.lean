@@ -2,9 +2,9 @@ import lang.py.builtin.type.core
 
 /-! Python truth-value testing, including `__bool__`, `__len__`, and default truth. -/
 
-namespace CleanXY.Py.Builtin.Truth
+namespace FormalSW.Py.Builtin.Truth
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 structure TruthModel (α : Type u) where
   boolMethod : Option (α → Result Bool) := none
@@ -29,4 +29,4 @@ def orValue (model : TruthModel α) (left right : α) : Result α := do
 
 def notValue (model : TruthModel α) (value : α) : Result Bool := (!·) <$> test model value
 
-end CleanXY.Py.Builtin.Truth
+end FormalSW.Py.Builtin.Truth

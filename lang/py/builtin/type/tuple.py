@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plain-Python model of tuple over the primitive list model.
 
-@cleanxy theorem modeled : TupleAst.module.hasExactlyClassMethods "tuple" ["__init__", "__eq__", "__lt__", "__le__", "__gt__", "__ge__", "__len__", "__getitem__"] = true
-@cleanxy theorem source_fingerprint : TupleAst.module.fingerprint = 13455955072439172151
+@formalsw theorem modeled : TupleAst.module.hasExactlyClassMethods "tuple" ["__init__", "__eq__", "__lt__", "__le__", "__gt__", "__ge__", "__len__", "__getitem__"] = true
+@formalsw theorem source_fingerprint : TupleAst.module.fingerprint = 4542874346801578048
 """
 
 

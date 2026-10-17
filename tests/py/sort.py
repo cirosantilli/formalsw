@@ -25,19 +25,19 @@ class DummyInt:
 
 def merge_sort_int(values: list[int]) -> list[int]:
     """
-    @cleanxy: Equiv(quick_sort_int)
-    @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
+    @formalsw: Equiv(quick_sort_int)
+    @formalsw: BigO(n * (Nat.log2 n + 1), n = len(values))
     """
     return merge_sort_untyped(values)
 
 
 def quick_sort_int(values: list[int]) -> list[int]:
-    """@cleanxy: BigO(n * n, n = len(values))"""
+    """@formalsw: BigO(n * n, n = len(values))"""
     return quick_sort(values)
 
 
 def merge_sort_dummy_int(values: list[DummyInt]) -> list[DummyInt]:
-    """@cleanxy: Equiv(quick_sort_dummy_int)"""
+    """@formalsw: Equiv(quick_sort_dummy_int)"""
     return merge_sort_untyped(values)
 
 
@@ -48,22 +48,22 @@ def quick_sort_dummy_int(values: list[DummyInt]) -> list[DummyInt]:
 def merge_sort_untyped(values: list) -> list:
     """
     This function can throw if one of the comparisons throws.
-    @cleanxy: Throws
+    @formalsw: Throws
 
     We don't have full Equiv because if two elements are not comparable and throw,
     different exception object can be thrown for different algorithms, revealing
     algorithm internal ordering details.
-    @cleanxy: EquivReturn(quick_sort)
+    @formalsw: EquivReturn(quick_sort)
 
-    @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
+    @formalsw: BigO(n * (Nat.log2 n + 1), n = len(values))
 
     If comparison of some objects don't halt then this function also does not halt.
-    @cleanxy: theorem returns_of_le_safe :
+    @formalsw: theorem returns_of_le_safe :
       (∀ left ∈ values, ∀ right ∈ values, Returns(left <= right)) →
       Returns(this_function(values))
 
     If comparison does not halt, then this sort also does not halt.
-    @cleanxy: theorem loops_on_bad_comparison :
+    @formalsw: theorem loops_on_bad_comparison :
       Not Halts(this_function([.object "Looping", .object "Looping"]))
     """
     if len(values) <= 1:
@@ -85,7 +85,7 @@ def merge_sort_untyped(values: list) -> list:
 
 
 def quick_sort(values: list) -> list:
-    """@cleanxy: BigO(n * n, n = len(values))"""
+    """@formalsw: BigO(n * n, n = len(values))"""
     if len(values) <= 1:
         return values
     pivot = values[0]

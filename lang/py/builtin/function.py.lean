@@ -1,10 +1,10 @@
-import «.cleanxy».lang.py.builtin.«function.py.ast»
+import «.formalsw».lang.py.builtin.«function.py.ast»
 import lang.py.builtin.function
 
 namespace lang.py.builtin.function
 
-open CleanXY.PyAst
-open CleanXY.Py.Builtin
+open FormalSW.PyAst
+open FormalSW.Py.Builtin
 
 theorem modeled :
     FunctionAst.module.hasExactlyFunctions
@@ -16,7 +16,7 @@ theorem modeled :
        "staticmethod"] = true := by
   rfl
 
-theorem source_fingerprint : FunctionAst.module.fingerprint = 8482260155569084117 := by
+theorem source_fingerprint : FunctionAst.module.fingerprint = 11409889112085856110 := by
   native_decide
 
 theorem abs_equivalent (number : Int) :

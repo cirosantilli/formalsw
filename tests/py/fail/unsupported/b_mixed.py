@@ -2,12 +2,12 @@
 
 
 def unsupported_call(n: int) -> int:
-    """@cleanxy: Not Halts"""
+    """@formalsw: Not Halts"""
     return abs(n)
 
 
 def unsupported_statement(n: int) -> int:
-    """@cleanxy: theorem irrelevant : True"""
+    """@formalsw: theorem irrelevant : True"""
     try:
         return n
     finally:
@@ -15,7 +15,7 @@ def unsupported_statement(n: int) -> int:
 
 
 def identity(n: int) -> int:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     return n
 
 

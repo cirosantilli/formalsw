@@ -1,6 +1,6 @@
-import lang.py.CleanXY.Runtime
+import lang.py.FormalSW.Runtime
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 abbrev ScalarGlobals := List (String × Constant)
 
@@ -152,4 +152,4 @@ def scalarFunctionWithGlobals (module : Module) (name : String) (values : List C
         ⟨ScalarState, ⟨executableBody body, env⟩, globalsStep globals declared⟩
       else Execution.unsupported⟩
 
-end CleanXY.PyAst
+end FormalSW.PyAst

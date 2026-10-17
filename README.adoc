@@ -1,4 +1,4 @@
-= CleanXY
+= FormalSW
 :idprefix:
 :idseparator: -
 :sectanchors:
@@ -15,10 +15,10 @@ toc::[]
 
 == Install
 
-Install the cleanxy Python library:
+Install the formalsw Python library:
 
 ----
-pipx install cleanxy
+pipx install formalsw
 ----
 
 Install Elan, Lean's version manager. On Linux:
@@ -32,7 +32,7 @@ Installation details for other systems: https://github.com/leanprover/elan
 Now test it on a hello world link:tests/py/range_sum.py[]:
 
 ----
-cleanxy tests/py/range_sum.py
+formalsw tests/py/range_sum.py
 ----
 
 and if all went well you should see a message:
@@ -80,8 +80,8 @@ To specify that we want both function to be proven to be the same, we can add a 
 ----
 def sum(n: int) -> int:
     """
-    @cleanxy: Not Throws
-    @cleanxy: Equiv(sum_naive)
+    @formalsw: Not Throws
+    @formalsw: Equiv(sum_naive)
     """
     if n <= 0:
         return 0
@@ -89,7 +89,7 @@ def sum(n: int) -> int:
 
 def sum_naive(n: int) -> int:
     """
-    @cleanxy: Not Throws
+    @formalsw: Not Throws
     """
     total = 0
     for i in range(n):
@@ -100,13 +100,13 @@ def sum_naive(n: int) -> int:
 After this is specified, if you run:
 
 ----
-cleanxy tmp.py
+formalsw tmp.py
 ----
 
 it blows up with:
 
 ----
-error: tmp.py:4: missing proof file tmp.py.lean for `@cleanxy: Not Throws`
+error: tmp.py:4: missing proof file tmp.py.lean for `@formalsw: Not Throws`
 ----
 
 which is good because haven't proven what we said we wanted to prove yet!
@@ -114,24 +114,24 @@ which is good because haven't proven what we said we wanted to prove yet!
 To create the required proofs, we must create a tmp.py.lean file containing the required theorems. The stubs can be generated automatically with:
 
 ----
-./cleanxy --stub tmp.py > tmp.py.lean
+./formalsw --stub tmp.py > tmp.py.lean
 ----
 
 which produces:
 
 ----
-import «.cleanxy».«tmp.py.ast»
-import CleanXY
+import «.formalsw».«tmp.py.ast»
+import FormalSW
 
 namespace tmp
 
 theorem sum.«Not Throws» :
-    Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
+    Not (FormalSW.Property.Function.Throws TmpAst.module "sum")
   := by
   sorry
 
 theorem sum.«Equiv(sum_naive)» :
-    CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+    FormalSW.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
   := by
   sorry
 
@@ -141,7 +141,7 @@ end tmp
 And now if we try again:
 
 ----
-cleanxy tmp.py
+formalsw tmp.py
 ----
 
 but this time it fails with:
@@ -151,9 +151,9 @@ proof check failed for tmp.py
 Complete tmp.py.lean; remove any `sorry`; and make sure it compiles before checking requested proof obligations.
 Expected proof obligations:
   tmp.sum.«Not Throws» :
-    Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
+    Not (FormalSW.Property.Function.Throws TmpAst.module "sum")
   tmp.sum.«Equiv(sum_naive)» :
-    CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+    FormalSW.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
 Lean diagnostic:
   tmp.py.lean:4:8: error: declaration uses `sorry`
   tmp.py.lean:9:8: error: declaration uses `sorry`
@@ -175,7 +175,7 @@ Then you let the LLM loose, and so long as the LLM does not touch your .py sourc
 Once the proof is complete, when you run:
 
 ----
-cleanxy tmp.py
+formalsw tmp.py
 ----
 
 there's no output, which means that all proofs were verified!
@@ -185,7 +185,7 @@ You can check this with the following example contained in-tree:
 link:tests/py/range_sum.py[]
 
 ----
-cleanxy tests/py/range_sum.py
+formalsw tests/py/range_sum.py
 ----
 
 which has a proof at link:tests/py/range_sum.py.lean[].
@@ -214,7 +214,7 @@ The synchronized worker quantifies over generic Python values, with all input re
 def increment_safe(counter: list[int], mutex: Lock):
     """Hold the mutex for the whole increment.
 
-    @cleanxy: theorem preserves_updates :
+    @formalsw: theorem preserves_updates :
       ∀ (counter worker_count : PyValue),
         py("valid_trial_input(counter, worker_count)") →
         Returns(py("run_trial(this_function, counter, worker_count)"))
@@ -258,7 +258,7 @@ The unsynchronized worker asks for a concrete counterexample using the same prec
 
 [source,lean]
 ----
-@cleanxy: theorem loses_an_update :
+@formalsw: theorem loses_an_update :
   ∃ (counter worker_count : PyValue),
     py("valid_trial_input(counter, worker_count)") ∧
     Throws(py("run_trial(this_function, counter, worker_count)"))
@@ -271,7 +271,7 @@ Run the real threads, or check the proofs:
 [source,sh]
 ----
 python3 tests/py/parallel_shared_counter.py
-./cleanxy tests/py/parallel_shared_counter.py
+./formalsw tests/py/parallel_shared_counter.py
 ----
 
 The executable runs 20 trials of each version. It prints actual failed assertions and the lost-update percentage for the unsafe version, then runs the synchronized version. Expected unsafe assertions are caught so both versions are visible; a synchronized failure is re-raised. Both versions call `sleep(0)` between reading and writing to make a thread switch easy to observe. The safe version holds the mutex during that yield. Failure percentages vary with scheduling; the proofs do not depend on observing a race in a particular run.
@@ -285,11 +285,11 @@ link:tests/py/parallel_doubly_linked_list.py[] inserts fresh nodes after a share
 [source,python]
 ----
 def insert_safe(head: Node, node: Node, mutex: Lock):
-    """@cleanxy: Concurrent(run_trial)"""
+    """@formalsw: Concurrent(run_trial)"""
     # Acquire mutex, insert the node, release mutex.
 
 def insert_unsafe(head: Node, node: Node, mutex: Lock):
-    """@cleanxy: Not Concurrent(run_trial)"""
+    """@formalsw: Not Concurrent(run_trial)"""
     # The same insertion without locking.
 ----
 
@@ -318,7 +318,7 @@ See <<dsl-concurrent>> for the supported Python subset. link:tests/py/parallel_t
 [source,sh]
 ----
 python3 tests/py/parallel_doubly_linked_list.py
-./cleanxy tests/py/parallel_doubly_linked_list.py
+./formalsw tests/py/parallel_doubly_linked_list.py
 ----
 
 The executable prints actual assertion failures and corruption rates for the unsafe version, then runs the locked version. A regression test also forces a corrupting schedule against the real Python worker by pausing at statement boundaries, so testing does not depend on a lucky thread switch.
@@ -329,14 +329,14 @@ Directories are also accepted; every `.py` file under the directory is checked:
 
 [source,sh]
 ----
-./cleanxy tests
+./formalsw tests
 ----
 
 Generate a complete Lean proof-file stub on standard output with `-S` or `--stub`:
 
 [source,sh]
 ----
-./cleanxy --stub myfile.py > myfile.py.lean
+./formalsw --stub myfile.py > myfile.py.lean
 ----
 
 The stub imports the generated AST module and declares every requested theorem with `by sorry`. Replace each `sorry` with a proof before running the normal check.
@@ -348,7 +348,7 @@ The specification language is how you specify the properties of the program whic
 Specifications are written as markers inside Python docstrings in lines starting with:
 
 ----
-@cleanxy
+@formalsw
 ----
 
 There are two types of ways to write the specification:
@@ -362,19 +362,19 @@ The DSL specification is a magic custom and very simple language that allows spe
 
 The DSL gets converted to corresponding Lean code behind the scenes.
 
-Each construct below includes a raw Lean equivalent. `Returns`, `Halts`, `Equiv`, `EquivReturn`, and `ReturnType` quantify over every modeled argument value. `Throws` uses an existential input, while `Not` negates the whole proposition. The examples show explicit quantifiers; `./cleanxy --stub file.py` prints the exact elaborated statement for a particular function, including its globals.
+Each construct below includes a raw Lean equivalent. `Returns`, `Halts`, `Equiv`, `EquivReturn`, and `ReturnType` quantify over every modeled argument value. `Throws` uses an existential input, while `Not` negates the whole proposition. The examples show explicit quantifiers; `./formalsw --stub file.py` prints the exact elaborated statement for a particular function, including its globals.
 
 [[dsl-concurrent]]
 ==== Concurrent
 
 For new integer-list specifications, prefer the general <<raw-lean-py,Python quotation>> with `Returns` or `Throws`; the shared-counter example uses it. `Concurrent` remains supported for existing reference-object specifications.
 
-`@cleanxy: Concurrent(helper)` requires every modeled execution of `helper(enclosing_function, ...)` to finish successfully and pass its assertions. The helper is an ordinary Python function in the same module, usable by tests and `main`. Its first argument receives the worker; its remaining integer arguments are universally quantified. Defaults do not bound the proof.
+`@formalsw: Concurrent(helper)` requires every modeled execution of `helper(enclosing_function, ...)` to finish successfully and pass its assertions. The helper is an ordinary Python function in the same module, usable by tests and `main`. Its first argument receives the worker; its remaining integer arguments are universally quantified. Defaults do not bound the proof.
 
 [source,python]
 ----
 def mark(item: Cell, mutex: Lock):
-    """@cleanxy: Concurrent(check_marks)"""
+    """@formalsw: Concurrent(check_marks)"""
     mutex.acquire()
     item.value = item
     mutex.release()
@@ -390,7 +390,7 @@ def check_marks(worker, count: int = 3):
         assert item.value is item
 ----
 
-Here `Cell.__init__` sets `self.value = None`. The theorem is named `mark.«Concurrent(check_marks)»`. `./cleanxy --stub file.py` shows its generated Lean statement. The proof must establish the property for the actual parsed worker, helper setup, and final assertions. No names inside the Python helper resolve to definitions in the proof file.
+Here `Cell.__init__` sets `self.value = None`. The theorem is named `mark.«Concurrent(check_marks)»`. `./formalsw --stub file.py` shows its generated Lean statement. The proof must establish the property for the actual parsed worker, helper setup, and final assertions. No names inside the Python helper resolve to definitions in the proof file.
 
 An equivalent raw Lean specification for this example, with the helper's final assertions written as a predicate on the final heap, is:
 
@@ -408,7 +408,7 @@ An equivalent raw Lean specification for this example, with the helper's final a
 
 ===== Counterexamples
 
-`@cleanxy: Not Concurrent(helper)` requires a concrete counterexample: integer inputs and a completed worker interleaving after which the helper's assertion checks fail. A missing lock or an unsuccessful proof is not a counterexample. The finite witness executes the actual compiled worker using <<raw-lean-parallel>>. A failed reference lookup in the checks also fails the trial, as it does in Python.
+`@formalsw: Not Concurrent(helper)` requires a concrete counterexample: integer inputs and a completed worker interleaving after which the helper's assertion checks fail. A missing lock or an unsuccessful proof is not a counterexample. The finite witness executes the actual compiled worker using <<raw-lean-parallel>>. A failed reference lookup in the checks also fails the trial, as it does in Python.
 
 Counterexample helpers need `max_workers=max(1, len(jobs))`, where `jobs` is the submitted collection, or a positive literal pool size large enough for a literal `range` of jobs (for example, two workers for `range(2)`). This ensures the real pool can run the witnessed interleaving. Positive proofs also allow a positive literal pool size or the default pool size, since covering additional scheduling choices is safe for a universal claim.
 
@@ -433,7 +433,7 @@ The mutex model permits only its owner to execute body operations; every other w
 [source,python]
 ----
 def sum_naive(n: int) -> int:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     total = 0
     for i in range(n):
         total += i
@@ -489,7 +489,7 @@ Example:
 ----
 def merge_sort(values: list) -> list:
     """
-    @cleanxy: BigO(n * (Nat.log2 n + 1), n = len(values))
+    @formalsw: BigO(n * (Nat.log2 n + 1), n = len(values))
     """
     # ...
 ----
@@ -506,23 +506,23 @@ Python arguments annotated as `int` are automatically available in Lean under th
 def sum_naive(n: int) -> int:
     """Sum of integers from 1 to n. Return 0 if n <= 0.
 
-    @cleanxy: BigO(n)
+    @formalsw: BigO(n)
     """
 ----
 
 rather than the more tedious:
 
 ----
-@cleanxy: BigO(n, n = n)
+@formalsw: BigO(n, n = n)
 ----
 
 The merge_sort example above requires `merge_sort.«BigO(n * (Nat.log2 n + 1), n = len(values))»` with type:
 
 [source,lean]
 ----
-CleanXY.Property.Function.BigO
+FormalSW.Property.Function.BigO
   SortAst.module "merge_sort"
-    (CleanXY.PyAst.InputSize.listLength "values")
+    (FormalSW.PyAst.InputSize.listLength "values")
     (fun n : Nat => n * (Nat.log2 n + 1))
 ----
 
@@ -560,7 +560,7 @@ Example:
 def sum(n: int) -> int:
     """Optimized version of sum_naive.
 
-    @cleanxy: Equiv(sum_naive)
+    @formalsw: Equiv(sum_naive)
     """
     if n <= 0:
         return 0
@@ -569,7 +569,7 @@ def sum(n: int) -> int:
 def sum_naive(n: int) -> int:
     """Sum of integers from 0 through n - 1. Return 0 if n <= 0.
 
-    @cleanxy: Returns
+    @formalsw: Returns
     """
     total = 0
     for i in range(n):
@@ -581,7 +581,7 @@ This marker requires `sum.«Equiv(sum_naive)»` with type:
 
 [source,lean]
 ----
-CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+FormalSW.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
 ----
 
 For unary integer functions, `Equiv` now compares actual execution outcomes for every input:
@@ -601,7 +601,7 @@ The existing list `Equiv` and `EquivReturn` demos still use the older abstract s
 
 ===== Comparing object state
 
-Python's `==` can run a user-defined `__eq__`; it need not compare stored attributes, and it can raise or loop forever. Stored-state equivalence has a separate executable Python definition in link:lang/py/graph_equivalence.py[]: `same_snapshot`. Lean parses that actual source and executes its AST using link:lang/py/CleanXY/DataRuntime.lean[]. There is no separate Lean implementation of the graph comparison algorithm, source fingerprint, or recognition of a particular function body. Changes to the Python definition change the interpreted computation; unsupported syntax anywhere in it produces a build error, including in unreachable branches.
+Python's `==` can run a user-defined `__eq__`; it need not compare stored attributes, and it can raise or loop forever. Stored-state equivalence has a separate executable Python definition in link:lang/py/graph_equivalence.py[]: `same_snapshot`. Lean parses that actual source and executes its AST using link:lang/py/FormalSW/DataRuntime.lean[]. There is no separate Lean implementation of the graph comparison algorithm, source fingerprint, or recognition of a particular function body. Changes to the Python definition change the interpreted computation; unsupported syntax anywhere in it produces a build error, including in unreachable branches.
 
 The Python interface is link:lang/py/object_snapshot.py[]:
 
@@ -654,7 +654,7 @@ does not require their exception objects to agree:
 ----
 def merge_sort_untyped(values: list) -> list:
     """
-    @cleanxy: EquivReturn(quick_sort)
+    @formalsw: EquivReturn(quick_sort)
     """
     # ...
 ----
@@ -695,7 +695,7 @@ my_not_example.py
 ----
 def sum(n: int) -> int:
     """
-    @cleanxy: Not Throws
+    @formalsw: Not Throws
     """
     return n + 1
 ----
@@ -719,7 +719,7 @@ Equivalently, `∀ n : Int, ¬ (scalarFunction MyNotExampleAst.module "sum" [.in
 ----
 def sum(n: int) -> int:
     """
-    @cleanxy: ReturnType
+    @formalsw: ReturnType
     """
     # ...
 ----
@@ -728,7 +728,7 @@ This marker requires `sum.«ReturnType»` with type:
 
 [source,lean]
 ----
-CleanXY.Property.Function.ReturnType TmpAst.module "sum"
+FormalSW.Property.Function.ReturnType TmpAst.module "sum"
 ----
 
 For the supported `int -> int` case, this expands to:
@@ -755,7 +755,7 @@ my_throws_example.py
 ----
 def reject_odd(n: int) -> int:
     """
-    @cleanxy: Throws
+    @formalsw: Throws
     """
     if n % 2 != 0:
         raise ValueError("odd input")
@@ -766,7 +766,7 @@ This marker requires a theorem named `reject_odd.«Throws»` with type:
 
 [source,lean]
 ----
-CleanXY.Property.Function.Throws MyThrowsExampleAst.module "reject_odd"
+FormalSW.Property.Function.Throws MyThrowsExampleAst.module "reject_odd"
 ----
 
 which expands to:
@@ -774,14 +774,14 @@ which expands to:
 [source,lean]
 ----
 ∃ n : Int,
-  (CleanXY.PyAst.scalarFunction ThrowsAst.module "reject_odd" [.int n]).Throws
+  (FormalSW.PyAst.scalarFunction ThrowsAst.module "reject_odd" [.int n]).Throws
 ----
 
 Use `Not Throws` to state that no input throws. For a function named `sum`, this requires a theorem named `sum.«Not Throws»` with type:
 
 [source,lean]
 ----
-Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
+Not (FormalSW.Property.Function.Throws TmpAst.module "sum")
 ----
 
 For a bare-list function, `Throws` instead provides a modeled runtime-value-list input and an exception produced by the list evaluator. The mixed input `[0, ""]` in link:tests/py/sort.py[] is one example.
@@ -796,11 +796,11 @@ offset: int = 10
 total: int = 0
 
 def add_offset(n: int) -> int:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     return n + offset
 
 def advance(n: int) -> int:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     global total
     total += n
     return total
@@ -817,7 +817,7 @@ def advance(n: int) -> int:
 
 The theorem covers every integer `offset`, not just its initial value of `10`. The domain comes from a module-level scalar declaration: `int`, `str`, and `bool` annotations are supported, or the type can be inferred from a scalar literal such as `offset = 10`. A declaration may use a matching literal initializer, an explicit supported type annotation without an initializer, or an alias to another supported module declaration. Module initialization is not executed by this call model; the theorem describes calls entered with values in those domains. An explicit raw hypothesis can restrict the entry state when that is intended.
 
-In raw function-level specifications, `this_function` captures the quantified globals while retaining the Python parameter list. For example, `@cleanxy: theorem returns_with_offset (n offset : Int) : Returns(this_function(n))` in `add_offset` expands to the same stateful call. Unbound globals needed by `this_function` are quantified automatically, even if their names are absent from the theorem body.
+In raw function-level specifications, `this_function` captures the quantified globals while retaining the Python parameter list. For example, `@formalsw: theorem returns_with_offset (n offset : Int) : Returns(this_function(n))` in `add_offset` expands to the same stateful call. Unbound globals needed by `this_function` are quantified automatically, even if their names are absent from the theorem body.
 
 `advance` returns a completion containing both its Python result and the final `total`. If it raises after assigning `total`, the exception completion still contains that update. `Equiv` compares both outcomes and final global state; equal return values or equal exceptions alone are insufficient. Both functions receive the same initial state covering the union of their global dependencies, and untouched globals are preserved. `EquivReturn` compares the returned value and final state whenever both calls return successfully. `Returns`, `Halts`, and `ReturnType` quantify universally over argument and global values; `Throws` uses an existential assignment to both.
 
@@ -831,16 +831,16 @@ items: list[int] = []
 alias = items
 
 def push(n: int) -> None:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     items.append(n)
 
 def push_via_alias(n: int) -> None:
-    """@cleanxy: Equiv(push)"""
+    """@formalsw: Equiv(push)"""
     local = items
     local.append(n)
 
 def replace(n: int) -> None:
-    """@cleanxy: Not Equiv(push)"""
+    """@formalsw: Not Equiv(push)"""
     global items
     items = items + [n]
 ----
@@ -870,13 +870,13 @@ Raw `this_function` specifications for mutable globals capture an additional `he
 
 If the specification starts with "theorem", then it is interpreted as an arbitrary Lean code to be proven.
 
-Function-level raw theorems infer referenced Python arguments that the theorem does not bind explicitly. For example, `values` below receives the type `List CleanXY.PyAst.Value` from the bare `list` annotation:
+Function-level raw theorems infer referenced Python arguments that the theorem does not bind explicitly. For example, `values` below receives the type `List FormalSW.PyAst.Value` from the bare `list` annotation:
 
 [source,python]
 ----
 def merge_sort_untyped(values: list) -> list:
     """
-    @cleanxy: theorem returns_of_le_safe :
+    @formalsw: theorem returns_of_le_safe :
       (∀ left ∈ values, ∀ right ∈ values, Returns(left <= right)) →
       Returns(this_function(values))
     """
@@ -892,7 +892,7 @@ Arguments can also be bound explicitly, and hypotheses may be named, anonymous, 
 def f(n: int) -> int:
     """Identity function.
 
-    @cleanxy: theorem returns_input (n : Int) :
+    @formalsw: theorem returns_input (n : Int) :
       n = n ∧ RawLeanAst.module.findFunctionBody "f" ≠ none
     """
     return n
@@ -900,12 +900,12 @@ def f(n: int) -> int:
 
 Continuation lines are included until a blank line or another marker. The example above requires `f.returns_input` inside the file-derived proof namespace. Raw theorem markers may also appear in a module docstring; module docstrings do not support the function-specific short forms.
 
-The constructs below are available through `import CleanXY`. Lean parses the custom predicate and call syntax; state types and observation helpers are ordinary Lean definitions. Use ordinary Lean negation, such as `Not Throws(...)` or `¬ Throws(...)`.
+The constructs below are available through `import FormalSW`. Lean parses the custom predicate and call syntax; state types and observation helpers are ordinary Lean definitions. Use ordinary Lean negation, such as `Not Throws(...)` or `¬ Throws(...)`.
 
 [[raw-lean-this-module]]
 ==== _this_module
 
-CleanXY supplies `_this_module` as the enclosing Python module's AST. Comparison syntax uses it to look up Python comparison methods, including in nested parenthesized expressions. The binding appears in generated stubs alongside `this_function`.
+FormalSW supplies `_this_module` as the enclosing Python module's AST. Comparison syntax uses it to look up Python comparison methods, including in nested parenthesized expressions. The binding appears in generated stubs alongside `this_function`.
 
 [[raw-lean-candeadlock]]
 ==== CanDeadlock
@@ -1061,7 +1061,7 @@ Each node stores its `kind`, ordered field `labels`, and outgoing `edges`. Insta
 
 `Halts(this_function(n))` states that this particular call terminates, either normally or by raising an exception. `Halts(left < right)` states the same for a comparison.
 
-The model in link:lang/py/CleanXY/Execution.lean[] and link:lang/py/CleanXY/Runtime.lean[] uses a deterministic transition system. Termination requires a finite derivation ending in a normal or exceptional outcome. Observation fuel only limits how long an observer runs; exhausting it produces `pending`, never a fabricated return.
+The model in link:lang/py/FormalSW/Execution.lean[] and link:lang/py/FormalSW/Runtime.lean[] uses a deterministic transition system. Termination requires a finite derivation ending in a normal or exceptional outcome. Observation fuel only limits how long an observer runs; exhausting it produces `pending`, never a fabricated return.
 
 For concurrent trials, `Halts(py("run_retries(this_function, 2)"))` requires every enabled schedule to finish the whole helper. It excludes both deadlock and infinite execution, including livelock. It permits assertions or workers to raise, provided the joined batch finishes. `Returns` adds successful execution and successful final assertions. `Halts` implies `DeadlockFree` and excludes `CanDiverge` in the general parallel model. Negating concurrent `Halts` disproves universal termination; it does not say that every schedule fails to finish.
 
@@ -1257,7 +1257,7 @@ A precondition in the Lean theorem is an assumption. An `assert` in the trial is
 
 `python_comparison(left < right)` produces the comparison execution used by `Returns`, `Halts`, and `Throws`. These wrappers expand comparisons automatically, so it is usually unnecessary to write this helper yourself.
 
-Supported operators are `<`, `<=`, `>`, `>=`, `==`, and `!=`, with operands of type `CleanXY.PyAst.Value`. Parentheses are allowed; Python comparison chains and arithmetic on modeled values are not yet supported. Ordinary `<` outside these wrappers retains its usual Lean meaning.
+Supported operators are `<`, `<=`, `>`, `>=`, `==`, and `!=`, with operands of type `FormalSW.PyAst.Value`. Parentheses are allowed; Python comparison chains and arithmetic on modeled values are not yet supported. Ordinary `<` outside these wrappers retains its usual Lean meaning.
 
 For example, `python_comparison(left <= right)` expands to `comparison _this_module .ltE left right`. `.ltE` and `.lt` are Lean's shorthand for comparison-operation constructors, selected using the expected type.
 
@@ -1266,7 +1266,7 @@ Custom same-class comparisons execute the supported method AST, including loops,
 [[raw-lean-python-context]]
 ==== python_context
 
-`python_context "source.py" "worker" SourceAst.module in proposition` supplies the Python source, enclosing function, and imported semantic AST for quotations. CleanXY inserts it around a function's quoted specification. Generated proof stubs preserve the quoted theorem and include this context explicitly, so the same syntax works directly in Lean. Names used inside a quotation refer to the Lean scope at that quotation, including nested binders and `let` values.
+`python_context "source.py" "worker" SourceAst.module in proposition` supplies the Python source, enclosing function, and imported semantic AST for quotations. FormalSW inserts it around a function's quoted specification. Generated proof stubs preserve the quoted theorem and include this context explicitly, so the same syntax works directly in Lean. Names used inside a quotation refer to the Lean scope at that quotation, including nested binders and `let` values.
 
 [[raw-lean-python-data]]
 ==== python_data%
@@ -1468,16 +1468,16 @@ That implication applies to deterministic calls. For a concurrent batch, `Throws
 The way it all works is as follows. When you run:
 
 ----
-cleanxy tmp.py
+formalsw tmp.py
 ----
 
-it will determine where to create the `.cleanxy` directory. When you are inside a .git repository, `.cleanxy` is always placed next to the `.git`. You basically always  want to use Git becuse you want to check that you LLMs haven't mofidifed your specifications in source files.
+it will determine where to create the `.formalsw` directory. When you are inside a .git repository, `.formalsw` is always placed next to the `.git`. You basically always  want to use Git becuse you want to check that you LLMs haven't mofidifed your specifications in source files.
 
-Then, inside the `.cleanxy` directory, `cleanxy` converts the input Python source code to a versioned JSON AST under `.cleanxy/tmp.py.ast.json`.
+Then, inside the `.formalsw` directory, `formalsw` converts the input Python source code to a versioned JSON AST under `.formalsw/tmp.py.ast.json`.
 
-The adjacent `.cleanxy/tmp.py.ast.lean` is only a small import bridge. Lean reads the JSON with `include_str`, validates `schema_version`, and elaborates it into a typed `CleanXY.PyAst.Module`. Proofs therefore continue to use `TmpAst.module` and operate on the typed data structure, not on untrusted claims made by the converter.
+The adjacent `.formalsw/tmp.py.ast.lean` is only a small import bridge. Lean reads the JSON with `include_str`, validates `schema_version`, and elaborates it into a typed `FormalSW.PyAst.Module`. Proofs therefore continue to use `TmpAst.module` and operate on the typed data structure, not on untrusted claims made by the converter.
 
-Compiled Lean `.olean` files are written to a mirrored cache under `.cleanxy/olean/`. `LEAN_PATH` includes that cache, so later proof imports use the compiled modules without placing build artifacts beside checked-in `.lean` proofs.
+Compiled Lean `.olean` files are written to a mirrored cache under `.formalsw/olean/`. `LEAN_PATH` includes that cache, so later proof imports use the compiled modules without placing build artifacts beside checked-in `.lean` proofs.
 
 The top-level JSON shape is:
 
@@ -1494,32 +1494,32 @@ The top-level JSON shape is:
 
 Nodes use a `type` discriminator and fields close to Python's `ast` names. For example, a name expression is `{"type": "Name", "id": "n"}` and a constant is `{"type": "Constant", "value": 1}`.
 
-At the same time, cleanxy searches for `@cleanxy:` markers in Python docstrings, and when those are found, it dumps them under `.cleanxy/tmp.py.reqs.lean` in such a way that unless proof of each requirement is also found, things will blow up when Lean runs.
+At the same time, formalsw searches for `@formalsw:` markers in Python docstrings, and when those are found, it dumps them under `.formalsw/tmp.py.reqs.lean` in such a way that unless proof of each requirement is also found, things will blow up when Lean runs.
 
 ----
 example :
-    Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
+    Not (FormalSW.Property.Function.Throws TmpAst.module "sum")
   := tmp.sum.«Not Throws»
 
 example :
-    CleanXY.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+    FormalSW.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
   := tmp.sum.«Equiv(sum_naive)»
 
 example :
-    Not (CleanXY.Property.Function.Throws TmpAst.module "sum_naive")
+    Not (FormalSW.Property.Function.Throws TmpAst.module "sum_naive")
   := tmp.sum_naive.«Not Throws»
 ----
 
 
 
-Finally, cleanxy runs Lean putting everything together:
+Finally, formalsw runs Lean putting everything together:
 
-* `.cleanxy/tmp.py.ast.json` with the Python AST representation
-* `.cleanxy/tmp.py.ast.lean` with the small JSON-to-Lean import bridge
-* `.cleanxy/tmp.py.reqs.lean` mentioned above with the proof requirements
+* `.formalsw/tmp.py.ast.json` with the Python AST representation
+* `.formalsw/tmp.py.ast.lean` with the small JSON-to-Lean import bridge
+* `.formalsw/tmp.py.reqs.lean` mentioned above with the proof requirements
 * `tmp.py.lean` which is supposed to contain your proof
-* link:CleanXY.lean[] as the language-neutral package facade
-* link:lang/py/CleanXY/Model.lean[] which defines the Python AST,
+* link:FormalSW.lean[] as the language-neutral package facade
+* link:lang/py/FormalSW/Model.lean[] which defines the Python AST,
   evaluator, and Python proof properties
 * plain-Python builtin models under link:lang/py/builtin/type[] and their
   adjacent, generated-AST-bound Lean proofs
@@ -1528,7 +1528,7 @@ Finally, cleanxy runs Lean putting everything together:
 
 === Unsupported Python constructs
 
-A requirement on a function is rejected if its body or a modeled dependency contains Python constructs that CleanXY cannot handle. The coverage check examines the whole body, including unreachable statements and both branches of conditionals. This applies to DSL properties, negated properties, and raw Lean requirements alike. Equivalence targets and modeled comparison methods are checked too.
+A requirement on a function is rejected if its body or a modeled dependency contains Python constructs that FormalSW cannot handle. The coverage check examines the whole body, including unreachable statements and both branches of conditionals. This applies to DSL properties, negated properties, and raw Lean requirements alike. Equivalence targets and modeled comparison methods are checked too.
 
 The diagnostic identifies the requirement, function, source location, and unsupported construct. Supported requirements and other files continue through checking. The command exits unsuccessfully and ends with a count such as `3 proofs failed because they depend on unsupported Python constructs.` Multiple unsupported constructs in one requirement count as one failed proof. Stub generation reports the same errors and emits only supported obligations.
 
@@ -1552,17 +1552,17 @@ link:tests/py/builtin_coverage[] derives callable coverage from the CPython `fun
 
 === Development installation
 
-Currently cleanxy is a single Python file with no dependencies outside of the standard library, so you can just:
+Currently formalsw is a single Python file with no dependencies outside of the standard library, so you can just:
 
 ----
-./cleanxy ...
+./formalsw ...
 ----
 
 or:
 
 ----
 export PATH="$PWD:$PATH"
-cleanxy
+formalsw
 ----
 
 === Test system

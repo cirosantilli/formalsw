@@ -2,9 +2,9 @@ import lang.py.builtin.type.core
 
 /-! Python object identity, instance attributes, callability, and hashing contracts. -/
 
-namespace CleanXY.Py.Builtin.Object
+namespace FormalSW.Py.Builtin.Object
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 /-- An object whose attribute values are represented by `α`. -/
 structure Object (α : Type u) where
@@ -49,4 +49,4 @@ structure HashModel (α : Type u) where
   equal : α → α → Bool
   equal_hash : ∀ left right, equal left right = true → hash left = hash right
 
-end CleanXY.Py.Builtin.Object
+end FormalSW.Py.Builtin.Object

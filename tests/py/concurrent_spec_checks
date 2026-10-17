@@ -11,7 +11,7 @@ PROOF = (REPO / 'tests/py/parallel_doubly_linked_list.py.lean').read_text()
 
 
 def run(path, *, stub=False):
-    return subprocess.run([str(REPO / 'cleanxy'), *(['--stub'] if stub else []), str(path)],
+    return subprocess.run([str(REPO / 'formalsw'), *(['--stub'] if stub else []), str(path)],
                           cwd=REPO, text=True, capture_output=True, timeout=60)
 
 

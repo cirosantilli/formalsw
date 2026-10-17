@@ -1,10 +1,10 @@
-import «.cleanxy».tests.py.«mutable_globals.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«mutable_globals.py.ast»
+import FormalSW
 
 set_option linter.unusedSimpArgs false
 
-open CleanXY.PyAst
-open CleanXY.PyAst.Mutable
+open FormalSW.PyAst
+open FormalSW.PyAst.Mutable
 
 namespace tests.py.mutable_globals
 
@@ -60,42 +60,42 @@ private theorem empty_ints : Mutable.Value.HasType [[]] (.ref 0) "list[int]" := 
   exact ⟨[], rfl, Or.inr ⟨"int", rfl, by simp⟩⟩
 
 theorem push.«Returns» :
-    ∀ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
-    (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap).Returns
+    ∀ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
+    (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap).Returns
   := by
   intro heap n address _ typed
   obtain ⟨items, found, _⟩ := typed
   exact ⟨_, _, _, _, push_done heap address items n found⟩
 
 theorem push.«Halts» :
-    ∀ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
-    (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap).Halts
+    ∀ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
+    (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap).Halts
   := by
   intro heap n address valid typed
   exact ((Call.returns_iff_halts_not_throws _).mp (push.«Returns» heap n address valid typed)).1
 
 theorem push.«Not Throws» :
-    Not (∃ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) ∧ (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") ∧ ((CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap).Throws))
+    Not (∃ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) ∧ (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") ∧ ((FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap).Throws))
   := by
   rintro ⟨heap, n, address, valid, typed, thrown⟩
   exact ((Call.returns_iff_halts_not_throws _).mp (push.«Returns» heap n address valid typed)).2 thrown
 
 theorem push.«ReturnType» :
-    ∀ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
-    (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap).ReturnType "None"
+    ∀ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
+    (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap).ReturnType "None"
   := by
   intro heap n address _ typed
   obtain ⟨items, found, _⟩ := typed
   exact Or.inr ⟨_, _, _, _, push_done heap address items n found, rfl⟩
 
 theorem push_via_alias.«Equiv(push)» :
-    ∀ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
-    (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push_via_alias" [.scalar (.int n)] [("items", .ref items)] heap).Equiv (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap)
+    ∀ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
+    (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push_via_alias" [.scalar (.int n)] [("items", .ref items)] heap).Equiv (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap)
   := by
   intro heap n address _ typed
   obtain ⟨items, found, _⟩ := typed
@@ -103,18 +103,18 @@ theorem push_via_alias.«Equiv(push)» :
     (push_done heap address items n found) (Or.inl rfl)
 
 theorem replace.«Returns» :
-    ∀ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
-    (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "replace" [.scalar (.int n)] [("items", .ref items)] heap).Returns
+    ∀ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
+    (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "replace" [.scalar (.int n)] [("items", .ref items)] heap).Returns
   := by
   intro heap n address _ typed
   obtain ⟨items, found, _⟩ := typed
   exact ⟨_, _, _, _, replace_done heap address items n found⟩
 
 theorem replace.«Not Equiv(push)» :
-    Not (∀ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
-    (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "replace" [.scalar (.int n)] [("items", .ref items)] heap).Equiv (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap))
+    Not (∀ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
+    (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "replace" [.scalar (.int n)] [("items", .ref items)] heap).Equiv (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap))
   := by
   intro all
   obtain ⟨result, done, eq⟩ := (all [[]] 1 0 empty_valid empty_ints).1 _ (replace_done [[]] 0 [] 1 rfl)
@@ -125,24 +125,24 @@ theorem replace.«Not Equiv(push)» :
   · exact (Graph.not_equivalent_of_observe (fuel := 1000) (by native_decide)) graph
 
 theorem push_then_raise.«Halts» :
-    ∀ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
-    (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push_then_raise" [.scalar (.int n)] [("items", .ref items)] heap).Halts
+    ∀ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
+    (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push_then_raise" [.scalar (.int n)] [("items", .ref items)] heap).Halts
   := by
   intro heap n address _ typed
   obtain ⟨items, found, _⟩ := typed
   exact ⟨_, raise_done heap address items n found⟩
 
 theorem push_then_raise.«Throws» :
-    ∃ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) ∧ (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") ∧ ((CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push_then_raise" [.scalar (.int n)] [("items", .ref items)] heap).Throws)
+    ∃ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) ∧ (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") ∧ ((FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push_then_raise" [.scalar (.int n)] [("items", .ref items)] heap).Throws)
   := by
   exact ⟨[[]], 1, 0, empty_valid, empty_ints, _, _, _, _, raise_done [[]] 0 [] 1 rfl⟩
 
 theorem push_then_raise.«Not Equiv(raise_without_push)» :
-    Not (∀ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
-    (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push_then_raise" [.scalar (.int n)] [("items", .ref items)] heap).Equiv (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "raise_without_push" [.scalar (.int n)] [("items", .ref items)] heap))
+    Not (∀ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
+    (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push_then_raise" [.scalar (.int n)] [("items", .ref items)] heap).Equiv (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "raise_without_push" [.scalar (.int n)] [("items", .ref items)] heap))
   := by
   intro all
   obtain ⟨result, done, eq⟩ := (all [[]] 1 0 empty_valid empty_ints).1 _ (raise_done [[]] 0 [] 1 rfl)
@@ -156,16 +156,16 @@ theorem push_then_raise.«Not Equiv(raise_without_push)» :
   · exact (Graph.not_equivalent_of_observe (fuel := 1000) (by native_decide)) graph
 
 theorem read_first.«Throws» :
-    ∃ (heap : CleanXY.PyAst.Mutable.Heap) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) ∧ (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") ∧ ((CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "read_first" [.scalar (.int n)] [("items", .ref items)] heap).Throws)
+    ∃ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) ∧ (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") ∧ ((FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "read_first" [.scalar (.int n)] [("items", .ref items)] heap).Throws)
   := by
   refine ⟨[[]], 1, 0, empty_valid, empty_ints, ⟨"IndexError", []⟩, [("items", .ref 0)], [[]], 1, ?_⟩
   exact Call.finishes_of_observe (fuel := 1) (by native_decide)
 
 theorem push_argument.«Returns» :
-    ∀ (heap : CleanXY.PyAst.Mutable.Heap) (other : Nat) (n : Int) (items : Nat),
-    (CleanXY.PyAst.Mutable.Heap.Valid heap) → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref other) "list[int]") → (CleanXY.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
-    (CleanXY.PyAst.Mutable.function MutableGlobalsAst.module "push_argument" [.ref other, .scalar (.int n)] [("items", .ref items)] heap).Returns
+    ∀ (heap : FormalSW.PyAst.Mutable.Heap) (other : Nat) (n : Int) (items : Nat),
+    (FormalSW.PyAst.Mutable.Heap.Valid heap) → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref other) "list[int]") → (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") →
+    (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push_argument" [.ref other, .scalar (.int n)] [("items", .ref items)] heap).Returns
   := by
   intro heap other n address _ otherTyped typed
   obtain ⟨otherItems, otherFound, _⟩ := otherTyped

@@ -1,11 +1,11 @@
-import «.cleanxy».tests.py.«typing.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«typing.py.ast»
+import FormalSW
 
 namespace tests.py.typing
 
 /-- An unrestricted comparison can receive incompatible runtime types. -/
 theorem lt_untyped.«Throws» :
-    CleanXY.Property.Function.Throws TypingAst.module "lt_untyped" := by
+    FormalSW.Property.Function.Throws TypingAst.module "lt_untyped" := by
   refine ⟨.int 0, .string [], { typeName := "TypeError", args := [] }, ?_⟩
   constructor
   · rfl
@@ -13,7 +13,7 @@ theorem lt_untyped.«Throws» :
   · rfl
   · rfl
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 /-- Evaluating the comparison and falling off the end returns Python None. -/
 theorem lt_int.«Returns» (a b : Int) :

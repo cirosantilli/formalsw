@@ -6,11 +6,11 @@ import tempfile
 import textwrap
 
 REPO = Path(__file__).resolve().parents[2]
-CLEANXY = REPO / 'cleanxy'
+FORMALSW = REPO / 'formalsw'
 
 
 def stub(path):
-    return subprocess.run([str(CLEANXY), '--stub', str(path)], cwd=REPO,
+    return subprocess.run([str(FORMALSW), '--stub', str(path)], cwd=REPO,
                           text=True, capture_output=True)
 
 
@@ -18,7 +18,7 @@ CASES = [
     ('unsupported code inside a parallel loop', '''
         from threading import Lock
         def f(mutex: Lock):
-            """@cleanxy: theorem bad : True"""
+            """@formalsw: theorem bad : True"""
             while True:
                 if False:
                     print("still unsupported")
@@ -28,7 +28,7 @@ CASES = [
     ('parallel chained comparison', '''
         from threading import Lock
         def f(n: int, mutex: Lock):
-            """@cleanxy: theorem bad : True"""
+            """@formalsw: theorem bad : True"""
             while 0 < n < 10:
                 n = n - 1
     ''', 'parallel comparisons currently support one operator'),
@@ -36,39 +36,39 @@ CASES = [
         from threading import Lock
         sleep = lambda n: None
         def f(mutex: Lock):
-            """@cleanxy: theorem bad : True"""
+            """@formalsw: theorem bad : True"""
             while True:
                 sleep(0)
     ''', 'unshadowed from time import sleep'),
     ('special exception constructor', '''
         items = [1]
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             items.append(n)
             raise OSError(2, "missing")
     ''', 'special builtin exception constructors are unsupported'),
     ('dictionary global', '''
         items = {"n": 1}
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             return items["n"]
     ''', 'supported state is int, str, bool, or homogeneous scalar lists'),
     ('nested mutable global', '''
         items = [[1]]
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             return items[0]
     ''', 'supported state is int, str, bool, or homogeneous scalar lists'),
     ('unsupported heap method', '''
         items = [1]
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             items.pop()
     ''', 'Call expression is unsupported by heap execution'),
     ('unsupported dead heap code', '''
         items = [1]
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             items.append(n)
             return
             print(n)
@@ -76,38 +76,38 @@ CASES = [
     ('recursive list comparison', '''
         items = [1]
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             return items == [n]
     ''', 'recursive list comparison is not yet supported'),
     ('nested heap write', '''
         items = [1]
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             items.append(items)
     ''', 'nested mutable containers are not yet supported'),
     ('unsupported augmented slice', '''
         items = [1]
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             items[:] += [n]
     ''', 'Slice expression is unsupported by heap execution'),
     ('shadowed heap len', '''
         items = [1]
         len = 3
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             return len(items)
     ''', 'Call expression is unsupported by heap execution'),
     ('scalar model cannot discard heap', '''
         items = [1]
         def f(n: int):
-            """@cleanxy: theorem bad : (scalarFunctionWithGlobals _this_module "f" [.int 1] []).Returns"""
+            """@formalsw: theorem bad : (scalarFunctionWithGlobals _this_module "f" [.int 1] []).Returns"""
             items.append(n)
     ''', 'mutable globals require Mutable.function'),
     ('Equiv validates counterpart with selected heap interpreter', '''
         items = [1]
         def f(n: int):
-            """@cleanxy: Equiv(g)"""
+            """@formalsw: Equiv(g)"""
             items.append(n)
         def g(n: int):
             for i in range(n):
@@ -115,7 +115,7 @@ CASES = [
     ''', 'For statement is unsupported by heap execution'),
     ('explicit heap model validates its own subset', '''
         def f(n: int):
-            """@cleanxy: theorem bad : (Mutable.function _this_module "f" [.scalar (.int 1)] [] []).Returns"""
+            """@formalsw: theorem bad : (Mutable.function _this_module "f" [.scalar (.int 1)] [] []).Returns"""
             for i in range(n):
                 pass
     ''', 'For statement is unsupported by heap execution'),
@@ -125,14 +125,14 @@ CASES = [
             def next(self):
                 return self
         def f(node: Node):
-            """@cleanxy: theorem invalid :
+            """@formalsw: theorem invalid :
               Not Ensures(Parallel([this_function [.ref 0]], {}), fun _ => True)
             """
             following = node.next
     ''', 'parallel objects currently support plain data fields'),
     ('parallel array element types', '''
         def f(data: list[int]):
-            """@cleanxy: theorem invalid :
+            """@formalsw: theorem invalid :
               Not Ensures(Parallel([this_function [.ref 0]], {}), fun _ => True)
             """
             data[0] = "wrong type"
@@ -142,7 +142,7 @@ CASES = [
             def __init__(self):
                 self.value = 0
         def f(box: Box):
-            """@cleanxy: theorem invalid :
+            """@formalsw: theorem invalid :
               Not Ensures(Parallel([this_function [.ref 0]], {}), fun _ => True)
             """
             box.value = "wrong type"
@@ -151,7 +151,7 @@ CASES = [
         from threading import Lock
         from time import sleep
         def f(counter: list[int], mutex: Lock):
-            """@cleanxy: theorem invalid :
+            """@formalsw: theorem invalid :
               Not Ensures(Parallel([this_function [.ref 0, .lock 0]], { objects := [.array [.int 0]] }), fun _ => True)
             """
             print(counter)
@@ -162,7 +162,7 @@ CASES = [
         def sleep(n):
             pass
         def f(counter: list[int], mutex: Lock):
-            """@cleanxy: theorem invalid :
+            """@formalsw: theorem invalid :
               CanReturn(Parallel([this_function [.ref 0, .lock 0]], { objects := [.array [.int 0]] }), {})
             """
             sleep(0)
@@ -171,11 +171,11 @@ CASES = [
         from threading import Lock
         from time import sleep
         def f(counter: list[int], mutex: Lock):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             pass
     ''', 'concurrent workers require a raw Parallel specification'),
     ('unmodeled parallel return', '''
-        """@cleanxy: theorem invalid :
+        """@formalsw: theorem invalid :
           Not Ensures(Parallel([parallelFunction ProbeAst.module "f" [.int 0]], {}), fun _ => True)
         """
         def f(n: int):
@@ -185,7 +185,7 @@ CASES = [
         from threading import Lock
         from time import sleep
         def f(counter: list[int], mutex: Lock):
-            """@cleanxy: theorem invalid :
+            """@formalsw: theorem invalid :
               Not Ensures(Parallel([this_function [.ref 0, .lock 0]], { objects := [.array [.int 0]] }), fun _ => True)
             """
             counter[1] = counter[0] + 2
@@ -193,56 +193,56 @@ CASES = [
     ('nested marker', '''
         class Example:
             def method(self):
-                """@cleanxy: Returns"""
+                """@formalsw: Returns"""
                 return 1
     ''', 'requirements on nested functions and class methods are unsupported'),
     ('type-changing loop', '''
         def f(n: int):
-            """@cleanxy: Not Halts"""
+            """@formalsw: Not Halts"""
             while n:
                 n = "oops"
                 n = n - 1
     ''', 'Sub on these operand types is unsupported'),
     ('unknown divisor', '''
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             return 1 // n
     ''', 'nonnegative integer literal divisor'),
     ('negative divisor', '''
         def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             return n % -2
     ''', 'nonnegative integer literal divisor'),
     ('range shadowing', '''
         def f(range: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             for n in range(3):
                 pass
     ''', 'only for name in range(stop) is supported'),
     ('exception shadowing', '''
         def f(ValueError: int):
-            """@cleanxy: Halts"""
+            """@formalsw: Halts"""
             raise ValueError()
     ''', 'only builtin exception constructors are supported'),
     ('unsupported Throws signature', '''
         def f(a: int, b: int):
-            """@cleanxy: Not Throws"""
+            """@formalsw: Not Throws"""
             return a + b
     ''', 'Throws has no function model for this argument signature'),
     ('unsupported ReturnType signature', '''
         def f(n: int) -> str:
-            """@cleanxy: Not ReturnType"""
+            """@formalsw: Not ReturnType"""
             return "a"
     ''', 'ReturnType currently requires matching supported argument and return annotations'),
     ('equivalence domains', '''
         def f(n: int):
-            """@cleanxy: Not Equiv(g)"""
+            """@formalsw: Not Equiv(g)"""
             return n
         def g(n: str):
             return n
     ''', 'Equiv requires matching supported argument domains'),
     ('module raw dependency', '''
-        """@cleanxy: theorem invalid :
+        """@formalsw: theorem invalid :
           Not (scalarFunction ProbeAst.module "f" [.int 0]).Halts
         """
         def f(n: int):
@@ -250,35 +250,35 @@ CASES = [
     ''', "call to 'abs' is unsupported"),
     ('unknown object', '''
         def f(n: int):
-            """@cleanxy: theorem invalid :
+            """@formalsw: theorem invalid :
               Not Halts(.object "Unknown" < .object "Unknown")
             """
             return n
     ''', "object class 'Unknown' is not defined"),
     ('async function', '''
         async def f(n: int):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             return n
     ''', 'async functions are unsupported'),
     ('default argument', '''
         def f(n: int = 1):
-            """@cleanxy: Returns"""
+            """@formalsw: Returns"""
             return n
     ''', 'only plain positional arguments without defaults or variadics are supported'),
     ('unrepresented annotation', '''
         def f(n: int) -> int | str:
-            """@cleanxy: theorem irrelevant : True"""
+            """@formalsw: theorem irrelevant : True"""
             return n
     ''', 'this return annotation is unsupported by the AST model'),
     ('raw property dependency', '''
-        """@cleanxy: theorem invalid :
-          Not (CleanXY.Property.Function.Throws ProbeAst.module "f")
+        """@formalsw: theorem invalid :
+          Not (FormalSW.Property.Function.Throws ProbeAst.module "f")
         """
         def f(n: int):
             return abs(n)
     ''', "call to 'abs' is unsupported"),
     ('raw list model mismatch', '''
-        """@cleanxy: theorem invalid :
+        """@formalsw: theorem invalid :
           Not (listFunction ProbeAst.module "f" []).Halts
         """
         def f(n: int):
@@ -312,7 +312,7 @@ with tempfile.TemporaryDirectory(prefix='.support-check-', dir=REPO) as director
 
     path.write_text(source + '''
 def twice_wrapped(values: list[int]) -> list[int]:
-    """@cleanxy: Not ReturnType"""
+    """@formalsw: Not ReturnType"""
     return merge_sort_int(values)
 ''')
     result = stub(path)

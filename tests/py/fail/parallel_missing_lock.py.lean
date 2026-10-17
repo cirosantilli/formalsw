@@ -1,7 +1,7 @@
-import «.cleanxy».tests.py.fail.«parallel_missing_lock.py.ast»
-import CleanXY
+import «.formalsw».tests.py.fail.«parallel_missing_lock.py.ast»
+import FormalSW
 namespace tests.py.fail.parallel_missing_lock
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 theorem increment.preserves_both_updates :
     Ensures(Parallel(List.replicate 2

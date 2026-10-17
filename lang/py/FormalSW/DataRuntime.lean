@@ -1,11 +1,11 @@
-import lang.py.CleanXY.Runtime
+import lang.py.FormalSW.Runtime
 
 /-! An interpreter for read-only Python data programs: scalars, nested lists,
 local assignment, conditionals, loops, and len/type. Lists cannot be mutated in
 this subset, so a tree representation preserves Python's observable behavior.
 This is a general interpreter, not a recognizer for the graph comparator. -/
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 inductive Data where
   | scalar (value : Constant)
@@ -175,7 +175,7 @@ def dataFunction (module : Module) (name : String) (values : List Data) : Execut
       else Execution.unsupported
   | none => Execution.unsupported
 
-end CleanXY.PyAst
+end FormalSW.PyAst
 
 /-- Parse Python through the normal AST bridge and validate the entire data subset.
 Use include_str so Lake tracks changes to the actual Python definition. -/
@@ -191,4 +191,4 @@ elab_rules : term
         cmd := "python3", args := #["-m", "lang.py.data_ast", (toJson text).compress] }
       if result.exitCode != 0 then throwError "{result.stderr}"
       let json ← ofExcept (Json.parse result.stdout)
-      return Lean.toExpr (← ofExcept (CleanXY.PyAst.Module.fromJsonDocument? json))
+      return Lean.toExpr (← ofExcept (FormalSW.PyAst.Module.fromJsonDocument? json))

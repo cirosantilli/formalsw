@@ -1,7 +1,7 @@
-import «.cleanxy».tests.py.«parallel_liveness.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«parallel_liveness.py.ast»
+import FormalSW
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 namespace tests.py.parallel_liveness
 
@@ -34,7 +34,7 @@ private theorem infinite_retries : retries.CanDiverge := by
 
 theorem lock_pair.opposite_order_can_deadlock :
     let _this_module := ParallelLivenessAst.module;
-    let this_function := CleanXY.PyAst.parallelFunction ParallelLivenessAst.module "lock_pair";
+    let this_function := FormalSW.PyAst.parallelFunction ParallelLivenessAst.module "lock_pair";
     CanDeadlock(Parallel([this_function [.lock 0, .lock 1],
                                 this_function [.lock 1, .lock 0]], {}))
   := by
@@ -44,7 +44,7 @@ theorem lock_pair.opposite_order_can_deadlock :
 
 theorem lock_pair.opposite_order_not_halts :
     let _this_module := ParallelLivenessAst.module;
-    let this_function := CleanXY.PyAst.parallelFunction ParallelLivenessAst.module "lock_pair";
+    let this_function := FormalSW.PyAst.parallelFunction ParallelLivenessAst.module "lock_pair";
     Not Halts(Parallel([this_function [.lock 0, .lock 1],
                               this_function [.lock 1, .lock 0]], {}))
   := by
@@ -55,7 +55,7 @@ theorem lock_pair.opposite_order_not_halts :
 
 theorem lock_pair.same_order_returns :
     let _this_module := ParallelLivenessAst.module;
-    let this_function := CleanXY.PyAst.parallelFunction ParallelLivenessAst.module "lock_pair";
+    let this_function := FormalSW.PyAst.parallelFunction ParallelLivenessAst.module "lock_pair";
     Returns(Parallel([this_function [.lock 0, .lock 1],
                             this_function [.lock 0, .lock 1]], {}))
   := by
@@ -64,7 +64,7 @@ theorem lock_pair.same_order_returns :
 
 theorem retry_forever.can_livelock :
     let _this_module := ParallelLivenessAst.module;
-    let this_function := CleanXY.PyAst.parallelFunction ParallelLivenessAst.module "retry_forever";
+    let this_function := FormalSW.PyAst.parallelFunction ParallelLivenessAst.module "retry_forever";
     CanDiverge(Parallel([this_function [.lock 0], this_function [.lock 0]], {}))
   := by
   dsimp only
@@ -73,7 +73,7 @@ theorem retry_forever.can_livelock :
 
 theorem retry_forever.does_not_halt :
     let _this_module := ParallelLivenessAst.module;
-    let this_function := CleanXY.PyAst.parallelFunction ParallelLivenessAst.module "retry_forever";
+    let this_function := FormalSW.PyAst.parallelFunction ParallelLivenessAst.module "retry_forever";
     Not Halts(Parallel([this_function [.lock 0], this_function [.lock 0]], {}))
   := by
   dsimp only

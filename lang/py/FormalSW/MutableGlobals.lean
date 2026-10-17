@@ -1,7 +1,7 @@
-import lang.py.CleanXY.Globals
-import lang.py.CleanXY.GraphEquivalence
+import lang.py.FormalSW.Globals
+import lang.py.FormalSW.GraphEquivalence
 
-namespace CleanXY.PyAst.Mutable
+namespace FormalSW.PyAst.Mutable
 
 /-- References are shared by arguments, globals, locals, and returned values. -/
 inductive Value where
@@ -385,4 +385,4 @@ def function (module : Module) (name : String) (values : List Value)
         ⟨State, ⟨executableBody body, env, heap⟩, step globals declared heap.length⟩
       else Execution.unsupported⟩
 
-end CleanXY.PyAst.Mutable
+end FormalSW.PyAst.Mutable

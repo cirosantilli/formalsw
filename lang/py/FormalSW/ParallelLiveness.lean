@@ -1,9 +1,9 @@
-import lang.py.CleanXY.Parallel
+import lang.py.FormalSW.Parallel
 
 /-! Unbounded liveness for a joined concurrent batch. All choices of enabled
 workers are included. There are no idle scheduler steps or fairness axioms.
 A finite stuck execution and an infinite execution are distinct witnesses. -/
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 namespace ParallelConfig
 
@@ -273,4 +273,4 @@ macro "Returns(" "Parallel(" calls:term "," state:term ")" ")" : term =>
 macro "Throws(" "Parallel(" calls:term "," state:term ")" ")" : term =>
   `((parallelRun $calls $state).Throws)
 
-end CleanXY.PyAst
+end FormalSW.PyAst

@@ -2,9 +2,9 @@ import lang.py.builtin.type.core
 
 /-! Models for `property`, `classmethod`, `staticmethod`, and bound methods. -/
 
-namespace CleanXY.Py.Builtin.Descriptor
+namespace FormalSW.Py.Builtin.Descriptor
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 structure Property (Owner : Type u) (Value : Type v) where
   get : Option (Owner → Result Value) := none
@@ -47,4 +47,4 @@ structure BoundMethod (Self Args ResultType : Type) where
 def BoundMethod.call (method : BoundMethod Self Args ResultType) (args : Args) : ResultType :=
   method.function method.self args
 
-end CleanXY.Py.Builtin.Descriptor
+end FormalSW.Py.Builtin.Descriptor

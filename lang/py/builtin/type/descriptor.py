@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plain-Python models of the standard descriptor wrappers.
 
-@cleanxy theorem modeled : DescriptorAst.module.hasExactlyClassMethods "property" ["__init__", "__get__", "__set__", "__delete__"] = true ∧ DescriptorAst.module.hasExactlyClassMethods "classmethod" ["__init__", "__get__"] = true ∧ DescriptorAst.module.hasExactlyClassMethods "staticmethod" ["__init__", "__get__"] = true
-@cleanxy theorem source_fingerprint : DescriptorAst.module.fingerprint = 6012450843489875384
+@formalsw theorem modeled : DescriptorAst.module.hasExactlyClassMethods "property" ["__init__", "__get__", "__set__", "__delete__"] = true ∧ DescriptorAst.module.hasExactlyClassMethods "classmethod" ["__init__", "__get__"] = true ∧ DescriptorAst.module.hasExactlyClassMethods "staticmethod" ["__init__", "__get__"] = true
+@formalsw theorem source_fingerprint : DescriptorAst.module.fingerprint = 531026127595171168
 """
 
 

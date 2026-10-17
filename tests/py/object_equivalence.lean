@@ -1,6 +1,6 @@
-import CleanXY
+import FormalSW
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 namespace ObjectEquivalenceExamples
 

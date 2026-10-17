@@ -11,7 +11,7 @@ class Cell:
 def mark(item: Cell, mutex: Lock):
     """Make each cell refer to itself.
 
-    @cleanxy: Concurrent(check_marks)
+    @formalsw: Concurrent(check_marks)
     """
     mutex.acquire()
     item.value = item

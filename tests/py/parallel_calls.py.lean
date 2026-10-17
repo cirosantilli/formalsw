@@ -1,7 +1,7 @@
-import «.cleanxy».tests.py.«parallel_calls.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«parallel_calls.py.ast»
+import FormalSW
 namespace tests.py.parallel_calls
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 theorem module_worker_calls :
     CanReturn(Parallel([parallelFunction ParallelCallsAst.module "write_last" [.ref 0, .int 9]],

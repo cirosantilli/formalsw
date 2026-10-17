@@ -2,9 +2,9 @@ import lang.py.builtin.type.core
 
 /-! Arbitrary-precision Python integer operations, excluding float-producing branches. -/
 
-namespace CleanXY.Py.Builtin.Int
+namespace FormalSW.Py.Builtin.Int
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 /-- Python integers have arbitrary precision, directly represented by Lean integers. -/
 abbrev IntValue := Int
@@ -234,4 +234,4 @@ example : powMod 2 (-1) 4 = .error (.valueError "base is not invertible for the 
 example : parse [45, 48, 120, 102, 102] 0 = .ok (-255) := rfl
 example : parse [49, 95, 48, 48, 48] = .ok 1000 := rfl
 
-end CleanXY.Py.Builtin.Int
+end FormalSW.Py.Builtin.Int

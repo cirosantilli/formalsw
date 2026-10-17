@@ -3,9 +3,9 @@ import lang.py.builtin.type.subsequence
 
 /-! Python `bytes` semantics and the non-mutating portion shared with `bytearray`. -/
 
-namespace CleanXY.Py.Builtin.Bytes
+namespace FormalSW.Py.Builtin.Bytes
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 abbrev ByteString := List UInt8
 
@@ -228,4 +228,4 @@ example : hex [0, 15, 255] = "000fff" := rfl
 example : fromHex "00 0f FF" = .ok [0, 15, 255] := rfl
 example : capitalize [104, 69, 76, 76, 79] = [72, 101, 108, 108, 111] := rfl
 
-end CleanXY.Py.Builtin.Bytes
+end FormalSW.Py.Builtin.Bytes

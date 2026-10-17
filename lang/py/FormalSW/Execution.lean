@@ -1,9 +1,9 @@
-import lang.py.CleanXY.Model
+import lang.py.FormalSW.Model
 
 /-! Deterministic transition systems. Termination requires a finite derivation;
 running out of observation fuel never manufactures a return value. -/
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 inductive Step (σ α : Type) where
   | next (state : σ)
@@ -288,4 +288,4 @@ theorem Equiv.halts_iff {left right : Execution α} (h : left.Equiv right) :
   · exact ⟨outcome, (h _).mpr finished⟩
 
 end Execution
-end CleanXY.PyAst
+end FormalSW.PyAst

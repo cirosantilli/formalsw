@@ -2,7 +2,7 @@ import lang.py.builtin.type.sequence
 
 /-! Python tuples: immutable, heterogeneous sequences represented extensionally as lists. -/
 
-namespace CleanXY.Py.Builtin.Tuple
+namespace FormalSW.Py.Builtin.Tuple
 
 abbrev Tuple (α : Type u) := List α
 
@@ -16,4 +16,4 @@ def count [BEq α] (values : Tuple α) (needle : α) : Nat := Sequence.count val
 def index? [BEq α] (values : Tuple α) (needle : α) : Option Nat :=
   Sequence.index? values needle
 
-end CleanXY.Py.Builtin.Tuple
+end FormalSW.Py.Builtin.Tuple

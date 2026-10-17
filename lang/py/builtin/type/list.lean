@@ -2,9 +2,9 @@ import lang.py.builtin.type.sequence
 
 /-! Python's mutable list operations, modeled as pure list transformations. -/
 
-namespace CleanXY.Py.Builtin.List
+namespace FormalSW.Py.Builtin.List
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 abbrev ListValue (α : Type u) := List α
 
@@ -82,4 +82,4 @@ def sort (values : ListValue α) (less : α → α → Bool)
   let ordering := if reverseOrder then (fun left right => less right left) else less
   values.foldl (fun result value => insertSorted ordering value result) []
 
-end CleanXY.Py.Builtin.List
+end FormalSW.Py.Builtin.List

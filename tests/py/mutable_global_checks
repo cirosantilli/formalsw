@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 from lang.py.object_snapshot import snapshot_roots
 from lang.py.support import SupportChecker
 
-api = runpy.run_path(str(ROOT / 'cleanxy'))
+api = runpy.run_path(str(ROOT / 'formalsw'))
 
 
 def data(value):
@@ -78,7 +78,7 @@ def main():
     checker = SupportChecker(module)
     for name in BODIES:
         assert not checker.check(name, mutable=True), (name, checker.check(name, mutable=True))
-    lines = ['import CleanXY', 'open CleanXY.PyAst', 'set_option maxRecDepth 4096',
+    lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 4096',
              'def source : Module := pyast_from_json% (include_str "source.json")']
     count = 0
     for name in BODIES:
@@ -115,7 +115,7 @@ def main():
                               f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
                               '  | _ => false) = true := by native_decide']
                     count += 1
-    with tempfile.TemporaryDirectory(prefix='cleanxy-mutable-') as directory:
+    with tempfile.TemporaryDirectory(prefix='formalsw-mutable-') as directory:
         path = Path(directory)
         (path / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
         (path / 'Check.lean').write_text('\n'.join(lines))

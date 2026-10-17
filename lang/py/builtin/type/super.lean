@@ -3,9 +3,9 @@ import lang.py.builtin.type.type
 
 /-! Python `super`: method-resolution search beginning after a nominated class. -/
 
-namespace CleanXY.Py.Builtin.Super
+namespace FormalSW.Py.Builtin.Super
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 structure Super where
   nominatedType : Nat
@@ -32,4 +32,4 @@ def getAttr? (superObject : Super) (lookup : Nat → String → Option α)
   let tail ← dropThrough superObject.methodResolutionOrder superObject.nominatedType
   tail.findSome? fun typeId => lookup typeId name
 
-end CleanXY.Py.Builtin.Super
+end FormalSW.Py.Builtin.Super

@@ -1,7 +1,7 @@
-import «.cleanxy».tests.py.«parallel_shared_counter.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«parallel_shared_counter.py.ast»
+import FormalSW
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 namespace tests.py.parallel_shared_counter
 

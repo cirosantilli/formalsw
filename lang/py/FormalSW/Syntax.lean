@@ -1,11 +1,11 @@
-import lang.py.CleanXY.Sorting
-import lang.py.CleanXY.Globals
+import lang.py.FormalSW.Sorting
+import lang.py.FormalSW.Globals
 
 /-! Outcome predicates over deterministic executions. `_this_module` is supplied
 by generated raw specifications; handwritten proofs bind it to their Python AST.
 No predicate treats unsupported execution as evidence of termination. -/
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 syntax (name := pythonComparison) "python_comparison(" term ")" : term
 macro_rules
@@ -47,4 +47,4 @@ macro_rules (kind := haltsCall)
 macro_rules (kind := divergesCall)
   | `(diverges($function:ident ($arguments,*))) => `(($function $arguments*).Diverges)
 
-end CleanXY.PyAst
+end FormalSW.PyAst

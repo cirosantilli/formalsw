@@ -69,7 +69,7 @@ def module_json(source):
                 if node.id not in local_names | {"type", "len", "int", "bool", "str", "list"}:
                     raise ValueError(f"unsupported Python constructs: free name {node.id}")
     # Reuse the application's AST schema, rather than introducing a second parser.
-    frontend = runpy.run_path(str(Path(__file__).resolve().parents[2] / "cleanxy"))
+    frontend = runpy.run_path(str(Path(__file__).resolve().parents[2] / "formalsw"))
     return frontend["AstJsonEmitter"](tree).emit()
 
 

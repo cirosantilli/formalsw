@@ -7,7 +7,7 @@ These definitions intentionally mirror Python's `ast` module shape more closely
 than executable Lean code. Partial semantic interpretations are defined below.
 -/
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 /-- Python constants currently represented by the AST bridge. -/
 inductive Constant where
@@ -334,7 +334,7 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
   | type => throw s!"unsupported statement type: {type}"
 
 /--
-Decode a complete cleanxy JSON AST document.
+Decode a complete formalsw JSON AST document.
 
 The schema version is checked before the JSON data is turned into the typed
 `PyAst.Module` on which proofs operate.
@@ -342,15 +342,15 @@ The schema version is checked before the JSON data is turned into the typed
 def Module.fromJsonDocument? (json : Lean.Json) : Except String Module := do
   let version ← (← jsonField json "schema_version").getNat?
   if version != 1 then
-    throw s!"unsupported cleanxy AST schema version: {version}"
+    throw s!"unsupported formalsw AST schema version: {version}"
   let ast ← jsonField json "ast"
   if (← jsonString ast "type") != "Module" then
     throw "the top-level AST node must have type Module"
   return { body := ← jsonArray ast "body" Stmt.fromJson? }
 
-end CleanXY.PyAst
+end FormalSW.PyAst
 
-/-- Import a cleanxy JSON AST as a reducible, typed `CleanXY.PyAst.Module`. -/
+/-- Import a formalsw JSON AST as a reducible, typed `FormalSW.PyAst.Module`. -/
 syntax "pyast_from_json% " term : term
 
 open Lean Elab Term Meta in
@@ -361,20 +361,20 @@ elab_rules : term
         | throwError "pyast_from_json% expects a string literal, usually from include_str"
       let json ← match Json.parse source with
         | .ok value => pure value
-        | .error message => throwError "invalid cleanxy AST JSON: {message}"
-      let module ← match CleanXY.PyAst.Module.fromJsonDocument? json with
+        | .error message => throwError "invalid formalsw AST JSON: {message}"
+      let module ← match FormalSW.PyAst.Module.fromJsonDocument? json with
         | .ok value => pure value
-        | .error message => throwError "invalid cleanxy AST document: {message}"
+        | .error message => throwError "invalid formalsw AST document: {message}"
       return Lean.toExpr module
 
 /-!
-Partial semantic interpreters for `CleanXY.PyAst`.
+Partial semantic interpreters for `FormalSW.PyAst`.
 
 This section is intentionally not generated. It is where we define the meaning
 of supported Python AST fragments and prove properties about that meaning.
 -/
 
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 /-- Runtime environment for the current integer-only evaluator. -/
 abbrev Env := List (String × Int)
@@ -1289,17 +1289,17 @@ def evalUnaryIntFunctionOutcome (module : Module) (name : String) (arg : Int) :
   let body ← module.findFunctionBody name
   evalIntBlockOutcome [("n", arg)] body
 
-end CleanXY.PyAst
+end FormalSW.PyAst
 
 /-!
-Reusable proof obligations that `cleanxy` docstring markers can request.
+Reusable proof obligations that `formalsw` docstring markers can request.
 
 These names are intentionally short and stable so users can discover available
-properties under `CleanXY.Property.Function` and then prove ordinary Lean
+properties under `FormalSW.Property.Function` and then prove ordinary Lean
 theorems with the same types.
 -/
 
-namespace CleanXY.Property.Function
+namespace FormalSW.Property.Function
 
 /--
 A function either throws or successfully returns a value of its annotated type
@@ -1436,4 +1436,4 @@ theorem bigO_of_growth_bound (module : PyAst.Module) (name : String)
       rw [hGrowth]
       exact PyAst.Growth.scale_left analysis.operations hBound
 
-end CleanXY.Property.Function
+end FormalSW.Property.Function

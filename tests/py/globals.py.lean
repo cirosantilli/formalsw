@@ -1,7 +1,7 @@
-import «.cleanxy».tests.py.«globals.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«globals.py.ast»
+import FormalSW
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 namespace tests.py.globals
 
@@ -43,28 +43,28 @@ private theorem raised_done (n total : Int) :
 
 theorem add_offset.«Returns» :
     ∀ (n : Int) (offset : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)]).Returns
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)]).Returns
   := by
   intro n offset
   exact ⟨_, _, offset_done n offset⟩
 
 theorem add_offset.«Halts» :
     ∀ (n : Int) (offset : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)]).Halts
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)]).Halts
   := by
   intro n offset
   exact (ScalarCall.returns_iff_halts_not_throws _).mp (add_offset.«Returns» n offset) |>.1
 
 theorem add_offset.«Not Throws» :
     Not (∃ (n : Int) (offset : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)]).Throws)
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)]).Throws)
   := by
   rintro ⟨n, offset, thrown⟩
   exact ((ScalarCall.returns_iff_halts_not_throws _).mp (add_offset.«Returns» n offset)).2 thrown
 
 theorem add_offset.«ReturnType» :
     ∀ (n : Int) (offset : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)]).ReturnType "int"
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)]).ReturnType "int"
   := by
   intro n offset
   exact Or.inr ⟨_, _, offset_done n offset, rfl⟩
@@ -72,42 +72,42 @@ theorem add_offset.«ReturnType» :
 theorem add_offset.returns_with_offset :
     let _this_module := GlobalsAst.module;
     ∀ (n offset : Int),
-    let this_function := fun (input_0 : Int) => CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int input_0] [("offset", .int offset)];
+    let this_function := fun (input_0 : Int) => FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int input_0] [("offset", .int offset)];
     Returns(this_function(n))
   := by
   exact add_offset.«Returns»
 
 theorem add_offset_commuted.«Equiv(add_offset)» :
     ∀ (n : Int) (offset : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset_commuted" [.int n] [("offset", .int offset)]).Equiv (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)])
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset_commuted" [.int n] [("offset", .int offset)]).Equiv (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "add_offset" [.int n] [("offset", .int offset)])
   := by
   intro n offset
   exact ScalarCall.equiv_of_finishes (commuted_done n offset) (offset_done n offset)
 
 theorem advance.«Returns» :
     ∀ (n : Int) (total : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance" [.int n] [("total", .int total)]).Returns
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance" [.int n] [("total", .int total)]).Returns
   := by
   intro n total
   exact ⟨_, _, advance_done n total⟩
 
 theorem advance_explicit.«Equiv(advance)» :
     ∀ (n : Int) (total : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance_explicit" [.int n] [("total", .int total)]).Equiv (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance" [.int n] [("total", .int total)])
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance_explicit" [.int n] [("total", .int total)]).Equiv (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance" [.int n] [("total", .int total)])
   := by
   intro n total
   exact ScalarCall.equiv_of_finishes (explicit_done n total) (advance_done n total)
 
 theorem advance_explicit.«EquivReturn(advance)» :
     ∀ (n : Int) (total : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance_explicit" [.int n] [("total", .int total)]).EquivReturn (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance" [.int n] [("total", .int total)])
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance_explicit" [.int n] [("total", .int total)]).EquivReturn (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance" [.int n] [("total", .int total)])
   := by
   intro n total
   exact (advance_explicit.«Equiv(advance)» n total).equivReturn
 
 theorem return_only.«Not Equiv(advance)» :
     Not (∀ (n : Int) (total : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "return_only" [.int n] [("total", .int total)]).Equiv (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance" [.int n] [("total", .int total)]))
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "return_only" [.int n] [("total", .int total)]).Equiv (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "advance" [.int n] [("total", .int total)]))
   := by
   intro h
   have unchanged : (call "return_only" [.int 1] [("total", .int 0)]).Finishes
@@ -118,20 +118,20 @@ theorem return_only.«Not Equiv(advance)» :
 
 theorem raise_after.«Halts» :
     ∀ (n : Int) (total : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "raise_after" [.int n] [("total", .int total)]).Halts
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "raise_after" [.int n] [("total", .int total)]).Halts
   := by
   intro n total
   exact ⟨_, _, raised_done n total⟩
 
 theorem raise_after.«Throws» :
     ∃ (n : Int) (total : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "raise_after" [.int n] [("total", .int total)]).Throws
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "raise_after" [.int n] [("total", .int total)]).Throws
   := by
   exact ⟨1, 0, _, _, raised_done 1 0⟩
 
 theorem raise_after.«Not Equiv(raise_before)» :
     Not (∀ (n : Int) (total : Int),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "raise_after" [.int n] [("total", .int total)]).Equiv (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "raise_before" [.int n] [("total", .int total)]))
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "raise_after" [.int n] [("total", .int total)]).Equiv (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "raise_before" [.int n] [("total", .int total)]))
   := by
   intro h
   have before : (call "raise_before" [.int 1] [("total", .int 0)]).Finishes
@@ -142,21 +142,21 @@ theorem raise_after.«Not Equiv(raise_before)» :
 
 theorem read_label.«Returns» :
     ∀ (label : String),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "read_label" [] [("label", .string label)]).Returns
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "read_label" [] [("label", .string label)]).Returns
   := by
   intro label
   exact ⟨.string label, [("label", .string label)], ScalarCall.finishes_of_observe (fuel := 2) (by rfl)⟩
 
 theorem read_label.«ReturnType» :
     ∀ (label : String),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "read_label" [] [("label", .string label)]).ReturnType "str"
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "read_label" [] [("label", .string label)]).ReturnType "str"
   := by
   intro label
   exact Or.inr ⟨.string label, [("label", .string label)], ScalarCall.finishes_of_observe (fuel := 2) (by rfl), rfl⟩
 
 theorem read_enabled.«Returns» :
     ∀ (enabled : Bool),
-    (CleanXY.PyAst.scalarFunctionWithGlobals GlobalsAst.module "read_enabled" [] [("enabled", .bool enabled)]).Returns
+    (FormalSW.PyAst.scalarFunctionWithGlobals GlobalsAst.module "read_enabled" [] [("enabled", .bool enabled)]).Returns
   := by
   intro enabled
   exact ⟨.bool enabled, [("enabled", .bool enabled)], ScalarCall.finishes_of_observe (fuel := 2) (by rfl)⟩

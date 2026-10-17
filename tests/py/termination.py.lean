@@ -1,8 +1,8 @@
-import «.cleanxy».tests.py.«termination.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«termination.py.ast»
+import FormalSW
 
 namespace tests.py.termination
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 private def foreverLoop : Stmt := .whileDo (.constant (.bool true)) [.expr (.constant .none)] []
 

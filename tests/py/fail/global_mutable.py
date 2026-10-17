@@ -2,5 +2,5 @@ items = {"count": 1}
 
 
 def read_global(n: int) -> int:
-    """@cleanxy: Returns"""
+    """@formalsw: Returns"""
     return items["count"] + n

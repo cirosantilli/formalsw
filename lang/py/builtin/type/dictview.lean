@@ -3,7 +3,7 @@ import lang.py.builtin.type.set
 
 /-! Dynamic dictionary views and read-only mapping proxies. -/
 
-namespace CleanXY.Py.Builtin.DictView
+namespace FormalSW.Py.Builtin.DictView
 
 inductive Kind where
   | keys
@@ -50,4 +50,4 @@ def MappingProxy.get? (proxy : MappingProxy α β cmp) (key : α) : Option β :=
 def MappingProxy.size (proxy : MappingProxy α β cmp) : Nat := Dict.size proxy.dictionary
 def MappingProxy.keys (proxy : MappingProxy α β cmp) : List α := Dict.keys proxy.dictionary
 
-end CleanXY.Py.Builtin.DictView
+end FormalSW.Py.Builtin.DictView

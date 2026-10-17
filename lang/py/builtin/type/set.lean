@@ -6,7 +6,7 @@ binary search tree; mutating Python operations are represented as pure
 functions returning the updated tree.
 -/
 
-namespace CleanXY.Py.Builtin.Set
+namespace FormalSW.Py.Builtin.Set
 
 universe u
 
@@ -76,4 +76,4 @@ theorem tree_wellFormed (s : Set α cmp) :
     (letI : Ord α := ⟨cmp⟩; s.inner.inner.inner.WF) := by
   exact s.inner.inner.wf
 
-end CleanXY.Py.Builtin.Set
+end FormalSW.Py.Builtin.Set

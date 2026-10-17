@@ -1,9 +1,9 @@
-import «.cleanxy».tests.py.«throws.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«throws.py.ast»
+import FormalSW
 
 namespace tests.py.throws
 
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 private theorem reject_odd_outcome (n : Int) :
     (scalarFunction ThrowsAst.module "reject_odd" [.int n]).observe 2 =
@@ -24,7 +24,7 @@ theorem reject_odd.throws_at_one :
   exact ⟨_, Execution.finishes_of_observe (reject_odd_outcome 1)⟩
 
 theorem reject_odd.«Throws» :
-    CleanXY.Property.Function.Throws ThrowsAst.module "reject_odd" :=
+    FormalSW.Property.Function.Throws ThrowsAst.module "reject_odd" :=
   ⟨1, reject_odd.throws_at_one⟩
 
 theorem reject_odd.returns_at_zero :

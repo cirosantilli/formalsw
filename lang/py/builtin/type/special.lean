@@ -1,6 +1,6 @@
 /-! Generic aliases, unions, modules, code objects, and builtin singleton objects. -/
 
-namespace CleanXY.Py.Builtin.Special
+namespace FormalSW.Py.Builtin.Special
 
 structure GenericAlias where
   origin : Nat
@@ -68,4 +68,4 @@ inductive NotImplementedType where
   | notImplemented
 deriving Repr, DecidableEq
 
-end CleanXY.Py.Builtin.Special
+end FormalSW.Py.Builtin.Special

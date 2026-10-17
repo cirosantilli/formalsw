@@ -1,13 +1,13 @@
-import lang.py.CleanXY.ParallelLiveness
-import lang.py.CleanXY.MutableGlobals
+import lang.py.FormalSW.ParallelLiveness
+import lang.py.FormalSW.MutableGlobals
 import Lean
-import lang.py.CleanXY.Model
-import lang.py.CleanXY.GraphEquivalence
-import lang.py.CleanXY.Syntax
-import lang.py.CleanXY.Parallel
-import lang.py.CleanXY.Concurrent
-import lang.py.CleanXY.PyValue
-import lang.py.CleanXY.Quotation
+import lang.py.FormalSW.Model
+import lang.py.FormalSW.GraphEquivalence
+import lang.py.FormalSW.Syntax
+import lang.py.FormalSW.Parallel
+import lang.py.FormalSW.Concurrent
+import lang.py.FormalSW.PyValue
+import lang.py.FormalSW.Quotation
 import lang.py.builtin.type.bool
 import lang.py.builtin.type.bytearray
 import lang.py.builtin.type.bytes
@@ -36,12 +36,12 @@ import lang.py.builtin.type.type
 import lang.py.builtin.type.truth
 
 /-!
-CleanXY umbrella module.
+FormalSW umbrella module.
 
 Language-specific implementations live below `lang/`; this module re-exports
-the installed models so proof files can simply use `import CleanXY`.
+the installed models so proof files can simply use `import FormalSW`.
 -/
 
-namespace CleanXY
+namespace FormalSW
 
-end CleanXY
+end FormalSW

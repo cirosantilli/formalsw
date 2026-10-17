@@ -1,5 +1,5 @@
-import CleanXY
-open CleanXY.PyAst
+import FormalSW
+open FormalSW.PyAst
 
 -- Exhausted observation fuel is not a proof of nontermination.
 private def countdown : ParallelWorker :=

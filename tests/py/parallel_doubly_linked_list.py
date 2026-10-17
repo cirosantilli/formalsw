@@ -2,7 +2,7 @@
 """Concurrent insertion in a doubly linked list can corrupt its links.
 
 Run: python3 tests/py/parallel_doubly_linked_list.py
-Prove: ./cleanxy tests/py/parallel_doubly_linked_list.py
+Prove: ./formalsw tests/py/parallel_doubly_linked_list.py
 
 The proof covers any existing list and any finite number of fresh insertions.
 The executable demonstrates the race with two workers and an initially empty
@@ -22,7 +22,7 @@ class Node:
 def insert_unsafe(head: Node, node: Node, mutex: Lock) -> None:
     """Concurrent inserts can leave next and prev disagreeing.
 
-    @cleanxy: Not Concurrent(run_trial)
+    @formalsw: Not Concurrent(run_trial)
     """
     following = head.next
     node.prev = head
@@ -35,7 +35,7 @@ def insert_unsafe(head: Node, node: Node, mutex: Lock) -> None:
 def insert_safe(head: Node, node: Node, mutex: Lock) -> None:
     """Every run_trial input and scheduling order must pass its assertions.
 
-    @cleanxy: Concurrent(run_trial)
+    @formalsw: Concurrent(run_trial)
     """
     mutex.acquire()
     following = head.next

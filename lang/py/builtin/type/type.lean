@@ -3,9 +3,9 @@ import lang.py.builtin.type.object
 
 /-! Python type objects and nominal subclass traversal. -/
 
-namespace CleanXY.Py.Builtin.Type
+namespace FormalSW.Py.Builtin.Type
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 structure TypeObject where
   identity : Nat
@@ -49,4 +49,4 @@ def create (identity : Nat) (name moduleName : String) (bases : List Nat)
     (doc : Option String := none) : TypeObject :=
   { identity, name, qualname := name, moduleName, bases, doc }
 
-end CleanXY.Py.Builtin.Type
+end FormalSW.Py.Builtin.Type

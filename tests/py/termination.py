@@ -5,8 +5,8 @@
 def forever() -> None:
     """A supported infinite execution.
 
-    @cleanxy: Not Halts
-    @cleanxy: theorem diverges_forever : diverges(this_function())
+    @formalsw: Not Halts
+    @formalsw: theorem diverges_forever : diverges(this_function())
     """
     while True:
         pass
@@ -18,7 +18,7 @@ def gcd_subtract(a: int, b: int) -> int:
     Each subtraction preserves positivity and strictly decreases a + b.
     Neither a fixed number of iterations nor a timeout proves this theorem.
 
-    @cleanxy: Returns
+    @formalsw: Returns
     """
     if a <= 0:
         return 0
@@ -35,7 +35,7 @@ def gcd_subtract(a: int, b: int) -> int:
 def implicit_none() -> None:
     """Falling off the end is successful termination.
 
-    @cleanxy: Returns
+    @formalsw: Returns
     """
     pass
 
@@ -43,7 +43,7 @@ def implicit_none() -> None:
 def explicit_none() -> None:
     """Explicit and implicit None have the same termination behavior.
 
-    @cleanxy: Returns
+    @formalsw: Returns
     """
     return None
 
@@ -51,6 +51,6 @@ def explicit_none() -> None:
 def bare_return() -> None:
     """A bare return is successful too.
 
-    @cleanxy: Returns
+    @formalsw: Returns
     """
     return

@@ -2,9 +2,9 @@ import lang.py.builtin.type.bytes
 
 /-! Python `bytearray`: mutable byte sequences represented by pure state transitions. -/
 
-namespace CleanXY.Py.Builtin.ByteArray
+namespace FormalSW.Py.Builtin.ByteArray
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 abbrev ByteArray := Bytes.ByteString
 
@@ -26,4 +26,4 @@ def resize (values : ByteArray) (size : Nat) : ByteArray :=
   if size ≤ values.length then values.take size
   else values ++ List.replicate (size - values.length) 0
 
-end CleanXY.Py.Builtin.ByteArray
+end FormalSW.Py.Builtin.ByteArray

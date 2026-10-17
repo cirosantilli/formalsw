@@ -12,7 +12,7 @@ PROOF = (REPO / 'tests/py/parallel_shared_counter.py.lean').read_text()
 
 
 def run(path, stub=False):
-    return subprocess.run([str(REPO / 'cleanxy'), *(['--stub'] if stub else []), str(path)],
+    return subprocess.run([str(REPO / 'formalsw'), *(['--stub'] if stub else []), str(path)],
                           cwd=REPO, text=True, capture_output=True, timeout=60)
 
 
@@ -97,7 +97,7 @@ with tempfile.TemporaryDirectory(prefix='quotation_checks_', dir=REPO / 'tests' 
 
     path.write_text(SOURCE)
     native = Path(directory) / 'native.lean'
-    prefix = (stub.stdout.splitlines()[0] + '\nimport CleanXY\nopen CleanXY.PyAst\n'
+    prefix = (stub.stdout.splitlines()[0] + '\nimport FormalSW\nopen FormalSW.PyAst\n'
               'local macro "ctx " body:term : term =>\n'
               '  `(python_context ' + json.dumps(str(path)) +
               ' "increment_safe" ProbeAst.module in $body)\n')
@@ -117,7 +117,7 @@ example : ctx (fun δ : PyValue => py("type(δ) == int")) (.int 3) := rfl
 -- Neither the Lean namespace nor local binders can capture compiler names.
 namespace Shadow
 def PyValue := Nat
-example : ctx ∀ (Module PyValue : CleanXY.PyAst.PyValue),
+example : ctx ∀ (Module PyValue : FormalSW.PyAst.PyValue),
     py("type(Module) == int and type(PyValue) == int") →
     py("type(Module) == int and type(PyValue) == int") := by
   intro _ _ h
@@ -147,7 +147,7 @@ example : ctx Not (Not Throws(py("run_trial(this_function, [], 0)"))) := by
   intro h
   exact h (Or.inl rfl)
 ''')
-    env = dict(os.environ, LEAN_PATH=str(REPO / '.cleanxy/olean'))
+    env = dict(os.environ, LEAN_PATH=str(REPO / '.formalsw/olean'))
     def check_native():
         return subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(native)],
                               cwd=REPO, env=env, text=True, capture_output=True, timeout=30)

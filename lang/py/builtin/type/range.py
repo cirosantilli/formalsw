@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plain-Python constant-space model of range.
 
-@cleanxy theorem modeled : RangeAst.module.hasExactlyClassMethods "range" ["__init__", "__len__", "__contains__", "__getitem__"] = true
-@cleanxy theorem source_fingerprint : RangeAst.module.fingerprint = 18288300290557242368
+@formalsw theorem modeled : RangeAst.module.hasExactlyClassMethods "range" ["__init__", "__len__", "__contains__", "__getitem__"] = true
+@formalsw theorem source_fingerprint : RangeAst.module.fingerprint = 6424005208048408203
 """
 
 

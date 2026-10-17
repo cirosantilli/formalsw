@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deadlock, livelock, and successful completion of joined worker batches.
 
-Prove: ./cleanxy tests/py/parallel_liveness.py
+Prove: ./formalsw tests/py/parallel_liveness.py
 Run: python3 tests/py/parallel_liveness.py
 
 The bad examples run in disposable child processes so the demonstration exits.
@@ -16,15 +16,15 @@ from time import sleep
 def lock_pair(first: Lock, second: Lock) -> None:
     """Opposite acquisition orders can leave each worker waiting for the other.
 
-    @cleanxy: theorem opposite_order_can_deadlock :
+    @formalsw: theorem opposite_order_can_deadlock :
       CanDeadlock(Parallel([this_function [.lock 0, .lock 1],
                             this_function [.lock 1, .lock 0]], {}))
 
-    @cleanxy: theorem opposite_order_not_halts :
+    @formalsw: theorem opposite_order_not_halts :
       Not Halts(Parallel([this_function [.lock 0, .lock 1],
                           this_function [.lock 1, .lock 0]], {}))
 
-    @cleanxy: theorem same_order_returns :
+    @formalsw: theorem same_order_returns :
       Returns(Parallel([this_function [.lock 0, .lock 1],
                         this_function [.lock 0, .lock 1]], {}))
     """
@@ -40,13 +40,13 @@ def retry_forever(mutex: Lock) -> None:
 
     Both workers can keep taking turns forever. Nobody needs to be starved.
 
-    @cleanxy: theorem can_livelock :
+    @formalsw: theorem can_livelock :
       CanDiverge(Parallel([this_function [.lock 0], this_function [.lock 0]], {}))
 
-    @cleanxy: theorem does_not_halt :
+    @formalsw: theorem does_not_halt :
       Not Halts(Parallel([this_function [.lock 0], this_function [.lock 0]], {}))
 
-    @cleanxy: theorem quoted_can_livelock :
+    @formalsw: theorem quoted_can_livelock :
       CanDiverge(py("run_retries(this_function, 2)"))
     """
     while True:
@@ -58,13 +58,13 @@ def retry_forever(mutex: Lock) -> None:
 def finish(mutex: Lock) -> None:
     """One complete lock region, unlike the broken retry protocol.
 
-    @cleanxy: theorem quoted_returns :
+    @formalsw: theorem quoted_returns :
       Returns(py("run_retries(this_function, 2)"))
 
-    @cleanxy: theorem quoted_halts :
+    @formalsw: theorem quoted_halts :
       Halts(py("run_retries(this_function, 2)"))
 
-    @cleanxy: theorem quoted_deadlock_free :
+    @formalsw: theorem quoted_deadlock_free :
       DeadlockFree(py("run_retries(this_function, 2)"))
     """
     mutex.acquire()
@@ -74,7 +74,7 @@ def finish(mutex: Lock) -> None:
 def acquire_twice(mutex: Lock) -> None:
     """A Python Lock is not reentrant: even one worker can deadlock itself.
 
-    @cleanxy: theorem can_deadlock :
+    @formalsw: theorem can_deadlock :
       CanDeadlock(py("run_retries(this_function, 1)"))
     """
     mutex.acquire()

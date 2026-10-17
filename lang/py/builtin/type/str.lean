@@ -8,9 +8,9 @@ properties and mappings are supplied by a Unicode database, while all sequence
 and method algorithms are modeled here.
 -/
 
-namespace CleanXY.Py.Builtin.Str
+namespace FormalSW.Py.Builtin.Str
 
-open CleanXY.Py.Builtin
+open FormalSW.Py.Builtin
 
 abbrev CodePoint := Nat
 abbrev Str := List CodePoint
@@ -264,4 +264,4 @@ example : chr 97 = .ok [97] := rfl
 example : ord [0x20ac] = .ok 0x20ac := rfl
 example : zfill [45, 52, 50] 5 = [45, 48, 48, 52, 50] := rfl
 
-end CleanXY.Py.Builtin.Str
+end FormalSW.Py.Builtin.Str

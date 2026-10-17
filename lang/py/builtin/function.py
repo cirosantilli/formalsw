@@ -3,8 +3,8 @@
 
 The environment-dependent builtins remain explicit Lean runtime interfaces.
 
-@cleanxy theorem modeled : FunctionAst.module.hasExactlyFunctions ["_digits", "_format_integer", "bin", "oct", "hex", "chr", "ord", "bool", "repr", "ascii", "format", "all", "any", "len", "iter", "aiter", "next", "anext", "reversed", "enumerate", "filter", "map", "max", "min", "sorted", "zip", "abs", "pow", "sum", "round", "callable", "delattr", "dir", "getattr", "hasattr", "id", "setattr", "vars", "hash", "isinstance", "issubclass", "type", "classmethod", "staticmethod"] = true
-@cleanxy theorem source_fingerprint : FunctionAst.module.fingerprint = 8482260155569084117
+@formalsw theorem modeled : FunctionAst.module.hasExactlyFunctions ["_digits", "_format_integer", "bin", "oct", "hex", "chr", "ord", "bool", "repr", "ascii", "format", "all", "any", "len", "iter", "aiter", "next", "anext", "reversed", "enumerate", "filter", "map", "max", "min", "sorted", "zip", "abs", "pow", "sum", "round", "callable", "delattr", "dir", "getattr", "hasattr", "id", "setattr", "vars", "hash", "isinstance", "issubclass", "type", "classmethod", "staticmethod"] = true
+@formalsw theorem source_fingerprint : FunctionAst.module.fingerprint = 11409889112085856110
 """
 
 

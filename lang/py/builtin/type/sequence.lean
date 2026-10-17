@@ -2,10 +2,10 @@ import lang.py.builtin.type.slice
 
 /-! Operations shared by Python list, tuple, range, text, and binary sequences. -/
 
-namespace CleanXY.Py.Builtin.Sequence
+namespace FormalSW.Py.Builtin.Sequence
 
-open CleanXY.Py.Builtin
-open CleanXY.Py.Builtin.Slice
+open FormalSW.Py.Builtin
+open FormalSW.Py.Builtin.Slice
 
 /-- Convert a Python index to a non-negative index relative to a sequence length. -/
 def normalizeIndex (length : Nat) (index : Int) : Option Nat :=
@@ -55,4 +55,4 @@ def lexicographicCompare (compareElement : α → α → Ordering) : List α →
       | .eq => lexicographicCompare compareElement leftRest rightRest
       | order => order
 
-end CleanXY.Py.Builtin.Sequence
+end FormalSW.Py.Builtin.Sequence

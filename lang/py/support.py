@@ -1,4 +1,4 @@
-"""Conservative source coverage checks for CleanXY's supported Python models.
+"""Conservative source coverage checks for FormalSW's supported Python models.
 
 A requirement is rejected if any part of its function or a modeled dependency
 falls outside the selected model. Both branches and unreachable statements are

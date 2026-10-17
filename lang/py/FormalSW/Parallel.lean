@@ -1,10 +1,10 @@
-import lang.py.CleanXY.Runtime
+import lang.py.FormalSW.Runtime
 
 /-! Sequentially consistent interleaving of explicit calls over a shared heap.
 Arguments and locals can hold scalars, object identities, and mutex identities.
 Each heap access and lock operation is a scheduling step. The finite interpreter
 rejects unimplemented source constructs rather than treating them as safe runs. -/
-namespace CleanXY.PyAst
+namespace FormalSW.PyAst
 
 inductive SharedValue where
   | int (value : Int)
@@ -358,4 +358,4 @@ macro "Parallel(" calls:term "," initial:term ")" : term => `(parallelRun $calls
 macro "Ensures(" run:term "," post:term ")" : term => `(ParallelRun.Ensures $run $post)
 macro "CanReturn(" run:term "," value:term ")" : term => `(ParallelRun.CanReturn $run $value)
 
-end CleanXY.PyAst
+end FormalSW.PyAst

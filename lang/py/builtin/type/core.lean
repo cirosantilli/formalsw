@@ -1,6 +1,6 @@
 /-! Shared result and error types for Python builtin models. -/
 
-namespace CleanXY.Py.Builtin
+namespace FormalSW.Py.Builtin
 
 /-- Python exceptions raised by the non-floating-point builtin model. -/
 inductive Error where
@@ -26,4 +26,4 @@ deriving Repr, DecidableEq
 /-- A builtin either returns a value or raises a modeled Python exception. -/
 abbrev Result (α : Type u) := Except Error α
 
-end CleanXY.Py.Builtin
+end FormalSW.Py.Builtin

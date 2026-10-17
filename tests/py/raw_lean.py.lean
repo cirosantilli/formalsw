@@ -1,8 +1,8 @@
-import «.cleanxy».tests.py.«raw_lean.py.ast»
-import CleanXY
+import «.formalsw».tests.py.«raw_lean.py.ast»
+import FormalSW
 
 namespace tests.py.raw_lean
-open CleanXY.PyAst
+open FormalSW.PyAst
 
 theorem module_fact : True := trivial
 theorem explicit_fact : True := trivial
