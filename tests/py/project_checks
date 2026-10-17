@@ -15,6 +15,11 @@ with tempfile.TemporaryDirectory(prefix="formalsw-project-") as temporary:
     )
     for directory in ("left", "right"):
         (project / directory).mkdir()
+        if directory == "left":
+            subprocess.run(["git", "init", "-q", str(project / directory)], check=True)
+        else:
+            # A stray directory is not a nested worktree.
+            (project / directory / ".git").mkdir()
         source = project / directory / "1.py"
         source.write_text(
             'def f(n: int) -> int:\n'
@@ -22,7 +27,9 @@ with tempfile.TemporaryDirectory(prefix="formalsw-project-") as temporary:
             '    return n\n'
         )
         module = f"{directory.capitalize()}.P1Ast"
-        imports = f'import «.formalsw».{directory}.«1.py.ast»\nimport FormalSW\n'
+        ast_module = ('left.«.formalsw».«1.py.ast»' if directory == "left"
+                      else '«.formalsw».right.«1.py.ast»')
+        imports = f'import {ast_module}\nimport FormalSW\n'
         if directory == "right":
             imports += 'import left.«1.py»\n'
         source.with_suffix(".py.lean").write_text(
@@ -36,5 +43,25 @@ with tempfile.TemporaryDirectory(prefix="formalsw-project-") as temporary:
             text=True, capture_output=True,
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "All 1 checks passed" in result.stdout, result.stdout
-print("External projects and colliding numeric filenames passed")
+        assert f"All {1 if directory == 'left' else 2} checks passed" in result.stdout, result.stdout
+    # Checking only the importing solver must recheck the current dependency,
+    # even when a previous successful object's cache remains on disk.
+    left = project / "left" / "1.py"
+    original = left.read_text()
+    left.write_text(original.replace("return n", "return n + 1"))
+    result = subprocess.run(
+        [str(REPO / "formalsw"), str(project / "right" / "1.py")], cwd=project,
+        text=True, capture_output=True,
+    )
+    assert result.returncode != 0, result.stdout
+    assert "imported Python proof failed" in result.stderr, result.stderr
+    left.write_text(original)
+    left_proof = left.with_suffix(".py.lean")
+    left_proof.write_text('import right.«1.py»\n' + left_proof.read_text())
+    result = subprocess.run(
+        [str(REPO / "formalsw"), str(project / "right" / "1.py")], cwd=project,
+        text=True, capture_output=True,
+    )
+    assert result.returncode != 0, result.stdout
+    assert "cyclic Python proof imports" in result.stderr, result.stderr
+print("External projects, numeric filenames, and fresh proof dependencies passed")

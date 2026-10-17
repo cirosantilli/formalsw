@@ -21,7 +21,7 @@ def _close():
 atexit.register(_close)
 
 
-def parse_theorem(text):
+def _request(request):
     global _parser
     if _parser is None:
         built = subprocess.run(['lake', 'build', 'FormalSW'], capture_output=True, text=True)
@@ -31,7 +31,7 @@ def parse_theorem(text):
         _parser = subprocess.Popen(['lake', 'env', 'lean', '--run', str(frontend)],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
-    _parser.stdin.write(json.dumps(text) + '\n')
+    _parser.stdin.write(json.dumps(request) + '\n')
     _parser.stdin.flush()
     line = _parser.stdout.readline()
     try:
@@ -44,3 +44,12 @@ def parse_theorem(text):
     if 'error' in result:
         raise ScenarioError(result['error'])
     return result
+
+
+def parse_theorem(text):
+    return _request(text)
+
+
+def parse_imports(text):
+    """Return import names as components, using Lean's actual header parser."""
+    return _request({"imports": text})["imports"]

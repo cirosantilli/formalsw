@@ -17,7 +17,7 @@ from pathlib import Path
 from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_model
 from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
-from lang.py.lean_frontend import parse_theorem
+from lang.py.lean_frontend import parse_imports, parse_theorem
 from lang.py.call_support import uses_calls_model
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind
 
@@ -1083,12 +1083,14 @@ def namespace_for_source(source: Path) -> str:
 
 
 def git_root_for_source(source: Path) -> Path | None:
-    """Return the containing git worktree root for a source path, if any."""
-    directory = source.resolve().parent
-    for candidate in [directory, *directory.parents]:
-        if (candidate / ".git").exists():
-            return candidate
-    return None
+    """Ask Git for the worktree root, ignoring invalid `.git` directories."""
+    if shutil.which("git") is None:
+        return None
+    result = subprocess.run(
+        ["git", "-C", str(source.resolve().parent), "rev-parse", "--show-toplevel"],
+        text=True, capture_output=True,
+    )
+    return Path(result.stdout.strip()) if result.returncode == 0 else None
 
 
 def generated_path_for_source(source: Path, suffix: str) -> Path:
@@ -1121,23 +1123,11 @@ def requirements_path_for_source(source: Path) -> Path:
 
 
 def olean_path_for_lean(source: Path) -> Path:
-    """Return a cached object path mirroring a Lean module's source path."""
-    try:
-        relative = source.resolve().relative_to(Path.cwd().resolve())
-    except ValueError as error:
-        raise SystemExit(
-            f"error: {source}: Lean files outside the current directory "
-            "cannot be cached by formalsw"
-        ) from error
-    return Path.cwd() / ".formalsw" / "olean" / relative.with_suffix(".olean")
+    """Cache all source-bound modules in the same Lake object tree.
 
-
-def lake_olean_path_for_lean(source: Path) -> Path:
-    """Return Lake's object path for an importable project source module.
-
-    Proof files such as `range.py.lean` can share a prefix with `range.lean`.
-    Lake resolves that project module in its own build tree before `LEAN_PATH`,
-    so requirement wrappers can import the proof only when its object is here.
+    Lean resolves a module prefix in one search-path directory. Splitting AST
+    objects and proof objects between roots therefore breaks nested repositories,
+    where their module names share a directory prefix.
     """
     try:
         relative = source.resolve().relative_to(Path.cwd().resolve())
@@ -1150,13 +1140,21 @@ def lake_olean_path_for_lean(source: Path) -> Path:
 
 
 def lean_env() -> dict[str, str]:
-    """Return an environment that lets Lean import cached and source modules."""
-    env = os.environ.copy()
-    existing = env.get("LEAN_PATH")
-    paths = [str(Path.cwd() / ".formalsw" / "olean"), "."]
-    if existing:
-        paths.append(existing)
-    env["LEAN_PATH"] = ":".join(paths)
+    """Use Lake's toolchain environment, prioritizing this project's objects.
+
+    Dependencies can have their own generated `.formalsw` namespace. Lake puts
+    dependency paths first, which would hide the current project's AST objects.
+    """
+    completed = subprocess.run(
+        ["lake", "env", "python3", "-c",
+         "import json, os; print(json.dumps(dict(os.environ)))"],
+        text=True, capture_output=True, check=True,
+    )
+    env = json.loads(completed.stdout)
+    paths = [str(Path.cwd() / ".lake/build/lib/lean"), "."]
+    if env.get("LEAN_PATH"):
+        paths.append(env["LEAN_PATH"])
+    env["LEAN_PATH"] = os.pathsep.join(paths)
     return env
 
 
@@ -1384,7 +1382,7 @@ def check_source(source: Path, report: CheckReport) -> int:
         RequirementEmitter(proof_path, proof_module, requirements).emit()
     )
     ast_olean_path = olean_path_for_lean(ast_path)
-    proof_olean_path = lake_olean_path_for_lean(proof_path)
+    proof_olean_path = olean_path_for_lean(proof_path)
     requirements_olean_path = olean_path_for_lean(requirements_path)
     for lean_path, olean_path in [
         (ast_path, ast_olean_path),
@@ -1400,8 +1398,6 @@ def check_source(source: Path, report: CheckReport) -> int:
         failure_hint="Fix the Lean libraries before checking Python source proofs.",
     )
     run([
-        "lake",
-        "env",
         "lean",
         "-o",
         str(ast_olean_path),
@@ -1415,8 +1411,6 @@ def check_source(source: Path, report: CheckReport) -> int:
         ),
     )
     run([
-        "lake",
-        "env",
         "lean",
         "-DwarningAsError=true",
         "-o",
@@ -1434,8 +1428,6 @@ def check_source(source: Path, report: CheckReport) -> int:
         requirements_path=requirements_path,
     )
     run([
-        "lake",
-        "env",
         "lean",
         "-DwarningAsError=true",
         "-o",
@@ -1484,12 +1476,53 @@ def iter_python_sources(directory: Path) -> list[Path]:
     return sources
 
 
+def proof_dependencies(source: Path) -> list[Path]:
+    """Find source-bound imports of adjacent Python proofs and generated ASTs."""
+    proof = proof_path_for_source(source)
+    if not proof.is_file():
+        return []
+    dependencies = []
+    for parts in parse_imports(proof.read_text()):
+        if parts[-1].endswith(".py"):
+            dependency = Path.cwd().joinpath(*parts)
+        elif parts[-1].endswith(".py.ast") and ".formalsw" in parts:
+            parts = [part for part in parts if part != ".formalsw"]
+            dependency = Path.cwd().joinpath(*parts).with_suffix("")
+            if dependency.resolve() == source.resolve():
+                continue
+        else:
+            continue
+        dependency = dependency.resolve()
+        if not dependency.is_relative_to(Path.cwd().resolve()):
+            raise SystemExit(f"error: imported Python source is outside the project: {dependency}")
+        if not dependency.is_file() or not proof_path_for_source(dependency).is_file():
+            raise SystemExit(f"error: imported Python source or adjacent proof is missing: {dependency}")
+        dependencies.append(dependency)
+    return dependencies
+
+
 def check_sources(sources: list[Path], report: CheckReport) -> None:
-    """Continue after errors and retain the unsupported-proof count."""
-    for source in sources:
+    """Check imported Python proofs first, once per invocation, without stale fallbacks."""
+    checked: dict[Path, bool] = {}
+    visiting: list[Path] = []
+
+    def visit(source: Path) -> bool:
+        source = source.resolve()
+        if source in checked:
+            return checked[source]
+        if source in visiting:
+            chain = " -> ".join(str(path) for path in [*visiting, source])
+            print(f"error: cyclic Python proof imports: {chain}", file=sys.stderr)
+            return False
+        visiting.append(source)
+        unsupported_before = report.unsupported
+        failures_before = report.failed_files
         try:
+            for dependency in proof_dependencies(source):
+                if not visit(dependency):
+                    raise SystemExit(f"error: {source}: imported Python proof failed: {dependency}")
             report.passed += check_source(source, report)
-        except (UnsupportedSyntax, InvalidRequirement) as error:
+        except (UnsupportedSyntax, InvalidRequirement, ScenarioError) as error:
             print(f"error: {source}: {error}", file=sys.stderr)
             report.failed_files += 1
         except SystemExit as error:
@@ -1497,6 +1530,13 @@ def check_sources(sources: list[Path], report: CheckReport) -> None:
                 if isinstance(error.code, str):
                     print(error.code, file=sys.stderr)
                 report.failed_files += 1
+        visiting.pop()
+        checked[source] = (report.unsupported == unsupported_before
+                           and report.failed_files == failures_before)
+        return checked[source]
+
+    for source in sources:
+        visit(source)
 
 
 def filter_supported_requirements(requirements: list[Requirement], report: CheckReport) -> list[Requirement]:

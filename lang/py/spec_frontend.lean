@@ -32,6 +32,24 @@ private def parseSpec (env : Environment) (text : String) : Except String Json :
         ("quotes", Json.arr (quotes stx))]
   | _ => throw "expected a theorem name, optional binders, and a proposition"
 
+private def nameParts : Name → List String
+  | .anonymous => []
+  | .str parent part => nameParts parent ++ [part]
+  | .num parent part => nameParts parent ++ [toString part]
+
+private def parseRequest (env : Environment) (line : String) : IO (Except String Json) := do
+  match Json.parse line with
+  | .error error => return .error error
+  | .ok (.str text) => return parseSpec env text
+  | .ok request =>
+      match request.getObjValAs? String "imports" with
+      | .error error => return .error error
+      | .ok text =>
+          let (imports, _, messages) ← Lean.Elab.parseImports text
+          if messages.hasErrors then
+            return .error "invalid Lean import header"
+          return .ok (Json.mkObj [("imports", toJson (imports.map fun i => nameParts i.module))])
+
 unsafe def main : IO Unit := do
   enableInitializersExecution
   initSearchPath (← findSysroot)
@@ -41,9 +59,7 @@ unsafe def main : IO Unit := do
   repeat
     let line ← input.getLine
     if line.isEmpty then break
-    let result := do
-      let request ← Json.parse line
-      parseSpec env (← request.getStr?)
+    let result ← parseRequest env line
     let response := match result with
       | .ok value => value
       | .error error => Json.mkObj [("error", toJson error)]

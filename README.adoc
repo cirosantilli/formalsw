@@ -1477,7 +1477,9 @@ Then, inside the `.formalsw` directory, `formalsw` converts the input Python sou
 
 The adjacent `.formalsw/tmp.py.ast.lean` is only a small import bridge. Lean reads the JSON with `include_str`, validates `schema_version`, and elaborates it into a typed `FormalSW.PyAst.Module`. Proofs therefore continue to use `TmpAst.module` and operate on the typed data structure, not on untrusted claims made by the converter.
 
-Compiled Lean `.olean` files are written to a mirrored cache under `.formalsw/olean/`. `LEAN_PATH` includes that cache, so later proof imports use the compiled modules without placing build artifacts beside checked-in `.lean` proofs.
+Compiled Lean `.olean` files for generated ASTs, proofs, and requirement checks are written to a single mirrored cache under `.lake/build/lib/lean/`. Keeping shared module prefixes in one object tree supports proofs inside nested Git repositories. Build artifacts are never placed beside checked-in `.lean` proofs.
+
+Imports of other Python proof sidecars or generated Python ASTs are checked against their current sources before the importing proof, once per invocation. Dependencies require an adjacent proof file. Lean's import parser handles comments and escaped module names; failed or cyclic dependencies stop the dependent proof, even if old compiled objects still exist.
 
 The top-level JSON shape is:
 
