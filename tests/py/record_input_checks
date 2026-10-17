@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""
+Check nominal record domains, shared inputs, and prerequisites on stored fields.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.global_inputs import annotation_domain, annotation_kind
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = (ROOT / 'tests/py/record_inputs.py').read_text()
+
+with project_temporary_directory(prefix='record-inputs-') as temporary:
+    directory = Path(temporary)
+    path = directory / 'records.py'
+    path.write_text(source)
+    module = api['source_module'](path)
+    requirements = api['collect_requirements'](path, module, 'Probe', 'RecordProbe')
+    assert len(requirements) == 9 and not any(item.unsupported for item in requirements)
+    assert all('HasRecordType' in item.property_type and 'Heap.Valid' in item.property_type for item in requirements)
+    assert any(item.marker == 'precondition model coverage' for item in requirements)
+    assert any('HeapCalls.Condition' in item.property_type for item in requirements)
+    total = next(item for item in requirements if item.theorem_name.endswith('total.«Returns»'))
+    assert total.property_type.count('HasRecordType') == 2
+    assert '≠' not in total.property_type
+
+    namespace = {}
+    exec(source, namespace)
+    record = namespace['Record'](-7, [])
+    assert namespace['read'](record) == -7 and namespace['total'](record, record) == -14
+    shared = []
+    assert namespace['total'](namespace['Record'](-7, shared), namespace['Record'](12, shared)) == 5
+
+    document = directory / 'records.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Inputs.lean'
+    origin = json.dumps(str(path.resolve()))
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'RecordProbe', module).emit() + f'''
+open FormalSW.PyAst
+set_option maxRecDepth 8192
+private def record (n : Int) : Mutable.Object :=
+  .dataInstance {origin} "Record" true ["value", "items"]
+    [("value", .scalar (.int n)), ("items", .ref 2)]
+private def heap : Mutable.Heap := [record (-7), record 12, .list []]
+private abbrev Typed (heap : Mutable.Heap) (address : Nat) :=
+  Mutable.Value.HasRecordType heap (.ref address) {origin} "Record" true [("value", "int"), ("items", "list[int]")]
+example : heap.Valid := by
+  simp [heap, record, Mutable.Heap.Valid]
+  constructor <;> intro a b member <;> rcases member with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ <;> decide
+example : Typed heap 0 ∧ Typed heap 1 := by
+  simp [Typed, Mutable.Value.HasRecordType, heap, record, List.lookup, Mutable.Value.HasType,
+    Mutable.dictionaryKinds]
+  exact ⟨"int", rfl⟩
+example : (HeapCalls.call RecordProbe.module "total" [.ref 0, .ref 0] heap).execution.observe 100 =
+    .done (.ok {{outcome := .ok (.scalar (.int (-14))), globals := [], heap := heap, anchors := 3}}) := by decide
+example : (HeapCalls.call RecordProbe.module "total" [.ref 0, .ref 1] heap).execution.observe 100 =
+    .done (.ok {{outcome := .ok (.scalar (.int 5)), globals := [], heap := heap, anchors := 3}}) := by decide
+example : ¬ Typed [.list []] 0 := by simp [Typed, Mutable.Value.HasRecordType]
+example : ¬ Typed [.dataInstance "another source" "Record" true ["value", "items"] []] 0 := by
+  simp [Typed, Mutable.Value.HasRecordType]
+example : ¬ Typed [.dataInstance {origin} "OtherRecord" true ["value", "items"] []] 0 := by
+  simp [Typed, Mutable.Value.HasRecordType]
+example : ¬ Typed [.dataInstance {origin} "Record" false ["value", "items"] []] 0 := by
+  simp [Typed, Mutable.Value.HasRecordType]
+example : ¬ Typed [.dataInstance {origin} "Record" true ["items", "value"] []] 0 := by
+  simp [Typed, Mutable.Value.HasRecordType]
+example : ¬ Typed [.dataInstance {origin} "Record" true ["value", "items"]
+    [("value", .scalar (.string "wrong")), ("items", .ref 1)], .list []] 0 := by
+  simp [Typed, Mutable.Value.HasRecordType, List.lookup, Mutable.Value.HasType]
+example : ¬ Typed [.dataInstance {origin} "Record" true ["value", "items"]
+    [("value", .scalar (.int 0))]] 0 := by
+  simp [Typed, Mutable.Value.HasRecordType, List.lookup, Mutable.Value.HasType]
+''')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+    other_path = directory / 'other.py'
+    other_path.write_text(source)
+    other = api['source_module'](other_path)
+    left = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'read')
+    right = next(node for node in other.body if isinstance(node, ast.FunctionDef) and node.name == 'read')
+    assert annotation_kind(left.args.args[0].annotation) == 'record'
+    assert annotation_domain(left.args.args[0].annotation) != annotation_domain(right.args.args[0].annotation)
+    try:
+        api['scalar_contract_type'](module, left, 'RecordProbe', 'Equiv', [], 0, (other, right, 'Other'))
+    except api['InvalidRequirement'] as error:
+        assert 'matching supported argument domains' in str(error)
+    else:
+        raise AssertionError('different nominal classes accepted by Equiv')
+
+    for index, text in enumerate((
+        source.replace('@dataclass(frozen=True)', '@dataclass(order=True)'),
+        source.replace('value: int', 'value: float'),
+        source.replace('@dataclass(frozen=True)\n', ''),
+        source.replace('record: Record', 'record: Unknown'),
+        source.replace('class Record:', 'class Record(object):'),
+    )):
+        invalid = directory / f'invalid{index}.py'
+        invalid.write_text(text)
+        rejected = api['source_module'](invalid)
+        assert SupportChecker(rejected).check('read'), text
+
+print('Record domains: shared inputs, nominal identity, field types, prerequisites, and rejection checks passed')

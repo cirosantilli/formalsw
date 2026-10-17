@@ -24,11 +24,11 @@ from lang.py.contracts import ContractError, input_condition, reference_kind, he
 from lang.py.defaults import literal_default
 from lang.py.tuple_support import flat_unpacking
 from lang.py.imports import bindings, identify_classes, resolve_function, resolve_python_function
-from lang.py.class_support import dataclass_fields
+from lang.py.class_support import dataclass_fields, resolve_record_inputs
 from lang.py.linking import link_imports
 from lang import spec_setup
 from lang.runtime import lake_command, runtime_env
-from lang.py.global_inputs import function_globals, merge_globals, annotation_kind, call_globals, needs_heap_globals, global_input_names, GlobalInputError
+from lang.py.global_inputs import function_globals, merge_globals, annotation_kind, annotation_record, annotation_domain, call_globals, needs_heap_globals, global_input_names, GlobalInputError
 
 
 class UnsupportedSyntax(Exception):
@@ -749,6 +749,7 @@ def source_module(source):
                 link_imports(path, module, source_module)
             else:
                 module.formalsw_link_dependencies = ()
+            resolve_record_inputs(module)
             _source_modules[path] = module
         except ContractError as error:
             raise InvalidRequirement(str(error)) from error
@@ -799,7 +800,14 @@ def contract_domain(function):
             raise InvalidRequirement(f'{function.name}: contracts need supported argument annotations')
         name = f'«{arg.arg}»'
         binders.append(f'({name} : {"Nat" if reference_kind(kind) else scalar_lean_type(kind)})')
-        if reference_kind(kind):
+        record = annotation_record(arg.annotation)
+        if record is not None:
+            fields = '[' + ', '.join(f'({lean_string(field)}, {lean_string(domain)})'
+                                     for field, domain in record.fields) + ']'
+            guards.append(f'FormalSW.PyAst.Mutable.Value.HasRecordType {heap} (.ref {name}) '
+                          f'{lean_string(record.origin)} {lean_string(record.name)} '
+                          f'{str(record.frozen).lower()} {fields}')
+        elif reference_kind(kind):
             guards.append(f'FormalSW.PyAst.Mutable.Value.HasType {heap} (.ref {name}) {lean_string(kind)}')
     globals_ = getattr(function, 'formalsw_globals', ())
     global_names = global_input_names(function, globals_)
@@ -915,7 +923,7 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
             raise InvalidRequirement(f"{func.name}: global inputs are missing from the contract domain")
         if program is not module and referenced:
             raise InvalidRequirement("cross-file Equiv references with globals need separate module contexts")
-        if [annotation_kind(arg.annotation) for arg in func.args.args] != kinds:
+        if [annotation_domain(arg.annotation) for arg in func.args.args] != [annotation_domain(arg.annotation) for arg in arguments]:
             raise InvalidRequirement("Equiv requires matching supported argument domains")
         if heap_inputs or getattr(inputs, "formalsw_globals", ()):
             values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))

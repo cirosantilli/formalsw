@@ -5,6 +5,37 @@ Fields hold shared references, including references back to the instance itself.
 Class descriptors and method binding are handled separately from stored fields. -/
 namespace FormalSW.PyAst.Mutable
 
+/-- Exact nominal record types with typed declared fields and arbitrary sharing.
+Extra instance attributes are permitted; heap validity is a separate condition. -/
+def Value.HasRecordType (heap : Heap) (value : Value) (origin name : String)
+    (frozen : Bool) (declared : List (String × String)) : Prop :=
+  match value with
+  | .scalar _ => False
+  | .ref address => ∃ fields,
+      heap[address]? = some (.dataInstance origin name frozen (declared.map Prod.fst) fields) ∧
+      ∀ field ∈ declared, ∃ value, fields.lookup field.1 = some value ∧ Value.HasType heap value field.2
+
+theorem Value.HasRecordType.of_heap_preserved
+    (typed : Value.HasRecordType heap value origin name frozen declared)
+    (preserved : ∀ (address : Nat) (object : Object), heap[address]? = some object → other[address]? = some object) :
+    Value.HasRecordType other value origin name frozen declared := by
+  cases value with
+  | scalar _ => exact typed.elim
+  | ref address =>
+      obtain ⟨fields, found, types⟩ := typed
+      refine ⟨fields, preserved address _ found, ?_⟩
+      intro field member
+      obtain ⟨value, lookup, typed⟩ := types field member
+      exact ⟨value, lookup, typed.of_heap_preserved preserved⟩
+
+theorem Value.HasRecordType.append
+    (typed : Value.HasRecordType heap value origin name frozen declared) (extra : Heap) :
+    Value.HasRecordType (heap ++ extra) value origin name frozen declared := by
+  apply typed.of_heap_preserved
+  intro address object found
+  rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+  exact found
+
 /-- Updating an existing field retains its position in the instance dictionary. -/
 def putField : List (String × Value) → String → Value → List (String × Value)
   | [], name, value => [(name, value)]

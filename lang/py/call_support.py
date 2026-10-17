@@ -260,7 +260,7 @@ def uses_heap_calls(module, function):
         visited.add(current.name)
         kinds = [annotation_kind(arg.annotation) for arg in current.args.args]
         kinds.append(annotation_kind(current.returns))
-        if any(kind and (kind.startswith(('list[', 'set[', 'dict[')) or kind == 'bytearray') for kind in kinds):
+        if any(kind and (kind.startswith(('list[', 'set[', 'dict[')) or kind in ('bytearray', 'record')) for kind in kinds):
             return True
         # Defaults are evaluated at definition time, outside the modeled body.
         # Their validation must not select a different execution backend.

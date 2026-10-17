@@ -132,4 +132,5 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("integer_parsing_ch
 subprocess.run([sys.executable, str(Path(__file__).with_name("sequence_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("heap_input_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("nested_input_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("record_input_checks"))], check=True)
 print("Recursive call and loop-control coverage passed")

@@ -10,7 +10,8 @@ import ast
 import builtins
 import re
 from dataclasses import dataclass
-from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind, needs_heap_globals, call_globals
+from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind, annotation_domain, needs_heap_globals, call_globals
+from lang.py.class_support import resolve_record_inputs
 from lang.py.mutable_support import check_mutable
 from lang.py.sorting_support import MERGE_SORT, QUICK_SORT, body_of, matches_sort
 from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
@@ -37,6 +38,7 @@ def binary_comparison(function: ast.FunctionDef) -> bool:
 
 class SupportChecker:
     def __init__(self, module: ast.Module):
+        resolve_record_inputs(module)
         self.module = module
         self.functions = {f.name: f for f in module.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
         self.classes = {c.name: c for c in module.body if isinstance(c, ast.ClassDef)}
@@ -638,7 +640,7 @@ class SupportChecker:
                 if name and target in self.functions and property_name in ('Equiv', 'EquivReturn'):
                     target_args = self.functions[target].args.args
                     if len(args) != len(target_args) or any(
-                        ast.dump(a.annotation or ast.Constant(None)) != ast.dump(b.annotation or ast.Constant(None))
+                        annotation_domain(a.annotation) != annotation_domain(b.annotation)
                         for a, b in zip(args, target_args)):
                         issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
                             f'{property_name} requires matching supported argument domains', (name,)))

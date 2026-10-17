@@ -16,7 +16,27 @@ class GlobalInput:
     kind: str
 
 
+@dataclass(frozen=True)
+class RecordInput:
+    origin: str
+    name: str
+    frozen: bool
+    fields: tuple[tuple[str, str], ...]
+
+
+def annotation_record(annotation):
+    """A nominal domain resolved from a validated source class, never a bare name."""
+    return getattr(annotation, 'formalsw_record_input', None)
+
+
+def annotation_domain(annotation):
+    """Signature equality retains class identity and its declared field domains."""
+    return annotation_record(annotation) or annotation_kind(annotation) or ast.dump(annotation or ast.Constant(None))
+
+
 def annotation_kind(annotation):
+    if annotation_record(annotation) is not None:
+        return 'record'
     if isinstance(annotation, ast.Name) and annotation.id in ('int', 'str', 'bytes', 'bytearray', 'bool'):
         return annotation.id
     if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name):

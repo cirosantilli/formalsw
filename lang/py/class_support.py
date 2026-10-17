@@ -5,7 +5,7 @@ import ast
 from pathlib import Path
 
 from lang.py.imports import bindings
-from lang.py.global_inputs import annotation_kind
+from lang.py.global_inputs import annotation_kind, RecordInput
 
 
 def dataclass_fields(module, cls, reject):
@@ -115,3 +115,32 @@ def ordinary_attribute(node, reject):
     """Avoid Python descriptors and class-private name rewriting."""
     if node.attr.startswith('__'):
         reject(node, 'special attributes and private-name mangling are unsupported')
+
+
+def resolve_record_inputs(module):
+    """Attach nominal input domains after local imports have been linked."""
+    arguments = [node for node in ast.walk(module) if isinstance(node, ast.arg)]
+    for argument in arguments:
+        if hasattr(argument.annotation, 'formalsw_record_input'):
+            del argument.annotation.formalsw_record_input
+    requested = {arg.annotation.id for arg in arguments if isinstance(arg.annotation, ast.Name)}
+    records = {}
+    for cls in module.body:
+        if not isinstance(cls, ast.ClassDef) or cls.name not in requested or not cls.decorator_list:
+            continue
+        origin = getattr(cls, 'formalsw_origin', None)
+        if origin is None:
+            continue
+        issues = []
+        def reject(node, message):
+            issues.append(message)
+        plain_class_methods(module, cls, reject)
+        data = dataclass_fields(module, cls, reject)
+        if issues or data is None:
+            continue
+        frozen, fields = data
+        records[cls.name] = RecordInput(origin, cls.name, frozen,
+            tuple((field.target.id, annotation_kind(field.annotation)) for field in fields))
+    for argument in arguments:
+        if isinstance(argument.annotation, ast.Name) and argument.annotation.id in records:
+            argument.annotation.formalsw_record_input = records[argument.annotation.id]
