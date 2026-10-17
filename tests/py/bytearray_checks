@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""
+Compare mutable list and bytearray assignments with Python.
+"""
+from itertools import product
+from pathlib import Path
+import subprocess
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def option(value):
+    return 'none' if value is None else f'some ({value})'
+
+
+def expected(value, key, replacement):
+    result = value.copy()
+    try:
+        result[key] = replacement
+    except (ValueError, IndexError) as error:
+        return f'("{type(error).__name__}", [])'
+    return f'("", {list(result)})'
+
+
+equations = []
+for constructor, model in ((list, 'List'), (bytearray, 'ByteArray')):
+    for original in ([], [0, 1, 255], [0, 1, 2, 3, 4]):
+        value = constructor(original)
+        for start, stop, step in product((None, -6, -1, 0, 1, 3, 6), (None, -6, -1, 0, 1, 3, 6), (None, -2, -1, 0, 1, 2, 6)):
+            bounds = f'{{ start := {option(start)}, stop := {option(stop)}, step := {option(step)} }}'
+            key = slice(start, stop, step)
+            # Cover both arbitrary lengths and exactly matching strided replacements.
+            replacement_sizes = {0, 1, 3}
+            if step != 0:
+                replacement_sizes.add(len(value[key]))
+            for size in sorted(replacement_sizes):
+                replacement = [7] * size
+                result = expected(value, key, replacement)
+                equations.append(f'example : classify ({model}.setSlice {original} {bounds} {replacement}) = ({result}) := by decide')
+        for index in (-8, -5, -3, -1, 0, 2, 4, 5, 8):
+            result = expected(value, index, 255)
+            equations.append(f'example : classify ({model}.setAt {original} ({index}) 255) = ({result}) := by decide')
+
+with project_temporary_directory(prefix='bytearray-check-') as temporary:
+    path = Path(temporary) / 'Checks.lean'
+    path.write_text('''import lang.py.builtin.type.bytearray
+open FormalSW.Py.Builtin
+private def classify (result : Result (List UInt8)) : String × List UInt8 :=
+  match result with
+  | .ok values => ("", values)
+  | .error (.valueError _) => ("ValueError", [])
+  | .error (.indexError _) => ("IndexError", [])
+  | .error _ => ("unexpected error", [])
+''' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(path)], cwd=REPO, check=True)
+print(f'Mutable sequences: {len(equations)} Python assignment comparisons passed')

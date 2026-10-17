@@ -21,6 +21,27 @@ def pop (values : ByteArray) (index : Int := -1) : Result (UInt8 × ByteArray) :
 def remove (values : ByteArray) (byte : UInt8) : Result ByteArray := List.remove values byte
 def reverse (values : ByteArray) : ByteArray := values.reverse
 
+def setAt (values : ByteArray) (index : Int) (byte : UInt8) : Result ByteArray :=
+  List.setAt values index byte
+
+/-- Empty replacements delete even extended slices; nonempty replacements must match their size. -/
+def setSlice (values : ByteArray) (bounds : Slice.Slice) (replacement : ByteArray) : Result ByteArray :=
+  if replacement.isEmpty then List.deleteSlice values bounds
+  else List.setSlice values bounds replacement
+
+theorem setSlice_uniform (values : ByteArray) (bounds : Slice.Slice) (byte : UInt8)
+    (normalized : Slice.indices bounds values.length = .ok (start, stop, step))
+    (extended : step ≠ 1)
+    (selected : Slice.indexList bounds values.length = .ok indices) :
+    setSlice values bounds (List.replicate indices.length byte) =
+      .ok (indices.foldl (fun result index => result.set index byte) values) :=
+by
+  cases indices with
+  | nil =>
+      simpa [setSlice] using List.deleteSlice_empty values bounds selected
+  | cons index rest =>
+      simpa [setSlice] using List.setSlice_uniform values bounds byte normalized extended selected
+
 /-- Resize in place, truncating or appending null bytes. -/
 def resize (values : ByteArray) (size : Nat) : ByteArray :=
   if size ≤ values.length then values.take size

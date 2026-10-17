@@ -99,6 +99,7 @@ assert not issues(sum_source.replace('sum(x for x in range(n) if x % 2 == 0)',
 subprocess.run([sys.executable, str(Path(__file__).with_name('loop_control.py'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('string_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('bytes_checks'))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name('bytearray_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('power_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("default_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("heap_call_checks"))], check=True)

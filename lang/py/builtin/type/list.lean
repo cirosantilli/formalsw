@@ -56,7 +56,7 @@ def setSlice (values : ListValue α) (bounds : Slice.Slice) (replacement : List 
     Result (ListValue α) := do
   let (start, stop, step) ← Slice.indices bounds values.length
   if step = 1 then
-    return values.take start.toNat ++ replacement ++ values.drop stop.toNat
+    return values.take start.toNat ++ replacement ++ values.drop (max start stop).toNat
   else
     let indices ← Slice.indexList bounds values.length
     if indices.length != replacement.length then
@@ -64,11 +64,60 @@ def setSlice (values : ListValue α) (bounds : Slice.Slice) (replacement : List 
     else
       return (indices.zip replacement).foldl (fun result pair => result.set pair.1 pair.2) values
 
+/-- Replacing selected elements preserves the sequence length. -/
+theorem length_setMany (updates : List (Nat × α)) (values : List α) :
+    (updates.foldl (fun result pair => result.set pair.1 pair.2) values).length = values.length := by
+  induction updates generalizing values with
+  | nil => rfl
+  | cons update rest ih => simpa only [List.foldl_cons, List.length_set] using ih (values.set update.1 update.2)
+
+/-- Uniform updates change precisely the selected positions; duplicates are harmless. -/
+theorem getElem?_setUniform (indices : List Nat) (values : List α) (value : α) (index : Nat)
+    (valid : index < values.length) :
+    (indices.foldl (fun result position => result.set position value) values)[index]? =
+      if index ∈ indices then some value else values[index]? := by
+  induction indices generalizing values with
+  | nil => simp
+  | cons position rest ih =>
+      rw [List.foldl_cons, ih _ (by simpa using valid)]
+      by_cases selected : index ∈ rest
+      · simp [selected]
+      · by_cases same : position = index
+        · subst position
+          simp [selected, List.getElem?_set_self valid]
+        · simp [selected, List.getElem?_set_ne same, Ne.symm same]
+
+private theorem setMany_uniform (indices : List Nat) (value : α) (values : List α) :
+    ((indices.zip (List.replicate indices.length value)).foldl
+      (fun result pair => result.set pair.1 pair.2) values) =
+      indices.foldl (fun result index => result.set index value) values := by
+  induction indices generalizing values with
+  | nil => rfl
+  | cons index rest ih => simpa using ih (values.set index value)
+
+/-- A uniform extended-slice assignment sets exactly its selected positions. -/
+theorem setSlice_uniform (values : List α) (bounds : Slice.Slice) (value : α)
+    (normalized : Slice.indices bounds values.length = .ok (start, stop, step))
+    (extended : step ≠ 1)
+    (selected : Slice.indexList bounds values.length = .ok indices) :
+    setSlice values bounds (List.replicate indices.length value) =
+      .ok (indices.foldl (fun result index => result.set index value) values) := by
+  simp [setSlice, normalized, extended, selected, setMany_uniform, bind, pure, Except.bind, Except.pure]
+
 def deleteSlice (values : ListValue α) (bounds : Slice.Slice) : Result (ListValue α) := do
   let indices ← Slice.indexList bounds values.length
   return values.mapIdx (fun index value => (index, value))
     |>.filter (fun pair => !indices.contains pair.1)
     |>.map Prod.snd
+
+theorem deleteSlice_empty (values : List α) (bounds : Slice.Slice)
+    (selected : Slice.indexList bounds values.length = .ok []) :
+    deleteSlice values bounds = .ok values := by
+  simp [deleteSlice, selected, bind, pure, Except.bind, Except.pure]
+  rw [List.filter_eq_self.mpr (by simp)]
+  apply List.ext_getElem?
+  intro index
+  simp [List.getElem?_mapIdx, Option.map_map, Function.comp_def]
 
 /-- Stable insertion sort using only the supplied strict-less comparison. -/
 private def insertSorted (less : α → α → Bool) (value : α) : List α → List α
