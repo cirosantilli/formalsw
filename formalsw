@@ -82,6 +82,19 @@ class RawTheoremRequirement:
     quotations: tuple[dict, ...] = ()
 
 
+def print_diagnostic(*values, **kwargs) -> None:
+    """
+    Show current-project paths relative to cwd, including Lean diagnostics.
+
+    Source identities and generated proof terms keep their absolute paths; only
+    the human-facing stderr rendering changes.
+    """
+    root = str(Path.cwd().resolve())
+    prefix = re.compile(r"(?<![\w./-])" + re.escape(root + os.sep))
+    rendered = [prefix.sub('', str(value)) if root != os.sep else str(value) for value in values]
+    print(*rendered, **dict(kwargs, file=sys.stderr))
+
+
 def lean_string(value: str) -> str:
     """Return a Lean string literal for a Python string."""
     return json.dumps(value)
@@ -1621,20 +1634,20 @@ def print_command_failure(
     requirements_path: Path | None = None,
 ) -> None:
     """Print a compact, user-facing subprocess failure."""
-    print(message, file=sys.stderr)
+    print_diagnostic(message, file=sys.stderr)
     if hint is not None:
-        print(hint, file=sys.stderr)
+        print_diagnostic(hint, file=sys.stderr)
     if expected:
-        print("Expected proof obligations:", file=sys.stderr)
+        print_diagnostic("Expected proof obligations:", file=sys.stderr)
         for requirement in expected:
-            print(f"  {requirement.theorem_name} :", file=sys.stderr)
-            print(indent(requirement.property_type, 4), file=sys.stderr)
+            print_diagnostic(f"  {requirement.theorem_name} :", file=sys.stderr)
+            print_diagnostic(indent(requirement.property_type, 4), file=sys.stderr)
     diagnostics = useful_diagnostic_lines(completed.stdout + completed.stderr)
     if diagnostics:
-        print("Lean diagnostic:", file=sys.stderr)
+        print_diagnostic("Lean diagnostic:", file=sys.stderr)
         for line in diagnostics:
-            print(f"  {line}", file=sys.stderr)
-    print(final_error_line(completed, proof_path, requirements_path, expected), file=sys.stderr)
+            print_diagnostic(f"  {line}", file=sys.stderr)
+    print_diagnostic(final_error_line(completed, proof_path, requirements_path, expected), file=sys.stderr)
 
 
 def run(
@@ -1730,7 +1743,7 @@ def check_source(source: Path, report: CheckReport) -> int:
     bindings_module = source_bindings(source, module, semantic_module)
     if requirements and not proof_path.exists():
         first = requirements[0]
-        print(
+        print_diagnostic(
             f"error: {first.source_path}:{first.source_line}: "
             f"missing proof file {proof_path} for `@formalsw: {first.marker}`",
             file=sys.stderr,
@@ -1900,7 +1913,7 @@ def check_sources(sources: list[Path], report: CheckReport) -> None:
             return checked[source]
         if source in visiting:
             chain = " -> ".join(str(path) for path in [*visiting, source])
-            print(f"error: cyclic Python proof imports: {chain}", file=sys.stderr)
+            print_diagnostic(f"error: cyclic Python proof imports: {chain}", file=sys.stderr)
             return False
         visiting.append(source)
         unsupported_before = report.unsupported
@@ -1911,12 +1924,12 @@ def check_sources(sources: list[Path], report: CheckReport) -> None:
                     raise SystemExit(f"error: {source}: imported Python proof failed: {dependency}")
             report.passed += check_source(source, report)
         except (UnsupportedSyntax, InvalidRequirement, ScenarioError, SyntaxError) as error:
-            print(f"error: {source}: {error}", file=sys.stderr)
+            print_diagnostic(f"error: {source}: {error}", file=sys.stderr)
             report.failed_files += 1
         except SystemExit as error:
             if error.code != 0:
                 if isinstance(error.code, str):
-                    print(error.code, file=sys.stderr)
+                    print_diagnostic(error.code, file=sys.stderr)
                 report.failed_files += 1
         visiting.pop()
         checked[source] = (report.unsupported == unsupported_before
@@ -1934,11 +1947,11 @@ def filter_supported_requirements(requirements: list[Requirement], report: Check
             supported.append(requirement)
             continue
         report.unsupported += 1
-        print(f"error: {requirement.source_path}:{requirement.source_line}: "
+        print_diagnostic(f"error: {requirement.source_path}:{requirement.source_line}: "
               f"cannot check {requirement.theorem_name}: unsupported Python constructs", file=sys.stderr)
         for issue in requirement.unsupported:
             via = " -> ".join((*issue.dependency, issue.function))
-            print(f"  {requirement.source_path}:{issue.line}: {via}: {issue.reason}", file=sys.stderr)
+            print_diagnostic(f"  {requirement.source_path}:{issue.line}: {via}: {issue.reason}", file=sys.stderr)
     return supported
 
 
@@ -1950,9 +1963,9 @@ def finish_report(report: CheckReport, *, stub: bool = False) -> None:
         if report.unsupported:
             noun = "proof" if report.unsupported == 1 else "proofs"
             verb = "it depends" if report.unsupported == 1 else "they depend"
-            print(f"{report.unsupported} {noun} failed because {verb} on unsupported Python constructs.", file=sys.stderr)
+            print_diagnostic(f"{report.unsupported} {noun} failed because {verb} on unsupported Python constructs.", file=sys.stderr)
         if report.failed_files:
-            print(f"{report.failed_files} source file(s) also failed validation or proof checking.", file=sys.stderr)
+            print_diagnostic(f"{report.failed_files} source file(s) also failed validation or proof checking.", file=sys.stderr)
         raise SystemExit(1)
     if not stub:
         print(f"All {report.passed} checks passed")
@@ -1978,12 +1991,12 @@ def main() -> None:
         try:
             print(stub_source(source, report), end="")
         except (UnsupportedSyntax, InvalidRequirement) as error:
-            print(f"error: {source}: {error}", file=sys.stderr)
+            print_diagnostic(f"error: {source}: {error}", file=sys.stderr)
             report.failed_files += 1
         except SystemExit as error:
             if error.code != 0:
                 if isinstance(error.code, str):
-                    print(error.code, file=sys.stderr)
+                    print_diagnostic(error.code, file=sys.stderr)
                 report.failed_files += 1
         finish_report(report, stub=True)
         return
