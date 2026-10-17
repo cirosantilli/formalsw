@@ -2,7 +2,7 @@
 """Plain-Python mutable byte sequence over the primitive list model.
 
 @formalsw theorem modeled : BytearrayAst.module.hasExactlyClassMethods "bytearray" ["__init__", "__len__", "__getitem__", "append", "clear", "extend", "reverse"] = true
-@formalsw theorem source_fingerprint : BytearrayAst.module.fingerprint = 4966000535727619840
+@formalsw theorem source_fingerprint : BytearrayAst.module.fingerprint = 2252873034453815805
 """
 
 

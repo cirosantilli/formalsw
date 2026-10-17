@@ -40,13 +40,85 @@ def unary (op : UnaryOp) (value : Value) : Eval Value := do
       | .scalar value => scalarResult (scalarExpr (fun _ => none) (.unaryOp .uSub (.constant value)))
       | .ref _ => Mutable.error "TypeError"
 
+/-- Scalar element equality uses Python's numeric coercion. References with the
+same identity compare equal; comparisons of distinct nested lists are partial. -/
+def equalElements : List Value → List Value → Option Bool
+  | [], [] => some true
+  | a :: as, b :: bs => do
+      let equal ← match a, b with
+        | .scalar a, .scalar b => scalarCompare .eq a b
+        | .ref a, .ref b => if a = b then some true else none
+        | _, _ => some false
+      if equal then equalElements as bs else some false
+  | _, _ => some false
+
+def equalLists (left right : List Value) : Option Bool :=
+  if left.length = right.length then equalElements left right else some false
+
+theorem equalElements_ints (left right : List Int) :
+    equalElements (left.map fun n => .scalar (.int n)) (right.map fun n => .scalar (.int n)) =
+      some (decide (left = right)) := by
+  induction left generalizing right with
+  | nil => cases right <;> simp [equalElements]
+  | cons value rest ih =>
+      cases right with
+      | nil => simp [equalElements]
+      | cons other tail =>
+          by_cases same : value = other
+          · subst other
+            simp [equalElements, scalarCompare, evalCmpOp, ih]
+          · simp [equalElements, scalarCompare, evalCmpOp, same]
+
+theorem equalLists_ints (left right : List Int) :
+    equalLists (left.map fun n => .scalar (.int n)) (right.map fun n => .scalar (.int n)) =
+      some (decide (left = right)) := by
+  by_cases lengths : left.length = right.length
+  · simp [equalLists, lengths, equalElements_ints]
+  · have different : left ≠ right := fun same => lengths (congrArg List.length same)
+    simp [equalLists, lengths, different]
+
 def compare (op : CmpOp) (left right : Value) : Eval Value := do
   match left, right with
   | .scalar a, .scalar b =>
       match scalarCompare op a b with
       | some value => return .scalar (.bool value)
       | none => Mutable.error "TypeError"
-  | _, _ => Mutable.unsupported
+  | .ref a, .ref b =>
+      let (_, xs) ← Mutable.array left
+      let (_, ys) ← Mutable.array right
+      match op with
+      | .eq | .notEq =>
+          let some equal := if a = b then some true else equalLists xs ys | Mutable.unsupported
+          return .scalar (.bool (if op == .eq then equal else !equal))
+      | _ => Mutable.unsupported
+  | _, _ => match op with
+      | .eq => pure (.scalar (.bool false))
+      | .notEq => pure (.scalar (.bool true))
+      | _ => Mutable.error "TypeError"
+
+theorem compare_int_lists (left right : List Int)
+    (foundLeft : heap[a]? = some (left.map fun n => .scalar (.int n)))
+    (foundRight : heap[b]? = some (right.map fun n => .scalar (.int n))) :
+    compare .eq (.ref a) (.ref b) heap = some (.ok (.scalar (.bool (decide (left = right)))), heap) := by
+  by_cases same : a = b
+  · subst b
+    have encoded : (left.map fun n => Mutable.Value.scalar (.int n)) =
+        right.map (fun n => Mutable.Value.scalar (.int n)) := Option.some.inj (foundLeft.symm.trans foundRight)
+    have injective : left = right := by
+      clear foundLeft foundRight
+      induction left generalizing right with
+      | nil => cases right <;> simp_all
+      | cons value rest ih =>
+          cases right with
+          | nil => simp at encoded
+          | cons other tail =>
+              simp only [List.map_cons, List.cons.injEq, Mutable.Value.scalar.injEq, Constant.int.injEq] at encoded
+              rw [encoded.1, ih tail encoded.2]
+    subst right
+    simp [compare, Mutable.array, foundLeft, Except.map]
+    rfl
+  · simp [compare, Mutable.array, foundLeft, foundRight, same, equalLists_ints]
+    rfl
 
 /-- In-place list operations preserve the left reference. Scalar operations
 fall back to ordinary binary evaluation. -/
@@ -77,6 +149,7 @@ inductive Operation where
   | subscript
   | append (address : Nat)
   | builtin (name : ScalarBuiltin)
+  | reversedList
 
 inductive Frame where
   | binaryLeft (op : BinOp) (right : Expr) (env : Env) (inPlace : Bool)
@@ -144,6 +217,12 @@ private def rangeState (name : String) (env : Env) (done : List Value)
 
 def primitive : Operation → List Value → Eval Value
   | .list, values => Mutable.allocate values
+  | .reversedList, [value] => do
+      let items : List Value ← match value with
+        | .ref _ => do pure (← Mutable.array value).2
+        | .scalar (.string text) => pure (text.toList.map fun c => .scalar (.string (String.singleton c)))
+        | _ => Mutable.error "TypeError"
+      Mutable.allocate items.reverse
   | .subscript, [base, index] => do
       match base, index with
       | .scalar base, .scalar index =>
@@ -161,6 +240,11 @@ def primitive : Operation → List Value → Eval Value
         | .scalar value => pure value
         | .ref _ => Mutable.unsupported
       scalarResult (some (Strings.str values))
+  | .builtin .max, values => do
+      let values ← values.mapM fun value => match value with
+        | .scalar value => pure value
+        | .ref _ => Mutable.unsupported
+      scalarResult (Calls.positionalMaximum values)
   | _, _ => Mutable.unsupported
 
 def step (module : Module) (anchors : Nat) (state : State) : Step State Completion :=
@@ -191,6 +275,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .boolOp op (first :: rest) => .next ⟨.expr first env, .boolean op rest env :: stack, heap⟩
       | .ifExp test yes no => .next ⟨.expr test env, .conditional yes no env :: stack, heap⟩
       | .list expressions => .next (argumentsState .list env [] expressions stack heap)
+      | .reversedList expression => .next (argumentsState .reversedList env [] [expression] stack heap)
       | .subscript base index => .next (argumentsState .subscript env [] [base, index] stack heap)
       | .builtinCall name expressions => .next (argumentsState (.builtin name) env [] expressions stack heap)
       | .call (.name name) expressions => .next (argumentsState (.call name) env [] expressions stack heap)
@@ -349,7 +434,7 @@ theorem step_extend (extension : Calls.Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | subscript | append _ | builtin _ => rfl
+      | list | subscript | append _ | builtin _ | reversedList => rfl
   | expr _ _ | block _ _ | value _ | startRange _ _ _ _ _ _ => rfl
 
 theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Calls.Extends target source) :
@@ -419,6 +504,23 @@ theorem list (arguments : Arguments module env expressions heap values finalHeap
   apply Reaches.next rfl
   apply (arguments_reach arguments .list [] anchors stack).trans
   exact .next (by simp [step, result, run, primitive, Mutable.allocate, Except.map]) .refl
+
+theorem reversed_list (evaluated : Evaluates module env expression heap (.ref address) middle)
+    (found : middle[address]? = some items) :
+    Evaluates module env (.reversedList expression) heap (.ref middle.length)
+      (middle ++ [items.reverse]) := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (arguments_reach (.cons evaluated .nil) .reversedList [] anchors stack).trans
+  exact .next (by simp [step, result, run, primitive, Mutable.array, found,
+    Mutable.allocate, Except.map]) .refl
+
+theorem builtin (arguments : Arguments module env expressions heap values middle)
+    (operation : primitive (.builtin name) values middle = some (.ok value, finalHeap)) :
+    Evaluates module env (.builtinCall name expressions) heap value finalHeap := by
+  intro anchors stack
+  exact .next rfl ((arguments_reach arguments (.builtin name) [] anchors stack).trans
+    (.next (by simp [step, result, run, operation]) .refl))
 
 theorem append (receiver : Evaluates module env base heap (.ref address) middle)
     (found : middle[address]? = some old)

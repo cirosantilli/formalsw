@@ -13,8 +13,21 @@ inductive Primitive where
   | subscript
   | slice
 
+/-- Python's positional maximum keeps the first value on ties, preserving its
+type (in particular, `True` and `1` compare equal but are distinct results). -/
+def maximumFrom (best : Constant) : List Constant → Except ExceptionObject Constant
+  | [] => .ok best
+  | value :: rest => match scalarCompare .gt value best with
+      | some larger => maximumFrom (if larger then value else best) rest
+      | none => .error { typeName := "TypeError", args := [] }
+
+def positionalMaximum : List Constant → Option (Except ExceptionObject Constant)
+  | first :: second :: rest => some (maximumFrom first (second :: rest))
+  | _ => none
+
 def Primitive.apply : Primitive → List Constant → Option (Except ExceptionObject Constant)
   | .builtin .str, values => some (Strings.str values)
+  | .builtin .max, values => positionalMaximum values
   | .subscript, [value, index] => some (Strings.get value index)
   | .slice, [value, lower, upper, stride] => some (Strings.slice value lower upper stride)
   | _, _ => none

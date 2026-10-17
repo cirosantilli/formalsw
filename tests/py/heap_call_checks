@@ -88,6 +88,26 @@ bodies = {
     'range_nested': 'for k in range(n):\n    for j in range(k, n):\n        push(items, k * 10 + j)\nreturn alias',
     'range_rebind_target': 'for k in range(n):\n    push(items, k)\n    k = 42\nreturn items',
     'range_else_break_outer': 'for k in range(n):\n    for j in range(0):\n        push(items, j)\n    else:\n        push(items, k)\n        break\nelse:\n    push(alias, 7)\nreturn items',
+    'reversed_copy': 'other = list(reversed(push(items, n)))\nother.append(8)\nreturn [items, other]',
+    'reversed_string': 'return list(reversed("λ😀"))',
+    'reversed_type_error': 'return list(reversed(touch(items, n)))',
+    'reversed_aliases': 'return list(reversed([items, alias]))',
+    'equal_lists': 'return items == alias',
+    'unequal_lists': 'return items != alias',
+    'equal_numbers': 'return [True, False, n] == [1, 0, n]',
+    'equal_mixed': 'return [n, "a", None] == [n, "a", None]',
+    'equal_list_scalar': 'return items == n',
+    'unequal_scalar_list': 'return n != items',
+    'equal_nested_aliases': 'return [items] == [items]',
+    'equal_cycle': 'items.append(items)\nreturn items == items',
+    'equal_length_mismatch': 'return [[n]] == [[n], 1]',
+    'equal_order': 'return push(items, n) == push(alias, n + 1)',
+    'maximum_values': 'return max(n, 3, -2)',
+    'maximum_order': 'return max(touch(items, n), touch(alias, n + 1))',
+    'maximum_bool_tie': 'return max(True, 1)',
+    'maximum_int_tie': 'return max(1, True)',
+    'maximum_strings': 'return max("α", "😀", "a")',
+    'maximum_error': 'return max(touch(items, n), "a", touch(alias, n + 1))',
 }
 for name, body in bodies.items():
     source += f'\ndef {name}(n: int, items: list[int], alias: list[int]):\n'
@@ -103,6 +123,28 @@ for suffix in ('range = f\n', 'from other import range\n', 'from other import *\
     assert SupportChecker(ast.parse(range_source + suffix)).check('f')
 for iterator in ('range()', 'range(n, stop=0)', 'range(n, n, n, n)', '[n]'):
     assert SupportChecker(ast.parse(range_source.replace('range(n)', iterator))).check('f')
+reverse_source = 'def f(n: int) -> list[int]: return list(reversed([n]))\n'
+assert not SupportChecker(ast.parse(reverse_source)).check('f')
+for builtin in ('list', 'reversed'):
+    for suffix in (f'{builtin} = f\n', f'from other import {builtin}\n'):
+        module = ast.parse(reverse_source + suffix)
+        assert SupportChecker(module).check('f')
+        assert api['AstJsonEmitter'](module).expr(module.body[0].body[0].value)['type'] == 'Call'
+    assert SupportChecker(ast.parse(reverse_source.replace('n: int', f'n: int, {builtin}: int'))).check('f')
+maximum_source = 'def f(n: int) -> int: return max(n, 1)\n'
+assert not SupportChecker(ast.parse(maximum_source)).check('f')
+for expression in ('max(n)', 'max(n, default=0)', 'max(n, 1, key=n)'):
+    assert SupportChecker(ast.parse(maximum_source.replace('max(n, 1)', expression))).check('f')
+for suffix in ('max = f\n', 'from other import max\n', 'from other import *\n'):
+    assert SupportChecker(ast.parse(maximum_source + suffix)).check('f')
+maximum_module = ast.parse(maximum_source + 'def g(n: int) -> int: return f(n)\n')
+for name in ('f', 'g'):
+    issues = SupportChecker(maximum_module).requirement(name,
+        f'theorem wrong : Not (scalarFunction Probe.module "{name}" [.int 0]).Halts')
+    assert any('positional max requires' in issue.reason for issue in issues)
+custom_max = ast.parse('def max(n: int) -> int: return n\ndef f(n: int) -> int: return max(n)\n')
+assert not SupportChecker(custom_max).check('f')
+assert api['AstJsonEmitter'](custom_max).expr(custom_max.body[1].body[0].value)['type'] == 'Call'
 lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
          'def source : Module := pyast_from_json% (include_str "source.json")']
 count = 0
@@ -144,14 +186,14 @@ with tempfile.TemporaryDirectory(prefix='.heap-coverage-', dir=ROOT) as director
     directory = Path(directory)
     for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
         path = directory / f'probe{index}.py'
-        path.write_text(f'def f(n: int) -> bool:\n    """\n    @formalsw: {marker}\n    """\n    return [n] == [n]\n')
+        path.write_text(f'def f(n: int) -> bool:\n    """\n    @formalsw: {marker}\n    """\n    return [n] < [n]\n')
         module = api['source_module'](path)
         obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
         coverage = [item for item in obligations if item.marker == 'execution model coverage']
         assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
         assert 'Not' not in coverage[0].property_type
     path = directory / 'vacuous.py'
-    path.write_text('def f(n: int) -> bool:\n    """\n    @formalsw: Equiv(f)\n    """\n    return [n] == [n]\n')
+    path.write_text('def f(n: int) -> bool:\n    """\n    @formalsw: Equiv(f)\n    """\n    return [n] < [n]\n')
     stub = subprocess.run([str(ROOT / 'formalsw'), '--stub', str(path)], cwd=ROOT,
                           text=True, capture_output=True, check=True).stdout
     before = stub.split('theorem f.«Supported»')[0]

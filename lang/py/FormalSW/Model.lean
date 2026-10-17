@@ -72,6 +72,7 @@ deriving Repr, DecidableEq, BEq, Lean.ToExpr
 /-- Builtins resolved by the frontend after rejecting shadowed bindings. -/
 inductive ScalarBuiltin where
   | str
+  | max
 deriving Repr, BEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
@@ -103,6 +104,8 @@ inductive Expr where
   /-- Normalized `sum(element for name in range(bounds) if conditions...)`.
   Coverage checking verifies the builtin bindings before this node executes. -/
   | sumRange : String → Expr → List Expr → List Expr → Expr
+  /-- Eager `list(reversed(value))` with both builtin bindings resolved. -/
+  | reversedList : Expr → Expr
   /-- A Python subscription such as `values[i]`. -/
   | subscript : Expr -> Expr -> Expr
   /-- A Python slice used inside a subscription. -/
@@ -308,8 +311,11 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
   | "BuiltinCall" =>
       let builtin ← match ← jsonString json "name" with
         | "str" => pure ScalarBuiltin.str
+        | "max" => pure ScalarBuiltin.max
         | builtinName => throw s!"unsupported scalar builtin: {builtinName}"
       return .builtinCall builtin (← jsonArray json "args" Expr.fromJson?)
+  | "ReversedList" =>
+      return .reversedList (← Expr.fromJson? (← jsonField json "value"))
   | "Subscript" =>
       return .subscript
         (← Expr.fromJson? (← jsonField json "value"))
@@ -813,6 +819,7 @@ mutual
     | .call function args =>
         1 + function.operationCount + (args.map Expr.operationCount).sum
     | .builtinCall _ args => 2 + (args.map Expr.operationCount).sum
+    | .reversedList value => 4 + value.operationCount
     | .sumRange _ element bounds conditions =>
         5 + element.operationCount + (bounds.map Expr.operationCount).sum +
           (conditions.map Expr.operationCount).sum
@@ -869,6 +876,7 @@ def Expr.callsFunction (name : String) : Expr → Bool
   | .attribute value _ => value.callsFunction name
   | .binOp left _ right => left.callsFunction name || right.callsFunction name
   | .unaryOp _ operand => operand.callsFunction name
+  | .reversedList value => value.callsFunction name || name == "list" || name == "reversed"
   | .call (.name functionName) _ => functionName == name
   | .call function _ => function.callsFunction name
   | .subscript value index => value.callsFunction name || index.callsFunction name
@@ -1260,6 +1268,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.ifExp _ _ _ => none
   | Expr.sumRange _ _ _ _ => none
   | Expr.builtinCall _ _ => none
+  | Expr.reversedList _ => none
   | Expr.tuple _ => none
   | Expr.binOp
       (Expr.binOp

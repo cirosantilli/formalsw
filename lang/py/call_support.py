@@ -24,12 +24,43 @@ def range_sum(node):
     return generator, loop
 
 
+def reversed_list(node):
+    """Recognize the eager builtin composition without exposing an iterator."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'list' and len(node.args) == 1 and not node.keywords):
+        inner = node.args[0]
+        if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                and inner.func.id == 'reversed' and len(inner.args) == 1 and not inner.keywords):
+            return inner.args[0]
+    return None
+
+
 def library_functions(module):
     """Supported standard-library functions, preserving their import bindings."""
     return {alias.asname or alias.name: (node.module, alias.name, node)
             for node in module.body if isinstance(node, ast.ImportFrom)
             and node.level == 0 and node.module == 'math'
             for alias in node.names if alias.name == 'isqrt'}
+
+
+def uses_builtin(module, function, name):
+    """Find an unshadowed builtin in the reachable local function bodies."""
+    if bindings(module, name):
+        return False
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    pending, visited = [function], set()
+    while pending:
+        current = pending.pop()
+        if current.name in visited:
+            continue
+        visited.add(current.name)
+        for node in (part for statement in current.body for part in ast.walk(statement)):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == name:
+                    return True
+                if node.func.id in functions:
+                    pending.append(functions[node.func.id])
+    return False
 
 
 def general_division(node):
@@ -78,7 +109,8 @@ def uses_heap_calls(module, function):
         # Defaults are evaluated at definition time, outside the modeled body.
         # Their validation must not select a different execution backend.
         for node in (part for statement in current.body for part in ast.walk(statement)):
-            if isinstance(node, ast.List) or (isinstance(node, ast.Attribute) and node.attr == 'append'):
+            if (isinstance(node, ast.List) or reversed_list(node) is not None
+                    or isinstance(node, ast.Attribute) and node.attr == 'append'):
                 return True
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
                 pending.append(functions[node.func.id])
@@ -101,7 +133,7 @@ def uses_calls_model(module, function):
         or general_division(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names | {'str'}
+        or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names | {'str', 'max'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -164,6 +196,13 @@ def check_calls(module, function, reject, *, heap=False):
             scope = locals_ if scope is None else scope
             recurse = lambda child: expr(child, scope)
             comprehension = range_sum(node)
+            reversed_value = reversed_list(node)
+            if heap and reversed_value is not None:
+                for builtin in ('list', 'reversed'):
+                    if builtin in scope or bindings(module, builtin):
+                        reject(node, f'reversed copies require the unshadowed builtin {builtin}')
+                recurse(reversed_value)
+                return
             if comprehension is not None:
                 if heap:
                     reject(node, "generator sums are not yet supported by heap call execution")
@@ -250,6 +289,13 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'scalar str supports zero or one positional argument')
                 if heap and any(isinstance(item, ast.List) for item in node.args):
                     reject(node, 'list string conversion is not yet supported by heap call execution')
+                for item in node.args:
+                    recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'max':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'maximum requires the unshadowed builtin max')
+                if node.keywords or len(node.args) < 2:
+                    reject(node, 'positional max requires at least two arguments and no keywords')
                 for item in node.args:
                     recurse(item)
             else:

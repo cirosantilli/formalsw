@@ -19,7 +19,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
-from lang.py.call_support import range_sum, uses_calls_model, has_partial_primitives, uses_heap_calls
+from lang.py.call_support import range_sum, reversed_list, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.contracts import ContractError, input_condition
 from lang.py.defaults import literal_default
 from lang.py.imports import bindings, resolve_function, resolve_python_function
@@ -1292,7 +1292,11 @@ class AstJsonEmitter:
                     "comparators": [self.expr(comparator) for comparator in comparators],
                 }
             case ast.Call(func=func, args=args, keywords=[]):
-                if isinstance(func, ast.Name) and func.id == 'str' and not bindings(self.bindings_module, func.id):
+                reversed_value = reversed_list(expr)
+                if (reversed_value is not None
+                        and not any(bindings(self.bindings_module, name) for name in ('list', 'reversed'))):
+                    return {"type": "ReversedList", "value": self.expr(reversed_value)}
+                if isinstance(func, ast.Name) and func.id in ('str', 'max') and not bindings(self.bindings_module, func.id):
                     return {"type": "BuiltinCall", "name": func.id,
                             "args": [self.expr(arg) for arg in args]}
                 return {
