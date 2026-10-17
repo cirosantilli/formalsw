@@ -24,6 +24,7 @@ from lang.py.contracts import ContractError, input_condition, reference_kind, he
 from lang.py.defaults import literal_default
 from lang.py.tuple_support import flat_unpacking
 from lang.py.imports import bindings, identify_classes, resolve_function, resolve_python_function
+from lang.py.class_support import dataclass_fields
 from lang.py.linking import link_imports
 from lang import spec_setup
 from lang.runtime import lake_command, runtime_env
@@ -1305,12 +1306,21 @@ class AstJsonEmitter:
                     "names": [{"name": alias.name, "binding": alias.asname or alias.name} for alias in names],
                 }
             case ast.ClassDef(name=name, bases=[], keywords=[], body=body):
+                metadata = []
                 if stmt.decorator_list:
-                    raise UnsupportedSyntax(f"{name}: decorators are unsupported")
+                    def reject(node, message):
+                        raise UnsupportedSyntax(f"{name}: {message}")
+                    data = dataclass_fields(self.bindings_module, stmt, reject)
+                    if data is None:
+                        raise UnsupportedSyntax(f"{name}: decorators are unsupported")
+                    frozen, fields = data
+                    metadata = [{"type": "DataclassFields", "frozen": frozen, "fields": [
+                        {"name": field.target.id, "annotation": self.expr(field.annotation)} for field in fields]}]
+                    body = [child for child in body if not isinstance(child, ast.AnnAssign)]
                 return {
                     "type": "ClassDef",
                     "name": name,
-                    "body": [self.stmt(child) for child in body],
+                    "body": metadata + [self.stmt(child) for child in body],
                 }
             case ast.FunctionDef(name=name, args=args, returns=returns, body=body):
                 if stmt.decorator_list:

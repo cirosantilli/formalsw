@@ -19,6 +19,25 @@ from lang.py.support import SupportChecker
 api = runpy.run_path(str(ROOT / 'formalsw'))
 
 source = '''
+from dataclasses import dataclass
+import dataclasses as dc
+@dataclass(frozen=True)
+class Frozen:
+    value: int
+    items: list[int]
+    def append(self, n: int) -> int:
+        self.items.append(n)
+        return self.value
+@dataclass
+class Record:
+    value: int
+@dc.dataclass(frozen=True)
+class OtherFrozen:
+    value: int
+    items: list[int]
+@dataclass
+class EmptyRecord:
+    pass
 class Box:
     def __init__(self, value: int = 0) -> None:
         self.value: int = value
@@ -58,6 +77,28 @@ def replace(box: Box, n: int) -> int:
 '''
 
 variants = {
+    'dataclass_init': 'return Frozen(n, items)',
+    'dataclass_read': 'return Frozen(n, items).value',
+    'dataclass_missing_argument': 'return Frozen(mark(items, n))',
+    'dataclass_extra_argument': 'return Frozen(mark(items, n), items, mark(items, 2))',
+    'dataclass_empty': 'return EmptyRecord()',
+    'dataclass_empty_equality': 'return EmptyRecord() == EmptyRecord()',
+    'dataclass_mutable': 'box = Record(n)\nbox.value += 1\nbox.extra = items\nreturn box',
+    'dataclass_frozen_write': 'box = Frozen(n, items)\nbox.value = mark(items, 2)\nreturn box',
+    'dataclass_frozen_new_field': 'box = Frozen(n, items)\nbox.extra = mark(items, 2)\nreturn box',
+    'dataclass_frozen_augmented': 'box = Frozen(n, items)\nbox.value += mark(items, 2)\nreturn box',
+    'dataclass_frozen_list': 'box = Frozen(n, items)\nbox.items += [n]\nreturn box',
+    'dataclass_method': 'return Frozen(n, items).append(n)',
+    'dataclass_equality': 'return Frozen(n, items) == Frozen(n, items)',
+    'dataclass_difference': 'return Frozen(n, items) != Frozen(n + 1, items)',
+    'dataclass_extra_equality': 'box = Record(n)\nbox.extra = items\nreturn box == Record(n)',
+    'dataclass_other_class': 'return Frozen(n, items) == OtherFrozen(n, items)',
+    'dataclass_plain_class': 'return Frozen(n, items) == Box(n)',
+    'dataclass_ordering': 'return Frozen(n, items) < Frozen(n, items)',
+    'dataclass_truth': 'return Frozen(n, items) and n',
+    'dataclass_length': 'return len(Frozen(n, items))',
+    'dataclass_missing_field': 'return Frozen(n, items).missing',
+    'dataclass_missing_method': 'return Frozen(n, items).missing(mark(items, n))',
     'default_init': 'return Box().value',
     'init_arguments': 'return Box(mark(items, n)).value',
     'init_arity': 'return Box(mark(items, n), mark(items, 2))',
@@ -91,7 +132,8 @@ partial = {
     'integer_method_value': 'return n.bit_length',
     'instance_method_value': 'return Box(n).bump',
 }
-for name, body in (variants | partial).items():
+unsupported_equality = {'dataclass_nested_equality': 'return Frozen(n, [n]) == Frozen(n, [n])'}
+for name, body in (variants | partial | unsupported_equality).items():
     source += f'\ndef {name}(items: list[int], n: int):\n' + ''.join(f'    {line}\n' for line in body.splitlines())
 
 
@@ -151,12 +193,59 @@ example : (match (HeapCalls.call Probe.module {json.dumps(name)} [.ref 0, .scala
 example : (HeapCalls.call Probe.module {json.dumps(name)} [.ref 0, .scalar (.int 7)]
     [.list [.scalar (.int 4)]]).execution.observe 200 = .unsupported := by native_decide
 ''')
+    for name in unsupported_equality:
+        assert namespace[name]([4], 7) is True
+        checks.append(f'''
+example : (HeapCalls.call Probe.module "{name}" [.ref 0, .scalar (.int 7)]
+    [.list [.scalar (.int 4)]]).execution.observe 200 = .unsupported := by native_decide
+''')
     document = directory / 'source.json'
     document.write_text(api['AstJsonEmitter'](module).emit())
     proof = directory / 'Checks.lean'
     proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
                      + 'open FormalSW.PyAst\nset_option maxRecDepth 8192\n' + '\n'.join(checks))
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+    data_helper = directory / 'data_helper.py'
+    data_helper.write_text('''
+from dataclasses import dataclass as record
+@record(frozen=True)
+class ImportedDate:
+    year: int
+    month: int
+    day: int
+def make_date(n: int) -> int:
+    return ImportedDate(n, 1, 1).year
+''')
+    data_caller = directory / 'data_caller.py'
+    data_caller.write_text('''
+from data_helper import make_date
+def caller(n: int) -> int:
+    """
+    @formalsw: Returns
+    """
+    return make_date(n)
+''')
+    linked_data = api['source_module'](data_caller)
+    assert not SupportChecker(linked_data).check('caller', heap_calls=True)
+    document = directory / 'imported_data.json'
+    document.write_text(api['AstJsonEmitter'](linked_data).emit())
+    proof = directory / 'ImportedData.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'ImportedData', linked_data).emit() + f'''
+open FormalSW.PyAst
+set_option maxRecDepth 8192
+example : ImportedData.module.classOrigins = [("ImportedDate", {json.dumps(str(data_helper.resolve()))})] := rfl
+example (n : Int) : (HeapCalls.scalarFunction ImportedData.module "caller" [.int n]).Returns :=
+  ⟨.int n, Execution.finishes_of_observe (fuel := 100) rfl⟩
+''')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+    # Shadowed standard-library modules must not be silently reinterpreted.
+    (directory / 'dataclasses.py').write_text('def dataclass(cls): return cls\n')
+    shadowed = ast.parse(data_helper.read_text())
+    shadowed.formalsw_source = data_helper
+    assert any('shadows the modeled standard library' in issue.reason
+               for issue in SupportChecker(shadowed).check('make_date', heap_calls=True))
 
     helper = directory / 'helper.py'
     helper.write_text('''
@@ -203,6 +292,21 @@ rejected = (
     'class Box:\n    def bit_length(self): return 1',
     'class Box:\n    pass\ndef patch():\n    Box.value = 1',
     'class Box:\n    pass\nBox = int',
+    'from dataclasses import dataclass\n@dataclass(frozen=1)\nclass Box:\n    value: int',
+    'from dataclasses import dataclass\n@dataclass(order=True)\nclass Box:\n    value: int',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    value: int = 0',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    value: int\n    value: str',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    __value: int',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    bit_length: int',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    def __post_init__(self): pass',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    def __init__(self): pass',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    value: int\n    def value(self): return 1',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    def value(self): return 1\n    value: int',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    value: int\n    def int(self): return 1',
+    'from dataclasses import dataclass\nfrom typing import ClassVar as int\n@dataclass\nclass Box:\n    value: int',
+    'from dataclasses import dataclass\n@dataclass\nclass Box:\n    value: int\ndataclass = int',
+    'import dataclasses\n@dataclasses.dataclass\nclass Box:\n    value: int\ndataclasses.dataclass = int',
+    'from other import dataclass\n@dataclass\nclass Box:\n    value: int',
 )
 for snippet in rejected:
     program = ast.parse(snippet + '\ndef run(n: int) -> int:\n    box = Box()\n    return n\n')

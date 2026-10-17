@@ -70,11 +70,27 @@ theorem ReturnsValue.empty_constructor
     (noFunction : findFunctionIn module.body name = none)
     (noLibrary : libraryFunction module name = none)
     (defined : module.findClass name = some (origin, classBody))
-    (initializer : findFunctionIn classBody "__init__" = none) :
+    (initializer : findFunctionIn classBody "__init__" = none)
+    (plain : dataclassFields classBody = none := by rfl) :
     ReturnsValue (globals := globals) module name [] heap (.ref heap.length) (heap ++ [.instance origin name []]) := by
   intro anchors stack
-  exact .next (by simp [step, noFunction, noLibrary, construct, defined, initializer,
+  exact .next (by simp [step, noFunction, noLibrary, construct, defined, initializer, plain,
     result, run, Mutable.allocateInstance_result]) .refl
+
+/-- Required positional dataclass fields are stored in declaration order. -/
+theorem ReturnsValue.dataclass_constructor
+    (noFunction : findFunctionIn module.body name = none)
+    (noLibrary : libraryFunction module name = none)
+    (defined : module.findClass name = some (origin, classBody))
+    (initializer : findFunctionIn classBody "__init__" = none)
+    (metadata : dataclassFields classBody = some (frozen, fields))
+    (arity : fields.length = values.length) :
+    ReturnsValue (globals := globals) module name values heap (.ref heap.length)
+      (heap ++ [.dataInstance origin name frozen (fields.map Arg.name) ((fields.map Arg.name).zip values)]) := by
+  intro anchors stack
+  exact .next (by simp [step, noFunction, noLibrary, construct, defined, initializer, metadata,
+    result, run, Mutable.allocateDataclass_result origin name frozen
+      (fields.map Arg.name) values heap (by simpa using arity)]) .refl
 
 private theorem assigned_field
     (target : Evaluates (globals := globals) module env base afterRhs receiver afterTarget)

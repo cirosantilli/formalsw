@@ -39,12 +39,22 @@ def allocateInstance (origin name : String) : Eval Value := do
   set (heap ++ [.instance origin name []])
   return .ref heap.length
 
+/-- Dataclass initialization stores the positional fields without a user setter. -/
+def allocateDataclass (origin name : String) (frozen : Bool) (declared : List String)
+    (values : List Value) : Eval Value := do
+  if declared.length ≠ values.length then error "TypeError"
+  else
+    let heap ← get
+    set (heap ++ [.dataInstance origin name frozen declared (declared.zip values)])
+    return .ref heap.length
+
 /-- Read stored fields only; the caller resolves methods when the field is absent. -/
 def instanceData (value : Value) : Eval (String × String × List (String × Value)) := do
   match value with
   | .scalar _ => error "AttributeError"
   | .ref address => match (← get)[address]? with
-      | some (.instance origin name fields) => return (origin, name, fields)
+      | some (.instance origin name fields) | some (.dataInstance origin name _ _ fields) =>
+          return (origin, name, fields)
       | some _ => error "AttributeError"
       | none => unsupported
 
@@ -62,13 +72,35 @@ def writeField (receiver : Value) (name : String) (value : Value) : Eval Value :
     let (origin, className, fields) ← instanceData receiver
     match receiver with
     | .ref address =>
-        modify fun heap => heap.set address (.instance origin className (putField fields name value))
-        return .scalar .none
+        match (← get)[address]? with
+        | some (.dataInstance _ _ frozen declared _) =>
+            if frozen then error "FrozenInstanceError"
+            else
+              modify fun heap => heap.set address
+                (.dataInstance origin className frozen declared (putField fields name value))
+              return .scalar .none
+        | _ =>
+            modify fun heap => heap.set address (.instance origin className (putField fields name value))
+            return .scalar .none
     | .scalar _ => error "AttributeError"
 
 theorem allocateInstance_result (origin name : String) (heap : Heap) :
     allocateInstance origin name heap =
       some (.ok (.ref heap.length), heap ++ [.instance origin name []]) := rfl
+
+theorem allocateDataclass_result (origin name : String) (frozen : Bool)
+    (declared : List String) (values : List Value) (heap : Heap)
+    (arity : declared.length = values.length) :
+    allocateDataclass origin name frozen declared values heap =
+      some (.ok (.ref heap.length), heap ++ [.dataInstance origin name frozen declared (declared.zip values)]) := by
+  simp [allocateDataclass, arity, Except.map]
+
+theorem writeField_frozen
+    (found : heap[address]? = some (.dataInstance origin className true declared fields))
+    (ordinary : name ≠ "__class__" ∧ name ≠ "__dict__" ∧ name ≠ "__weakref__") :
+    writeField (.ref address) name value heap =
+      some (.error {typeName := "FrozenInstanceError", args := []}, heap) := by
+  simp [writeField, instanceData, found, ordinary.1, ordinary.2.1, ordinary.2.2, error]
 
 theorem readField_result
     (found : heap[address]? = some (.instance origin className fields))

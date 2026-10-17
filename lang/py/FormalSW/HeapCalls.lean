@@ -131,6 +131,21 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
           | .eq => return .scalar (.bool (a == b))
           | .notEq => return .scalar (.bool (a != b))
           | _ => Mutable.error "TypeError"
+      | some (.dataInstance origin name frozen declared fields),
+          some (.dataInstance otherOrigin otherName otherFrozen otherDeclared otherFields) =>
+          if origin ≠ otherOrigin ∨ name ≠ otherName then compareDifferent op
+          else if frozen ≠ otherFrozen ∨ declared ≠ otherDeclared then Mutable.unsupported
+          else match op with
+          | .eq | .notEq =>
+              let left ← declared.mapM fun field => match fields.lookup field with
+                | some value => pure value
+                | none => Mutable.error "AttributeError"
+              let right ← declared.mapM fun field => match otherFields.lookup field with
+                | some value => pure value
+                | none => Mutable.error "AttributeError"
+              let some equal := equalLists left right | Mutable.unsupported
+              return .scalar (.bool (if op == .eq then equal else !equal))
+          | _ => Mutable.error "TypeError"
       | some (.dict xs), some (.dict ys) =>
           match op with
           | .eq | .notEq =>
@@ -223,7 +238,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
       match (← get)[address]? with
       | none => Mutable.unsupported
       | some (.list _) => listInplace op left right
-      | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) => Mutable.binary op left right
+      | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.binary op left right
       | some (.bytearray bytes) =>
           match op with
           | .mult =>
@@ -238,7 +253,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
                     | some (.bytearray more) =>
                         if other = address ∧ !more.isEmpty then Mutable.error "BufferError"
                         else pure more
-                    | some (.list _) | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) => Mutable.error "TypeError"
+                    | some (.list _) | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
                     | none => Mutable.unsupported
                 | _ => Mutable.error "TypeError"
               modify fun heap => heap.set address (.bytearray (bytes ++ more))
@@ -614,7 +629,7 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .int, [.ref address] => do
       match (← get)[address]? with
       | some (.bytearray bytes) => scalarResult (Calls.integerConversion [.bytes bytes])
-      | some (.list _) | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) => Mutable.error "TypeError"
+      | some (.list _) | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
       | _ => Mutable.unsupported
   | .builtin .int, values => do
       let values ← values.mapM fun value => match value with
@@ -697,7 +712,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
   match receiver with
   | .ref address =>
       match (← get)[address]? with
-      | some (.instance origin className fields) =>
+      | some (.instance origin className fields) | some (.dataInstance origin className _ _ fields) =>
           let body ← instanceClass module origin className
           if name = "__class__" ∨ name = "__dict__" ∨ name = "__weakref__" then Mutable.unsupported
           else match fields.lookup name with
@@ -725,7 +740,7 @@ def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Val
   match receiver with
   | .scalar _ => Mutable.unsupported
   | .ref address => match (← get)[address]? with
-      | some (.instance origin className fields) =>
+      | some (.instance origin className fields) | some (.dataInstance origin className _ _ fields) =>
           let body ← instanceClass module origin className
           if name = "__class__" ∨ name = "__dict__" ∨ name = "__weakref__" then Mutable.unsupported
           else match fields.lookup name with
@@ -742,14 +757,21 @@ def invokeMethod (anchors : Nat) (receiver : Value) (args : List Arg) (body : Li
   | some values => .next ⟨.block (executableBody body) (functionEnv args body values globals), stack, heap⟩
   | none => done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
 
+def dataclassFields : List Stmt → Option (Bool × List Arg)
+  | .dataclassFields frozen fields :: _ => some (frozen, fields)
+  | _ => none
+
 def construct (module : Module) (anchors : Nat) (name : String) (values : List Value)
     (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
   match module.findClass name with
   | none => .unsupported
   | some (origin, body) =>
       match findFunctionIn body "__init__" with
-      | none => if values.isEmpty then result (globals := globals) anchors heap (Mutable.allocateInstance origin name) stack
-          else done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
+      | none => match dataclassFields body with
+          | some (frozen, fields) => result (globals := globals) anchors heap
+              (Mutable.allocateDataclass origin name frozen (fields.map Arg.name) values) stack
+          | none => if values.isEmpty then result (globals := globals) anchors heap (Mutable.allocateInstance origin name) stack
+              else done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
       | some (args, body) =>
           invokeMethod (globals := globals) anchors (.ref heap.length) args body values (.initialized heap.length :: stack)
             (heap ++ [.instance origin name []])
@@ -1006,7 +1028,7 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           | .addReceiver item env =>
               match value with
               | .ref address => match heap[address]? with
-                  | some (.instance _ _ _) => run (globals := globals) anchors heap (bindMethod module value "add") fun method heap =>
+                  | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => run (globals := globals) anchors heap (bindMethod module value "add") fun method heap =>
                       .next (argumentsState method env [] [item] stack heap)
                   | _ => run (globals := globals) anchors heap (Mutable.addReceiver value) fun address heap =>
                       .next (argumentsState (.add address) env [] [item] stack heap)
@@ -1014,7 +1036,7 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           | .appendReceiver item env => match value with
               | .scalar _ => done (globals := globals) anchors heap (.error { typeName := "AttributeError", args := [] })
               | .ref address => match heap[address]? with
-                  | some (.instance _ _ _) => run (globals := globals) anchors heap (bindMethod module value "append") fun method heap =>
+                  | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => run (globals := globals) anchors heap (bindMethod module value "append") fun method heap =>
                       .next (argumentsState method env [] [item] stack heap)
                   | _ => run (globals := globals) anchors heap (Mutable.appendReceiver value) fun _ heap =>
                       .next (argumentsState (.append address) env [] [item] stack heap)
@@ -1206,7 +1228,7 @@ private theorem bindMethod_extend (extension : Extends target source)
       | some object =>
           cases object with
           | list items | tuple items | bytearray items | set items | dict items => simp [bindMethod, found]
-          | «instance» origin className fields =>
+          | «instance» origin className fields | dataInstance origin className frozen declared fields =>
               cases defined : source.findClass className with
               | none => simp [bindMethod, found, instanceClass, defined, Mutable.unsupported] at supported
               | some definition =>
@@ -1226,7 +1248,7 @@ private theorem attribute_extend (extension : Extends target source)
           cases object with
           | list items | tuple items | bytearray items | set items | dict items =>
               simp [getAttribute, found]
-          | «instance» origin className fields =>
+          | «instance» origin className fields | dataInstance origin className frozen declared fields =>
               cases defined : source.findClass className with
               | none => simp [getAttribute, found, instanceClass, defined, Mutable.unsupported] at supported
               | some definition =>
@@ -1291,7 +1313,7 @@ theorem step_extend (extension : Extends target source) (state : State)
                   | some object =>
                       cases object with
                       | list items | tuple items | bytearray items | set items | dict items => simp [step, found]
-                      | «instance» origin className fields =>
+                      | «instance» origin className fields | dataInstance origin className frozen declared fields =>
                           simp only [step, found] at supported ⊢
                           exact run_extend _ _ (bindMethod_extend extension) supported
           | _ => rfl

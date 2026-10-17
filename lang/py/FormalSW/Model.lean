@@ -174,6 +174,8 @@ deriving Repr, BEq, Lean.ToExpr
 inductive Stmt where
   /-- A Python class definition. -/
   | classDef : (name : String) -> (body : List Stmt) -> Stmt
+  /-- Validated dataclass metadata, stored at the start of a class body. -/
+  | dataclassFields (frozen : Bool) (fields : List Arg)
   /-- A Python function definition. -/
   | functionDef :
       (name : String) ->
@@ -450,6 +452,9 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
       return .classDef
         (← jsonString json "name")
         (← jsonArray json "body" Stmt.fromJson?)
+  | "DataclassFields" =>
+      return .dataclassFields (← (← json.getObjVal? "frozen").getBool?)
+        (← jsonArray json "fields" Arg.fromJson?)
   | "FunctionDef" =>
       return .functionDef
         (← jsonString json "name")
@@ -970,6 +975,7 @@ mutual
       | .zipStepLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
+    | .dataclassFields _ fields => 1 + fields.length
     | .functionDef _ args returns body =>
         1 + args.length + (returns.map Expr.operationCount).getD 0 +
           (body.map Stmt.operationCount).sum
