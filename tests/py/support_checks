@@ -15,6 +15,85 @@ def stub(path):
 
 
 CASES = [
+    ('special exception constructor', '''
+        items = [1]
+        def f(n: int):
+            """@cleanxy: Returns"""
+            items.append(n)
+            raise OSError(2, "missing")
+    ''', 'special builtin exception constructors are unsupported'),
+    ('dictionary global', '''
+        items = {"n": 1}
+        def f(n: int):
+            """@cleanxy: Returns"""
+            return items["n"]
+    ''', 'supported state is int, str, bool, or homogeneous scalar lists'),
+    ('nested mutable global', '''
+        items = [[1]]
+        def f(n: int):
+            """@cleanxy: Returns"""
+            return items[0]
+    ''', 'supported state is int, str, bool, or homogeneous scalar lists'),
+    ('unsupported heap method', '''
+        items = [1]
+        def f(n: int):
+            """@cleanxy: Returns"""
+            items.pop()
+    ''', 'Call expression is unsupported by heap execution'),
+    ('unsupported dead heap code', '''
+        items = [1]
+        def f(n: int):
+            """@cleanxy: Returns"""
+            items.append(n)
+            return
+            print(n)
+    ''', 'Call expression is unsupported by heap execution'),
+    ('recursive list comparison', '''
+        items = [1]
+        def f(n: int):
+            """@cleanxy: Returns"""
+            return items == [n]
+    ''', 'recursive list comparison is not yet supported'),
+    ('nested heap write', '''
+        items = [1]
+        def f(n: int):
+            """@cleanxy: Returns"""
+            items.append(items)
+    ''', 'nested mutable containers are not yet supported'),
+    ('unsupported augmented slice', '''
+        items = [1]
+        def f(n: int):
+            """@cleanxy: Returns"""
+            items[:] += [n]
+    ''', 'Slice expression is unsupported by heap execution'),
+    ('shadowed heap len', '''
+        items = [1]
+        len = 3
+        def f(n: int):
+            """@cleanxy: Returns"""
+            return len(items)
+    ''', 'Call expression is unsupported by heap execution'),
+    ('scalar model cannot discard heap', '''
+        items = [1]
+        def f(n: int):
+            """@cleanxy: theorem bad : (scalarFunctionWithGlobals _this_module "f" [.int 1] []).Returns"""
+            items.append(n)
+    ''', 'mutable globals require Mutable.function'),
+    ('Equiv validates counterpart with selected heap interpreter', '''
+        items = [1]
+        def f(n: int):
+            """@cleanxy: Equiv(g)"""
+            items.append(n)
+        def g(n: int):
+            for i in range(n):
+                pass
+    ''', 'For statement is unsupported by heap execution'),
+    ('explicit heap model validates its own subset', '''
+        def f(n: int):
+            """@cleanxy: theorem bad : (Mutable.function _this_module "f" [.scalar (.int 1)] [] []).Returns"""
+            for i in range(n):
+                pass
+    ''', 'For statement is unsupported by heap execution'),
     ('parallel descriptors need a model', '''
         class Node:
             @property

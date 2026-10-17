@@ -10,7 +10,8 @@ import ast
 import builtins
 import re
 from dataclasses import dataclass
-from lang.py.global_inputs import function_globals, GlobalInputError
+from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind
+from lang.py.mutable_support import check_mutable
 
 
 @dataclass(frozen=True)
@@ -114,10 +115,10 @@ class SupportChecker:
         return (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
                 and annotation.value.id == 'list' and isinstance(annotation.slice, ast.Name))
 
-    def check(self, name: str, stack: tuple[str, ...] = (), *, parallel: bool = False) -> tuple[UnsupportedConstruct, ...]:
+    def check(self, name: str, stack: tuple[str, ...] = (), *, parallel: bool = False, mutable: bool = False) -> tuple[UnsupportedConstruct, ...]:
         if name in stack:
             return (UnsupportedConstruct(name, self.functions[name].lineno, 'recursive calls outside a recognized sorting implementation are unsupported', stack),)
-        if name in self.cache and not parallel:
+        if name in self.cache and not parallel and not mutable:
             return tuple(UnsupportedConstruct(issue.function, issue.line, issue.reason,
                 (*stack, *issue.dependency)) for issue in self.cache[name])
         function = self.functions.get(name)
@@ -142,6 +143,16 @@ class SupportChecker:
         if parallel or uses_parallel_model(function):
             self.check_parallel(function, reject)
             return tuple(dict.fromkeys(issues))
+        try:
+            globals = function_globals(self.module, function)
+        except GlobalInputError as error:
+            return (UnsupportedConstruct(name, error.line, str(error), stack),)
+        if mutable or any(item.kind.startswith('list[') for item in globals):
+            check_mutable(function, globals, self.bindings, reject)
+            result = tuple(dict.fromkeys(issues))
+            if not stack and not mutable:
+                self.cache[name] = result
+            return result
         arguments = args.args
         is_list = len(arguments) == 1 and (
             isinstance(arguments[0].annotation, ast.Name) and arguments[0].annotation.id == 'list'
@@ -551,7 +562,14 @@ class SupportChecker:
 
     def requirement(self, name: str | None, marker: str) -> tuple[UnsupportedConstruct, ...]:
         """Check the enclosing function and any explicitly named proof dependencies."""
-        issues = list(self.check(name)) if name else []
+        mutable = False
+        candidates = ([name] if name else []) + re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', marker)
+        try:
+            mutable = any(item.kind.startswith('list[') for target in candidates if target in self.functions
+                          for item in function_globals(self.module, self.functions[target]))
+        except GlobalInputError:
+            pass
+        issues = list(self.check(name, mutable=mutable)) if name else []
         if name:
             function = self.functions[name]
             if uses_parallel_model(function) and (
@@ -577,40 +595,39 @@ class SupportChecker:
                     for target in global_targets if target in self.functions)
             except GlobalInputError:
                 stateful = False  # check() reports the precise declaration error.
-            scalar_arguments = all(isinstance(arg.annotation, ast.Name) and
-                arg.annotation.id in ('int', 'str', 'bool') for arg in args)
+            supported_arguments = all(annotation_kind(arg.annotation) is not None for arg in args)
             if stateful and property_name == 'BigO':
                 issues.append(UnsupportedConstruct(name, function.lineno,
                     'BigO does not yet model global-state inputs; use an explicit cost specification'))
             if property_name in ('Equiv', 'EquivReturn', 'ReturnType') and not (
-                    unary_int or unary_list or stateful and scalar_arguments):
+                    unary_int or unary_list or stateful and supported_arguments):
                 issues.append(UnsupportedConstruct(name, function.lineno, f'{property_name} currently supports unary int or list functions only'))
             binary_throws = binary_comparison(function) and all(
                 arg.annotation is None or isinstance(arg.annotation, ast.Name) and arg.annotation.id in ('int', 'str')
                 for arg in args)
-            if property_name == 'Throws' and not (unary_int or unary_list or binary_throws or stateful and scalar_arguments):
+            if property_name == 'Throws' and not (unary_int or unary_list or binary_throws or stateful and supported_arguments):
                 issues.append(UnsupportedConstruct(name, function.lineno, 'Throws has no function model for this argument signature'))
             if property_name == 'ReturnType' and not stateful and (unary_int or unary_list) and (
                 function.returns is None or ast.dump(args[0].annotation) != ast.dump(function.returns)
             ):
                 issues.append(UnsupportedConstruct(name, function.lineno, 'ReturnType currently requires matching supported argument and return annotations'))
             if property_name == 'ReturnType' and stateful and not (
-                isinstance(function.returns, ast.Name) and function.returns.id in ('int', 'str', 'bool')
+                annotation_kind(function.returns) is not None
                 or isinstance(function.returns, ast.Constant) and function.returns.value is None
             ):
                 issues.append(UnsupportedConstruct(name, function.lineno,
-                    'ReturnType with globals requires an int, str, bool, or None return annotation'))
+                    'ReturnType with globals requires a supported scalar, scalar-list, or None return annotation'))
             wants_execution = property_name in ('Returns', 'Halts') or bool(re.search(r'\b(?:Returns|Halts|Throws|diverges)\(', marker))
-            if unary_list and (wants_execution or property_name == 'Throws') and not matches_sort(function, MERGE_SORT):
+            if unary_list and not stateful and (wants_execution or property_name == 'Throws') and not matches_sort(function, MERGE_SORT):
                 issues.append(UnsupportedConstruct(name, function.lineno, 'list execution currently supports only the exact merge-sort body'))
         targets = re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)', marker)
         # Explicit low-level calls in raw requirements are checked too.
-        executions = re.findall(r'\b(scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
+        executions = re.findall(r'\b(Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
         parallel_targets = {target for model, target in executions if model == 'parallelFunction'}
         targets += [target for _, target in executions]
         for target in dict.fromkeys(targets):
             if target != name:
-                issues.extend(self.check(target, (name,) if name else (), parallel=target in parallel_targets))
+                issues.extend(self.check(target, (name,) if name else (), parallel=target in parallel_targets, mutable=mutable or ("Mutable.function", target) in executions))
                 if name and target in self.functions and property_name in ('Equiv', 'EquivReturn'):
                     target_args = self.functions[target].args.args
                     if len(args) != len(target_args) or any(
@@ -622,6 +639,8 @@ class SupportChecker:
             function = self.functions.get(target)
             if function is None:
                 continue
+            if model == 'Mutable.function':
+                issues.extend(self.check(target, mutable=True))
             if model == 'parallelFunction':
                 self.check_parallel(function, lambda node, reason: issues.append(UnsupportedConstruct(
                     target, getattr(node, 'lineno', function.lineno), reason)))
@@ -633,6 +652,13 @@ class SupportChecker:
             ) for arg in function.args.args):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'scalar execution requires scalar int, str, or bool arguments'))
+            if model == 'scalarFunctionWithGlobals':
+                try:
+                    if any(item.kind.startswith('list[') for item in function_globals(self.module, function)):
+                        issues.append(UnsupportedConstruct(target, function.lineno,
+                            'mutable globals require Mutable.function with a shared heap'))
+                except GlobalInputError:
+                    pass
             if model == 'scalarFunction':
                 try:
                     if function_globals(self.module, function):

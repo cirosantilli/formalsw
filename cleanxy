@@ -18,7 +18,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_theorem
-from lang.py.global_inputs import function_globals, merge_globals
+from lang.py.global_inputs import function_globals, merge_globals, annotation_kind
 
 
 class UnsupportedSyntax(Exception):
@@ -144,9 +144,22 @@ def scalar_global_call(ast_namespace, function_name, arguments, globals):
             f'{lean_string(function_name)} [{values}] [{state}]')
 
 
+def mutable_global_call(ast_namespace, function_name, arguments, globals, heap="heap"):
+    def value(name, kind):
+        return f'.ref {name}' if kind.startswith('list[') else f'.scalar ({scalar_term(name, kind)})'
+    values = ", ".join(value(name, kind) for name, kind in arguments)
+    state = ", ".join(f"({lean_string(key)}, {value(name, kind)})" for key, name, kind in globals)
+    return (f'CleanXY.PyAst.Mutable.function {ast_namespace}.module '
+            f'{lean_string(function_name)} [{values}] [{state}] {heap}')
+
+
+def mutable_domain(name, kind, heap):
+    return f'CleanXY.PyAst.Mutable.Value.HasType {heap} (.ref {name}) {lean_string(kind)}'
+
+
 def global_property_type(ast_namespace, function, property_name, args, negations, globals):
     """Quantify the shared initial state, then compare all observable final state."""
-    arguments = [(arg.arg, arg.annotation.id) for arg in function.args.args]
+    arguments = [(arg.arg, annotation_kind(arg.annotation)) for arg in function.args.args]
     used = {name for name, _ in arguments}
     state = []
     for item in globals:
@@ -155,20 +168,37 @@ def global_property_type(ast_namespace, function, property_name, args, negations
             name = "global_" + name
         used.add(name)
         state.append((item.name, name, item.kind))
-    binders = " ".join(f"({name} : {scalar_lean_type(kind)})" for name, kind in
-                       arguments + [(name, kind) for _, name, kind in state])
-    call = scalar_global_call(ast_namespace, function.name, arguments, state)
+    mutable = any(item.kind.startswith('list[') for item in globals) or any(kind.startswith('list[') for _, kind in arguments)
+    heap = "heap"
+    while heap in used:
+        heap = "_" + heap
+    domains = arguments + [(name, kind) for _, name, kind in state]
+    binders = " ".join(f"({name} : {'Nat' if kind.startswith('list[') else scalar_lean_type(kind)})"
+                       for name, kind in domains)
+    if mutable:
+        binders = f"({heap} : CleanXY.PyAst.Mutable.Heap) " + binders
+        call_function = lambda name: mutable_global_call(ast_namespace, name, arguments, state, heap)
+    else:
+        call_function = lambda name: scalar_global_call(ast_namespace, name, arguments, state)
+    call = call_function(function.name)
     if property_name in ("Returns", "Halts", "Throws"):
         body = f"({call}).{property_name}"
     elif property_name in ("Equiv", "EquivReturn"):
-        other = scalar_global_call(ast_namespace, args[0], arguments, state)
+        other = call_function(args[0])
         body = f"({call}).{property_name} ({other})"
     elif property_name == "ReturnType":
-        kind = function.returns.id if isinstance(function.returns, ast.Name) else "None"
+        kind = annotation_kind(function.returns) or "None"
         body = f"({call}).ReturnType {lean_string(kind)}"
     else:
         raise InvalidRequirement(f"{property_name} has no global-state model")
     quantifier = "∃" if property_name == "Throws" else "∀"
+    if mutable:
+        constraints = [f"CleanXY.PyAst.Mutable.Heap.Valid {heap}"] + [
+            mutable_domain(name, kind, heap) for name, kind in domains if kind.startswith('list[')]
+        if property_name == "Throws":
+            body = " ∧ ".join(f"({condition})" for condition in constraints) + f" ∧ ({body})"
+        else:
+            body = " → ".join(f"({condition})" for condition in constraints) + f" →\n{body}"
     result = f"{quantifier} {binders},\n{body}"
     for _ in range(negations):
         result = f"Not ({result})"
@@ -371,12 +401,20 @@ def raw_theorem_type_for_function(
     bound = explicitly_bound_names(requirement.params)
     inferred = []
     global_args = function_globals(module, function) if module is not None and re.search(r"\bthis_function\b", referenced_text) else ()
+    mutable = any(item.kind.startswith('list[') for item in global_args)
+    heap = "heap"
+    taken = {arg.arg for arg in function.args.args} | {item.name for item in global_args}
+    while heap in taken:
+        heap = "_" + heap
+    if mutable and heap not in bound:
+        inferred.append(f"({heap} : CleanXY.PyAst.Mutable.Heap)")
     for argument in [*function.args.posonlyargs, *function.args.args]:
         if argument.arg in bound:
             continue
         if re.search(rf"\b{re.escape(argument.arg)}\b", referenced_text) is None:
             continue
-        lean_type = lean_type_for_python_annotation(argument.annotation)
+        lean_type = ("Nat" if mutable and (annotation_kind(argument.annotation) or "").startswith('list[')
+                     else lean_type_for_python_annotation(argument.annotation))
         if lean_type is None:
             raise InvalidRequirement(
                 f"{function.name}: cannot infer a Lean domain for Python argument "
@@ -385,7 +423,8 @@ def raw_theorem_type_for_function(
         inferred.append(f"({argument.arg} : {lean_type})")
     for item in global_args:
         if item.name not in bound:
-            inferred.append(f"({item.name} : {scalar_lean_type(item.kind)})")
+            kind = "Nat" if item.kind.startswith('list[') else scalar_lean_type(item.kind)
+            inferred.append(f"({item.name} : {kind})")
     params = " ".join([*inferred, requirement.params]).strip()
     property_type = requirement.property_type
     if params and not global_args:
@@ -401,7 +440,16 @@ def raw_theorem_type_for_function(
                 f"{function.name}: this_function supports positional arguments without variadics"
             )
         annotations = [argument.annotation for argument in arguments]
-        if uses_parallel_model(function) or re.search(r"\bParallel\(", referenced_text):
+        if mutable:
+            names = [f"input_{index}" for index in range(len(arguments))]
+            kinds = [annotation_kind(arg.annotation) for arg in arguments]
+            lambda_params = " ".join(f"({name} : {'Nat' if kind.startswith('list[') else scalar_lean_type(kind)})"
+                                     for name, kind in zip(names, kinds))
+            binding = mutable_global_call(ast_namespace, function.name, list(zip(names, kinds)),
+                [(item.name, item.name, item.kind) for item in global_args], heap)
+            if names:
+                binding = f"fun {lambda_params} => {binding}"
+        elif uses_parallel_model(function) or re.search(r"\bParallel\(", referenced_text):
             binding = f"CleanXY.PyAst.parallelFunction {ast_namespace}.module {lean_string(function.name)}"
         elif len(arguments) == 1 and isinstance(annotations[0], ast.Name) and annotations[0].id == "list":
             binding = f"CleanXY.PyAst.listFunction {ast_namespace}.module {lean_string(function.name)}"

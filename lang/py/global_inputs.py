@@ -1,5 +1,4 @@
-"""Python's symbol table determines which names denote module state."""
-
+"""Module bindings used as explicit call-entry inputs by the stateful models."""
 import ast
 from dataclasses import dataclass
 import symtable
@@ -8,7 +7,7 @@ import symtable
 class GlobalInputError(ValueError):
     def __init__(self, node, message):
         super().__init__(message)
-        self.line = getattr(node, "lineno", 1)
+        self.line = getattr(node, 'lineno', 1)
 
 
 @dataclass(frozen=True)
@@ -17,20 +16,31 @@ class GlobalInput:
     kind: str
 
 
+def annotation_kind(annotation):
+    if isinstance(annotation, ast.Name) and annotation.id in ('int', 'str', 'bool'):
+        return annotation.id
+    if (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
+            and annotation.value.id == 'list' and isinstance(annotation.slice, ast.Name)
+            and annotation.slice.id in ('int', 'str', 'bool')):
+        return f'list[{annotation.slice.id}]'
+    return None
+
+
 def function_globals(module, function):
-    # Parse ordinary Python scoping, including assignments later in the body.
+    """Use Python's scope analysis; infer domains without fixing entry values.
+
+    List declarations establish an element domain, not distinct object identities.
+    Aliases in declarations are accepted; entry aliases are universally quantified.
+    """
     try:
-        table = next(child for child in symtable.symtable(
-            ast.unparse(function), "<function>", "exec").get_children()
-            if child.get_type() == "function" and child.get_name() == function.name)
+        table = next(child for child in symtable.symtable(ast.unparse(function), '<function>', 'exec').get_children()
+                     if child.get_type() == 'function' and child.get_name() == function.name)
     except SyntaxError as error:
-        raise GlobalInputError(function, f"invalid Python scope: {error.msg}") from None
+        raise GlobalInputError(function, f'invalid Python scope: {error.msg}') from None
     except StopIteration:
-        raise GlobalInputError(function, "generic function scopes are unsupported") from None
-    referenced = {
-        symbol.get_name() for symbol in table.get_symbols()
-        if symbol.is_global() and (symbol.is_referenced() or symbol.is_assigned())
-    }
+        raise GlobalInputError(function, 'generic function scopes are unsupported') from None
+    referenced = {symbol.get_name() for symbol in table.get_symbols()
+                  if symbol.is_global() and (symbol.is_referenced() or symbol.is_assigned())}
     declared = {symbol.get_name() for symbol in table.get_symbols() if symbol.is_declared_global()}
     definitions = {}
     for stmt in module.body:
@@ -40,31 +50,45 @@ def function_globals(module, function):
                     definitions.setdefault(target.id, []).append((stmt, None, stmt.value))
         elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
             definitions.setdefault(stmt.target.id, []).append((stmt, stmt.annotation, stmt.value))
-    inputs = []
-    for name in sorted(referenced | declared):
-        entries = definitions.get(name)
-        if entries is None:
-            if name in declared:
-                raise GlobalInputError(function, f"global {name!r} needs a module-level scalar declaration")
-            continue  # Unknown names/callees remain subject to normal coverage checks.
+
+    def domain(name, visiting=()):
+        if name in visiting:
+            raise GlobalInputError(function, f'cyclic global declarations involving {name!r}')
+        if name not in definitions:
+            raise GlobalInputError(function, f'global {name!r} needs a module-level declaration')
         kinds = set()
-        for stmt, annotation, value in entries:
+        for stmt, annotation, value in definitions[name]:
             if isinstance(stmt, ast.Assign) and (len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name)):
-                raise GlobalInputError(stmt, f"global {name!r} needs a simple scalar declaration")
-            try:
-                literal = ast.literal_eval(value) if value is not None else None
-            except (ValueError, TypeError, SyntaxError):
-                raise GlobalInputError(stmt, f"global {name!r} needs a scalar literal initializer") from None
-            kind = {int: "int", bool: "bool", str: "str"}.get(type(literal))
-            if kind is None:
-                raise GlobalInputError(stmt, f"global {name!r}: only int, str, and bool state is currently supported")
-            if annotation is not None and not (isinstance(annotation, ast.Name) and annotation.id == kind):
-                raise GlobalInputError(stmt, f"global {name!r}: annotation must match its scalar initializer")
+                raise GlobalInputError(stmt, f'global {name!r} needs a simple declaration')
+            expected = annotation_kind(annotation)
+            if isinstance(value, ast.Name):
+                kind = domain(value.id, (*visiting, name))
+            elif value is None and expected:
+                kind = expected
+            else:
+                try:
+                    literal = ast.literal_eval(value)
+                except (ValueError, TypeError, SyntaxError):
+                    raise GlobalInputError(stmt, f'global {name!r} needs a literal initializer or declared alias') from None
+                scalar = {int: 'int', bool: 'bool', str: 'str'}
+                kind = scalar.get(type(literal))
+                if type(literal) is list:
+                    elements = {scalar.get(type(item)) for item in literal}
+                    if not elements and expected and expected.startswith('list['):
+                        kind = expected
+                    elif len(elements) == 1 and None not in elements:
+                        kind = f'list[{elements.pop()}]'
+                if kind is None:
+                    raise GlobalInputError(stmt, f'global {name!r}: supported state is int, str, bool, or homogeneous scalar lists; empty lists need list[int], list[str], or list[bool] annotations')
+            if annotation is not None and expected != kind:
+                raise GlobalInputError(stmt, f'global {name!r}: annotation must match its initializer')
             kinds.add(kind)
         if len(kinds) != 1:
-            raise GlobalInputError(entries[-1][0], f"global {name!r} has inconsistent scalar declarations")
-        inputs.append(GlobalInput(name, kinds.pop()))
-    return tuple(inputs)
+            raise GlobalInputError(definitions[name][-1][0], f'global {name!r} has inconsistent declarations')
+        return kinds.pop()
+
+    return tuple(GlobalInput(name, domain(name)) for name in sorted(referenced | declared)
+                 if name in definitions or name in declared)
 
 
 def merge_globals(*groups):

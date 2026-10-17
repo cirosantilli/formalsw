@@ -15,6 +15,7 @@ roots = [
   "lang.py.CleanXY.Execution",
   "lang.py.CleanXY.Runtime",
   "lang.py.CleanXY.Globals",
+  "lang.py.CleanXY.MutableGlobals",
   "lang.py.CleanXY.DataRuntime",
   "lang.py.CleanXY.GraphEquivalence",
   "lang.py.CleanXY.Sorting",

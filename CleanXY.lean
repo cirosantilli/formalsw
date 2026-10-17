@@ -1,3 +1,4 @@
+import lang.py.CleanXY.MutableGlobals
 import Lean
 import lang.py.CleanXY.Model
 import lang.py.CleanXY.GraphEquivalence

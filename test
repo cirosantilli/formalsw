@@ -95,9 +95,10 @@ def print_result(result: TestResult) -> None:
 def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
+        TestCase("mutable global lists, aliases, and exceptional state", Path("tests/py/mutable_globals.py"), 0),
         TestCase("global inputs and normal/exceptional state", Path("tests/py/globals.py"), 0),
-        TestCase("mutable globals require a heap model", Path("tests/py/fail/global_mutable.py"), 1,
-                 ("only int, str, and bool state is currently supported", "1 proof failed because it depends on unsupported Python constructs")),
+        TestCase("dictionary globals are explicitly unsupported", Path("tests/py/fail/global_mutable.py"), 1,
+                 ("supported state is int, str, bool, or homogeneous scalar lists", "1 proof failed because it depends on unsupported Python constructs")),
         TestCase("legacy equivalence cannot discard globals", Path("tests/py/fail/global_legacy.py"), 1,
                  "legacy Function properties omit globals"),
         TestCase("doubly linked list synchronization and corrupted links", Path("tests/py/parallel_doubly_linked_list.py"), 0),
@@ -304,8 +305,10 @@ def main() -> int:
     ) for command in (
         [sys.executable, "tests/py/object_equivalence.py"],
         [sys.executable, "tests/py/globals.py"],
+        [sys.executable, "tests/py/mutable_globals.py"],
         ["lake", "env", "lean", "-DwarningAsError=true", "tests/py/object_equivalence.lean"],
         [sys.executable, "tests/py/graph_equivalence_checks"],
+        [sys.executable, "tests/py/mutable_global_checks"],
     )]
     graph_passed = all(result.returncode == 0 for result in graph_results)
     print(f"{'PASS' if graph_passed else 'FAIL'} interpreted Python object-graph equivalence", flush=True)

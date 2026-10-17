@@ -788,7 +788,7 @@ For a bare-list function, `Throws` instead provides a modeled runtime-value-list
 
 === Global state
 
-Scalar module globals are supported as additional function inputs. Python's symbol table determines the global names, so a local assignment anywhere in a function shadows the module binding unless Python declares it `global`. This supports reads without a `global` statement and assignments with one:
+Scalar module globals and mutable list globals are supported as additional function inputs. Python's symbol table determines the global names, so a local assignment anywhere in a function shadows the module binding unless Python declares it `global`. This supports reads without a `global` statement and assignments with one:
 
 [source,python]
 ----
@@ -815,7 +815,7 @@ def advance(n: int) -> int:
     [.int n] [("offset", .int offset)]).Returns
 ----
 
-The theorem covers every integer `offset`, not just its initial value of `10`. The domain comes from a module-level scalar declaration: `int`, `str`, and `bool` annotations are supported, or the type can be inferred from a scalar literal such as `offset = 10`. Each required global must have a matching scalar literal initializer. Module initialization is not executed by this call model; the theorem describes calls entered with values in those domains. An explicit raw hypothesis can restrict the entry state when that is intended.
+The theorem covers every integer `offset`, not just its initial value of `10`. The domain comes from a module-level scalar declaration: `int`, `str`, and `bool` annotations are supported, or the type can be inferred from a scalar literal such as `offset = 10`. A declaration may use a matching literal initializer, an explicit supported type annotation without an initializer, or an alias to another supported module declaration. Module initialization is not executed by this call model; the theorem describes calls entered with values in those domains. An explicit raw hypothesis can restrict the entry state when that is intended.
 
 In raw function-level specifications, `this_function` captures the quantified globals while retaining the Python parameter list. For example, `@cleanxy: theorem returns_with_offset (n offset : Int) : Returns(this_function(n))` in `add_offset` expands to the same stateful call. Unbound globals needed by `this_function` are quantified automatically, even if their names are absent from the theorem body.
 
@@ -823,7 +823,48 @@ In raw function-level specifications, `this_function` captures the quantified gl
 
 See link:tests/py/globals.py[] and link:tests/py/globals.py.lean[] for proofs over arbitrary integers, including a counterexample where omitting a global update changes equivalence and another where throwing before versus after an update differs. The examples also cover string and Boolean globals and local shadowing.
 
-Mutable container/object globals, imported module attributes, closures (`nonlocal`), deletion of globals, and globals in the parallel or quotation backends remain unsupported. The scalar global model does not execute ordinary function calls either. These dependencies produce unsupported-construct diagnostics rather than being silently omitted. `BigO` currently rejects functions depending on globals because its single input-size abstraction does not account for additional state inputs. Explicit legacy `Property.Function`/`scalarFunction` specifications cannot discard a function's globals; use the short DSL or `scalarFunctionWithGlobals`.
+Mutable list globals use a shared heap, so a local alias, another global, a function argument, and a returned value can all refer to the same object:
+
+[source,python]
+----
+items: list[int] = []
+alias = items
+
+def push(n: int) -> None:
+    """@cleanxy: Returns"""
+    items.append(n)
+
+def push_via_alias(n: int) -> None:
+    """@cleanxy: Equiv(push)"""
+    local = items
+    local.append(n)
+
+def replace(n: int) -> None:
+    """@cleanxy: Not Equiv(push)"""
+    global items
+    items = items + [n]
+----
+
+`push` mutates the existing object, so every alias sees the appended value. `replace` binds the global to a new list; callers retaining the original list still see its previous contents. Both finish with the same list elements in `items`, but their observable effects differ. Mutation does not need a `global` declaration; rebinding does.
+
+The raw obligation for `push` is:
+
+[source,lean]
+----
+∀ (heap : Mutable.Heap) (n : Int) (items : Nat),
+  heap.Valid →
+  Mutable.Value.HasType heap (.ref items) "list[int]" →
+  (Mutable.function MutableGlobalsAst.module "push"
+    [.scalar (.int n)] [("items", .ref items)] heap).Returns
+----
+
+This quantifies over every valid entry heap and list address, including empty lists. List arguments and all required list globals use addresses in that same heap; their addresses can coincide. Initializers establish input domains without fixing list contents or assuming distinct objects. `list[int]`, `list[str]`, and `list[bool]` are supported; a nonempty homogeneous literal can supply the element type, and an empty initializer needs an annotation. An annotation describes the entry state; subsequent supported scalar writes may change element types.
+
+The heap interpreter supports list literals, scalar indexed reads and writes (including negative indices), `append`, concatenation, repetition, `len`, name assignment, name or indexed augmented assignment, scalar expressions, `if`, `while`, message-free `assert`, `return`, and ordinary builtin `raise` with scalar arguments (special constructors such as `OSError` are rejected). `list += string` appends its characters in place. Indexed augmented assignment evaluates the target once, reads before the right-hand side, and preserves Python's write order even if the right-hand side mutates the list. List operations on a function argument share the same semantics as operations on a global. Ordinary calls, slicing, other list methods, recursive list comparisons, nested mutable containers, dictionary/object globals, imported module attributes, closures (`nonlocal`), deletion of globals, and globals in the parallel or quotation backends remain unsupported. The scalar global model does not execute ordinary function calls either. These dependencies produce unsupported-construct diagnostics rather than being silently omitted. `BigO` currently rejects functions depending on globals because its single input-size abstraction does not account for additional state inputs. Explicit legacy `Property.Function`/`scalarFunction` specifications cannot discard a function's globals; use the short DSL, `scalarFunctionWithGlobals` for scalar state, or `Mutable.function` for shared list state.
+
+Mutable completions retain global bindings and the heap on both return and exception. `Equiv` compares the outcome and the rooted final object graph, using the interpreted Python `same_snapshot` comparison; exactly identical completions are an immediate fast path. Roots include every entry object (a caller might retain it), final globals, and a successful return value. This preserves caller-visible aliases even after rebinding and permits renaming newly allocated objects and ignoring unreachable temporary allocations. Entry heap addresses keep their order as caller anchors. `EquivReturn` compares this same observable state whenever both executions return. Implicit builtin exception messages remain abstracted, as in the scalar interpreter; explicit supported exception arguments are retained.
+
+Raw `this_function` specifications for mutable globals capture an additional `heap : Mutable.Heap` input and the global addresses. Referenced typed list arguments are addresses too. As with other raw specifications, write the desired heap-validity and input-type hypotheses explicitly; the short DSL supplies them automatically. See link:tests/py/mutable_globals.py[] and link:tests/py/mutable_globals.py.lean[] for arbitrary-heap proofs, argument/global aliasing, mutation versus rebinding, and mutation before an exception. link:tests/py/mutable_global_checks[] also compares the interpreter with real Python executions.
 
 === Raw Lean specification
 
@@ -1004,6 +1045,76 @@ Each node stores its `kind`, ordered field `labels`, and outgoing `edges`. Insta
 The model in link:lang/py/CleanXY/Execution.lean[] and link:lang/py/CleanXY/Runtime.lean[] uses a deterministic transition system. Termination requires a finite derivation ending in a normal or exceptional outcome. Observation fuel only limits how long an observer runs; exhausting it produces `pending`, never a fabricated return.
 
 `Not Halts(this_function(values))` states that a call does not terminate. link:tests/py/sort.py[`Looping.__le__`] and its checked proof show that sorting two such objects does not halt. Unsupported source constructs cause validation errors and cannot be used to satisfy this requirement.
+
+[[raw-lean-mutable-call]]
+==== Mutable.Call
+
+A heap-backed call containing an execution of `Mutable.Completion`. Its `Returns`, `Halts`, `Throws`, and `Diverges` predicates inspect the Python outcome, not the internal completion wrapper. `Call.returns_iff_halts_not_throws` proves `Returns ↔ Halts ∧ ¬ Throws`; `Call.throws_halts` proves `Throws → Halts`.
+
+[[raw-lean-mutable-call-equiv]]
+==== Mutable.Call.Equiv
+
+`left.Equiv right` requires each finite completion on either side to have a matching `Mutable.Completion.Equivalent` completion on the other. Final global state and caller-visible mutations matter on exceptional exits too. `Call.equiv_of_finishes` proves equivalence from two matching completions.
+
+[[raw-lean-mutable-call-equiv-return]]
+==== Mutable.Call.EquivReturn
+
+`left.EquivReturn right` compares successful completions using `Mutable.Completion.Equivalent` whenever both calls return. It does not prove termination. `Call.Equiv.equivReturn` derives it from `Equiv`.
+
+[[raw-lean-mutable-call-finishes]]
+==== Mutable.Call.Finishes
+
+`call.Finishes completion` is a finite execution ending with that Python outcome, global bindings, and heap. `Call.finishes_of_observe` turns an actual completed observation into a proof; exhausting observation fuel is insufficient.
+
+[[raw-lean-mutable-call-return-type]]
+==== Mutable.Call.ReturnType
+
+`call.ReturnType kind` means that the call throws or returns a value satisfying `Mutable.Value.HasType` in its final heap. For example, `"list[int]"` checks the returned reference and the exact scalar types of its elements.
+
+[[raw-lean-mutable-completion]]
+==== Mutable.Completion
+
+A record with `outcome : Except ExceptionObject Mutable.Value`, `globals : Mutable.Globals`, `heap : Mutable.Heap`, and `anchors : Nat`. The first `anchors` heap objects existed at entry and remain observable even if a global stops referring to them.
+
+[[raw-lean-mutable-completion-equivalent]]
+==== Mutable.Completion.Equivalent
+
+Two completions match if they are identical, or if their anchor counts, global-name order, and outcome kinds/exception objects agree and `Graph.Equivalent` holds between their snapshots. The snapshot comparison runs the Python definition of object-graph equivalence.
+
+[[raw-lean-mutable-completion-snapshot]]
+==== Mutable.Completion.snapshot
+
+Encode the final graph as `Data` for the Python comparator. Ordered roots are entry objects, final global values, and the return value on success. Fresh unreachable objects are ignored by graph comparison; aliases between roots are preserved.
+
+[[raw-lean-mutable-function]]
+==== Mutable.function
+
+`Mutable.function module "name" arguments globals heap` executes the actual translated Python function body with shared references. It respects whole-function local/global scope. Supplied globals unused by the body remain observable and unchanged, which allows comparing functions with different global dependencies in the same world.
+
+[[raw-lean-mutable-globals]]
+==== Mutable.Globals
+
+A list of `(String × Mutable.Value)` module bindings. A binding such as `("items", .ref 0)` refers to object zero in the shared heap. Rebinding changes this entry; mutation changes the object.
+
+[[raw-lean-mutable-heap]]
+==== Mutable.Heap
+
+A list of list objects, indexed by reference addresses. For example, `[[.scalar (.int 1)]]` contains one list. Arguments, globals, locals, and results share these addresses. The representation can express cycles; the current source validator restricts accessible containers to flat scalar lists.
+
+[[raw-lean-mutable-heap-valid]]
+==== Mutable.Heap.Valid
+
+`heap.Valid` requires every reference stored in the heap to address an existing object. It does not assert that different bindings refer to different objects.
+
+[[raw-lean-mutable-value]]
+==== Mutable.Value
+
+Either `.scalar constant` or `.ref address`. Constants use the existing `Constant` representation; references identify mutable list objects.
+
+[[raw-lean-mutable-value-has-type]]
+==== Mutable.Value.HasType
+
+`value.HasType heap kind` is the entry-domain predicate used by the mutable-state DSL. Scalar kinds are `"int"`, `"str"`, `"bool"`, and `"None"`; list kinds check that a reference exists and, for `"list[int]"`, `"list[str]"`, or `"list[bool]"`, every element has that exact scalar type. Empty lists satisfy each scalar element domain.
 
 [[raw-lean-mutex-ensures]]
 ==== Mutex.Ensures
@@ -1283,6 +1394,7 @@ Finally, cleanxy runs Lean putting everything together:
   adjacent, generated-AST-bound Lean proofs
 
 [[unsupported-python-constructs]]
+
 === Unsupported Python constructs
 
 A requirement on a function is rejected if its body or a modeled dependency contains Python constructs that CleanXY cannot handle. The coverage check examines the whole body, including unreachable statements and both branches of conditionals. This applies to DSL properties, negated properties, and raw Lean requirements alike. Equivalence targets and modeled comparison methods are checked too.

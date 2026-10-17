@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Compare real Python execution with the heap interpreter, including aliases."""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'cleanxy'))
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is str:
+        return '.string ' + json.dumps(value, ensure_ascii=False)
+    raise AssertionError(value)
+
+
+BODIES = {
+    'push': 'items.append(n)',
+    'alias_local': 'local = items\nlocal.append(n)',
+    'replace': 'global items\nitems = items + [n]',
+    'extend_string': 'global items\nitems += "λ😀"\nreturn len(items)',
+    'augmented_index': 'items[-1] += n',
+    'augmented_index_rhs_effect': 'items[-1] += len([items.append(n)])',
+    'augmented_index_target_effect': 'items[len([items.append(n)]) - 1] += n',
+    'extend_self': 'global items\nitems += items',
+    'extend': 'global items\nitems += [n]',
+    'repeat': 'global items\nitems *= n',
+    'repeat_bool': 'global items\nitems *= True',
+    'repeat_copy': 'global items\nitems = items * n',
+    'write': 'items[-1] = n',
+    'read': 'return items[-1]',
+    'read_alias': 'items.append(n)\nreturn len(alias)',
+    'write_alias': 'alias[0] = n\nreturn items',
+    'raise_after': 'items.append(n)\nraise ValueError("failure")',
+    'raise_before': 'raise ValueError("failure")\nitems.append(n)',
+    'expr_error': 'return items.append(n) + 1',
+    'evaluation_order': 'items[len(items)] = items.append(n)',
+    'index_error_after': 'items.append(n)\nreturn items[100]',
+    'exception_arg_error': 'items.append(n)\nraise ValueError(items[100])',
+    'scalar_change': 'global total\nitems.append(n)\ntotal += n\nreturn total',
+    'local_shadow': 'items = [n]\nreturn items',
+    'list_compare_scalar': 'return items[0] < n',
+    'element_type_change': 'items[0] = "x"\nreturn items[0] * n',
+    'element_type_error': 'items[0] = "x"\nreturn items[0] - n',
+    'bool_numeric': 'items[0] = True\nreturn items[0] + n',
+    'divide_zero': 'items.append(n)\nreturn n // 0',
+    'loop': 'while n > 0:\n    items.append(n)\n    n -= 1\nreturn len(items)',
+    'assert_after': 'items.append(n)\nassert n > 0',
+    'return_literal': 'return [n, len(items)]',
+}
+
+
+def main():
+    source = 'items: list[int] = []\nalias = items\ntotal = 0\n\n'
+    for name, body in BODIES.items():
+        source += f'def {name}(n: int):\n' + ''.join('    ' + line + '\n' for line in body.splitlines()) + '\n'
+    module = ast.parse(source)
+    checker = SupportChecker(module)
+    for name in BODIES:
+        assert not checker.check(name, mutable=True), (name, checker.check(name, mutable=True))
+    lines = ['import CleanXY', 'open CleanXY.PyAst', 'set_option maxRecDepth 4096',
+             'def source : Module := pyast_from_json% (include_str "source.json")']
+    count = 0
+    for name in BODIES:
+        for initial in ([], [4], [1, -2]):
+            for n in (-2, 0, 3):
+                for shared in (False, True):
+                    world = {}
+                    exec(compile(source, '<heap test>', 'exec'), world)
+                    anchors = [initial.copy(), [9]]
+                    world.update(items=anchors[0], alias=anchors[0 if shared else 1], total=7)
+                    try:
+                        result = world[name](n)
+                        error = None
+                    except (IndexError, TypeError, ValueError, AssertionError, ZeroDivisionError) as exc:
+                        error = type(exc).__name__
+                        result = None
+                    roots = anchors + [world['alias'], world['items'], world['total']]
+                    if error is None:
+                        roots.append(result)
+                    expected = data(snapshot_roots(roots))
+                    heap = '[' + ', '.join('[' + ', '.join('.scalar (' + constant(v) + ')' for v in xs) + ']' for xs in (initial, [9])) + ']'
+                    globals = f'[("alias", .ref {0 if shared else 1}), ("items", .ref 0), ("total", .scalar (.int 7))]'
+                    call = f'Mutable.function source {json.dumps(name)} [.scalar (.int ({n}))] {globals} {heap}'
+                    # Implicit builtin exception messages remain abstracted, as
+                    # in the scalar runtime. Explicit ValueError args are exact.
+                    if error is None:
+                        outcome = 'match c.outcome with | .ok _ => true | _ => false'
+                    else:
+                        args = '[.string "failure"]' if error == 'ValueError' else '[]'
+                        outcome = f'match c.outcome with | .error e => decide (e = ⟨{json.dumps(error)}, {args}⟩) | _ => false'
+                    lines += [f'-- {name}, {initial!r}, n={n}, shared={shared}',
+                              'example : (match (' + call + ').execution.observe 100 with',
+                              '  | .done (.ok c) => (' + outcome + ') &&',
+                              f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+                              '  | _ => false) = true := by native_decide']
+                    count += 1
+    with tempfile.TemporaryDirectory(prefix='cleanxy-mutable-') as directory:
+        path = Path(directory)
+        (path / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+        (path / 'Check.lean').write_text('\n'.join(lines))
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(path / 'Check.lean')], cwd=ROOT, check=True)
+    print(f'{count} Python/Lean mutable-global comparisons passed')
+
+
+if __name__ == '__main__':
+    main()
