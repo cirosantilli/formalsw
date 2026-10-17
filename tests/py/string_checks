@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Compare scalar string primitives with Python and reject binding ambiguities."""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import tempfile
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+from lang.py.contracts import ContractError
+from lang.py.linking import link_imports
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if isinstance(value, bool):
+        return f'(.bool {str(value).lower()})'
+    if isinstance(value, int):
+        return f'(.int ({value}))'
+    return f'(.string {json.dumps(value, ensure_ascii=False)})'
+
+
+def expectation(operation):
+    try:
+        return f'Except.ok {constant(operation())}'
+    except (IndexError, TypeError, ValueError) as error:
+        return f'Except.error {{ typeName := "{type(error).__name__}", args := [] }}'
+
+
+equations = []
+for text in ('', 'abcdef', 'Aé😺Z'):
+    for start, stop, step in itertools.product((None, -7, -1, 0, 2, 7), repeat=3):
+        expected = expectation(lambda: text[start:stop:step])
+        equations.append(f'example : Strings.slice {constant(text)} {constant(start)} '
+                         f'{constant(stop)} {constant(step)} = {expected} := by decide')
+    for index in (None, True, False, 'bad', *range(-8, 9)):
+        expected = expectation(lambda: text[index])
+        equations.append(f'example : Strings.get {constant(text)} {constant(index)} = {expected} := by decide')
+for value, start, stop, step in itertools.product(('abc', 42, None), ('bad', None), ('bad', None), (False, True, 'bad', None)):
+    expected = expectation(lambda: value[start:stop:step])
+    equations.append(f'example : Strings.slice {constant(value)} {constant(start)} '
+                     f'{constant(stop)} {constant(step)} = {expected} := by decide')
+for value in (None, True, False, '', 'é😺', 0, -1, 12345, -(10 ** 100)):
+    equations.append(f'example : Strings.str [{constant(value)}] = '
+                     f'Except.ok {constant(str(value))} := by decide')
+
+with tempfile.TemporaryDirectory(prefix='formalsw-string-') as directory:
+    proof = Path(directory) / 'StringChecks.lean'
+    proof.write_text('import FormalSW\nopen FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+base = 'def f(n: int) -> str:\n    return str(n)\n'
+assert not SupportChecker(ast.parse(base)).check('f')
+for changed in (
+    base + 'str = 0\n', base + 'from elsewhere import str\n', base + 'from elsewhere import *\n',
+    base.replace('f(n: int)', 'f(n: int, str: int)'),
+    base.replace('return str(n)', 'str = n\n    return str(n)'),
+    base.replace('str(n)', 'str(n, n)'), base.replace('str(n)', 'str(object=n)'),
+    base.replace('str(n)', 'str([n])'),
+):
+    assert SupportChecker(ast.parse(changed)).check('f'), changed
+
+# A real local function called str retains ordinary call semantics.
+local = ast.parse(base + 'def str(n: int) -> int:\n    return n + 1\n')
+assert not SupportChecker(local).check('f')
+assert api['AstJsonEmitter'](local).expr(local.body[0].body[0].value)['type'] == 'Call'
+ordinary = ast.parse(base)
+assert api['AstJsonEmitter'](ordinary).expr(ordinary.body[0].body[0].value)['type'] == 'BuiltinCall'
+augmented = api['module_with_python_builtins'](REPO / 'tests/py/strings.py', ordinary)
+assert api['AstJsonEmitter'](augmented, bindings_module=ordinary).expr(ordinary.body[0].body[0].value)['type'] == 'BuiltinCall'
+model_bindings = api['source_bindings'](REPO / 'lang/py/builtin/function.py', ordinary, augmented)
+assert api['AstJsonEmitter'](augmented, bindings_module=model_bindings).expr(ordinary.body[0].body[0].value)['type'] == 'Call'
+condition = ast.parse('str(n) == n + 1', mode='eval').body
+bridge = api['AstLeanBridgeEmitter'](Path('source.json'), 'Source', local, {'requires_f': condition}).emit()
+assert 'BuiltinCall' not in bridge
+
+# Flattening helpers must not capture either module's unshadowed builtin calls.
+with tempfile.TemporaryDirectory(prefix='formalsw-string-link-', dir=REPO) as directory:
+    source = Path(directory) / 'source.py'
+    helper = Path(directory) / 'helper.py'
+    for main, dependency in (
+        ('from helper import g\n' + base.replace('str(n)', 'str(g(n))'),
+         'def g(n: int) -> int: return n\ndef str(n: int) -> int: return n\n'),
+        ('from helper import g\ndef f(n: int): return g(n)\ndef str(n: int): return n\n',
+         'def g(n: int) -> str: return str(n)\n'),
+    ):
+        source.write_text(main)
+        helper.write_text(dependency)
+        try:
+            link_imports(source, ast.parse(main), lambda path: ast.parse(path.read_text()))
+        except ContractError as error:
+            assert 'conflicting module bindings' in str(error), error
+        else:
+            raise AssertionError('linked declaration captured a builtin')
+
+subprocess.run([sys.executable, str(REPO / 'tests/py/strings.py')], check=True)
+print(f'Scalar strings: {len(equations)} Python comparisons and binding checks passed')

@@ -55,10 +55,10 @@ def uses_calls_model(module, function):
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
     names.update(library_functions(module))
     return any(
-        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue))
+        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript))
         or general_division(node)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names
+        or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names | {'str'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -145,6 +145,14 @@ def check_calls(module, function, reject):
                 recurse(node.test)
                 recurse(node.body)
                 recurse(node.orelse)
+            elif isinstance(node, ast.Subscript):
+                recurse(node.value)
+                if isinstance(node.slice, ast.Slice):
+                    for bound in (node.slice.lower, node.slice.upper, node.slice.step):
+                        if bound is not None:
+                            recurse(bound)
+                else:
+                    recurse(node.slice)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
                 if node.func.id in scope:
                     reject(node, 'local bindings must not shadow module-level call targets')
@@ -164,6 +172,13 @@ def check_calls(module, function, reject):
                 if source is not None and any((root / 'math.py').exists() or (root / 'math').is_dir()
                                               for root in (source.parent, Path.cwd())):
                     reject(node, 'a local math module shadows the modeled standard library')
+                for item in node.args:
+                    recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'str':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'string conversion requires the unshadowed builtin str')
+                if node.keywords or len(node.args) > 1:
+                    reject(node, 'scalar str supports zero or one positional argument')
                 for item in node.args:
                     recurse(item)
             else:

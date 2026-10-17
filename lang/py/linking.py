@@ -38,6 +38,12 @@ def scope_names(module):
     return result
 
 
+def free_calls(module):
+    """Names resolved outside this module must not capture linked declarations."""
+    return {node.func.id for node in ast.walk(module)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)} - scope_names(module)
+
+
 def link_imports(source, module, load):
     """
     Append complete helper modules so existing execution proofs can be transported
@@ -65,11 +71,13 @@ def link_imports(source, module, load):
         prefix.append(node)
     linked = ast.Module(body=list(prefix), type_ignores=[])
     occupied = scope_names(linked)
+    free = free_calls(linked) - selected
     aliases = []
     for path in module.formalsw_link_dependencies:
         dependency = load(path)
         names = scope_names(dependency)
-        collisions = names & occupied
+        dependency_free = free_calls(dependency)
+        collisions = (names & occupied) | (names & free) | (dependency_free & occupied)
         if collisions:
             raise ContractError(f'local helper imports have conflicting module bindings: {", ".join(sorted(collisions))}')
         # Check each selected function in its own module before flattening. A
@@ -83,7 +91,7 @@ def link_imports(source, module, load):
             if issues:
                 raise ContractError(f'local helper {path}:{target} is unsupported: {issues[0].reason}')
             if alias != target:
-                if alias in occupied or alias in names:
+                if alias in occupied or alias in names or alias in free or alias in dependency_free:
                     raise ContractError(f'local helper alias conflicts with a module binding: {alias}')
                 function = next(node for node in dependency.body
                                 if isinstance(node, ast.FunctionDef) and node.name == target)
@@ -101,6 +109,7 @@ def link_imports(source, module, load):
                 node.formalsw_imported = True
         linked.body.extend(body)
         occupied.update(names)
+        free.update(dependency_free)
     # Put alias wrappers before dependency bodies to preserve a common suffix
     # for the first linked module's source proof.
     module.body = [*prefix, *aliases, *linked.body[len(prefix):]]

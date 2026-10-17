@@ -16,6 +16,7 @@ roots = [
   "lang.py.FormalSW.Execution",
   "lang.py.FormalSW.Runtime",
   "lang.py.FormalSW.Math",
+  "lang.py.FormalSW.Strings",
   "lang.py.FormalSW.Calls",
   "lang.py.FormalSW.Linking",
   "lang.py.FormalSW.Globals",

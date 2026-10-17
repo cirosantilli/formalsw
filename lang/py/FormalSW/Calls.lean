@@ -1,10 +1,23 @@
 import lang.py.FormalSW.Math
+import lang.py.FormalSW.Strings
 
 /-! Scalar Python execution with an explicit expression and function call stack.
 Recursive calls consume transitions, not Lean recursion fuel. Unsupported syntax
 remains unsupported, and exceptions propagate out of callers. -/
 
 namespace FormalSW.PyAst.Calls
+
+/-- Operations whose bindings have already been resolved by source checking. -/
+inductive Primitive where
+  | builtin (function : ScalarBuiltin)
+  | subscript
+  | slice
+
+def Primitive.apply : Primitive → List Constant → Option (Except ExceptionObject Constant)
+  | .builtin .str, values => some (Strings.str values)
+  | .subscript, [value, index] => some (Strings.get value index)
+  | .slice, [value, lower, upper, stride] => some (Strings.slice value lower upper stride)
+  | _, _ => none
 
 /-- A generator's private environment is kept apart from its caller's locals. -/
 structure RangeSum where
@@ -29,6 +42,7 @@ inductive Frame where
   | boolean (op : BoolOp) (rest : List Expr) (env : ScalarEnv)
   | conditional (yes no : Expr) (env : ScalarEnv)
   | arguments (name : String) (done : List Constant) (rest : List Expr) (env : ScalarEnv)
+  | primitiveArguments (operation : Primitive) (done : List Constant) (rest : List Expr) (env : ScalarEnv)
   | assign (name : String) (rest : List Stmt) (env : ScalarEnv)
   | branch (yes no rest : List Stmt) (env : ScalarEnv)
   | discard (rest : List Stmt) (env : ScalarEnv)
@@ -47,6 +61,7 @@ inductive Work where
   | block (body : List Stmt) (env : ScalarEnv)
   | value (value : Constant)
   | invoke (name : String) (values : List Constant)
+  | primitive (operation : Primitive) (values : List Constant)
   | startRange (name : String) (values : List Constant)
       (body otherwise following : List Stmt) (env : ScalarEnv)
 
@@ -64,6 +79,12 @@ def outcome (result : Option (Except ExceptionObject Constant)) (stack : List Fr
   | some (.ok value) => .next ⟨.value value, stack⟩
   | some (.error exception) => .done (.error exception)
   | none => .unsupported
+
+private def primitiveState (operation : Primitive) (env : ScalarEnv) (done : List Constant)
+    (expressions : List Expr) (stack : List Frame) : State :=
+  match expressions with
+  | [] => ⟨.primitive operation done, stack⟩
+  | first :: rest => ⟨.expr first env, .primitiveArguments operation done rest env :: stack⟩
 
 def targetNames (targets : List Expr) : Option (List String) :=
   targets.mapM fun target => match target with
@@ -144,6 +165,7 @@ def sumAdd (total : Int) : Constant → Except ExceptionObject Int
 def step (module : Module) (state : State) : Step State Constant :=
   let ⟨work, stack⟩ := state
   match work with
+  | .primitive operation values => outcome (operation.apply values) stack
   | .startRange name values body otherwise following env =>
       match rangeBounds values with
       | .ok (start, stop, stride) =>
@@ -167,6 +189,11 @@ def step (module : Module) (state : State) : Step State Constant :=
       | none => outcome (libraryCall module name values) stack
   | .expr expression env =>
       match expression with
+      | .builtinCall builtin args => .next (primitiveState (.builtin builtin) env [] args stack)
+      | .subscript value (.slice lower upper stride) =>
+          .next (primitiveState .slice env [] [value, lower.getD (.constant .none),
+            upper.getD (.constant .none), stride.getD (.constant .none)] stack)
+      | .subscript value index => .next (primitiveState .subscript env [] [value, index] stack)
       | .sumRange name element bounds conditions =>
           .next (sumState name element conditions env [] bounds stack)
       | .constant value => .next ⟨.value value, stack⟩
@@ -261,6 +288,8 @@ def step (module : Module) (state : State) : Step State Constant :=
               | [] => .next ⟨.invoke name (done ++ [value]), stack⟩
               | first :: rest =>
                   .next ⟨.expr first env, .arguments name (done ++ [value]) rest env :: stack⟩
+          | .primitiveArguments operation done rest env =>
+              .next (primitiveState operation env (done ++ [value]) rest stack)
           | .assign name rest env => .next ⟨.block rest (env.set name value), stack⟩
           | .branch yes no rest env =>
               .next ⟨.block ((if scalarTruth value then yes else no) ++ rest) env, stack⟩
@@ -451,6 +480,45 @@ theorem library_call (arguments : Arguments module env expressions values)
   apply call arguments
   intro stack
   exact .next (by simp [step, absent, outcome, result]) .refl
+
+private theorem primitive_arguments_reach
+    (h : Arguments module env expressions values) (done : List Constant) (stack : List Frame) :
+    Reaches module (primitiveState operation env done expressions stack)
+      ⟨.primitive operation (done ++ values), stack⟩ := by
+  induction h generalizing done with
+  | nil => simp [primitiveState]; exact .refl
+  | @cons expression value expressions values head tail ih =>
+      apply (head _).trans
+      refine .next rfl ?_
+      simpa [List.append_assoc] using ih (done ++ [value])
+
+private theorem primitive_result (arguments : Arguments module env expressions values)
+    (result : operation.apply values = some (.ok value)) (stack : List Frame) :
+    Reaches module (primitiveState operation env [] expressions stack) ⟨.value value, stack⟩ :=
+  (primitive_arguments_reach arguments [] stack).trans
+    (.next (by simpa [step, outcome] using congrArg (fun r => outcome r stack) result) .refl)
+
+theorem builtin (arguments : Arguments module env expressions values)
+    (result : (Primitive.builtin operation).apply values = some (.ok value)) :
+    Evaluates module env (.builtinCall operation expressions) value :=
+  fun stack => .next rfl (primitive_result arguments result stack)
+
+theorem subscript (receiver : Evaluates module env expression value)
+    (index : Evaluates module env key indexValue)
+    (notSlice : ∀ lower upper stride, key ≠ .slice lower upper stride)
+    (result : Strings.get value indexValue = .ok element) :
+    Evaluates module env (.subscript expression key) element := by
+  intro stack
+  apply Reaches.next (following := primitiveState .subscript env [] [expression, key] stack)
+  · cases key <;> simp_all [step]
+  · exact primitive_result (operation := .subscript)
+      (.cons receiver (.cons index .nil)) (congrArg some result) stack
+
+theorem slice (arguments : Arguments module env [expression, lower.getD (.constant .none),
+      upper.getD (.constant .none), stride.getD (.constant .none)] [value, start, stop, stepValue])
+    (result : Strings.slice value start stop stepValue = .ok sliced) :
+    Evaluates module env (.subscript expression (.slice lower upper stride)) sliced :=
+  fun stack => .next rfl (primitive_result (operation := .slice) arguments (congrArg some result) stack)
 
 /-- Recover a mathematical comparison from a simple Python input precondition. -/
 theorem condition_int_compare

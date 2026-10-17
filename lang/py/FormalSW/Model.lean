@@ -67,6 +67,11 @@ inductive CmpOp where
   | gtE
 deriving Repr, DecidableEq, BEq, Lean.ToExpr
 
+/-- Builtins resolved by the frontend after rejecting shadowed bindings. -/
+inductive ScalarBuiltin where
+  | str
+deriving Repr, BEq, Lean.ToExpr
+
 /-- Python expressions currently represented by the AST bridge. -/
 inductive Expr where
   /-- A Python literal constant. -/
@@ -91,6 +96,8 @@ inductive Expr where
   | compare : Expr -> List (CmpOp × Expr) -> Expr
   /-- A Python call expression with positional arguments. -/
   | call : Expr -> List Expr -> Expr
+  /-- A resolved builtin call; local functions retain the ordinary call node. -/
+  | builtinCall : ScalarBuiltin → List Expr → Expr
   /-- Normalized `sum(element for name in range(bounds) if conditions...)`.
   Coverage checking verifies the builtin bindings before this node executes. -/
   | sumRange : String → Expr → List Expr → List Expr → Expr
@@ -275,6 +282,11 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         (← Expr.fromJson? (← jsonField json "element"))
         (← jsonArray json "bounds" Expr.fromJson?)
         (← jsonArray json "conditions" Expr.fromJson?)
+  | "BuiltinCall" =>
+      let builtin ← match ← jsonString json "name" with
+        | "str" => pure ScalarBuiltin.str
+        | builtinName => throw s!"unsupported scalar builtin: {builtinName}"
+      return .builtinCall builtin (← jsonArray json "args" Expr.fromJson?)
   | "Subscript" =>
       return .subscript
         (← Expr.fromJson? (← jsonField json "value"))
@@ -770,6 +782,7 @@ mutual
         1 + left.operationCount + (comparisons.map (Expr.operationCount ∘ Prod.snd)).sum
     | .call function args =>
         1 + function.operationCount + (args.map Expr.operationCount).sum
+    | .builtinCall _ args => 2 + (args.map Expr.operationCount).sum
     | .sumRange _ element bounds conditions =>
         5 + element.operationCount + (bounds.map Expr.operationCount).sum +
           (conditions.map Expr.operationCount).sum
@@ -1216,6 +1229,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.boolOp _ _ => none
   | Expr.ifExp _ _ _ => none
   | Expr.sumRange _ _ _ _ => none
+  | Expr.builtinCall _ _ => none
   | Expr.tuple _ => none
   | Expr.binOp
       (Expr.binOp
