@@ -6,7 +6,6 @@ def sum(n: int) -> int:
 
     @cleanxy: BigO(1)
     @cleanxy: Equiv(sum_naive)
-    @cleanxy: Not Throws
     @cleanxy: ReturnType
     """
     if n <= 0:
@@ -14,9 +13,10 @@ def sum(n: int) -> int:
     return (n * (n - 1)) // 2
 
 def sum_naive(n: int) -> int:
-    """Sum of integers from 1 to n. Return 0 if n <= 0.
+    """Sum of integers from 0 through n - 1. Return 0 if n <= 0.
 
     @cleanxy: BigO(n)
+    @cleanxy: Returns
     """
     total = 0
     for i in range(n):

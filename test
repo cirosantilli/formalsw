@@ -93,12 +93,25 @@ def print_result(result: TestResult) -> None:
 def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
+        TestCase("termination and divergence", Path("tests/py/termination.py"), 0),
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
         TestCase("typed, object, and return sort equivalence", Path("tests/py/sort.py"), 0),
         TestCase("equivalent throws pass", Path("tests/py/equiv_throw.py"), 0),
         TestCase("Throws can be proved", Path("tests/py/throws.py"), 0),
         TestCase("annotations restrict comparison inputs", Path("tests/py/typing.py"), 0),
         TestCase("raw Lean requirement passes", Path("tests/py/raw_lean.py"), 0),
+        TestCase(
+            "this_function rejects unsupported arity",
+            Path("tests/py/fail/this_function_arity.py"),
+            1,
+            "this_function supports positional arguments without variadics",
+        ),
+        TestCase(
+            "this_function rejects unsupported argument annotations",
+            Path("tests/py/fail/this_function_annotation.py"),
+            1,
+            "this_function supports scalar int/str/bool arguments or one bare list",
+        ),
         TestCase(
             "sorrys are rejected",
             Path("tests/py/fail/sorry.py"),
@@ -154,6 +167,7 @@ def main() -> int:
         and "theorem sum.«Equiv(sum_naive)» :" in stub_completed.stdout
         and "theorem sum.«BigO(1)» :" in stub_completed.stdout
         and "theorem sum.«ReturnType» :" in stub_completed.stdout
+        and "theorem sum_naive.«Returns» :" in stub_completed.stdout
         and "theorem sum_naive.«BigO(n)» :" in stub_completed.stdout
         and "end tests.py.range_sum" in stub_completed.stdout
         and stub_completed.stdout.count("  sorry") == 5
@@ -223,6 +237,23 @@ def main() -> int:
         output = builtin_models.stdout + builtin_models.stderr
         if output:
             print(textwrap.indent(output.rstrip(), "  "))
+    throws_syntax = subprocess.run(
+        ["lake", "env", "lean", "-DwarningAsError=true", "tests/py/throws_syntax.lean"],
+        cwd=REPO,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    throws_syntax_passed = throws_syntax.returncode == 0
+    print(
+        f"{'PASS' if throws_syntax_passed else 'FAIL'} Throws, Returns, and Halts syntax",
+        flush=True,
+    )
+    if not throws_syntax_passed:
+        output = throws_syntax.stdout + throws_syntax.stderr
+        if output:
+            print(textwrap.indent(output.rstrip(), "  "))
     builtin_python_models = subprocess.run(
         [sys.executable, "tests/py/builtin_python_models.py"],
         cwd=REPO,
@@ -247,6 +278,7 @@ def main() -> int:
         and source_tree_clean
         and builtin_coverage_passed
         and builtin_models_passed
+        and throws_syntax_passed
         and builtin_python_models_passed
     ) else 1
 

@@ -12,6 +12,10 @@ name = "CleanXY"
 name = "lang.py.CleanXY"
 roots = [
   "lang.py.CleanXY.Model",
+  "lang.py.CleanXY.Execution",
+  "lang.py.CleanXY.Runtime",
+  "lang.py.CleanXY.Sorting",
+  "lang.py.CleanXY.Syntax",
   "lang.py.builtin.type.bool",
   "lang.py.builtin.type.bytearray",
   "lang.py.builtin.type.bytes",

@@ -87,7 +87,7 @@ def proof_name_for_short_requirement(
 ) -> str:
     """Return a source-oriented theorem name for a short property marker."""
     match property_name, args:
-        case "ReturnType", []:
+        case "ReturnType" | "Returns" | "Halts", []:
             pass
         case "Throws", []:
             pass
@@ -121,6 +121,13 @@ def property_type_for_short_requirement(
 ) -> str:
     """Return the Lean property type for a short property marker."""
     match property_name, args:
+        case "Returns" | "Halts", []:
+            arguments = [*function.args.posonlyargs, *function.args.args]
+            call = ", ".join(argument.arg for argument in arguments)
+            property_type = raw_theorem_type_for_function(
+                RawTheoremRequirement("", "", f"{property_name}(this_function({call}))"),
+                function, ast_namespace,
+            )
         case "ReturnType", []:
             property_type = (
                 f'CleanXY.Property.Function.ReturnType {ast_namespace}.module '
@@ -271,7 +278,7 @@ def lean_type_for_python_annotation(annotation: ast.expr | None) -> str | None:
         return {
             "int": "Int",
             "bool": "Bool",
-            "str": "CleanXY.Py.Builtin.Str.Str",
+            "str": "String",
             "list": "List Value",
         }.get(annotation.id)
     if (
@@ -297,12 +304,13 @@ def explicitly_bound_names(params: str) -> set[str]:
 def raw_theorem_type_for_function(
     requirement: RawTheoremRequirement,
     function: ast.FunctionDef,
+    ast_namespace: str,
 ) -> str:
     """Infer referenced, unbound Python arguments in a function-level theorem."""
     referenced_text = f"{requirement.params}\n{requirement.property_type}"
     bound = explicitly_bound_names(requirement.params)
     inferred = []
-    for argument in function.args.args:
+    for argument in [*function.args.posonlyargs, *function.args.args]:
         if argument.arg in bound:
             continue
         if re.search(rf"\b{re.escape(argument.arg)}\b", referenced_text) is None:
@@ -315,9 +323,43 @@ def raw_theorem_type_for_function(
             )
         inferred.append(f"({argument.arg} : {lean_type})")
     params = " ".join([*inferred, requirement.params]).strip()
+    property_type = requirement.property_type
     if params:
-        return f"∀ {params},\n{requirement.property_type}"
-    return requirement.property_type
+        property_type = f"∀ {params},\n{property_type}"
+    if re.search(r"\bthis_function\b", referenced_text):
+        arguments = [*function.args.posonlyargs, *function.args.args]
+        if "this_function" in bound or any(arg.arg == "this_function" for arg in arguments):
+            raise InvalidRequirement(
+                f"{function.name}: this_function is reserved for the enclosing Python function"
+            )
+        if function.args.kwonlyargs or function.args.vararg is not None or function.args.kwarg is not None:
+            raise InvalidRequirement(
+                f"{function.name}: this_function supports positional arguments without variadics"
+            )
+        annotations = [argument.annotation for argument in arguments]
+        if len(arguments) == 1 and isinstance(annotations[0], ast.Name) and annotations[0].id == "list":
+            binding = f"CleanXY.PyAst.listFunction {ast_namespace}.module {lean_string(function.name)}"
+        elif all(isinstance(annotation, ast.Name) and annotation.id in {"int", "str", "bool"}
+                 for annotation in annotations):
+            names = [f"input_{index}" for index in range(len(arguments))]
+            constructors = {"int": "int", "str": "string", "bool": "bool"}
+            types = {"int": "Int", "str": "String", "bool": "Bool"}
+            params = " ".join(f"({name} : {types[annotation.id]})"
+                              for name, annotation in zip(names, annotations))
+            values = ", ".join(f".{constructors[annotation.id]} {name}"
+                               for name, annotation in zip(names, annotations))
+            binding = (f"CleanXY.PyAst.scalarFunction {ast_namespace}.module "
+                       f"{lean_string(function.name)} [{values}]")
+            if names:
+                binding = f"fun {params} => {binding}"
+        else:
+            raise InvalidRequirement(
+                f"{function.name}: this_function supports scalar int/str/bool arguments or one bare list"
+            )
+        property_type = f"let this_function := {binding};\n{property_type}"
+    # Always supply the module: Lean parses nested comparison expressions itself.
+    property_type = f"let _this_module := {ast_namespace}.module;\n{property_type}"
+    return property_type
 
 
 def docstring_markers(docstring: str | None, start_line: int | None) -> list[Marker]:
@@ -399,10 +441,10 @@ def collect_requirements(
             if raw_theorem is not None:
                 theorem_name = raw_theorem.theorem_name
                 if "." not in theorem_name:
-                    theorem_name = f"{proof_namespace}.{theorem_name}"
+                    theorem_name = f"{proof_namespace}.{lean_import_component(stmt.name)}.{theorem_name}"
                 requirements.append(Requirement(
                     theorem_name,
-                    raw_theorem_type_for_function(raw_theorem, stmt),
+                    raw_theorem_type_for_function(raw_theorem, stmt, ast_namespace),
                     source_path,
                     marker.line,
                     marker.text,
@@ -571,6 +613,8 @@ class AstJsonEmitter:
                     "returns": self.expr(returns) if returns is not None else None,
                     "body": [self.stmt(child) for child in body],
                 }
+            case ast.Pass():
+                return {"type": "Expr", "value": self.constant(None)}
             case ast.Return(value=value):
                 return {
                     "type": "Return",

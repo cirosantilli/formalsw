@@ -13,32 +13,21 @@ theorem merge_sort_untyped.«Throws» :
   · rfl
   · rfl
 
-/-- Two integer arguments are always mutually comparable. -/
-theorem merge_sort_int.«Not Throws» :
-    Not (CleanXY.Property.Function.Throws TypingAst.module "merge_sort_int") := by
-  rintro ⟨left, right, exception, hleft, hright, houtcome⟩
-  cases left <;> cases right <;> simp [
-    CleanXY.PyAst.evalBinaryComparisonOutcome,
-    CleanXY.PyAst.Module.findBinaryComparison,
-    CleanXY.PyAst.findBinaryComparisonIn,
-    CleanXY.PyAst.executableBody,
-    CleanXY.PyAst.annotationKindFromAnnotation,
-    CleanXY.PyAst.AnnotationKind.accepts,
-    TypingAst.module,
-  ] at hleft hright houtcome
+open CleanXY.PyAst
 
-/-- Two string arguments are always mutually comparable. -/
-theorem merge_sort_str.«Not Throws» :
-    Not (CleanXY.Property.Function.Throws TypingAst.module "merge_sort_str") := by
-  rintro ⟨left, right, exception, hleft, hright, houtcome⟩
-  cases left <;> cases right <;> simp [
-    CleanXY.PyAst.evalBinaryComparisonOutcome,
-    CleanXY.PyAst.Module.findBinaryComparison,
-    CleanXY.PyAst.findBinaryComparisonIn,
-    CleanXY.PyAst.executableBody,
-    CleanXY.PyAst.annotationKindFromAnnotation,
-    CleanXY.PyAst.AnnotationKind.accepts,
-    TypingAst.module,
-  ] at hleft hright houtcome
+/-- Evaluating the comparison and falling off the end returns Python None. -/
+theorem merge_sort_int.«Returns» (a b : Int) :
+    (scalarFunction TypingAst.module "merge_sort_int" [.int a, .int b]).Returns := by
+  refine ⟨.none, Execution.finishes_of_observe (fuel := 2) ?_⟩
+  simp [Execution.observe, Execution.observeFrom, scalarFunction, findFunctionIn,
+    scalarBlock, executableBody, scalarStep, scalarExpr, scalarCompare,
+    argumentEnv, List.lookup, evalCmpOp, TypingAst.module]
+
+theorem merge_sort_str.«Returns» (a b : String) :
+    (scalarFunction TypingAst.module "merge_sort_str" [.string a, .string b]).Returns := by
+  refine ⟨.none, Execution.finishes_of_observe (fuel := 2) ?_⟩
+  simp [Execution.observe, Execution.observeFrom, scalarFunction, findFunctionIn,
+    scalarBlock, executableBody, scalarStep, scalarExpr, scalarCompare,
+    argumentEnv, List.lookup, TypingAst.module]
 
 end tests.py.typing

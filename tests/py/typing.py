@@ -13,7 +13,7 @@ def merge_sort_int(a: int, b: int) -> bool:
     """
     Typing can be used to prove things.
 
-    @cleanxy: Not Throws
+    @cleanxy: Returns
     """
     a < b
 
@@ -21,6 +21,6 @@ def merge_sort_str(a: str, b: str) -> bool:
     """
     Analogous to merge_sort_int
 
-    @cleanxy: Not Throws
+    @cleanxy: Returns
     """
     a < b

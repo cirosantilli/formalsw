@@ -39,7 +39,7 @@ theorem sum.returns (n : Int) :
 
 /-- `sum` never throws for an integer input. -/
 theorem sum.«Not Throws» :
-    Not (CleanXY.Property.Function.Throws RangeSumAst.module "sum") := by
+    Not (CleanXY.Property.Function.AbstractThrows RangeSumAst.module "sum") := by
   rintro ⟨n, exception, hthrow⟩
   by_cases hn : n <= 0
   · simp [
@@ -87,7 +87,7 @@ theorem sum_naive.returns (n : Int) :
 
 /-- `sum_naive` never throws for an integer input. -/
 theorem sum_naive.not_throws :
-    Not (CleanXY.Property.Function.Throws RangeSumAst.module "sum_naive") := by
+    Not (CleanXY.Property.Function.AbstractThrows RangeSumAst.module "sum_naive") := by
   rintro ⟨n, exception, hthrow⟩
   simp [
     CleanXY.PyAst.evalUnaryIntFunctionOutcome,
@@ -114,8 +114,8 @@ theorem noException (n : Int) :
   ⟨sum.returns n, sum_naive.returns n⟩
 
 /-- `sum` and `sum_naive` give the same result for every integer input. -/
-theorem sum.«Equiv(sum_naive)» :
-    CleanXY.Property.Function.Equiv
+private theorem sum.abstract_equiv :
+    CleanXY.Property.Function.AbstractEquiv
       RangeSumAst.module "sum" "sum_naive" := by
   intro n
   by_cases hn : n <= 0
@@ -156,7 +156,7 @@ theorem sum.«Equiv(sum_naive)» :
 theorem sum.«ReturnType» :
     CleanXY.Property.Function.ReturnType RangeSumAst.module "sum" := by
   intro n
-  obtain ⟨outcome, hsum, _⟩ := sum.«Equiv(sum_naive)» n
+  obtain ⟨outcome, hsum, _⟩ := sum.abstract_equiv n
   exact ⟨outcome, hsum⟩
 
 /-- The closed-form implementation has constant worst-case cost. -/
@@ -178,5 +178,128 @@ theorem sum_naive.«BigO(n)» :
   · rfl
   · rfl
   · exact CleanXY.PyAst.Growth.linear_isBigO
+
+open CleanXY.PyAst
+
+private def sumLoop (index stop : Int) : Stmt :=
+  .rangeLoop "i" index stop [.augAssign (.name "total") .add (.name "i")] []
+
+private theorem sum_loop_finishes (index stop total : Int) (env : ScalarEnv)
+    (getTotal : env "total" = some (.int total)) :
+    ∃ result, Finishes scalarStep ⟨[sumLoop index stop, .return (.name "total")], env⟩ (.ok result) := by
+  by_cases active : index < stop
+  · let updated := (env.set "i" (.int index)).set "total" (.int (total + index))
+    obtain ⟨result, finished⟩ := sum_loop_finishes (index + 1) stop (total + index) updated
+      (by simp [updated, ScalarEnv.set])
+    refine ⟨result, .next
+      (following := ⟨[.augAssign (.name "total") .add (.name "i"),
+        sumLoop (index + 1) stop, .return (.name "total")], env.set "i" (.int index)⟩)
+      ?_ (.next ?_ finished)⟩
+    · simp [scalarStep, sumLoop, active]
+    · simp [scalarStep, scalarExpr, scalarBinary, ScalarEnv.set, getTotal, updated]
+  · refine ⟨.int total, .next (following := ⟨[.return (.name "total")], env⟩) ?_ (.done ?_)⟩
+    · simp [scalarStep, sumLoop, active]
+    · simp [scalarStep, scalarExpr, getTotal]
+termination_by (stop - index).toNat
+decreasing_by omega
+
+/-- The finite range loop terminates for every integer n, including n <= 0. -/
+theorem sum_naive.«Returns» (n : Int) :
+    (scalarFunction RangeSumAst.module "sum_naive" [.int n]).Returns := by
+  let env := argumentEnv [{ name := "n", annotation := some (.name "int") }] [.int n]
+  let updated := env.set "total" (.int 0)
+  obtain ⟨result, finished⟩ := sum_loop_finishes 0 n 0 updated (by simp [updated, ScalarEnv.set])
+  change ∃ result, Finishes scalarStep
+    ⟨[.assign [.name "total"] (.constant (.int 0)),
+      .forIn (.name "i") (.call (.name "range") [.name "n"])
+        [.augAssign (.name "total") .add (.name "i")] [],
+      .return (.name "total")], env⟩ (.ok result)
+  refine ⟨result, .next (following := ⟨[
+    .forIn (.name "i") (.call (.name "range") [.name "n"])
+      [.augAssign (.name "total") .add (.name "i")] [],
+    .return (.name "total")], updated⟩) ?_ (.next ?_ finished)⟩
+  · rfl
+  · simp [scalarStep, scalarExpr, updated, env, ScalarEnv.set, argumentEnv, sumLoop]
+
+private theorem sum_loop_result (index stop total : Int) (env : ScalarEnv)
+    (getTotal : env "total" = some (.int total))
+    (nonnegative : 0 ≤ index) (bound : index ≤ stop)
+    (invariant : 2 * total = index * (index - 1)) :
+    Finishes scalarStep ⟨[sumLoop index stop, .return (.name "total")], env⟩
+      (.ok (.int (stop * (stop - 1) / 2))) := by
+  by_cases active : index < stop
+  · let updated := (env.set "i" (.int index)).set "total" (.int (total + index))
+    have next_invariant : 2 * (total + index) = (index + 1) * (index + 1 - 1) := by
+      simp only [Int.add_sub_cancel, Int.mul_add, Int.add_mul, Int.one_mul]
+      simp only [Int.mul_sub, Int.mul_one] at invariant
+      omega
+    have rest := sum_loop_result (index + 1) stop (total + index) updated
+      (by simp [updated, ScalarEnv.set]) (by omega) (by omega) next_invariant
+    refine .next
+      (following := ⟨[.augAssign (.name "total") .add (.name "i"),
+        sumLoop (index + 1) stop, .return (.name "total")], env.set "i" (.int index)⟩)
+      ?_ (.next ?_ rest)
+    · simp [scalarStep, sumLoop, active]
+    · simp [scalarStep, scalarExpr, scalarBinary, ScalarEnv.set, getTotal, updated]
+  · have same : index = stop := by omega
+    have result : total = stop * (stop - 1) / 2 := by rw [same] at invariant; omega
+    refine .next (following := ⟨[.return (.name "total")], env⟩) ?_ (.done ?_)
+    · simp [scalarStep, sumLoop, active]
+    · simp [scalarStep, scalarExpr, getTotal, result]
+termination_by (stop - index).toNat
+decreasing_by omega
+
+private theorem sum_naive.result (n : Int) :
+    Finishes (scalarFunction RangeSumAst.module "sum_naive" [.int n]).step
+      (scalarFunction RangeSumAst.module "sum_naive" [.int n]).initial
+      (.ok (.int (if n ≤ 0 then 0 else n * (n - 1) / 2))) := by
+  let env := argumentEnv [{ name := "n", annotation := some (.name "int") }] [.int n]
+  let updated := env.set "total" (.int 0)
+  change Finishes scalarStep
+    ⟨[.assign [.name "total"] (.constant (.int 0)),
+      .forIn (.name "i") (.call (.name "range") [.name "n"])
+        [.augAssign (.name "total") .add (.name "i")] [],
+      .return (.name "total")], env⟩ _
+  refine .next (following := ⟨[
+    .forIn (.name "i") (.call (.name "range") [.name "n"])
+      [.augAssign (.name "total") .add (.name "i")] [],
+    .return (.name "total")], updated⟩) rfl
+    (.next (following := ⟨[sumLoop 0 n, .return (.name "total")], updated⟩) ?_ ?_)
+  · simp [scalarStep, scalarExpr, updated, env, ScalarEnv.set, argumentEnv, sumLoop]
+  · by_cases nonpositive : n ≤ 0
+    · simp only [nonpositive, ↓reduceIte]
+      refine .next (following := ⟨[.return (.name "total")], updated⟩) ?_ (.done rfl)
+      simp [scalarStep, sumLoop, nonpositive]
+    · simp only [nonpositive, ↓reduceIte]
+      exact sum_loop_result 0 n 0 updated (by simp [updated, ScalarEnv.set])
+        (by omega) (by omega) (by simp)
+
+private theorem sum.result (n : Int) :
+    Finishes (scalarFunction RangeSumAst.module "sum" [.int n]).step
+      (scalarFunction RangeSumAst.module "sum" [.int n]).initial
+      (.ok (.int (if n ≤ 0 then 0 else n * (n - 1) / 2))) := by
+  apply Execution.finishes_of_observe (fuel := 2)
+  by_cases nonpositive : n ≤ 0 <;>
+    simp [Execution.observe, Execution.observeFrom, scalarFunction, findFunctionIn,
+      scalarBlock, executableBody, scalarStep, scalarExpr, scalarCompare, scalarBinary,
+      scalarTruth, argumentEnv, evalCmpOp, RangeSumAst.module, nonpositive]
+
+/-- Actual execution outcomes agree, so termination contracts transfer too. -/
+theorem sum.«Equiv(sum_naive)» :
+    CleanXY.Property.Function.Equiv RangeSumAst.module "sum" "sum_naive" := by
+  intro n outcome
+  constructor
+  · intro h
+    have same := h.unique (sum.result n)
+    rw [same]
+    exact sum_naive.result n
+  · intro h
+    have same := h.unique (sum_naive.result n)
+    rw [same]
+    exact sum.result n
+
+/-- No duplicate Returns marker is needed on the equivalent implementation. -/
+example (n : Int) : (scalarFunction RangeSumAst.module "sum" [.int n]).Returns :=
+  (sum.«Equiv(sum_naive)» n).returns_iff.mpr (sum_naive.«Returns» n)
 
 end tests.py.range_sum

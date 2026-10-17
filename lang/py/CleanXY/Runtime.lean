@@ -1,0 +1,220 @@
+import lang.py.CleanXY.Execution
+
+namespace CleanXY.PyAst
+
+/-- Scalar environments distinguish an unbound name from Python `None`. -/
+abbrev ScalarEnv := String → Option Constant
+
+def ScalarEnv.set (env : ScalarEnv) (name : String) (value : Constant) : ScalarEnv :=
+  fun query => if query = name then some value else env query
+
+def scalarTruth : Constant → Bool
+  | .bool value => value
+  | .int value => value != 0
+  | .string value => !value.isEmpty
+  | .none => false
+
+def scalarCompare (op : CmpOp) (left right : Constant) : Option Bool :=
+  let number : Constant → Option Int
+    | .int value => some value
+    | .bool value => some (if value then 1 else 0)
+    | _ => none
+  match number left, number right with
+  | some left, some right => some (evalCmpOp op left right)
+  | _, _ => match op with
+      | .eq => some (decide (left = right))
+      | .notEq => some (decide (left ≠ right))
+      | _ => match left, right with
+          | .string left, .string right =>
+              some (match op with
+                | .lt => decide (left < right)
+                | .ltE => decide (left ≤ right)
+                | .gt => decide (left > right)
+                | .gtE => decide (left ≥ right)
+                | _ => false)
+          | _, _ => none
+
+def scalarBinary (op : BinOp) (left right : Constant) : Option (Except ExceptionObject Constant) :=
+  match left, right with
+  | .int left, .int right =>
+      match op with
+      | .add => some (.ok (.int (left + right)))
+      | .sub => some (.ok (.int (left - right)))
+      | .mult => some (.ok (.int (left * right)))
+      | .floorDiv | .mod =>
+          if right = 0 then
+            some (.error { typeName := "ZeroDivisionError", args := [] })
+          else if right > 0 then
+            some (.ok (.int (match op with | .mod => left % right | _ => left / right)))
+          else none
+  | _, _ => none
+
+/-- Supported scalar expressions are finite. Calls and unsupported operators are
+rejected; looping Python comparison methods are executed by `comparison` below. -/
+def scalarExpr (env : ScalarEnv) : Expr → Option (Except ExceptionObject Constant)
+  | .constant value => some (.ok value)
+  | .name name => Except.ok <$> env name
+  | .attribute (.name name) field => Except.ok <$> env (name ++ "." ++ field)
+  | .binOp left op right => do
+      let left ← scalarExpr env left
+      match left with
+      | .error exception => return .error exception
+      | .ok left =>
+          let right ← scalarExpr env right
+          match right with
+          | .error exception => return .error exception
+          | .ok right => scalarBinary op left right
+  | .unaryOp op operand => do
+      let operand ← scalarExpr env operand
+      match operand with
+      | .error exception => return .error exception
+      | .ok operand =>
+          match op, operand with
+          | .not, value => return .ok (.bool (!scalarTruth value))
+          | .uSub, .int value => return .ok (.int (-value))
+          | _, _ => none
+  | .compare left [(op, right)] => do
+      let left ← scalarExpr env left
+      match left with
+      | .error exception => return .error exception
+      | .ok left =>
+          let right ← scalarExpr env right
+          match right with
+          | .error exception => return .error exception
+          | .ok right =>
+              let result ← scalarCompare op left right
+              return .ok (.bool result)
+  | _ => none
+
+def scalarException (env : ScalarEnv) : Expr → Option ExceptionObject
+  | .call (.name name) args => do
+      let values ← args.mapM fun argument => do
+        match ← scalarExpr env argument with
+        | .ok value => some value
+        | .error _ => none
+      some { typeName := name, args := values }
+  | .name name => some { typeName := name, args := [] }
+  | _ => none
+
+structure ScalarState where
+  todo : List Stmt
+  env : ScalarEnv
+
+/-- Execute one statement or loop guard. No step limit changes the program's result. -/
+def scalarStep (state : ScalarState) : Step ScalarState Constant :=
+  let ⟨todo, env⟩ := state
+  match todo with
+  | [] => .done (.ok .none)
+  | .return expr :: _ =>
+      match scalarExpr env expr with
+      | some outcome => .done outcome
+      | none => .unsupported
+  | .assign [.name name] expr :: rest =>
+      match scalarExpr env expr with
+      | some (.ok value) => .next ⟨rest, env.set name value⟩
+      | some (.error exception) => .done (.error exception)
+      | none => .unsupported
+  | .augAssign (.name name) op expr :: rest =>
+      match scalarExpr env (.binOp (.name name) op expr) with
+      | some (.ok value) => .next ⟨rest, env.set name value⟩
+      | some (.error exception) => .done (.error exception)
+      | none => .unsupported
+  | .ifThen condition yes no :: rest =>
+      match scalarExpr env condition with
+      | some (.ok value) => .next ⟨(if scalarTruth value then yes else no) ++ rest, env⟩
+      | some (.error exception) => .done (.error exception)
+      | none => .unsupported
+  | .whileDo condition body otherwise :: rest =>
+      match scalarExpr env condition with
+      | some (.ok value) =>
+          .next ⟨if scalarTruth value then
+            body ++ [.whileDo condition body otherwise] ++ rest
+            else otherwise ++ rest, env⟩
+      | some (.error exception) => .done (.error exception)
+      | none => .unsupported
+  | .forIn (.name loopVar) (.call (.name "range") [stop]) body otherwise :: rest =>
+      match scalarExpr env stop with
+      | some (.ok (.int stop)) => .next ⟨.rangeLoop loopVar 0 stop body otherwise :: rest, env⟩
+      | some (.error exception) => .done (.error exception)
+      | _ => .unsupported
+  | .rangeLoop loopVar next stop body otherwise :: rest =>
+      if next < stop then
+        .next ⟨body ++ [.rangeLoop loopVar (next + 1) stop body otherwise] ++ rest,
+          env.set loopVar (.int next)⟩
+      else .next ⟨otherwise ++ rest, env⟩
+  | .raise (some expr) :: _ =>
+      match scalarException env expr with
+      | some exception => .done (.error exception)
+      | none => .unsupported
+  | .expr expr :: rest =>
+      match scalarExpr env expr with
+      | some (.ok _) => .next ⟨rest, env⟩
+      | some (.error exception) => .done (.error exception)
+      | none => .unsupported
+  | _ => .unsupported
+
+def scalarBlock (body : List Stmt) (env : ScalarEnv) : Execution Constant :=
+  ⟨ScalarState, ⟨executableBody body, env⟩, scalarStep⟩
+
+def findFunctionIn : List Stmt → String → Option (List Arg × List Stmt)
+  | [], _ => none
+  | .functionDef name args _ body :: rest, query =>
+      if query = name then some (args, body) else findFunctionIn rest query
+  | _ :: rest, query => findFunctionIn rest query
+
+def argumentEnv (args : List Arg) (values : List Constant) : ScalarEnv :=
+  fun name => ((args.map Arg.name).zip values).lookup name
+
+def scalarFunction (module : Module) (name : String) (values : List Constant) : Execution Constant :=
+  match findFunctionIn module.body name with
+  | some (args, body) =>
+      if args.length = values.length then scalarBlock body (argumentEnv args values)
+      else Execution.unsupported
+  | none => Execution.unsupported
+
+def CmpOp.method : CmpOp → String
+  | .eq => "__eq__"
+  | .notEq => "__ne__"
+  | .lt => "__lt__"
+  | .ltE => "__le__"
+  | .gt => "__gt__"
+  | .gtE => "__ge__"
+
+/-- Custom comparisons run the actual supported method AST, including its loops.
+Supported objects are empty or have an integer `value` field. Python reflected comparison and
+`NotImplemented` dispatch are not yet modeled; missing methods and comparisons
+between objects of different classes or between objects and primitives are unsupported.
+-/
+def comparison (module : Module) (op : CmpOp) (left right : Value) : Execution Bool :=
+  match left, right with
+  | .object leftType left, .object rightType right =>
+      if leftType = rightType then
+        match module.findClassBody leftType with
+        | some body =>
+            match findFunctionIn body op.method with
+            | some ([self, other], body) =>
+                let env : ScalarEnv := fun name =>
+                  if name = self.name ++ ".value" then left.map Constant.int
+                  else if name = other.name ++ ".value" then right.map Constant.int
+                  else none
+                (scalarBlock body env).bind fun value => Execution.pure (scalarTruth value)
+            | _ => Execution.unsupported
+        | none => Execution.unsupported
+      else Execution.unsupported
+  | .object _ _, _ | _, .object _ _ => Execution.unsupported
+  | _, _ => Execution.ofExcept (evalValueCmp op left right)
+
+end CleanXY.PyAst
+
+namespace CleanXY.Property.Function
+
+/-- Scalar equivalence preserves actual finite execution outcomes, including
+exceptions. The older list equivalence model remains an abstraction. -/
+def Equiv (module : PyAst.Module) (left right : String) : Prop :=
+  match module.findFunctionArgKind left, module.findFunctionArgKind right with
+  | some .int, some .int => ∀ n : Int,
+      (PyAst.scalarFunction module left [.int n]).Equiv
+        (PyAst.scalarFunction module right [.int n])
+  | _, _ => AbstractEquiv module left right
+
+end CleanXY.Property.Function

@@ -19,7 +19,7 @@ inductive Constant where
   | bool : Bool -> Constant
   /-- The Python `None` constant. -/
   | none : Constant
-deriving Repr, DecidableEq, Lean.ToExpr
+deriving Repr, DecidableEq, BEq, Lean.ToExpr
 
 /-- Python unary operators currently represented by the AST bridge. -/
 inductive UnaryOp where
@@ -27,7 +27,7 @@ inductive UnaryOp where
   | uSub
   /-- Python logical `not`. -/
   | not
-deriving Repr, Lean.ToExpr
+deriving Repr, BEq, Lean.ToExpr
 
 /-- Python boolean operators currently represented by the AST bridge. -/
 inductive BoolOp where
@@ -35,7 +35,7 @@ inductive BoolOp where
   | and
   /-- Python short-circuiting `or`. -/
   | or
-deriving Repr, Lean.ToExpr
+deriving Repr, BEq, Lean.ToExpr
 
 /-- Python binary operators currently represented by the AST bridge. -/
 inductive BinOp where
@@ -49,7 +49,7 @@ inductive BinOp where
   | floorDiv
   /-- Python remainder `%`. -/
   | mod
-deriving Repr, Lean.ToExpr
+deriving Repr, BEq, Lean.ToExpr
 
 /-- Python comparison operators currently represented by the AST bridge. -/
 inductive CmpOp where
@@ -65,7 +65,7 @@ inductive CmpOp where
   | gt
   /-- Python `>=`. -/
   | gtE
-deriving Repr, DecidableEq, Lean.ToExpr
+deriving Repr, DecidableEq, BEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
 inductive Expr where
@@ -91,7 +91,7 @@ inductive Expr where
   | subscript : Expr -> Expr -> Expr
   /-- A Python slice used inside a subscription. -/
   | slice : Option Expr -> Option Expr -> Option Expr -> Expr
-deriving Repr, Lean.ToExpr
+deriving Repr, BEq, Lean.ToExpr
 
 /-- A Python function argument. -/
 structure Arg where
@@ -99,7 +99,7 @@ structure Arg where
   name : String
   /-- The optional source annotation expression. -/
   annotation : Option Expr
-deriving Repr, Lean.ToExpr
+deriving Repr, BEq, Lean.ToExpr
 
 /-- Python statements currently represented by the AST bridge. -/
 inductive Stmt where
@@ -120,6 +120,8 @@ inductive Stmt where
   | augAssign : Expr -> BinOp -> Expr -> Stmt
   /-- A Python `for target in iter` statement. -/
   | forIn : Expr -> Expr -> List Stmt -> List Stmt -> Stmt
+  /-- Internal state of an evaluated `range(stop)` iterator, not source syntax. -/
+  | rangeLoop : String -> Int -> Int -> List Stmt -> List Stmt -> Stmt
   /-- A Python `if` statement. -/
   | ifThen : Expr -> List Stmt -> List Stmt -> Stmt
   /-- A Python `while` statement. -/
@@ -130,13 +132,13 @@ inductive Stmt where
   | raise : Option Expr -> Stmt
   /-- A Python expression statement. -/
   | expr : Expr -> Stmt
-deriving Repr, Lean.ToExpr
+deriving Repr, BEq, Lean.ToExpr
 
 /-- A Python module represented as a list of top-level statements. -/
 structure Module where
   /-- Top-level statements in source order. -/
   body : List Stmt
-deriving Repr, Lean.ToExpr
+deriving Repr, BEq, Lean.ToExpr
 
 /-- A modeled Python exception object. -/
 structure ExceptionObject where
@@ -558,8 +560,11 @@ inductive Value where
   | int (value : Int)
   /-- A Python `str`, represented by its Unicode integer code points. -/
   | string (value : List Int)
-  /-- A modeled object with a runtime type name and comparable integer payload. -/
-  | object (typeName : String) (value : Int)
+  /-- A modeled object with a runtime class name and an optional integer `value` field.
+  Omitting the field represents an object with no stored attributes.
+  The execution model runs supported comparison method bodies; the older abstract
+  evaluator compares payloads directly and is not a termination model. -/
+  | object (typeName : String) (value : Option Int := none)
 deriving Repr, DecidableEq
 
 /-- A successful list return value or a thrown exception object. -/
@@ -588,7 +593,10 @@ def unsupportedOrdering (op : CmpOp) (left right : Value) : ExceptionObject :=
 '{left.typeName}' and '{right.typeName}'"]
   }
 
-/-- Evaluate a comparison on modeled Python values. -/
+/-- Evaluate a comparison on modeled Python values.
+This total evaluator always returns a boolean or an exception. It does not model
+arbitrary Python comparison method bodies, including methods that diverge.
+-/
 def evalValueCmp (op : CmpOp) (left right : Value) :
     Except ExceptionObject Bool :=
   match op with
@@ -610,7 +618,7 @@ def evalValueCmp (op : CmpOp) (left right : Value) :
             | .gt => decide (left > right)
             | .gtE => decide (left ≥ right)
             | _ => false
-      | .object leftType left, .object rightType right =>
+      | .object leftType (some left), .object rightType (some right) =>
           if leftType = rightType then
             .ok <| match op with
               | .lt => decide (left < right)
@@ -619,7 +627,7 @@ def evalValueCmp (op : CmpOp) (left right : Value) :
               | .gtE => decide (left ≥ right)
               | _ => false
           else
-            .error (unsupportedOrdering op (.object leftType left) (.object rightType right))
+            .error (unsupportedOrdering op (.object leftType (some left)) (.object rightType (some right)))
       | left, right => .error (unsupportedOrdering op left right)
 
 /-- An optional Python annotation restricting a scalar argument's runtime values. -/
@@ -706,6 +714,8 @@ mutual
 
   /-- Count statement operations, assigning unit cost to every AST node. -/
   partial def Stmt.operationCount : Stmt → Nat
+    | .rangeLoop _ _ _ body otherwise =>
+        1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
     | .functionDef _ args returns body =>
         1 + args.length + (returns.map Expr.operationCount).getD 0 +
@@ -912,7 +922,8 @@ def Module.analyzeFunction (module : Module) (name : String) : Option CostAnalys
       | none => analyzeFunctionIn module.body name
   | none => none
 
-/-- Merge two sorted lists, propagating Python comparison exceptions. -/
+/-- Legacy bounded sorting abstraction. Fuel exhaustion supplies a fallback value;
+this helper is NOT an execution or termination model. Use `mergeExecution` instead. -/
 def mergeSortedFuel : Nat → List Value → List Value → ValueListOutcome
   | 0, left, right => .ok (left ++ right)
   | _ + 1, [], right => .ok right
@@ -925,7 +936,7 @@ def mergeSortedFuel : Nat → List Value → List Value → ValueListOutcome
         return rightHead ::
           (← mergeSortedFuel fuel (leftHead :: leftTail) rightTail)
 
-/-- Evaluate the merge-sort shape used by the supported Python subset. -/
+/-- Legacy merge-sort abstraction; not evidence of Python termination. -/
 def evalMergeSortFuel : Nat → List Value → ValueListOutcome
   | 0, values => .ok values
   | fuel + 1, values =>
@@ -953,7 +964,7 @@ def quickPartition (pivot : Value) :
         let (less, equal, greater) ← quickPartition pivot rest
         return (less, value :: equal, greater)
 
-/-- Evaluate the first-element-pivot quick-sort shape used by the Python subset. -/
+/-- Legacy quick-sort abstraction; not evidence of Python termination. -/
 def evalQuickSortFuel : Nat → List Value → ValueListOutcome
   | 0, values => .ok values
   | _ + 1, [] => .ok []
@@ -972,7 +983,10 @@ def valueLe : Value → Value → Bool
   | .object leftType left, .object rightType right =>
       match compare leftType rightType with
       | .lt => true
-      | .eq => decide (left ≤ right)
+      | .eq => match left, right with
+          | none, _ => true
+          | some _, none => false
+          | some left, some right => decide (left ≤ right)
       | .gt => false
   | .int _, .string _ => true
   | .int _, .object _ _ => true
@@ -1000,10 +1014,10 @@ def normalizeSortOutcome (input : List Value) : ValueListOutcome → ValueListOu
   | .ok _ => .ok (canonicalValueSort input)
 
 /--
-Interpret the two structurally recognized recursive list-sorting shapes.
-
-Unlike the old canonical-sort shortcut, this preserves each algorithm's
-comparison order and exception outcome on heterogeneous lists.
+Legacy abstraction of two broadly recognized recursive list-sorting shapes.
+It preserves modeled primitive-comparison exception order and normalizes success
+canonically. It does not execute custom Python methods or establish termination.
+The new `listFunction` in Sorting uses exact recognition and actual executions.
 -/
 def evalUnaryListFunctionOutcome (module : Module) (name : String)
     (values : List Value) : Option ValueListOutcome := do
@@ -1288,7 +1302,7 @@ def ReturnType (module : PyAst.Module) (name : String) : Prop :=
   | _, _ => False
 
 /-- A unary integer function throws a modeled exception for at least one input. -/
-def Throws (module : PyAst.Module) (name : String) : Prop :=
+def AbstractThrows (module : PyAst.Module) (name : String) : Prop :=
   match module.findBinaryComparison name with
   | some signature =>
       ∃ left right exception,
@@ -1312,7 +1326,7 @@ def Throws (module : PyAst.Module) (name : String) : Prop :=
 Two supported unary functions return the same value or throw structurally
 equal exception objects for every input in their modeled domain.
 -/
-def Equiv (module : PyAst.Module) (left right : String) : Prop :=
+def AbstractEquiv (module : PyAst.Module) (left right : String) : Prop :=
   match module.findFunctionArgKind left, module.findFunctionArgKind right with
   | some .int, some .int =>
       ∀ n : Int, ∃ outcome,
@@ -1370,7 +1384,8 @@ def EquivReturn (module : PyAst.Module) (left right : String) : Prop :=
       else False
   | _, _ => False
 
-/-- A function terminates within a bound using an explicit Python input-size measure. -/
+/-- Bound the cost assigned by the structural classifier using an explicit input
+size. This abstraction does not establish termination; use execution Halts/Returns. -/
 def BigO (module : PyAst.Module) (name : String) (inputSize : PyAst.InputSize)
     (bound : Nat → Nat) : Prop :=
   ∃ analysis,
