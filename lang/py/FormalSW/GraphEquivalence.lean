@@ -79,6 +79,8 @@ deriving Repr
 inductive Kind where
   | list | tuple | dict | bytearray | set
   | object (typeIdentity : Nat)
+  /-- A statically loaded class is identified by its source module and binding. -/
+  | staticObject (origin name : String)
 deriving Repr
 
 structure Node where
@@ -103,6 +105,8 @@ def Kind.encode : Kind → Data
   | .bytearray => .scalar (.string "bytearray")
   | .set => .scalar (.string "set")
   | .object identity => .list [.scalar (.string "object"), .scalar (.int identity)]
+  | .staticObject origin name =>
+      .list [.scalar (.string "static_object"), .scalar (.string origin), .scalar (.string name)]
 
 def Node.encode (node : Node) : Data :=
   .list [node.kind.encode, .list (node.labels.map (Data.scalar ∘ Constant.string)),

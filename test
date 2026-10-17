@@ -340,6 +340,7 @@ def main() -> int:
         [sys.executable, "tests/py/mutable_globals.py"],
         ["lake", "env", "lean", "-DwarningAsError=true", "tests/py/object_equivalence.lean"],
         [sys.executable, "tests/py/graph_equivalence_checks"],
+        [sys.executable, "tests/py/instance_heap_checks"],
         [sys.executable, "tests/py/mutable_global_checks"],
     )]
     graph_passed = all(result.returncode == 0 for result in graph_results)

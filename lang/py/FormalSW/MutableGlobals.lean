@@ -18,6 +18,8 @@ inductive Object where
   | tuple (items : List Value)
   | bytearray (bytes : List UInt8)
   | set (items : List Constant)
+  /-- Plain instances have ordered fields and no custom special methods. -/
+  | instance (origin name : String) (fields : List (String × Value))
 deriving Repr, DecidableEq
 
 abbrev Heap := List Object
@@ -202,6 +204,10 @@ def Heap.Valid (heap : Heap) : Prop :=
   ∀ object ∈ heap, match object with
     | .bytearray _ => True
     | .set items => ScalarSet.Valid items
+    | .instance _ _ fields => (fields.map Prod.fst).Nodup ∧
+        ∀ field ∈ fields, match field.2 with
+          | .scalar _ => True
+          | .ref address => address < heap.length
     | .list items | .tuple items => ∀ value ∈ items, match value with
         | .scalar _ => True
         | .ref address => address < heap.length
@@ -219,6 +225,8 @@ def Completion.snapshot (c : Completion) : Data :=
   (Graph.Heap.mk ((List.range c.anchors).map Graph.Edge.ref ++
     c.globals.map (fun (_, v) => v.edge) ++ result)
     (c.heap.map fun object => match object with
+      | .instance origin name fields =>
+          ⟨.staticObject origin name, fields.map Prod.fst, fields.map (fun field => field.2.edge)⟩
       | .list items => ⟨.list, [], items.map Value.edge⟩
       | .tuple items => ⟨.tuple, [], items.map Value.edge⟩
       | .set items => ⟨.set, [], (ScalarSet.canonical items).map Graph.Edge.scalar⟩
@@ -243,6 +251,8 @@ theorem Completion.equivalent_allocations (heap leftExtra rightExtra : Heap) (re
       ⟨.ok result, globals, heap ++ rightExtra, heap.length⟩ := by
   refine Or.inr ⟨rfl, rfl, trivial, ?_⟩
   let encode : Object → Graph.Node := fun object => match object with
+    | .instance origin name fields =>
+        ⟨.staticObject origin name, fields.map Prod.fst, fields.map (fun field => field.2.edge)⟩
     | .list items => ⟨.list, [], items.map Value.edge⟩
     | .tuple items => ⟨.tuple, [], items.map Value.edge⟩
     | .set items => ⟨.set, [], (ScalarSet.canonical items).map Graph.Edge.scalar⟩
@@ -258,6 +268,12 @@ theorem Completion.equivalent_allocations (heap leftExtra rightExtra : Heap) (re
         cases value with
         | scalar _ => trivial
         | ref _ => exact valueValid
+    | «instance» origin name fields =>
+        obtain ⟨field, fieldMember, rfl⟩ := List.mem_map.mp edgeMember
+        have fieldValid := objectValid.2 field fieldMember
+        cases value : field.2 with
+        | scalar _ => trivial
+        | ref _ => simpa only [value] using fieldValid
     | bytearray bytes =>
         obtain ⟨byte, _, rfl⟩ := List.mem_map.mp edgeMember
         trivial
@@ -451,7 +467,7 @@ def addItem (address : Nat) (value : Value) : Eval Value := do
           return .scalar .none
       | .ref other =>
           match (← get)[other]? with
-          | some (.tuple _) => unsupported
+          | some (.tuple _) | some (.instance _ _ _) => unsupported
           | some _ => error "TypeError"
           | none => unsupported
   | some _ => error "AttributeError"
@@ -475,6 +491,7 @@ def byteValues : Value → Eval (List UInt8)
       | some (.bytearray bytes) => return bytes
       | some (.list items) | some (.tuple items) => items.mapM byte
       | some (.set _) => unsupported
+      | some (.instance _ _ _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
 
@@ -493,7 +510,7 @@ def array (value : Value) : Eval (Nat × List Value) := do
       | some (.list items) => return (address, items)
       | some (.bytearray _) => error "TypeError"
       | some (.tuple _) => error "TypeError"
-      | some (.set _) => error "TypeError"
+      | some (.set _) | some (.instance _ _ _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
 
@@ -513,6 +530,7 @@ def truth (value : Value) : Eval Bool := do
       | some (.list items) | some (.tuple items) => return !items.isEmpty
       | some (.bytearray bytes) => return !bytes.isEmpty
       | some (.set items) => return !items.isEmpty
+      | some (.instance _ _ _) => return true
       | none => unsupported
 
 /-- Formatting is partial; ordinary invalid operand combinations raise TypeError. -/
@@ -530,7 +548,7 @@ def invalidBinary (op : BinOp) (left : Value) : Eval Value := do
         match (← get)[address]? with
         | some (.bytearray _) => unsupported
         | some (.list _) | some (.tuple _) => error "TypeError"
-        | some (.set _) => error "TypeError"
+        | some (.set _) | some (.instance _ _ _) => error "TypeError"
         | none => unsupported
     | _ => error "TypeError"
   else error "TypeError"
@@ -560,7 +578,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value := do
         | some (.tuple items) =>
             if n = 1 ∨ items.isEmpty then return .ref address
             else allocateTuple (List.replicate n.toNat items).flatten
-        | some (.set _) => error "TypeError"
+        | some (.set _) | some (.instance _ _ _) => error "TypeError"
         | none => unsupported
       else invalidBinary op a
   | .ref address, .scalar (.bytes bytes) =>
@@ -568,7 +586,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value := do
         match (← get)[address]? with
         | some (.bytearray left) => allocateBuffer (left ++ bytes)
         | some (.list _) | some (.tuple _) => error "TypeError"
-        | some (.set _) => error "TypeError"
+        | some (.set _) | some (.instance _ _ _) => error "TypeError"
         | none => unsupported
       else invalidBinary op a
   | .scalar (.bytes bytes), .ref address =>
@@ -576,7 +594,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value := do
         match (← get)[address]? with
         | some (.bytearray right) => return .scalar (.bytes (bytes ++ right))
         | some (.list _) | some (.tuple _) => error "TypeError"
-        | some (.set _) => error "TypeError"
+        | some (.set _) | some (.instance _ _ _) => error "TypeError"
         | none => unsupported
       else invalidBinary op a
   | .scalar (.string s), .scalar (.int n) | .scalar (.int n), .scalar (.string s) =>
@@ -603,6 +621,7 @@ def sequence : Value → Eval (List Value)
       | some (.list items) | some (.tuple items) => pure items
       | some (.bytearray bytes) => pure (bytes.map (fun byte => .scalar (.int byte.toNat)))
       | some (.set _) => unsupported
+      | some (.instance _ _ _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
 
@@ -616,6 +635,7 @@ def length : Value → Eval Value
       | some (.list items) | some (.tuple items) => return .scalar (.int items.length)
       | some (.bytearray bytes) => return .scalar (.int bytes.length)
       | some (.set items) => return .scalar (.int items.length)
+      | some (.instance _ _ _) => error "TypeError"
       | none => unsupported
 
 def getItem (value subscript : Value) : Eval Value := do
@@ -628,7 +648,7 @@ def getItem (value subscript : Value) : Eval Value := do
       match (← get)[address]? with
       | some (.list items) | some (.tuple items) => return (items[← index items subscript]?).getD (.scalar .none)
       | some (.bytearray bytes) => return .scalar (.int ((bytes[← index bytes subscript]?).getD 0).toNat)
-      | some (.set _) => error "TypeError"
+      | some (.set _) | some (.instance _ _ _) => error "TypeError"
       | none => unsupported
   | _, _ => error "TypeError"
 
@@ -656,7 +676,7 @@ def setItem (value subscript replacement : Value) : Eval Value := do
           let i ← index bytes (.scalar (.int n))
           modify fun heap => heap.set address (.bytearray (bytes.set i byte))
           return .scalar .none
-      | some (.set _) => error "TypeError"
+      | some (.set _) | some (.instance _ _ _) => error "TypeError"
       | some (.tuple _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
@@ -722,7 +742,7 @@ def getSlice (value lower upper stride : Value) : Eval Value := do
       | some (.bytearray bytes) =>
           let bounds ← sliceBounds lower upper stride
           allocateBuffer (← sequenceResult (Py.Builtin.Sequence.slice bytes bounds))
-      | some (.set _) => error "TypeError"
+      | some (.set _) | some (.instance _ _ _) => error "TypeError"
       | none => unsupported
 
 /-- A list prefix is a fresh object; all existing references keep their contents. -/
@@ -757,7 +777,7 @@ def setSlice (value lower upper stride replacement : Value) : Eval Value := do
           let result ← sequenceResult (Py.Builtin.ByteArray.setSlice bytes bounds replacement)
           modify fun heap => heap.set address (.bytearray result)
           return .scalar .none
-      | some (.set _) => error "TypeError"
+      | some (.set _) | some (.instance _ _ _) => error "TypeError"
       | some (.tuple _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
@@ -778,7 +798,7 @@ def appendReceiver (value : Value) : Eval Nat := do
   | .ref address =>
       match (← get)[address]? with
       | some (.list _) | some (.bytearray _) => return address
-      | some (.set _) | some (.tuple _) => error "AttributeError"
+      | some (.set _) | some (.tuple _) | some (.instance _ _ _) => error "AttributeError"
       | none => unsupported
   | .scalar _ => error "AttributeError"
 
@@ -791,7 +811,7 @@ def appendItem (address : Nat) (value : Value) : Eval Value := do
       let byte ← byte value
       modify fun heap => heap.set address (.bytearray (bytes ++ [byte]))
       return .scalar .none
-  | some (.set _) | some (.tuple _) => error "AttributeError"
+  | some (.set _) | some (.tuple _) | some (.instance _ _ _) => error "AttributeError"
   | none => unsupported
 
 def expr (env : Env) : Expr → Eval Value

@@ -23,6 +23,7 @@ roots = [
   "lang.py.FormalSW.ScalarSets",
   "lang.py.FormalSW.ScalarSort",
   "lang.py.FormalSW.MutableGlobals",
+  "lang.py.FormalSW.Instances",
   "lang.py.FormalSW.HeapCalls",
   "lang.py.FormalSW.DataRuntime",
   "lang.py.FormalSW.GraphEquivalence",

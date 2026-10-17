@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""
+Compare plain instance heap operations and observations against Python.
+"""
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import equivalent, snapshot_roots
+
+
+class Record:
+    pass
+
+
+# Same class name, different definition: field equality cannot merge their types.
+OtherRecord = type('Record', (), {})
+identities = {id(Record): ('first.py', 'Record'), id(OtherRecord): ('second.py', 'Record')}
+
+
+def quoted(value):
+    return json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    if value is None:
+        return '.scalar .none'
+    if type(value) is bool:
+        return '.scalar (.bool ' + str(value).lower() + ')'
+    if type(value) is int:
+        return f'.scalar (.int ({value}))'
+    if type(value) is str:
+        return f'.scalar (.string {quoted(value)})'
+    raise AssertionError(value)
+
+
+def normalized(snapshot):
+    roots, nodes = snapshot
+    result = []
+    for kind, labels, edges in nodes:
+        if type(kind) is list:
+            kind = ['static_object', *identities[kind[1]]]
+        result.append([kind, labels, edges])
+    return [roots, result]
+
+
+def value(edge):
+    if edge[0] == 'ref':
+        return f'.ref {edge[1]}'
+    return data(edge[1])
+
+
+def heap(snapshot):
+    objects = []
+    for kind, labels, edges in snapshot[1]:
+        if type(kind) is list:
+            origin, name = identities[kind[1]]
+            fields = ', '.join(f'({quoted(label)}, {value(edge)})' for label, edge in zip(labels, edges))
+            objects.append(f'.instance {quoted(origin)} {quoted(name)} [{fields}]')
+        else:
+            assert kind == 'list', kind
+            objects.append('.list [' + ', '.join(map(value, edges)) + ']')
+    return '[' + ', '.join(objects) + ']'
+
+
+checks = []
+
+
+def check(objects, python, lean):
+    before = snapshot_roots(objects)
+    # Anchor every entry object, just as the shared-heap execution model does.
+    assert len(before[1]) == len(objects)
+    try:
+        result = python()
+    except (AttributeError, TypeError) as error:
+        expected = f'outcome matches .error {{typeName := {quoted(type(error).__name__)}, args := _}}'
+        after = snapshot_roots(objects)
+    else:
+        expected = 'outcome matches .ok _'
+        after = snapshot_roots(objects + [result])
+    checks.append(f'''
+example : (match ({lean}) {heap(before)} with
+  | some (outcome, finalHeap) => ({expected}) &&
+      (Mutable.Completion.mk outcome [] finalHeap {len(objects)}).snapshot.equal ({data(normalized(after))})
+  | none => false) = true := by decide
+''')
+
+
+# Field replacement preserves insertion order; new fields append at the end.
+for name in ('first', 'second', 'third', 'λ'):
+    record = Record()
+    record.first = 1
+    record.second = 2
+    check([record], lambda: setattr(record, name, 99),
+          f'Mutable.writeField (.ref 0) {quoted(name)} (.scalar (.int 99))')
+
+record = Record()
+record.number = 10**40
+check([record], lambda: record.number, 'Mutable.readField (.ref 0) "number"')
+check([record], lambda: record.missing, 'Mutable.readField (.ref 0) "missing"')
+check([], lambda: getattr(42, 'number'), 'Mutable.readField (.scalar (.int 42)) "number"')
+check([], lambda: setattr(42, 'number', 3),
+      'Mutable.writeField (.scalar (.int 42)) "number" (.scalar (.int 3))')
+check([[]], lambda: getattr([], 'number'), 'Mutable.readField (.ref 0) "number"')
+
+record = Record()
+shared = [1]
+record.left = shared
+record.right = shared
+check([record, shared], lambda: record.left, 'Mutable.readField (.ref 0) "left"')
+check([record, shared], lambda: record.left.append(2),
+      '(do let items ← Mutable.readField (.ref 0) "left"; '
+      'let address ← Mutable.appendReceiver items; Mutable.appendItem address (.scalar (.int 2)))')
+check([record, shared], lambda: setattr(record, 'self', record),
+      'Mutable.writeField (.ref 0) "self" (.ref 0)')
+check([record, shared], lambda: record.self.right, '(do '
+      'let alias ← Mutable.readField (.ref 0) "self"; Mutable.readField alias "right")')
+
+check([], Record, 'Mutable.allocateInstance "first.py" "Record"')
+check([record, shared], Record, 'Mutable.allocateInstance "first.py" "Record"')
+
+first, second = Record(), Record()
+for name, python, lean in (
+    ('equal_self', lambda: first == first, 'HeapCalls.compare .eq (.ref 0) (.ref 0)'),
+    ('equal_other', lambda: first == second, 'HeapCalls.compare .eq (.ref 0) (.ref 1)'),
+    ('unequal_self', lambda: first != first, 'HeapCalls.compare .notEq (.ref 0) (.ref 0)'),
+    ('unequal_other', lambda: first != second, 'HeapCalls.compare .notEq (.ref 0) (.ref 1)'),
+    ('ordered', lambda: first < second, 'HeapCalls.compare .lt (.ref 0) (.ref 1)'),
+    ('truth', lambda: bool(first), '((Mutable.Value.scalar ∘ Constant.bool) <$> Mutable.truth (.ref 0))'),
+    ('length', lambda: len(first), 'Mutable.length (.ref 0)'),
+    ('integer', lambda: int(first), 'HeapCalls.primitive (.builtin .int) [.ref 0]'),
+    ('addition', lambda: first + 1, 'Mutable.binary .add (.ref 0) (.scalar (.int 1))'),
+    ('multiplication', lambda: first * 2, 'Mutable.binary .mult (.ref 0) (.scalar (.int 2))'),
+    ('inplace', lambda: first + second, 'HeapCalls.inplace .add (.ref 0) (.ref 1)'),
+    ('subscript', lambda: first[0], 'Mutable.getItem (.ref 0) (.scalar (.int 0))'),
+):
+    check([first, second], python, lean)
+
+# State equivalence differs from Python ==, while retaining nominal class identity.
+for left, right in ((Record(), Record()), (Record(), OtherRecord())):
+    left.value = right.value = 5
+    expected = str(equivalent(left, right)).lower()
+    left_heap = heap(snapshot_roots([left]))
+    right_heap = heap(snapshot_roots([right]))
+    checks.append(f'''
+example : Graph.observedBool ((Graph.compare
+  (Mutable.Completion.mk (.ok (.ref 0)) [] {left_heap} 0).snapshot
+  (Mutable.Completion.mk (.ok (.ref 0)) [] {right_heap} 0).snapshot).observe 500)
+  = some {expected} := by native_decide
+''')
+
+# Descriptor access and instance sets remain explicitly outside this model.
+checks.append('''
+example : Mutable.readField (.ref 0) "__dict__" [.instance "first.py" "Record" []] = none := rfl
+example : Mutable.writeField (.ref 0) "__class__" (.scalar .none)
+    [.instance "first.py" "Record" []] = none := rfl
+example : Mutable.readField (.ref 0) "__weakref__" [.instance "first.py" "Record" []] = none := rfl
+example : Mutable.addItem 0 (.ref 1) [.set [], .instance "first.py" "Record" []] = none := rfl
+''')
+
+with project_temporary_directory(prefix='instance-heaps-') as temporary:
+    proof = Path(temporary) / 'Checks.lean'
+    proof.write_text('import FormalSW\nopen FormalSW.PyAst\n'
+                     'set_option maxRecDepth 8192\nset_option maxHeartbeats 2000000\n'
+                     + '\n'.join(checks))
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{len(checks)} instance heap checks passed against Python')

@@ -100,6 +100,11 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
       match (← get)[a]?, (← get)[b]? with
       | some (.bytearray xs), some (.bytearray ys) => compareScalars op (.bytes xs) (.bytes ys)
       | some (.set xs), some (.set ys) => return .scalar (.bool (ScalarSet.compare op xs ys))
+      | some (.instance _ _ _), some (.instance _ _ _) =>
+          match op with
+          | .eq => return .scalar (.bool (a == b))
+          | .notEq => return .scalar (.bool (a != b))
+          | _ => Mutable.error "TypeError"
       | some (.tuple xs), some (.tuple ys) =>
           match op with
           | .eq | .notEq =>
@@ -186,7 +191,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
       match (← get)[address]? with
       | none => Mutable.unsupported
       | some (.list _) => listInplace op left right
-      | some (.set _) | some (.tuple _) => Mutable.binary op left right
+      | some (.set _) | some (.tuple _) | some (.instance _ _ _) => Mutable.binary op left right
       | some (.bytearray bytes) =>
           match op with
           | .mult =>
@@ -201,7 +206,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
                     | some (.bytearray more) =>
                         if other = address ∧ !more.isEmpty then Mutable.error "BufferError"
                         else pure more
-                    | some (.list _) | some (.set _) | some (.tuple _) => Mutable.error "TypeError"
+                    | some (.list _) | some (.set _) | some (.tuple _) | some (.instance _ _ _) => Mutable.error "TypeError"
                     | none => Mutable.unsupported
                 | _ => Mutable.error "TypeError"
               modify fun heap => heap.set address (.bytearray (bytes ++ more))
@@ -398,7 +403,7 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
   | .builtin .int, [.ref address] => do
       match (← get)[address]? with
-      | some (.list _) | some (.set _) | some (.tuple _) => Mutable.error "TypeError"
+      | some (.list _) | some (.set _) | some (.tuple _) | some (.instance _ _ _) => Mutable.error "TypeError"
       | _ => Mutable.unsupported
   | .builtin .int, values => do
       let values ← values.mapM fun value => match value with
