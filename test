@@ -95,6 +95,7 @@ def print_result(result: TestResult) -> None:
 def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
+        TestCase("immutable scalar default arguments", Path("tests/py/defaults.py"), 0, "All 3 checks passed"),
         TestCase("deadlock, livelock, and joined worker termination", Path("tests/py/parallel_liveness.py"), 0),
         TestCase("mutable global lists, aliases, and exceptional state", Path("tests/py/mutable_globals.py"), 0),
         TestCase("global inputs and normal/exceptional state", Path("tests/py/globals.py"), 0),
@@ -135,7 +136,7 @@ def main() -> int:
             "this_function rejects unsupported arity",
             Path("tests/py/fail/this_function_arity.py"),
             1,
-            "only plain positional arguments without defaults or variadics are supported",
+            "only plain positional arguments without variadics are supported",
         ),
         TestCase(
             "this_function rejects unsupported argument annotations",

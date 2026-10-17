@@ -43,7 +43,9 @@ for body in (
     '(a, b), c = (n, n), n\n    return c',
 ):
     assert issues(base.replace('return n', body)), body
-assert issues(base.replace('g(n: int)', 'g(n: int = 0)'))
+with_default = base.replace('g(n: int)', 'g(n: int = 0)')
+assert not issues(with_default)
+assert not issues(with_default.replace('return g(n)', 'return g()'))
 assert issues(base.replace('g(n: int)', 'g(n: list[int])'))
 assert not issues(base.replace('return n', 'return f(n - 1) if n else 0'))
 range_source = base.replace('return g(n)', 'for k in range(n, 0, -1):\n        n = g(n)\n    return n')
@@ -96,4 +98,5 @@ assert not issues(sum_source.replace('sum(x for x in range(n) if x % 2 == 0)',
 subprocess.run([sys.executable, str(Path(__file__).with_name('loop_control.py'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('string_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('power_checks'))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("default_checks"))], check=True)
 print("Recursive call and loop-control coverage passed")

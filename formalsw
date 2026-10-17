@@ -21,6 +21,7 @@ from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
 from lang.py.call_support import range_sum, uses_calls_model, has_partial_primitives
 from lang.py.contracts import ContractError, input_condition
+from lang.py.defaults import literal_default
 from lang.py.imports import bindings, resolve_function, resolve_python_function
 from lang.py.linking import link_imports
 from lang import spec_setup
@@ -1209,7 +1210,14 @@ class AstJsonEmitter:
         """Encode supported Python function arguments."""
         if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
             raise UnsupportedSyntax("only plain positional args supported")
-        return [self.arg(arg) for arg in args.args]
+        result = [self.arg(arg) for arg in args.args]
+        for arg, default in zip(result[len(result) - len(args.defaults):], args.defaults):
+            try:
+                value = literal_default(default)
+            except ValueError as error:
+                raise UnsupportedSyntax(str(error)) from error
+            arg['default'] = self.expr(ast.Constant(value=value))
+        return result
 
     def arg(self, arg: ast.arg) -> dict[str, object]:
         """Encode one supported Python function argument."""

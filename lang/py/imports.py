@@ -8,6 +8,7 @@ import ast
 import types
 from pathlib import Path
 from lang.py.contracts import ContractError
+from lang.py.defaults import literal_default
 
 
 def resolve_python_function(value):
@@ -27,7 +28,15 @@ def resolve_python_function(value):
     compiled = compile(text, value.__code__.co_filename, 'exec', dont_inherit=True)
     code = next((constant for constant in compiled.co_consts
                  if isinstance(constant, types.CodeType) and constant.co_name == function.name), None)
-    if value.__code__ != code or value.__closure__ or value.__defaults__ or value.__kwdefaults__:
+    try:
+        defaults = tuple(literal_default(default) for default in function.args.defaults)
+    except ValueError as error:
+        raise ContractError(str(error)) from error
+    runtime_defaults = value.__defaults__ or ()
+    same_defaults = (len(defaults) == len(runtime_defaults) and all(
+        type(actual) is type(expected) and actual == expected
+        for actual, expected in zip(runtime_defaults, defaults)))
+    if value.__code__ != code or value.__closure__ or not same_defaults or value.__kwdefaults__:
         raise ContractError('Equiv setup target differs from its source definition or captures runtime values')
     return path, program, function
 
@@ -47,6 +56,10 @@ def bindings(module, name):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             if any((a.asname or a.name.split('.')[0]) in (name, '*') for a in node.names):
                 found.append(node)
+            return
+        if (isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del))
+                and isinstance(node.value, ast.Name) and node.value.id == name):
+            found.append(node)
             return
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and node.id == name:
             found.append(node)

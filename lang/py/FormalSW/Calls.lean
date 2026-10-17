@@ -73,6 +73,17 @@ structure State where
   work : Work
   stack : List Frame
 
+/-- Fill missing trailing arguments from definition-time scalar defaults. The
+source checker excludes effectful or mutable defaults and keyword arguments. -/
+def completeArguments : List Arg → List Constant → Option (List Constant)
+  | [], [] => some []
+  | [], _ :: _ => none
+  | arg :: args, [] => do
+      let value ← arg.defaultValue
+      return value :: (← completeArguments args [])
+  | _ :: args, value :: values => do
+      return value :: (← completeArguments args values)
+
 def outcome (result : Option (Except ExceptionObject Constant)) (stack : List Frame) :
     Step State Constant :=
   match result with
@@ -185,7 +196,9 @@ def step (module : Module) (state : State) : Step State Constant :=
       | some (args, body) =>
           if args.length = values.length then
             .next ⟨.block (executableBody body) (argumentEnv args values), stack⟩
-          else .unsupported
+          else match completeArguments args values with
+            | some values => .next ⟨.block (executableBody body) (argumentEnv args values), stack⟩
+            | none => .done (.error { typeName := "TypeError", args := [] })
       | none => outcome (libraryCall module name values) stack
   | .expr expression env =>
       match expression with
@@ -704,6 +717,15 @@ theorem function (found : findFunctionIn module.body name = some (args, body))
     ReturnsValue module name values value := by
   intro stack
   exact .next (by simp [step, found, arity]) (h stack)
+
+/-- Execute a call that omits one or more trailing default arguments. -/
+theorem function_defaults (found : findFunctionIn module.body name = some (args, body))
+    (omitted : args.length ≠ values.length)
+    (defaults : completeArguments args values = some completed)
+    (h : BlockReturns module (argumentEnv args completed) (executableBody body) value) :
+    ReturnsValue module name values value := by
+  intro stack
+  exact .next (by simp [step, found, omitted, defaults]) (h stack)
 
 end BlockReturns
 

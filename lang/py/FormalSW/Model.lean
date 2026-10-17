@@ -115,7 +115,27 @@ structure Arg where
   name : String
   /-- The optional source annotation expression. -/
   annotation : Option Expr
-deriving Repr, BEq, Lean.ToExpr
+  /-- A definition-time immutable scalar default, when present. -/
+  defaultValue : Option Constant := none
+deriving BEq, Lean.ToExpr
+
+private structure RequiredArgView where
+  name : String
+  annotation : Option Expr
+deriving Repr
+
+private structure DefaultArgView where
+  name : String
+  annotation : Option Expr
+  defaultValue : Constant
+deriving Repr
+
+/-- Keep existing source fingerprints stable when no default is present. A
+present default contributes its complete value to the representation. -/
+instance : Repr Arg where
+  reprPrec arg prec := match arg.defaultValue with
+    | none => reprPrec (RequiredArgView.mk arg.name arg.annotation) prec
+    | some value => reprPrec (DefaultArgView.mk arg.name arg.annotation value) prec
 
 /-- Python statements currently represented by the AST bridge. -/
 inductive Stmt where
@@ -313,9 +333,16 @@ private def optionalExpr (json : Lean.Json) (name : String) : Except String (Opt
 
 /-- Decode one function argument from the version 1 JSON schema. -/
 private def Arg.fromJson? (json : Lean.Json) : Except String Arg := do
+  let defaultValue ← match json.getObjVal? "default" with
+    | .error _ => pure none
+    | .ok value => do
+        match ← Expr.fromJson? value with
+        | .constant value => pure (some value)
+        | _ => throw "argument defaults must be immutable scalar constants"
   return {
     name := ← jsonString json "name"
     annotation := ← optionalExpr json "annotation"
+    defaultValue := defaultValue
   }
 
 /-- Decode one statement from the version 1 JSON schema. -/

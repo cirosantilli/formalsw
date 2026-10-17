@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Compare default binding with Python and reject runtime-dependent defaults."""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import tempfile
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+from lang.py.contracts import ContractError
+from lang.py.imports import resolve_python_function
+from lang.py.linking import link_imports
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if isinstance(value, bool):
+        return f'(.bool {str(value).lower()})'
+    if isinstance(value, int):
+        return f'(.int ({value}))'
+    return f'(.string {json.dumps(value, ensure_ascii=False)})'
+
+
+source = 'def add(a: int, b: int = 10, c: int = -2): return a + b + c\n'
+cases = [('add', args) for args in ((), (7,), (7, 8), (7, 8, 9), (1, 2, 3, 4))]
+for index, value in enumerate((None, True, False, 0, -7, 10**30, '', 'é😺')):
+    name = f'default_{index}'
+    source += f'def {name}(value: int = {value!r}): return value\n'
+    cases.extend(((name, ()), (name, (42,))))
+source += ('def recursive(n: int = 3):\n'
+           '    if n <= 0: return 0\n'
+           '    return recursive(n - 1) + 1\n')
+cases.extend((('recursive', ()), ('recursive', (8,))))
+namespace = {}
+exec(source, namespace)
+program = ast.parse(source)
+assert all(not SupportChecker(program).check(name) for name in namespace if name != '__builtins__')
+equations = []
+for name, args in cases:
+    try:
+        expected = f'.ok {constant(namespace[name](*args))}'
+    except TypeError:
+        expected = '.error { typeName := "TypeError", args := [] }'
+    values = ', '.join(map(constant, args))
+    equations.append(f'example : (Calls.function Probe.module "{name}" [{values}]).observe 250 = '
+                     f'.done ({expected}) := by decide')
+equations.extend([
+    'example : reprStr ({ name := "n", annotation := none } : Arg) ≠ '
+    'reprStr ({ name := "n", annotation := none, defaultValue := some .none } : Arg) := by native_decide',
+    'example : reprStr ({ name := "n", annotation := none, defaultValue := some (.int 1) } : Arg) ≠ '
+    'reprStr ({ name := "n", annotation := none, defaultValue := some (.int 2) } : Arg) := by native_decide',
+])
+
+with tempfile.TemporaryDirectory(prefix='.default-check-', dir=REPO) as temporary:
+    directory = Path(temporary)
+    path = directory / 'defaults.py'
+    path.write_text(source)
+    document = directory / 'defaults.json'
+    document.write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
+                     + 'open FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+    # Setup imports must preserve the exact definition-time default and its type.
+    runtime = {}
+    exec(compile(source, str(path), 'exec'), runtime)
+    assert resolve_python_function(runtime['add'])[2].name == 'add'
+    runtime['add'].__defaults__ = (11, -2)
+    try:
+        resolve_python_function(runtime['add'])
+    except ContractError as error:
+        assert 'differs from its source definition' in str(error)
+    else:
+        raise AssertionError('mutated defaults accepted')
+    runtime['default_1'].__defaults__ = (1,)
+    try:
+        resolve_python_function(runtime['default_1'])
+    except ContractError:
+        pass
+    else:
+        raise AssertionError('bool default replaced by int accepted')
+
+    # Imported aliases keep defaults on the wrapper and on the original target.
+    caller = directory / 'caller.py'
+    caller.write_text('from defaults import add as plus\ndef f(n: int): return plus(n)\n')
+    linked = ast.parse(caller.read_text())
+    link_imports(caller, linked, lambda path: ast.parse(path.read_text()))
+    assert not SupportChecker(linked).check('f')
+    alias = next(node for node in linked.body if isinstance(node, ast.FunctionDef) and node.name == 'plus')
+    assert [ast.literal_eval(default) for default in alias.args.defaults] == [10, -2]
+
+for default in ('[]', '{}', '(1, 2)', 'object()', '1 + 2', 'unknown', '1.5'):
+    bad = ast.parse(f'def f(n: int = {default}): return n\n')
+    assert any('immutable scalar literals' in issue.reason for issue in SupportChecker(bad).check('f')), default
+    assert json.loads(api['AstJsonEmitter'](bad).emit())['ast']['body'][0]['type'] == 'Unsupported'
+for arguments in ('', '1, 2, 3, 4', '1, b=2'):
+    bad = ast.parse(source + f'def caller(): return add({arguments})\n')
+    assert SupportChecker(bad).check('caller'), arguments
+bad = ast.parse('def f(n: int = 10): return n\nf.__defaults__ = (99,)\n')
+assert SupportChecker(bad).check('f')
+parallel = ast.parse('def f(n: int = 10):\n    """\n    @formalsw: Parallel(f)\n    """\n    return n\n')
+assert any('require scalar call execution' in issue.reason for issue in SupportChecker(parallel).check('f'))
+positive = ast.parse('def f(n: int = +2): return n\n')
+assert not SupportChecker(positive).check('f')
+assert json.loads(api['AstJsonEmitter'](positive).emit())['ast']['body'][0]['args'][0]['default']['value'] == 2
+for model in ('scalarFunction', 'scalarFunctionWithGlobals', 'Mutable.function', 'parallelFunction'):
+    issues = SupportChecker(positive).requirement('f', f'theorem legacy : Not ({model} _this_module "f" []).Halts')
+    assert any('require Calls.function execution' in issue.reason for issue in issues), model
+
+print(f'Default arguments: {len(cases)} Python comparisons, imports, and coverage checks passed')

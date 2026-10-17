@@ -47,7 +47,7 @@ theorem bad_type.throws (n : String) :
 example : Math.isqrt (10 ^ 100) = 10 ^ 50 := by native_decide
 
 private def callerBody : List Stmt :=
-  [.functionDef "caller" [.mk "n" (some (.name "int"))] (some (.name "int"))
+  [.functionDef "caller" [{ name := "n", annotation := some (.name "int") }] (some (.name "int"))
     [.return (.call (.name "root") [.name "n"])]]
 
 private def linkedProgram : Module := ⟨callerBody ++ program.body⟩

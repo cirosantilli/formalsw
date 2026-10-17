@@ -3,6 +3,7 @@ import ast
 from pathlib import Path
 from lang.py.global_inputs import GlobalInputError, function_globals
 from lang.py.imports import bindings
+from lang.py.defaults import literal_default
 
 
 def range_sum(node):
@@ -72,7 +73,7 @@ def uses_calls_model(module, function):
         return False
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
     names.update(library_functions(module))
-    return any(
+    return bool(function.args.defaults) or any(
         isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript))
         or general_division(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
@@ -102,15 +103,22 @@ def check_calls(module, function, reject):
             for item in ast.walk(node):
                 if (isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del))
                         and item.id == function.name
+                        or isinstance(item, ast.Attribute) and isinstance(item.ctx, (ast.Store, ast.Del))
+                        and isinstance(item.value, ast.Name) and item.value.id == function.name
                         or isinstance(item, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
                         and item.name == function.name
                         or isinstance(item, (ast.Import, ast.ImportFrom)) and any(
                             (alias.asname or alias.name.split('.')[0]) in (function.name, '*')
                             for alias in item.names)):
                     reject(item, 'module-level call targets must not be rebound')
-        if function.decorator_list or function.args.defaults or function.args.posonlyargs or \
+        if function.decorator_list or function.args.posonlyargs or \
                 function.args.kwonlyargs or function.args.vararg or function.args.kwarg:
             reject(function, 'call execution requires undecorated plain positional functions')
+        for default in function.args.defaults:
+            try:
+                literal_default(default)
+            except ValueError as error:
+                reject(default, str(error))
         locals_ = {arg.arg for arg in function.args.args}
         # Comprehension targets have their own scope and must not leak into the
         # enclosing function's locals (including before the expression).
@@ -176,8 +184,8 @@ def check_calls(module, function, reject):
                 if node.func.id in scope:
                     reject(node, 'local bindings must not shadow module-level call targets')
                 target = functions[node.func.id]
-                if node.keywords or len(node.args) != len(target.args.args):
-                    reject(node, 'calls require exactly the declared positional arguments')
+                if node.keywords or not len(target.args.args) - len(target.args.defaults) <= len(node.args) <= len(target.args.args):
+                    reject(node, 'calls require the declared positional arguments, with trailing defaults optional')
                 for item in node.args:
                     recurse(item)
                 visit(target)

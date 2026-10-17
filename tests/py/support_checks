@@ -250,11 +250,11 @@ CASES = [
             """@formalsw: Returns"""
             return n
     ''', 'async functions are unsupported'),
-    ('default argument', '''
-        def f(n: int = 1):
+    ('mutable default argument', '''
+        def f(n: int = []):
             """@formalsw: Returns"""
             return n
-    ''', 'only plain positional arguments without defaults or variadics are supported'),
+    ''', 'default arguments require immutable scalar literals'),
     ('unrepresented annotation', '''
         def f(n: int) -> int | str:
             """@formalsw: theorem irrelevant : True"""

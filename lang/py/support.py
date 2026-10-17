@@ -137,8 +137,11 @@ class SupportChecker:
         if not self.annotation_supported(function.returns):
             reject(function.returns, 'this return annotation is unsupported by the AST model')
         args = function.args
-        if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.defaults:
-            reject(function, 'only plain positional arguments without defaults or variadics are supported')
+        if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
+            reject(function, 'only plain positional arguments without variadics are supported')
+        if args.defaults and (mutable or parallel or uses_parallel_model(function)
+                              or not uses_calls_model(self.module, function)):
+            reject(function, 'default arguments currently require scalar call execution')
         if issues:
             return tuple(issues)
         if parallel or uses_parallel_model(function):
@@ -691,6 +694,9 @@ class SupportChecker:
             function = self.functions.get(target)
             if function is None:
                 continue
+            if function.args.defaults and model != 'Calls.function':
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'default arguments require Calls.function execution'))
             if model == 'Mutable.function':
                 issues.extend(self.check(target, mutable=True))
             if model == 'parallelFunction':
