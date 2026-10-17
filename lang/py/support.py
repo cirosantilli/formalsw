@@ -53,8 +53,7 @@ class SupportChecker:
             return True
         if isinstance(annotation, ast.Constant):
             return annotation.value is None or isinstance(annotation.value, str)
-        return (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
-                and annotation.value.id in ('list', 'set') and isinstance(annotation.slice, ast.Name))
+        return annotation_kind(annotation) is not None
 
     def check(self, name: str, stack: tuple[str, ...] = (), *, parallel: bool = False, mutable: bool = False, heap_calls: bool = False) -> tuple[UnsupportedConstruct, ...]:
         if name in stack:

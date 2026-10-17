@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""
+Check nested annotation domains, shared rows, deep inputs, and runtime behavior.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.global_inputs import annotation_kind
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / "formalsw"))
+source = (ROOT / "tests/py/nested_inputs.py").read_text() + '''
+def mutate(rows: list[list[int]], value: int) -> int:
+    rows[0].append(value)
+    return rows[1][-1]
+'''
+module = ast.parse(source)
+for name in ("count_cells", "identity", "mutate"):
+    assert not SupportChecker(module).check(name), name
+for kind in ("list[list[int]]", "list[list[str]]", "list[list[bool]]",
+             "list[" * 32 + "int" + "]" * 32):
+    assert annotation_kind(ast.parse(kind, mode="eval").body) == kind
+for kind in ("list[set[int]]", "set[list[int]]", "list[object]", "list[list[float]]"):
+    assert annotation_kind(ast.parse(kind, mode="eval").body) is None
+global_source = "rows: list[list[int]] = []\ndef f() -> int: return len(rows)\n"
+assert SupportChecker(ast.parse(global_source)).check("f")
+
+world = {}
+exec(source, world)
+equations = []
+for rows, heap in (
+    ([], "[.list []]"),
+    ([[]], "[.list [.ref 1], .list []]"),
+    ([[1, 2], [-3]], "[.list [.ref 1, .ref 2], .list [.scalar (.int 1), .scalar (.int 2)], .list [.scalar (.int (-3))]]"),
+):
+    result = world["count_cells"](rows)
+    equations.append(f'example : (HeapCalls.call NestedProbe.module "count_cells" [.ref 0] {heap}).execution.observe 300 = '
+                     f'.done (.ok {{ outcome := .ok (.scalar (.int {result})), globals := [], heap := {heap}, anchors := {len(rows) + 1} }}) := by decide')
+shared = [3]
+rows = [shared, shared]
+assert world["count_cells"](rows) == 2
+assert world["mutate"](rows, 7) == 7 and rows == [[3, 7], [3, 7]]
+equations.append('''
+example : (HeapCalls.call NestedProbe.module "mutate" [.ref 0, .scalar (.int 7)]
+    [.list [.ref 1, .ref 1], .list [.scalar (.int 3)]]).execution.observe 200 =
+    .done (.ok {
+      outcome := .ok (.scalar (.int 7)), globals := [],
+      heap := [.list [.ref 1, .ref 1], .list [.scalar (.int 3), .scalar (.int 7)]],
+      anchors := 2 }) := by decide
+
+example : Mutable.Value.HasType [.list []] (.ref 0) "list[list[int]]" := by
+  exact ⟨[], rfl, .inr ⟨"list[int]", rfl, by simp⟩⟩
+
+example : Mutable.Value.HasType [.list [.ref 1, .ref 1], .list [.scalar (.int 3)]] (.ref 0) "list[list[int]]" := by
+  refine ⟨[.ref 1, .ref 1], rfl, .inr ⟨"list[int]", rfl, ?_⟩⟩
+  intro item member
+  simp only [List.mem_cons, List.not_mem_nil, or_false, or_self] at member
+  subst item
+  refine ⟨by simp, ?_⟩
+  rw [Mutable.Value.ListHasType]
+  exact ⟨[.scalar (.int 3)], rfl, .inr ⟨"int", rfl, by simp⟩⟩
+
+example : Mutable.Value.HasType
+    [.list [.ref 1], .list [.ref 2], .list [.scalar (.string "hello")]] (.ref 0) "list[list[list[str]]]" := by
+  refine ⟨[.ref 1], rfl, .inr ⟨"list[list[str]]", rfl, ?_⟩⟩
+  intro item member
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at member
+  subst item
+  refine ⟨by simp, ?_⟩
+  rw [Mutable.Value.ListHasType]
+  refine ⟨[.ref 2], rfl, .inr ⟨"list[str]", rfl, ?_⟩⟩
+  intro item member
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at member
+  subst item
+  refine ⟨by simp, ?_⟩
+  rw [Mutable.Value.ListHasType]
+  exact ⟨[.scalar (.string "hello")], rfl, .inr ⟨"str", rfl, by simp⟩⟩
+
+example : ¬ Mutable.Value.HasType [.list [.scalar (.int 1)]] (.ref 0) "list[list[int]]" := by
+  intro typed
+  obtain ⟨rows, found, _⟩ := Mutable.Value.lists_of_hasType typed
+  cases rows <;> simp at found
+
+example : ¬ Mutable.Value.HasType [.list [.ref 0]] (.ref 0) "list[list[int]]" := by
+  intro typed
+  obtain ⟨rows, found, types⟩ := Mutable.Value.lists_of_hasType typed
+  have shape : [Mutable.Value.ref 0] = rows.map Mutable.Value.ref := by simpa using found
+  cases rows with
+  | nil => simp at shape
+  | cons row rest =>
+      have same : row = 0 := by simpa using (List.cons.inj shape).1.symm
+      subst row
+      obtain ⟨values, contents⟩ := Mutable.Value.ints_of_hasType (types 0 (by simp))
+      cases values <;> simp at contents
+''')
+with project_temporary_directory(prefix="nested-inputs-") as directory:
+    directory = Path(directory)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text(api["AstLeanBridgeEmitter"](document, "NestedProbe", module).emit()
+                     + "open FormalSW.PyAst\n" + "\n".join(equations))
+    subprocess.run(["lake", "env", "lean", "-DwarningAsError=true", str(proof)], cwd=ROOT, check=True)
+print("Nested inputs: shared rows, deep annotations, invalid domains, and Python behavior passed")

@@ -28,6 +28,25 @@ def Value.edge : Value → Graph.Edge
   | .scalar c => .scalar c
   | .ref n => .ref n
 
+/-- Follow the finite annotation structure through the shared heap. -/
+def Value.ListHasType (heap : Heap) (value : Value) (kind : String) : Prop :=
+  match value with
+  | .scalar _ => False
+  | .ref address => ∃ items, heap[address]? = some (.list items) ∧
+      (kind = "list" ∨ ∃ elementKind, ∃ (_ : kind = "list[" ++ elementKind ++ "]"),
+        ∀ item ∈ items, match item with
+          | .scalar (.int _) => elementKind = "int"
+          | .scalar (.string _) => elementKind = "str"
+          | .scalar (.bool _) => elementKind = "bool"
+          | .ref _ => elementKind.startsWith "list[" = true ∧ Value.ListHasType heap item elementKind
+          | _ => False)
+termination_by kind.length
+decreasing_by
+  subst kind
+  simp only [String.length_append]
+  change elementKind.length < 5 + elementKind.length + 1
+  omega
+
 def Value.HasType (heap : Heap) (value : Value) (kind : String) : Prop :=
   match value with
   | .scalar (.int _) => kind = "int"
@@ -42,12 +61,47 @@ def Value.HasType (heap : Heap) (value : Value) (kind : String) : Prop :=
         (kind = "set" ∨ ∃ elementKind, kind = "set[" ++ elementKind ++ "]" ∧
           ∀ item ∈ items, (Data.scalar item).typeName = elementKind)
     else ∃ items, heap[address]? = some (.list items) ∧
-      (kind = "list" ∨ ∃ elementKind, kind = "list[" ++ elementKind ++ "]" ∧
+      (kind = "list" ∨ ∃ elementKind, ∃ (_ : kind = "list[" ++ elementKind ++ "]"),
         ∀ item ∈ items, match item with
           | .scalar (.int _) => elementKind = "int"
           | .scalar (.string _) => elementKind = "str"
           | .scalar (.bool _) => elementKind = "bool"
+          | .ref _ => elementKind.startsWith "list[" = true ∧ Value.ListHasType heap item elementKind
           | _ => False)
+
+/-- Nested annotations describe the same shared heap, so rows may alias. -/
+theorem Value.lists_of_hasType (typed : Value.HasType heap (.ref address) "list[list[int]]") :
+    ∃ rows : List Nat, heap[address]? = some (.list (rows.map Value.ref)) ∧
+      ∀ row ∈ rows, Value.HasType heap (.ref row) "list[int]" := by
+  obtain ⟨items, found, kinds⟩ := typed
+  have elements : ∀ item ∈ items, ∃ row, item = .ref row ∧ Value.HasType heap (.ref row) "list[int]" := by
+    rcases kinds with impossible | ⟨kind, domain, kinds⟩
+    · simp at impossible
+    · have equal : kind = "list[int]" := by
+        change "list[" ++ "list[int]" ++ "]" = "list[" ++ kind ++ "]" at domain
+        have chars := congrArg String.toList domain.symm
+        simp only [String.toList_append] at chars
+        exact String.toList_injective (List.append_cancel_left (List.append_cancel_right chars))
+      subst kind
+      intro item member
+      have typed := kinds item member
+      cases item with
+      | ref row =>
+          have nested := typed.2
+          rw [Value.ListHasType] at nested
+          exact ⟨row, rfl, nested⟩
+      | scalar value => cases value <;> simp_all
+  have contents : ∃ rows : List Nat, items = rows.map Value.ref ∧
+      ∀ row ∈ rows, Value.HasType heap (.ref row) "list[int]" := by
+    clear found kinds
+    induction items with
+    | nil => exact ⟨[], rfl, by simp⟩
+    | cons item rest ih =>
+        obtain ⟨row, rfl, typed⟩ := elements item (by simp)
+        obtain ⟨rows, same, types⟩ := ih (by intro item member; exact elements item (by simp [member]))
+        exact ⟨row :: rows, by simp [same], by simpa using And.intro typed types⟩
+  obtain ⟨rows, rfl, types⟩ := contents
+  exact ⟨rows, found, types⟩
 
 /-- Recover mathematical integer contents without changing the object's address. -/
 theorem Value.ints_of_hasType (typed : Value.HasType heap (.ref address) "list[int]") :
@@ -56,10 +110,16 @@ theorem Value.ints_of_hasType (typed : Value.HasType heap (.ref address) "list[i
   have elements : ∀ item ∈ items, ∃ n, item = .scalar (.int n) := by
     rcases kinds with impossible | ⟨kind, domain, kinds⟩
     · simp at impossible
-    · intro item member
+    · have equal : kind = "int" := by
+        change "list[" ++ "int" ++ "]" = "list[" ++ kind ++ "]" at domain
+        have chars := congrArg String.toList domain.symm
+        simp only [String.toList_append] at chars
+        exact String.toList_injective (List.append_cancel_left (List.append_cancel_right chars))
+      subst kind
+      intro item member
       have typed := kinds item member
       cases item with
-      | ref address => contradiction
+      | ref address => simp_all
       | scalar value => cases value <;> simp_all
   have contents : ∃ xs : List Int, items = xs.map (fun n => Value.scalar (.int n)) := by
     clear found kinds
