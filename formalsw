@@ -22,7 +22,7 @@ from lang.py.lean_frontend import parse_imports, parse_theorem, guard_propositio
 from lang.py.call_support import range_sum, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
-from lang.py.imports import bindings, resolve_function, resolve_python_function
+from lang.py.imports import bindings, identify_classes, resolve_function, resolve_python_function
 from lang.py.linking import link_imports
 from lang import spec_setup
 from lang.runtime import lake_command, runtime_env
@@ -706,6 +706,7 @@ def source_module(source):
             module = ast.parse(text, filename=str(source))
             module.formalsw_source = path
             module.formalsw_source_text = text
+            identify_classes(module, path)
             prepare_specification(source, module)
             if proof_path_for_source(path).is_file() or any(
                     getattr(node, 'formalsw_markers', ()) for node in (module, *module.body)):
@@ -873,13 +874,15 @@ def collect_requirements(
     """Collect proof obligations requested by source docstring markers."""
     requirements: list[Requirement] = []
     module.formalsw_source = source_path.resolve()
+    identify_classes(module, source_path)
     prepare_specification(source_path, module)
     support = SupportChecker(module)
     module.formalsw_conditions = {}
     module.formalsw_condition_coverage = []
     raw_targets = {target for node in (module, *module.body)
                    for marker in getattr(node, 'formalsw_markers', ())
-                   for _, target in support.execution_targets(marker.text)}
+                   for model, target in support.execution_targets(marker.text)
+                   if model != 'parallelFunction'}
     module_conditions, module_markers, module_unsupported = collect_conditions(
         module.formalsw_markers,
         None, module, ast_namespace)
@@ -1178,6 +1181,11 @@ class AstJsonEmitter:
             "ast": {
                 "type": "Module",
                 "body": [self.stmt(stmt) for stmt in self.module.body],
+                "class_origins": [
+                    {"name": stmt.name, "origin": stmt.formalsw_origin}
+                    for stmt in self.module.body
+                    if isinstance(stmt, ast.ClassDef) and hasattr(stmt, 'formalsw_origin')
+                ],
             },
         }
         return json.dumps(document, indent=2, ensure_ascii=False) + "\n"

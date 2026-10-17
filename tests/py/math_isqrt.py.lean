@@ -50,7 +50,7 @@ private def callerBody : List Stmt :=
   [.functionDef "caller" [{ name := "n", annotation := some (.name "int") }] (some (.name "int"))
     [.return (.call (.name "root") [.name "n"])]]
 
-private def linkedProgram : Module := ⟨callerBody ++ program.body⟩
+private def linkedProgram : Module := { body := callerBody ++ program.body }
 
 private theorem linked_extends : Extends linkedProgram program := by
   apply Extends.prepend
@@ -67,7 +67,7 @@ example (n : Nat) : ReturnsValue linkedProgram "caller" [.int n] (.int (Math.isq
   exact Evaluates.call (.cons (Evaluates.lookup rfl) .nil) ((root.result n).extend linked_extends)
 
 -- The preservation condition rejects replacing a reference implementation.
-example : ¬ Extends ⟨[.functionDef "root" [] none [.return (.constant (.int 0))]] ++ program.body⟩ program := by
+example : ¬ Extends { body := [.functionDef "root" [] none [.return (.constant (.int 0))]] ++ program.body } program := by
   intro extension
   have h := extension.functions "root" _ _ (by rfl)
   simp [findFunctionIn] at h

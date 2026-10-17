@@ -53,6 +53,11 @@ class SupportChecker:
             return True
         if isinstance(annotation, ast.Constant):
             return annotation.value is None or isinstance(annotation.value, str)
+        if (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
+                and annotation.value.id == 'list' and isinstance(annotation.slice, ast.Name)
+                and annotation.slice.id in self.classes):
+            # The legacy object-sorting model validates the class methods below.
+            return True
         return annotation_kind(annotation) is not None
 
     def check(self, name: str, stack: tuple[str, ...] = (), *, parallel: bool = False, mutable: bool = False, heap_calls: bool = False) -> tuple[UnsupportedConstruct, ...]:
@@ -666,7 +671,7 @@ class SupportChecker:
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'positional max requires a call interpreter'))
             if (uses_calls_model(self.module, function) and uses_heap_calls(self.module, function)
-                    and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction')):
+                    and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction', 'parallelFunction')):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'list helper calls require the heap call interpreter'))
             if model in ('HeapCalls.call', 'HeapCalls.scalarFunction'):

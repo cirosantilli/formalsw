@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""
+Compare class calls with Python, including binding order, aliases, and errors.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+source = '''
+class Box:
+    def __init__(self, value: int = 0) -> None:
+        self.value: int = value
+    def bump(self, n: int) -> int:
+        self.value += n
+        return self.value
+    def append(self, n: int) -> int:
+        return self.bump(n)
+    def add(self, n: int) -> int:
+        return self.bump(n)
+    def fail(self, items: list[int], n: int) -> int:
+        items.append(n)
+        return n // 0
+class Empty:
+    pass
+class BadInit:
+    def __init__(self, items: list[int], n: int) -> None:
+        items.append(n)
+        return n
+class RaiseInit:
+    def __init__(self, items: list[int], n: int) -> None:
+        items.append(n)
+        raise ValueError()
+def mark(items: list[int], n: int) -> int:
+    items.append(n)
+    return n
+def receiver(items: list[int], box: Box) -> Box:
+    items.append(100)
+    return box
+def shadow(items: list[int], box: Box, n: int) -> int:
+    items.append(n)
+    box.bump = 0
+    return n
+def replace(box: Box, n: int) -> int:
+    box.value = 999
+    return n
+'''
+
+variants = {
+    'default_init': 'return Box().value',
+    'init_arguments': 'return Box(mark(items, n)).value',
+    'init_arity': 'return Box(mark(items, n), mark(items, 2))',
+    'empty': 'return Empty()',
+    'empty_arity': 'return Empty(mark(items, n))',
+    'bad_init': 'return BadInit(items, n)',
+    'raise_init': 'return RaiseInit(items, n)',
+    'shared_alias': 'box = Box(n)\nalias = box\nbox.bump(2)\nreturn alias.value',
+    'nested_receiver': 'return Box(n).bump(2)',
+    'return_instance': 'return Box(n)',
+    'cycle': 'box = Box(n)\nbox.other = box\nreturn box',
+    'field_alias': 'box = Box(n)\nbox.items = items\nbox.items.append(n)\nreturn box.items',
+    'missing_method': 'return Box(n).missing(mark(items, n))',
+    'missing_field': 'return Box(n).missing',
+    'method_arity': 'return Box(n).bump(mark(items, n), mark(items, 2))',
+    'method_error': 'return Box(n).fail(items, n)',
+    'shadowed_method': 'box = Box(n)\nbox.bump = 0\nreturn box.bump(mark(items, n))',
+    'bound_before_arguments': 'box = Box(n)\nreturn box.bump(shadow(items, box, n))',
+    'assignment_order': 'box = Box(1)\nreceiver(items, box).value = mark(items, n)\nreturn box.value',
+    'augmented_order': 'box = Box(1)\nreceiver(items, box).value += mark(items, n)\nreturn box.value',
+    'augmented_old_value': 'box = Box(1)\nbox.value += replace(box, n)\nreturn box.value',
+    'annotation_only': 'box = Box(n)\nreceiver(items, box).missing: UnknownAnnotation\nreturn box.value',
+    'append_method': 'return Box(n).append(mark(items, 2))',
+    'add_method': 'return Box(n).add(mark(items, 2))',
+    'append_arity': 'return Box(n).append(mark(items, 1), mark(items, 2))',
+    'different_instances': 'return Box(n) == Box(n)',
+    'same_instance': 'box = Box(n)\nalias = box\nreturn box == alias',
+}
+partial = {
+    'builtin_method_value': 'return items.append',
+    'integer_method_value': 'return n.bit_length',
+    'instance_method_value': 'return Box(n).bump',
+}
+for name, body in (variants | partial).items():
+    source += f'\ndef {name}(items: list[int], n: int):\n' + ''.join(f'    {line}\n' for line in body.splitlines())
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    if value is None:
+        return '.scalar .none'
+    if type(value) is bool:
+        return f'.scalar (.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'.scalar (.int ({value}))'
+    if type(value) is str:
+        return f'.scalar (.string {json.dumps(value, ensure_ascii=False)})'
+    raise AssertionError(value)
+
+
+with project_temporary_directory(prefix='class-calls-') as temporary:
+    directory = Path(temporary)
+    path = directory / 'source.py'
+    path.write_text(source)
+    module = api['source_module'](path)
+    checker = SupportChecker(module)
+    namespace = {}
+    exec(compile(source, str(path), 'exec'), namespace)
+    classes = {id(value): name for name, value in namespace.items() if isinstance(value, type)}
+    checks = []
+    for name in variants:
+        issues = checker.check(name, heap_calls=True)
+        assert not issues, (name, issues)
+        for n in (-3, 0, 7):
+            items = [4]
+            try:
+                result = namespace[name](items, n)
+            except Exception as error:
+                expected_outcome = f'outcome matches .error {{typeName := {json.dumps(type(error).__name__)}, args := _}}'
+                observed = snapshot_roots([items])
+            else:
+                expected_outcome = 'outcome matches .ok _'
+                observed = snapshot_roots([items, result])
+            for node in observed[1]:
+                if type(node[0]) is list:
+                    node[0] = ['static_object', str(path.resolve()), classes[node[0][1]]]
+            checks.append(f'''
+-- {name}({n})
+example : (match (HeapCalls.call Probe.module {json.dumps(name)} [.ref 0, .scalar (.int ({n}))]
+    [.list [.scalar (.int 4)]]).execution.observe 2000 with
+  | .done (.ok completion) =>
+      let outcome := completion.outcome
+      ({expected_outcome}) && (Graph.observedBool
+        ((Graph.compare completion.snapshot ({data(observed)})).observe 2000) == some true)
+  | _ => false) = true := by native_decide
+''')
+    for name in partial:
+        assert callable(namespace[name]([4], 7))
+        checks.append(f'''
+example : (HeapCalls.call Probe.module {json.dumps(name)} [.ref 0, .scalar (.int 7)]
+    [.list [.scalar (.int 4)]]).execution.observe 200 = .unsupported := by native_decide
+''')
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+                     + 'open FormalSW.PyAst\nset_option maxRecDepth 8192\n' + '\n'.join(checks))
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+    helper = directory / 'helper.py'
+    helper.write_text('''
+class ImportedBox:
+    def __init__(self, n: int) -> None:
+        self.value = n
+    def read(self) -> int:
+        return self.value
+def make(n: int) -> int:
+    return ImportedBox(n).read()
+''')
+    caller = directory / 'caller.py'
+    caller.write_text('''
+from helper import make
+def caller(n: int) -> int:
+    """
+    @formalsw: Returns
+    """
+    return make(n)
+''')
+    linked = api['source_module'](caller)
+    assert not SupportChecker(linked).check('caller', heap_calls=True)
+    imported_class = next(node for node in linked.body if isinstance(node, ast.ClassDef))
+    assert imported_class.formalsw_origin == str(helper.resolve())
+    document = directory / 'imported.json'
+    document.write_text(api['AstJsonEmitter'](linked).emit())
+    proof = directory / 'Imported.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Imported', linked).emit() + f'''
+open FormalSW.PyAst
+set_option maxRecDepth 8192
+example : Imported.module.classOrigins = [("ImportedBox", {json.dumps(str(helper.resolve()))})] := rfl
+example (n : Int) : (HeapCalls.scalarFunction Imported.module "caller" [.int n]).Returns :=
+  ⟨.int n, Execution.finishes_of_observe (fuel := 100) rfl⟩
+''')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+rejected = (
+    'class Box(object):\n    pass',
+    'class Box:\n    value = 0',
+    'class Box:\n    def __getattr__(self, name: str): return 0',
+    'class Box:\n    def __init__(self): self.__value = 1',
+    'class Box:\n    @property\n    def value(self): return 0',
+    'class Box:\n    def bump(self): return 0\n    def bump(self): return 1',
+    'class Box:\n    def bit_length(self): return 1',
+    'class Box:\n    pass\ndef patch():\n    Box.value = 1',
+    'class Box:\n    pass\nBox = int',
+)
+for snippet in rejected:
+    program = ast.parse(snippet + '\ndef run(n: int) -> int:\n    box = Box()\n    return n\n')
+    assert SupportChecker(program).check('run', heap_calls=True), snippet
+
+print(f'{len(checks)} class executions, imported class identity, and {len(rejected)} unsupported-class checks passed')

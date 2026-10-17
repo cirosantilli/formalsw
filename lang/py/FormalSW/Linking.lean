@@ -118,7 +118,7 @@ theorem Extends.prepend (prelude : List Stmt) (source : Module)
     (freshFunctions : ∀ ⦃name⦄, name ∈ functionNames prelude →
       name ∈ functionNames source.body ++ importNames source.body → False)
     (freshImports : ∀ ⦃name⦄, name ∈ importNames prelude → name ∈ importNames source.body → False) :
-    Extends ⟨prelude ++ source.body⟩ source := by
+    Extends { body := prelude ++ source.body } source := by
   constructor
   · intro name args body found
     have member : name ∈ functionNames source.body := (function_found _ _).mp (by simp [found])

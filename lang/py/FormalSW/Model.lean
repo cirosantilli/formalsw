@@ -219,6 +219,8 @@ deriving Repr, BEq, Lean.ToExpr
 structure Module where
   /-- Top-level statements in source order. -/
   body : List Stmt
+  /-- Canonical source identities of statically loaded class definitions. -/
+  classOrigins : List (String × String) := []
 deriving Repr, BEq, Lean.ToExpr
 
 /-- A modeled Python exception object. -/
@@ -468,7 +470,13 @@ def Module.fromJsonDocument? (json : Lean.Json) : Except String Module := do
   let ast ← jsonField json "ast"
   if (← jsonString ast "type") != "Module" then
     throw "the top-level AST node must have type Module"
-  return { body := ← jsonArray ast "body" Stmt.fromJson? }
+  let origins ← match ast.getObjVal? "class_origins" with
+    | .error _ => pure []
+    | .ok origins => do
+        let origins ← origins.getArr?
+        origins.toList.mapM fun entry => do
+          return (← jsonString entry "name", ← jsonString entry "origin")
+  return { body := ← jsonArray ast "body" Stmt.fromJson?, classOrigins := origins }
 
 end FormalSW.PyAst
 
@@ -567,6 +575,12 @@ def findClassBodyIn : List Stmt → String → Option (List Stmt)
 def Module.findClassBody (module : Module) (name : String) : Option (List Stmt) :=
   findClassBodyIn module.body name
 
+/-- Construction requires a nominal source identity, not just a matching name. -/
+def Module.findClass (module : Module) (name : String) : Option (String × List Stmt) := do
+  let origin ← module.classOrigins.lookup name
+  let body ← module.findClassBody name
+  return (origin, body)
+
 /-- The name of a method statement, ignoring non-method class-body entries. -/
 def Stmt.methodName? : Stmt → Option String
   | .functionDef name _ _ _ => some name
@@ -592,11 +606,15 @@ The structural predicates describe the intended model, while this digest makes
 every parsed detail part of the checked obligation. It is not a trust boundary:
 the generated JSON has already been decoded into `Module` before hashing.
 -/
+private structure ModuleSourceView where
+  body : List Stmt
+deriving Repr
+
 def Module.fingerprint (module : Module) : UInt64 :=
   let body := match module.body with
     | .expr (.constant (.string _)) :: rest => rest
     | body => body
-  hash (reprStr ({ body } : Module))
+  hash (reprStr ({ body } : ModuleSourceView))
 
 /-- Recognize a wrapper constructor that stores one annotated scalar field. -/
 def isScalarWrapperInit (payloadAnnotation : String) : Stmt → Bool

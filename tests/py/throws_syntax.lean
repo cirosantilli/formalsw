@@ -2,7 +2,7 @@ import FormalSW
 
 open FormalSW.PyAst
 
-private def _this_module : Module := ⟨[]⟩
+private def _this_module : Module := { body := [] }
 private def low : Value := .int 1
 private def high : Value := .int 2
 private def text : Value := .string []
@@ -66,12 +66,12 @@ example (left right : Execution Constant) (h : left.Equiv right) :
     left.Returns ↔ right.Returns := h.returns_iff
 
 -- An extra infinite loop must invalidate the recognized sorting program.
-private def alteredSort : Module := ⟨[
+private def alteredSort : Module := { body := [
   .functionDef "sort" [{ name := "values", annotation := some (.name "list") }]
     (some (.name "list"))
     (.whileDo (.constant (.bool true)) [.expr (.constant .none)] [] ::
       mergeSortBody "sort" "values")
-]⟩
+] }
 example : isMergeSortFunction alteredSort "sort" = false := by native_decide
 example : (listFunction alteredSort "sort" []).observe 5 = .unsupported := by native_decide
 

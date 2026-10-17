@@ -6,7 +6,7 @@ namespace tests.py.linked_calls
 open FormalSW.PyAst FormalSW.PyAst.Calls
 
 private theorem extends_reference : Extends LinkedCallsAst.module LinkReferenceAst.module := by
-  change Extends ⟨LinkedCallsAst.module.body.take 2 ++ LinkReferenceAst.module.body⟩ LinkReferenceAst.module
+  change Extends { body := LinkedCallsAst.module.body.take 2 ++ LinkReferenceAst.module.body } LinkReferenceAst.module
   apply Extends.prepend
   · intro name member
     change name ∈ ["caller", "imported_double"] at member

@@ -8,6 +8,7 @@ from lang.py.imports import bindings
 from lang.py.defaults import literal_default
 from lang.py.sorting_support import uses_sort_model
 from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays
+from lang.py.class_support import ordinary_attribute, plain_class_methods
 
 
 # These builtin constructors preserve positional arguments without the special
@@ -221,6 +222,7 @@ def has_partial_primitives(module, function):
 def uses_heap_calls(module, function):
     """Find list allocation or use in the transitive local call graph."""
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    classes = {node.name for node in module.body if isinstance(node, ast.ClassDef)}
     pending, visited = [function], set()
     while pending:
         current = pending.pop()
@@ -246,7 +248,7 @@ def uses_heap_calls(module, function):
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
-                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("bytearray", "set", "sorted")
+                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "set", "sorted"}
                     or isinstance(node, ast.Attribute) and node.attr in ('append', 'add')):
                 return True
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
@@ -292,17 +294,26 @@ def uses_calls_model(module, function):
 
 def check_calls(module, function, reject, *, heap=False):
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    classes = {node.name: node for node in module.body if isinstance(node, ast.ClassDef)}
     libraries = library_functions(module)
     visited = set()
+    visited_classes = set()
 
-    def visit(function):
-        if function.name in visited:
+    def visit_class(cls):
+        if cls.name in visited_classes:
             return
-        visited.add(function.name)
-        if sum(isinstance(node, ast.FunctionDef) and node.name == function.name
+        visited_classes.add(cls.name)
+        for method in plain_class_methods(module, cls, reject):
+            visit(method, cls)
+
+    def visit(function, owner=None):
+        if id(function) in visited:
+            return
+        visited.add(id(function))
+        if owner is None and sum(isinstance(node, ast.FunctionDef) and node.name == function.name
                for node in module.body) != 1:
             reject(function, 'call targets must have one module-level definition')
-        for node in module.body:
+        for node in module.body if owner is None else ():
             if isinstance(node, ast.FunctionDef):
                 continue
             for item in ast.walk(node):
@@ -316,7 +327,7 @@ def check_calls(module, function, reject, *, heap=False):
                             (alias.asname or alias.name.split('.')[0]) in (function.name, '*')
                             for alias in item.names)):
                     reject(item, 'module-level call targets must not be rebound')
-        if function.decorator_list or function.args.posonlyargs or \
+        if function.decorator_list or getattr(function, 'type_params', []) or function.args.posonlyargs or \
                 function.args.kwonlyargs or function.args.vararg or function.args.kwarg:
             reject(function, 'call execution requires undecorated plain positional functions')
         for default in function.args.defaults:
@@ -335,9 +346,14 @@ def check_calls(module, function, reject, *, heap=False):
             return set().union(*(stored_names(child) for child in ast.iter_child_nodes(node)))
         locals_.update(stored_names(function))
         hidden_tuples = unpacked_tuple_displays(function) if heap else set()
-        if locals_ & functions.keys():
+        if locals_ & (functions.keys() | classes.keys()):
             reject(function, 'local bindings must not shadow module-level call targets')
-        for arg in function.args.args:
+        for index, arg in enumerate(function.args.args):
+            if owner is not None and index == 0:
+                continue
+            if heap and isinstance(arg.annotation, ast.Name) and arg.annotation.id in classes:
+                visit_class(classes[arg.annotation.id])
+                continue
             kind = annotation_kind(arg.annotation)
             if kind not in ('int', 'str', 'bytes', 'bool') and not (heap and kind and (kind.startswith(('list[', 'set[')) or kind in ('bytes', 'bytearray'))):
                 reject(arg, 'call arguments require scalar annotations or supported heap list annotations' if heap
@@ -394,6 +410,10 @@ def check_calls(module, function, reject, *, heap=False):
                 return
             if isinstance(node, ast.Name) and node.id in scope:
                 return
+            if heap and isinstance(node, ast.Attribute):
+                ordinary_attribute(node, reject)
+                recurse(node.value)
+                return
             if isinstance(node, ast.JoinedStr):
                 if not plain_fstring(node):
                     reject(node, 'f-strings support scalar fields with empty format specifications and optional !s')
@@ -403,7 +423,7 @@ def check_calls(module, function, reject, *, heap=False):
                 return
             if heap and isinstance(node, (ast.List, ast.Tuple)):
                 if (isinstance(node, ast.Tuple) and node.elts and node not in hidden_tuples
-                        and not any(isinstance(item, (ast.Name, ast.Call, ast.Subscript, ast.List))
+                        and not any(isinstance(item, (ast.Name, ast.Call, ast.Subscript, ast.List, ast.Attribute))
                                     for item in node.elts)):
                     reject(node, 'nonempty tuple displays need a runtime element; constant-tuple pooling is not modeled')
                 for item in node.elts:
@@ -475,6 +495,19 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'a local math module shadows the modeled standard library')
                 for item in node.args:
                     recurse(item)
+            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes:
+                if node.func.id in scope or node.keywords:
+                    reject(node, 'class construction requires an unshadowed name and positional arguments')
+                for item in node.args:
+                    recurse(item)
+                visit_class(classes[node.func.id])
+            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                ordinary_attribute(node.func, reject)
+                if node.keywords:
+                    reject(node, 'method calls require positional arguments')
+                recurse(node.func.value)
+                for item in node.args:
+                    recurse(item)
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'sorted':
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, 'sorting requires the unshadowed builtin sorted')
@@ -544,6 +577,16 @@ def check_calls(module, function, reject, *, heap=False):
                     if node.value is not None:
                         expr(node.value)
                 elif (heap and isinstance(node, ast.Assign) and len(node.targets) == 1
+                      and isinstance(node.targets[0], ast.Attribute)):
+                    expr(node.value)
+                    ordinary_attribute(node.targets[0], reject)
+                    expr(node.targets[0].value)
+                elif heap and isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Attribute):
+                    if node.value is not None:
+                        expr(node.value)
+                    ordinary_attribute(node.target, reject)
+                    expr(node.target.value)
+                elif (heap and isinstance(node, ast.Assign) and len(node.targets) == 1
                       and isinstance(node.targets[0], (ast.Tuple, ast.List))
                       and all(isinstance(target, ast.Name) for target in node.targets[0].elts)):
                     if isinstance(node.value, ast.Tuple):
@@ -563,6 +606,8 @@ def check_calls(module, function, reject, *, heap=False):
                     expr(node.value)
                     expr(node.targets[0])
                 elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                    expr(ast.BinOp(node.target, node.op, node.value))
+                elif heap and isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Attribute):
                     expr(ast.BinOp(node.target, node.op, node.value))
                 elif isinstance(node, ast.Assert):
                     expr(node.test)

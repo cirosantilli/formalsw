@@ -1,4 +1,4 @@
-import lang.py.FormalSW.MutableGlobals
+import lang.py.FormalSW.Instances
 import lang.py.FormalSW.Linking
 import lang.py.FormalSW.ScalarSort
 
@@ -223,6 +223,10 @@ theorem inplace_add_lists (heap : Heap) (left right : Nat) (leftItems rightItems
 
 inductive Operation where
   | call (name : String)
+  /-- A bound function captures its receiver and definition before argument effects. -/
+  | method (receiver : Value) (args : List Arg) (body : List Stmt)
+  | notCallable
+  | setField (name : String) (value : Value)
   | raiseException (typeName : String)
   | list
   | tuple
@@ -237,6 +241,12 @@ inductive Operation where
   | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
 
 inductive Frame where
+  | initialized (address : Nat)
+  | attribute (name : String)
+  | methodReceiver (name : String) (arguments : List Expr) (env : Env)
+  | assignAttribute (base : Expr) (name : String) (rest : List Stmt) (env : Env)
+  | augmentAttribute (name : String) (op : BinOp) (right : Expr) (rest : List Stmt) (env : Env)
+  | writeAttribute (receiver : Value) (name : String) (rest : List Stmt) (env : Env)
   | comprehensionResult (address : Nat)
   | binaryLeft (op : BinOp) (right : Expr) (env : Env) (inPlace : Bool)
   | binaryRight (op : BinOp) (left : Value) (inPlace : Bool)
@@ -369,6 +379,8 @@ def enumerateStart : Value → Eval Int
   | _ => Mutable.error "TypeError"
 
 def primitive : Operation → List Value → Eval Value
+  | .notCallable, _ => Mutable.error "TypeError"
+  | .setField name value, [receiver] => Mutable.writeField receiver name value
   | .raiseException typeName, values => do
       let args ← values.mapM fun value => match value with
         | .scalar value => pure value
@@ -384,6 +396,7 @@ def primitive : Operation → List Value → Eval Value
   | .setSlice replacement, [base, lower, upper, stride] => Mutable.setSlice base lower upper stride replacement
   | .append address, [value] => Mutable.appendItem address value
   | .add address, [value] => Mutable.addItem address value
+  | .append _, _ | .add _, _ => Mutable.error "TypeError"
   | .builtin .len, [value] => Mutable.length value
   | .builtin .bytearray, values => Mutable.bytearray values
   | .builtin .set, [] => Mutable.allocateSet []
@@ -460,6 +473,70 @@ def library (module : Module) (name : String) (values : List Value) : Eval Value
     | .ref _ => Mutable.error "TypeError"
   scalarResult (some (function scalars))
 
+/-- Validate the instance's nominal type before consulting its class definition. -/
+def instanceClass (module : Module) (origin name : String) : Eval (List Stmt) :=
+  match module.findClass name with
+  | some (identity, body) => if identity = origin then pure body else Mutable.unsupported
+  | none => Mutable.unsupported
+
+/-- Method binding precedes argument evaluation, including failure and shadowing. -/
+def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Operation := do
+  match receiver with
+  | .ref address =>
+      match (← get)[address]? with
+      | some (.instance origin className fields) =>
+          let body ← instanceClass module origin className
+          if name = "__class__" ∨ name = "__dict__" ∨ name = "__weakref__" then Mutable.unsupported
+          else match fields.lookup name with
+          | some _ => pure .notCallable
+          | none => match findFunctionIn body name with
+              | some (args, body) => pure (.method receiver args body)
+              | none => if name.startsWith "__" then Mutable.unsupported else Mutable.error "AttributeError"
+      | some (.list _) | some (.bytearray _) =>
+          if name = "append" then pure (.append address) else Mutable.unsupported
+      | some (.set _) =>
+          if name = "add" then pure (.add address)
+          else if name = "append" then Mutable.error "AttributeError" else Mutable.unsupported
+      | some (.tuple _) =>
+          if name = "append" ∨ name = "add" then Mutable.error "AttributeError" else Mutable.unsupported
+      | none => Mutable.unsupported
+  | .scalar _ =>
+      if name = "append" ∨ name = "add" then Mutable.error "AttributeError" else Mutable.unsupported
+
+/-- Stored fields are values; first-class bound methods are outside this model. -/
+def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
+  match receiver with
+  | .scalar _ => Mutable.unsupported
+  | .ref address => match (← get)[address]? with
+      | some (.instance origin className fields) =>
+          let body ← instanceClass module origin className
+          if name = "__class__" ∨ name = "__dict__" ∨ name = "__weakref__" then Mutable.unsupported
+          else match fields.lookup name with
+            | some value => pure value
+            | none =>
+                if (findFunctionIn body name).isSome ∨ name.startsWith "__" then Mutable.unsupported
+                else Mutable.error "AttributeError"
+      -- Builtin attributes can be bound methods; no first-class method values yet.
+      | _ => Mutable.unsupported
+
+def invokeMethod (anchors : Nat) (receiver : Value) (args : List Arg) (body : List Stmt)
+    (values : List Value) (stack : List Frame) (heap : Heap) : Step State Completion :=
+  match completeArguments args (receiver :: values) with
+  | some values => .next ⟨.block (executableBody body) (argumentEnv args values), stack, heap⟩
+  | none => done anchors heap (.error { typeName := "TypeError", args := [] })
+
+def construct (module : Module) (anchors : Nat) (name : String) (values : List Value)
+    (stack : List Frame) (heap : Heap) : Step State Completion :=
+  match module.findClass name with
+  | none => .unsupported
+  | some (origin, body) =>
+      match findFunctionIn body "__init__" with
+      | none => if values.isEmpty then result anchors heap (Mutable.allocateInstance origin name) stack
+          else done anchors heap (.error { typeName := "TypeError", args := [] })
+      | some (args, body) =>
+          invokeMethod anchors (.ref heap.length) args body values (.initialized heap.length :: stack)
+            (heap ++ [.instance origin name []])
+
 def step (module : Module) (anchors : Nat) (state : State) : Step State Completion :=
   let ⟨work, stack, heap⟩ := state
   match work with
@@ -474,7 +551,11 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           match completeArguments args values with
           | some values => .next ⟨.block (executableBody body) (argumentEnv args values), stack, heap⟩
           | none => done anchors heap (.error { typeName := "TypeError", args := [] })
-      | none => result anchors heap (library module name values) stack
+      | none => match libraryFunction module name with
+          | some _ => result anchors heap (library module name values) stack
+          | none => construct module anchors name values stack heap
+  | .operation (.method receiver args body) values =>
+      invokeMethod anchors receiver args body values stack heap
   | .operation (.comprehension element generators env) values =>
       comprehensionStart anchors element generators env values stack heap
   | .operation operation values => result anchors heap (primitive operation values) stack
@@ -484,6 +565,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .name name => match env name with
           | some value => .next ⟨.value value, stack, heap⟩
           | none => done anchors heap (.error { typeName := "UnboundLocalError", args := [] })
+      | .attribute base field => .next ⟨.expr base env, .attribute field :: stack, heap⟩
       | .binOp a op b => .next ⟨.expr a env, .binaryLeft op b env false :: stack, heap⟩
       | .unaryOp op expression => .next ⟨.expr expression env, .unary op :: stack, heap⟩
       | .compare a [(op, b)] => .next ⟨.expr a env, .compareLeft op b env :: stack, heap⟩
@@ -508,7 +590,11 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .call (.attribute base "append") [item] => .next ⟨.expr base env, .appendReceiver item env :: stack, heap⟩
       | .call (.attribute base "add") [item] => .next ⟨.expr base env, .addReceiver item env :: stack, heap⟩
       | .call (.attribute (.name name) field) args =>
-          .next (argumentsState (.call (name ++ "." ++ field)) env [] args stack heap)
+          if (env name).isSome then
+            .next ⟨.expr (.name name) env, .methodReceiver field args env :: stack, heap⟩
+          else .next (argumentsState (.call (name ++ "." ++ field)) env [] args stack heap)
+      | .call (.attribute base field) args =>
+          .next ⟨.expr base env, .methodReceiver field args env :: stack, heap⟩
       | _ => .unsupported
   | .block body env =>
       match body with
@@ -524,6 +610,11 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .assign [.subscript base index] expression :: rest =>
           .next ⟨.expr expression env, .assignItem base index rest env :: stack, heap⟩
       | .assign [.name name] expression :: rest => .next ⟨.expr expression env, .assign name rest env :: stack, heap⟩
+      | .assign [.attribute base name] expression :: rest
+        | .annAssign (.attribute base name) _ (some expression) :: rest =>
+          .next ⟨.expr expression env, .assignAttribute base name rest env :: stack, heap⟩
+      | .annAssign (.attribute base _) _ none :: rest =>
+          .next ⟨.expr base env, .discard rest env :: stack, heap⟩
       | .annAssign (.name name) _ (some expression) :: rest =>
           .next ⟨.expr expression env, .assign name rest env :: stack, heap⟩
       | .annAssign (.name _) _ none :: rest => .next ⟨.block rest env, stack, heap⟩
@@ -533,6 +624,8 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | none => .unsupported
       | .augAssign (.name name) op expression :: rest =>
           .next ⟨.expr (.name name) env, .binaryLeft op expression env true :: .assign name rest env :: stack, heap⟩
+      | .augAssign (.attribute base name) op expression :: rest =>
+          .next ⟨.expr base env, .augmentAttribute name op expression rest env :: stack, heap⟩
       | .assert condition message :: rest =>
           .next ⟨.expr condition env, .assertion message rest env :: stack, heap⟩
       | .ifThen condition yes no :: rest => .next ⟨.expr condition env, .branch yes no rest env :: stack, heap⟩
@@ -600,6 +693,21 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       match stack with
       | [] => done anchors heap (.ok value)
       | frame :: stack => match frame with
+          | .initialized address => match value with
+              | .scalar .none => .next ⟨.value (.ref address), stack, heap⟩
+              | _ => done anchors heap (.error { typeName := "TypeError", args := [] })
+          | .attribute name => result anchors heap (getAttribute module value name) stack
+          | .methodReceiver name expressions env =>
+              run anchors heap (bindMethod module value name) fun method heap =>
+                .next (argumentsState method env [] expressions stack heap)
+          | .assignAttribute base name rest env =>
+              .next (argumentsState (.setField name value) env [] [base] (.discard rest env :: stack) heap)
+          | .augmentAttribute name op right rest env =>
+              run anchors heap (getAttribute module value name) fun previous heap =>
+                .next ⟨.expr right env, .binaryRight op previous true ::
+                  .writeAttribute value name rest env :: stack, heap⟩
+          | .writeAttribute receiver name rest env =>
+              result anchors heap (Mutable.writeField receiver name value) (.discard rest env :: stack)
           | .comprehensionResult address => .next ⟨.value (.ref address), stack, heap⟩
           | .binaryLeft op right env inPlace => .next ⟨.expr right env, .binaryRight op value inPlace :: stack, heap⟩
           | .binaryRight op left inPlace =>
@@ -625,12 +733,20 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
               .next ⟨.expr (if truth then yes else no) env, stack, heap⟩
           | .arguments operation done rest env => .next (argumentsState operation env (done ++ [value]) rest stack heap)
           | .addReceiver item env =>
-              run anchors heap (Mutable.addReceiver value) fun address heap =>
-                .next (argumentsState (.add address) env [] [item] stack heap)
+              match value with
+              | .ref address => match heap[address]? with
+                  | some (.instance _ _ _) => run anchors heap (bindMethod module value "add") fun method heap =>
+                      .next (argumentsState method env [] [item] stack heap)
+                  | _ => run anchors heap (Mutable.addReceiver value) fun address heap =>
+                      .next (argumentsState (.add address) env [] [item] stack heap)
+              | .scalar _ => done anchors heap (.error { typeName := "AttributeError", args := [] })
           | .appendReceiver item env => match value with
               | .scalar _ => done anchors heap (.error { typeName := "AttributeError", args := [] })
-              | .ref address => run anchors heap (Mutable.appendReceiver value) fun _ heap =>
-                  .next (argumentsState (.append address) env [] [item] stack heap)
+              | .ref address => match heap[address]? with
+                  | some (.instance _ _ _) => run anchors heap (bindMethod module value "append") fun method heap =>
+                      .next (argumentsState method env [] [item] stack heap)
+                  | _ => run anchors heap (Mutable.appendReceiver value) fun _ heap =>
+                      .next (argumentsState (.append address) env [] [item] stack heap)
           | .assignItem base index rest env =>
               .next (argumentsState (.setItem value) env [] [base, index] (.discard rest env :: stack) heap)
           | .assignSlice base lower upper stride rest env =>
@@ -779,8 +895,80 @@ theorem ReturnsValue.scalar_returns
     (h : ReturnsValue module name (values.map Mutable.Value.scalar) [] (.scalar value) heap) :
     (scalarFunction module name values).Returns := ⟨value, ReturnsValue.scalar_finishes h⟩
 
+/-- Linking preserves class definitions and their constructor bindings too. -/
+structure Extends (target source : Module) : Prop extends Calls.Extends target source where
+  classes : ∀ name origin body, source.findClass name = some (origin, body) →
+    target.findClass name = some (origin, body) ∧
+    findFunctionIn target.body name = findFunctionIn source.body name ∧
+    libraryFunction target name = libraryFunction source name
+
+theorem Extends.of_classless (extension : Calls.Extends target source)
+    (classless : source.classOrigins = []) : Extends target source := by
+  refine ⟨extension, ?_⟩
+  intro name origin body found
+  simp [Module.findClass, classless] at found
+
+theorem Extends.refl (module : Module) : Extends module module :=
+  ⟨Calls.Extends.refl module, fun _ _ _ found => ⟨found, rfl, rfl⟩⟩
+
+theorem Extends.trans (first : Extends middle source) (second : Extends target middle) :
+    Extends target source := by
+  refine ⟨first.toExtends.trans second.toExtends, ?_⟩
+  intro name origin body found
+  obtain ⟨middle, functions, libraries⟩ := first.classes name origin body found
+  obtain ⟨target, otherFunctions, otherLibraries⟩ := second.classes name origin body middle
+  exact ⟨target, otherFunctions.trans functions, otherLibraries.trans libraries⟩
+
+private theorem bindMethod_extend (extension : Extends target source)
+    (supported : bindMethod source receiver name heap ≠ none) :
+    bindMethod target receiver name heap = bindMethod source receiver name heap := by
+  cases receiver with
+  | scalar value => rfl
+  | ref address =>
+      cases found : heap[address]? with
+      | none => simp [bindMethod, found]
+      | some object =>
+          cases object with
+          | list items | tuple items | bytearray items | set items => simp [bindMethod, found]
+          | «instance» origin className fields =>
+              cases defined : source.findClass className with
+              | none => simp [bindMethod, found, instanceClass, defined, Mutable.unsupported] at supported
+              | some definition =>
+                  rcases definition with ⟨identity, body⟩
+                  have preserved := (extension.classes className identity body defined).1
+                  simp [bindMethod, found, instanceClass, defined, preserved]
+
+private theorem attribute_extend (extension : Extends target source)
+    (supported : getAttribute source receiver name heap ≠ none) :
+    getAttribute target receiver name heap = getAttribute source receiver name heap := by
+  cases receiver with
+  | scalar value => rfl
+  | ref address =>
+      cases found : heap[address]? with
+      | none => simp [getAttribute, found]
+      | some object =>
+          cases object with
+          | list items | tuple items | bytearray items | set items =>
+              simp [getAttribute, found]
+          | «instance» origin className fields =>
+              cases defined : source.findClass className with
+              | none => simp [getAttribute, found, instanceClass, defined, Mutable.unsupported] at supported
+              | some definition =>
+                  rcases definition with ⟨identity, body⟩
+                  have preserved := (extension.classes className identity body defined).1
+                  simp [getAttribute, found, instanceClass, defined, preserved]
+
+private theorem run_extend (left right : Eval α)
+    (same : left heap ≠ none → right heap = left heap)
+    (supported : run anchors heap left next ≠ .unsupported) :
+    run anchors heap right next = run anchors heap left next := by
+  have defined : left heap ≠ none := by
+    intro missing
+    simp [run, missing] at supported
+  simp only [run, same defined]
+
 /-- Imported helpers retain their checked bodies and share the caller's heap. -/
-theorem step_extend (extension : Calls.Extends target source) (state : State)
+theorem step_extend (extension : Extends target source) (state : State)
     (supported : step source anchors state ≠ .unsupported) :
     step target anchors state = step source anchors state := by
   rcases state with ⟨work, stack, heap⟩
@@ -791,17 +979,47 @@ theorem step_extend (extension : Calls.Extends target source) (state : State)
           cases found : findFunctionIn source.body name with
           | none =>
               cases imported : libraryFunction source name with
-              | none => simp [step, found, library, imported, result, run, Mutable.unsupported] at supported
+              | none =>
+                  cases defined : source.findClass name with
+                  | none => simp [step, found, imported, construct, defined] at supported
+                  | some definition =>
+                      rcases definition with ⟨origin, body⟩
+                      obtain ⟨preserved, functions, libraries⟩ := extension.classes name origin body defined
+                      simp [step, found, imported, construct, defined, preserved, functions, libraries]
               | some function =>
-                  obtain ⟨absent, same⟩ := extension.libraryFunction_eq found imported
+                  obtain ⟨absent, same⟩ := extension.toExtends.libraryFunction_eq found imported
                   simp only [step, found, absent, library, imported, same]
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList | raiseException _ | comprehension _ _ _ => rfl
-  | expr _ _ | block _ _ | value _ | startRange _ _ _ _ _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList | raiseException _ | comprehension _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+  | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
+  | value value =>
+      cases stack with
+      | nil => rfl
+      | cons frame stack =>
+          cases frame with
+          | «attribute» name =>
+              exact run_extend _ _ (attribute_extend extension) supported
+          | methodReceiver name arguments env =>
+              exact run_extend _ _ (bindMethod_extend extension) supported
+          | augmentAttribute name op right rest env =>
+              exact run_extend _ _ (attribute_extend extension) supported
+          | addReceiver item env | appendReceiver item env =>
+              cases value with
+              | scalar _ => rfl
+              | ref address =>
+                  cases found : heap[address]? with
+                  | none => simp [step, found]
+                  | some object =>
+                      cases object with
+                      | list items | tuple items | bytearray items | set items => simp [step, found]
+                      | «instance» origin className fields =>
+                          simp only [step, found] at supported ⊢
+                          exact run_extend _ _ (bindMethod_extend extension) supported
+          | _ => rfl
 
-theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Calls.Extends target source) :
+theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Extends target source) :
     Reaches target anchors initial final := by
   induction h with
   | refl => exact .refl
@@ -811,7 +1029,7 @@ theorem Reaches.extend (h : Reaches source anchors initial final) (extension : C
       exact transition
 
 theorem ReturnsValue.extend (h : ReturnsValue source name values heap value finalHeap)
-    (extension : Calls.Extends target source) : ReturnsValue target name values heap value finalHeap :=
+    (extension : Extends target source) : ReturnsValue target name values heap value finalHeap :=
   fun anchors stack => (h anchors stack).extend extension
 
 
@@ -945,7 +1163,8 @@ inductive Arguments (module : Module) (env : Env) : List Expr → Heap → List 
       Arguments module env expressions middle values finalHeap →
       Arguments module env (expression :: expressions) heap (value :: values) finalHeap
 
-private theorem arguments_reach (h : Arguments module env expressions heap values finalHeap)
+/-- Argument expressions retain left-to-right effects for every call operation. -/
+theorem arguments_reach (h : Arguments module env expressions heap values finalHeap)
     (operation : Operation) (done : List Value) (anchors : Nat) (stack : List Frame) :
     Reaches module anchors (argumentsState operation env done expressions stack heap)
       ⟨.operation operation (done ++ values), stack, finalHeap⟩ := by
@@ -966,18 +1185,22 @@ theorem library_call (arguments : Arguments module env expressions heap values m
     (absent : findFunctionIn module.body name = none)
     (operation : library module name values middle = some (.ok value, finalHeap)) :
     Evaluates module env (.call (.name name) expressions) heap value finalHeap := by
-  apply call arguments
-  intro anchors stack
-  exact .next (by simp [step, absent, result, run, operation]) .refl
+  cases imported : libraryFunction module name with
+  | none => simp [library, imported, Mutable.unsupported] at operation
+  | some implementation =>
+      apply call arguments
+      intro anchors stack
+      exact .next (by simp [step, absent, imported, result, run, operation]) .refl
 
 theorem qualified_call (notAppend : field ≠ "append")
     (arguments : Arguments module env expressions heap values middle)
     (callee : ReturnsValue module (alias ++ "." ++ field) values middle value finalHeap)
-    (notAdd : field ≠ "add" := by decide) :
+    (notAdd : field ≠ "add" := by decide)
+    (unbound : env alias = none := by rfl) :
     Evaluates module env (.call (.attribute (.name alias) field) expressions) heap value finalHeap := by
   intro anchors stack
   apply Reaches.next (following := argumentsState (.call (alias ++ "." ++ field)) env [] expressions stack heap)
-    (by simp [step, notAppend, notAdd])
+    (by simp [step, notAppend, notAdd, unbound])
   exact (arguments_reach arguments (.call (alias ++ "." ++ field)) [] anchors stack).trans (callee anchors stack)
 
 theorem list (arguments : Arguments module env expressions heap values finalHeap) :

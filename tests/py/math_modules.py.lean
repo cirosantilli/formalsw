@@ -53,7 +53,7 @@ theorem heap_import.«Supported» (a b : Int) :
 
 -- Linking preserves module imports as well as directly imported functions.
 private def prelude : List Stmt := [.functionDef "unrelated" [] none [.return (.constant .none)]]
-private theorem extension : Extends ⟨prelude ++ program.body⟩ program := by
+private theorem extension : Extends { body := prelude ++ program.body } program := by
   apply Extends.prepend
   · intro name member
     simp only [prelude, functionNames, List.mem_cons, List.not_mem_nil, or_false] at member
@@ -61,7 +61,7 @@ private theorem extension : Extends ⟨prelude ++ program.body⟩ program := by
     decide
   · simp [prelude, importNames]
 
-example (n : Nat) : ReturnsValue ⟨prelude ++ program.body⟩ "root" [.int n] (.int (Math.isqrt n)) :=
+example (n : Nat) : ReturnsValue { body := prelude ++ program.body } "root" [.int n] (.int (Math.isqrt n)) :=
   (root.result n).extend extension
 
 end tests.py.math_modules

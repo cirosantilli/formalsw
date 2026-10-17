@@ -9,7 +9,7 @@ private def env (n : Int) : ScalarEnv := fun name => if name = "n" then some (.i
 private abbrev allowed (n : Int) := Condition program (env n) RequiresImportedAst.requires_checked_0
 
 private theorem extends_reference : Extends program LinkReferenceAst.module := by
-  change Extends ⟨program.body.take 2 ++ LinkReferenceAst.module.body⟩ LinkReferenceAst.module
+  change Extends { body := program.body.take 2 ++ LinkReferenceAst.module.body } LinkReferenceAst.module
   apply Extends.prepend
   · intro name member
     change name ∈ ["checked", "_formalsw_requires_target"] at member

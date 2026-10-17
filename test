@@ -101,6 +101,7 @@ def main() -> int:
         TestCase("unpacking loops and local annotations", Path("tests/py/unpack_loops.py"), 0, "All 5 checks passed"),
         TestCase("sequence lengths and product loops", Path("tests/py/sequences.py"), 0, "All 5 checks passed"),
         TestCase("shared heap helper calls", Path("tests/py/heap_calls.py"), 0, "All 4 checks passed"),
+        TestCase("plain classes and shared instance fields", Path("tests/py/classes.py"), 0, "All 2 checks passed"),
         TestCase("scalar sets and shared set inputs", Path("tests/py/sets.py"), 0, "All 7 checks passed"),
         TestCase("tuple values and heap unpacking", Path("tests/py/tuple_calls.py"), 0, "All 4 checks passed"),
         TestCase("scalar sorting and fresh result lists", Path("tests/py/sorted_calls.py"), 0, "All 3 checks passed"),
@@ -341,6 +342,7 @@ def main() -> int:
         ["lake", "env", "lean", "-DwarningAsError=true", "tests/py/object_equivalence.lean"],
         [sys.executable, "tests/py/graph_equivalence_checks"],
         [sys.executable, "tests/py/instance_heap_checks"],
+        [sys.executable, "tests/py/class_call_checks"],
         [sys.executable, "tests/py/mutable_global_checks"],
     )]
     graph_passed = all(result.returncode == 0 for result in graph_results)

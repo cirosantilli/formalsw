@@ -4,6 +4,7 @@ import lang.py.FormalSW.ScalarSort
 import lang.py.FormalSW.MutableGlobals
 import lang.py.FormalSW.Instances
 import lang.py.FormalSW.HeapCalls
+import lang.py.FormalSW.ClassCalls
 import Lean
 import lang.py.FormalSW.Model
 import lang.py.FormalSW.Calls
