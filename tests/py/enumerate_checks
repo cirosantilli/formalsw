@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+Compare enumerate loops with Python, including mutable iterables and start effects.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n
+def fail(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n // 0
+def unsupported(xs: list[int], start: int):
+    values = set()
+    for i, value in enumerate(values):
+        xs.append(i)
+    return xs
+'''
+bodies = {
+    'ordinary': 'for i, value in enumerate(xs, start):\n    out.append([i, value])',
+    'default': 'for i, value in enumerate(xs):\n    out.append([i, value])',
+    'list_target': 'for [i, value] in enumerate(xs, start):\n    out.append([i, value])',
+    'same_target': 'for value, value in enumerate(xs, start):\n    out.append(value)',
+    'counter_rebound': 'for i, value in enumerate(xs, start):\n    out.append(i)\n    i = 99',
+    'source_rebound': 'for i, value in enumerate(xs, start):\n    out.append([i, value])\n    xs = []',
+    'grow': 'for i, value in enumerate(xs, start):\n    out.append([i, value])\n    if i < start + 3:\n        xs.append(i)',
+    'replace': 'for i, value in enumerate(xs, start):\n    out.append([i, value])\n    xs[-1] = i',
+    'skip': 'for i, value in enumerate(xs, start):\n    if value == 0:\n        continue\n    out.append([i, value])\nelse:\n    out.append(9)',
+    'stop': 'for i, value in enumerate(xs, start):\n    if value == 0:\n        break\n    out.append([i, value])\nelse:\n    out.append(9)',
+    'return_early': 'for i, value in enumerate(xs, start):\n    return [i, value]',
+    'nested': 'for i, value in enumerate(xs, start):\n    for j, other in enumerate(xs):\n        out.append([i, j, value, other])',
+    'start_mutation': 'for i, value in enumerate(xs, touch(xs, start)):\n    out.append([i, value])',
+    'start_failure': 'for i, value in enumerate(xs, fail(xs, start)):\n    out.append(value)',
+    'invalid_iterable': 'for i, value in enumerate(touch(xs, start), touch(xs, start + 1)):\n    out.append(value)',
+    'error_order': 'for i, value in enumerate(touch(xs, start), fail(xs, start + 1)):\n    out.append(value)',
+    'invalid_start': 'for i, value in enumerate(xs, "bad"):\n    out.append(value)',
+    'bool_start': 'for i, value in enumerate(xs, True):\n    out.append([i, value])',
+    'text': 'for i, value in enumerate("λ😀x", start):\n    out.append([i, value])',
+    'bytes_value': 'for i, value in enumerate(b"az", start):\n    out.append([i, value])',
+    'buffer': 'values = bytearray([1, 2, 3])\nfor i, value in enumerate(values):\n    out.append([i, value])\n    values[-1] = 8',
+    'tuple_value': 'for i, value in enumerate((start, start + 1)):\n    out.append([i, value])',
+    'references': 'for i, value in enumerate([xs, xs], start):\n    value.append(i)\n    out.append(value)',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(xs: list[int], start: int):\n    out = []\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+    source += '    return out\n'
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, start in itertools.product(bodies, ([], [0], [3, 0, 7]), (-2, 0, 2 ** 80)):
+    value = initial.copy()
+    try:
+        result = world[name](value, start)
+        error = None
+    except (TypeError, ZeroDivisionError) as exception:
+        result, error = None, type(exception).__name__
+    snapshot = data(snapshot_roots([value] + ([result] if error is None else [])))
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    call = f'HeapCalls.call source "{name}" [.ref 0, .scalar (.int ({start}))] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, start={start}',
+        f'example : (match ({call}).execution.observe 3000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
+for target, arguments in (('pair', 'xs'), ('a, b, c', 'xs'), ('a, *b', 'xs'), ('a, xs[0]', 'xs'),
+                          ('a, b', ''), ('a, b', 'xs, 0, 1'), ('a, b', 'xs, start=0')):
+    text = f'def f(xs: list[int]):\n    for {target} in enumerate({arguments}):\n        pass\n'
+    assert SupportChecker(ast.parse(text)).check('f'), text
+for binding in ('enumerate = 1\n', 'from somewhere import enumerate\n'):
+    text = binding + 'def f(xs: list[int]):\n    for i, x in enumerate(xs):\n        pass\n'
+    assert SupportChecker(ast.parse(text)).check('f'), text
+
+with project_temporary_directory(prefix='enumerate-checks-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(xs: list[int]) -> int:\n    """\n    @formalsw: ' + marker
+                        + '\n    """\n    for i, value in enumerate(set()):\n        pass\n    return 0\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} enumerate Python comparisons passed, including aliases, starts, and loop control')

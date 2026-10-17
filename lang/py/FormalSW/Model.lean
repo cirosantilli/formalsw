@@ -183,6 +183,8 @@ inductive Stmt where
   | rangeStepLoop : String → Int → Int → Int → List Stmt → List Stmt → Stmt
   /-- Internal sequence iterator: a scalar sequence or a shared heap address. -/
   | sequenceStepLoop : String → SequenceSource → Nat → List Stmt → List Stmt → Stmt
+  /-- Internal enumerate iterator with an unobservable, immediately unpacked pair. -/
+  | enumerateStepLoop : String → String → SequenceSource → Nat → Int → List Stmt → List Stmt → Stmt
   /-- A Python `if` statement. -/
   | ifThen : Expr -> List Stmt -> List Stmt -> Stmt
   /-- A Python `while` statement. -/
@@ -867,7 +869,8 @@ mutual
     | .loopResume loop => 1 + loop.operationCount
     | .rangeLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
-    | .rangeStepLoop _ _ _ _ body otherwise | .sequenceStepLoop _ _ _ body otherwise =>
+    | .rangeStepLoop _ _ _ _ body otherwise | .sequenceStepLoop _ _ _ body otherwise
+      | .enumerateStepLoop _ _ _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
     | .functionDef _ args returns body =>

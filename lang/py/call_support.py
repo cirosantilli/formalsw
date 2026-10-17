@@ -564,6 +564,19 @@ def check_calls(module, function, reject, *, heap=False):
                         expr(argument)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)
+                elif (heap and isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
+                      and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'enumerate'):
+                    if 'enumerate' in locals_ or bindings(module, 'enumerate'):
+                        reject(node, 'enumerate loops require the unshadowed builtin enumerate')
+                    if (not isinstance(node.target, (ast.Tuple, ast.List)) or len(node.target.elts) != 2
+                            or not all(isinstance(target, ast.Name) for target in node.target.elts)):
+                        reject(node, 'enumerate loops require immediate unpacking into two local names')
+                    if not 1 <= len(node.iter.args) <= 2 or node.iter.keywords:
+                        reject(node, 'enumerate loops support an iterable and optional positional start')
+                    for argument in node.iter.args:
+                        expr(argument)
+                    block(node.body, loop_depth + 1)
+                    block(node.orelse, loop_depth)
                 elif heap and isinstance(node, ast.For) and isinstance(node.target, ast.Name):
                     expr(node.iter)
                     block(node.body, loop_depth + 1)

@@ -244,6 +244,8 @@ inductive Frame where
   | assertion (message : Option Expr) (rest : List Stmt) (env : Env)
   | assertionMessage
   | sequence (name : String) (body otherwise following : List Stmt) (env : Env)
+  | enumerateSource (index name : String) (start : Expr) (body otherwise following : List Stmt) (env : Env)
+  | enumerateStart (index name : String) (source : Value) (body otherwise following : List Stmt) (env : Env)
   | assignItem (base index : Expr) (rest : List Stmt) (env : Env)
   | assignSlice (base lower upper stride : Expr) (rest : List Stmt) (env : Env)
   | rangeArguments (name : String) (done : List Value) (rest : List Expr)
@@ -307,6 +309,12 @@ def sequenceValue : SequenceSource → Value
 
 @[simp] theorem sequenceValue_source (value : Value) :
     sequenceValue (sequenceSource value) = value := by cases value <;> rfl
+
+/-- Enumerate accepts an integer start, including a Boolean, with no size limit. -/
+def enumerateStart : Value → Eval Int
+  | .scalar (.int value) => pure value
+  | .scalar (.bool value) => pure (if value then 1 else 0)
+  | _ => Mutable.error "TypeError"
 
 def primitive : Operation → List Value → Eval Value
   | .raiseException typeName, values => do
@@ -472,6 +480,20 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           .next (rangeState name env [] expressions body otherwise rest stack heap)
       | .forIn (.name name) iterable body otherwise :: rest =>
           .next ⟨.expr iterable env, .sequence name body otherwise rest env :: stack, heap⟩
+      | .forIn (.tuple [.name index, .name name]) (.call (.name "enumerate") [iterable]) body otherwise :: rest
+        | .forIn (.list [.name index, .name name]) (.call (.name "enumerate") [iterable]) body otherwise :: rest =>
+          .next ⟨.expr iterable env,
+            .enumerateSource index name (.constant (.int 0)) body otherwise rest env :: stack, heap⟩
+      | .forIn (.tuple [.name index, .name name]) (.call (.name "enumerate") [iterable, start]) body otherwise :: rest
+        | .forIn (.list [.name index, .name name]) (.call (.name "enumerate") [iterable, start]) body otherwise :: rest =>
+          .next ⟨.expr iterable env, .enumerateSource index name start body otherwise rest env :: stack, heap⟩
+      | .enumerateStepLoop index name source position counter body otherwise :: rest =>
+          run anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
+            match items[position]? with
+            | none => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
+            | some value => .next ⟨.block (body ++ [Calls.loopContinuation body
+                (.enumerateStepLoop index name source (position + 1) (counter + 1) body otherwise)] ++ rest)
+                (setLocal (setLocal env index (.scalar (.int counter))) name value), stack, heap⟩
       | .sequenceStepLoop name source position body otherwise :: rest =>
           run anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
             match items[position]? with
@@ -550,6 +572,13 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
               run anchors heap (Mutable.sequence value) fun _ heap =>
                 .next ⟨.block (.sequenceStepLoop name (sequenceSource value) 0 body otherwise :: following) env,
                   stack, heap⟩
+          | .enumerateSource index name start body otherwise following env =>
+              .next ⟨.expr start env, .enumerateStart index name value body otherwise following env :: stack, heap⟩
+          | .enumerateStart index name source body otherwise following env =>
+              run anchors heap (enumerateStart value) fun counter heap =>
+                run anchors heap (Mutable.sequence source) fun _ heap =>
+                  .next ⟨.block (.enumerateStepLoop index name (sequenceSource source) 0 counter body otherwise :: following) env,
+                    stack, heap⟩
           | .assertionMessage => match value with
               | .scalar value => done anchors heap (.error { typeName := "AssertionError", args := [value] })
               -- Exception arguments currently have a scalar observation boundary.
@@ -1315,6 +1344,55 @@ theorem sequence_done (sequence : Mutable.sequence (sequenceValue source) heap =
     (finished : items[position]? = none)
     (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
     BlockContinues module env [.sequenceStepLoop name source position body otherwise]
+      heap finalEnv finalHeap :=
+  fun following anchors stack => .next (by simp [step, run, sequence, finished]) (rest following anchors stack)
+
+/-- Evaluate the iterable and explicit start before constructing the iterator. -/
+theorem for_enumerate_start
+    (iterable : Evaluates module env expression heap source afterSource)
+    (start : Evaluates module env startExpression afterSource startValue middle)
+    (counter : enumerateStart startValue middle = some (.ok initial, middle))
+    (sequence : Mutable.sequence source middle = some (.ok items, middle))
+    (rest : BlockContinues module env
+      [.enumerateStepLoop index name (sequenceSource source) 0 initial body otherwise] middle finalEnv finalHeap) :
+    BlockContinues module env
+      [.forIn (.tuple [.name index, .name name]) (.call (.name "enumerate") [expression, startExpression]) body otherwise]
+      heap finalEnv finalHeap := by
+  intro following anchors stack
+  exact .next rfl ((iterable anchors _).trans (.next rfl ((start anchors _).trans
+    (.next (by simp [step, run, counter, sequence]) (rest following anchors stack)))))
+
+theorem for_enumerate
+    (iterable : Evaluates module env expression heap source middle)
+    (sequence : Mutable.sequence source middle = some (.ok items, middle))
+    (rest : BlockContinues module env
+      [.enumerateStepLoop index name (sequenceSource source) 0 0 body otherwise] middle finalEnv finalHeap) :
+    BlockContinues module env
+      [.forIn (.tuple [.name index, .name name]) (.call (.name "enumerate") [expression]) body otherwise]
+      heap finalEnv finalHeap := by
+  intro following anchors stack
+  exact .next rfl ((iterable anchors _).trans (.next rfl (.next rfl
+    (.next (by simp [step, run, enumerateStart, sequence]) (rest following anchors stack)))))
+
+/-- The hidden pair cannot escape immediate unpacking; its two bindings are ordered. -/
+theorem enumerate_step
+    (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
+    (item : items[position]? = some value)
+    (rest : BlockContinues module (setLocal (setLocal env index (.scalar (.int counter))) name value)
+      (body ++ [Calls.loopContinuation body
+        (.enumerateStepLoop index name source (position + 1) (counter + 1) body otherwise)])
+      heap finalEnv finalHeap) :
+    BlockContinues module env [.enumerateStepLoop index name source position counter body otherwise]
+      heap finalEnv finalHeap := by
+  intro following anchors stack
+  refine .next ?_ (rest following anchors stack)
+  simp [step, run, sequence, item, List.append_assoc]
+
+theorem enumerate_done
+    (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
+    (finished : items[position]? = none)
+    (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
+    BlockContinues module env [.enumerateStepLoop index name source position counter body otherwise]
       heap finalEnv finalHeap :=
   fun following anchors stack => .next (by simp [step, run, sequence, finished]) (rest following anchors stack)
 
