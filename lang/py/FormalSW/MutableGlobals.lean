@@ -69,6 +69,71 @@ def Value.HasType (heap : Heap) (value : Value) (kind : String) : Prop :=
           | .ref _ => elementKind.startsWith "list[" = true ∧ Value.ListHasType heap item elementKind
           | _ => False)
 
+theorem Value.ListHasType.of_heap_preserved {heap other : Heap} (typed : Value.ListHasType heap value kind)
+    (preserved : ∀ (address : Nat) (object : Object), heap[address]? = some object → other[address]? = some object) :
+    Value.ListHasType other value kind := by
+  rw [Value.ListHasType.eq_def] at typed ⊢
+  cases value with
+  | scalar _ => exact typed.elim
+  | ref address =>
+      obtain ⟨items, found, kinds⟩ := typed
+      refine ⟨items, preserved address _ found, ?_⟩
+      rcases kinds with plain | ⟨elementKind, domain, elements⟩
+      · exact .inl plain
+      · refine .inr ⟨elementKind, domain, ?_⟩
+        intro item member
+        have inner := elements item member
+        cases item with
+        | scalar constant => cases constant <;> exact inner
+        | ref row => exact ⟨inner.1, inner.2.of_heap_preserved preserved⟩
+termination_by kind.length
+decreasing_by
+  subst kind
+  simp only [String.length_append]
+  change elementKind.length < 5 + elementKind.length + 1
+  omega
+
+/-- Allocating other objects preserves types, including shared nested lists. -/
+theorem Value.HasType.of_heap_preserved {heap other : Heap} (typed : Value.HasType heap value kind)
+    (preserved : ∀ (address : Nat) (object : Object), heap[address]? = some object → other[address]? = some object) :
+    Value.HasType other value kind := by
+  cases value with
+  | scalar constant => cases constant <;> exact typed
+  | ref address =>
+      simp only [Value.HasType] at typed ⊢
+      by_cases buffer : kind = "bytearray"
+      · simp only [if_pos buffer] at typed ⊢
+        obtain ⟨bytes, found⟩ := typed
+        exact ⟨bytes, preserved address _ found⟩
+      · simp only [if_neg buffer] at typed ⊢
+        by_cases isSet : kind = "set" ∨ kind = "set[int]" ∨ kind = "set[str]" ∨ kind = "set[bool]"
+        · simp only [if_pos isSet] at typed ⊢
+          obtain ⟨items, found, kinds⟩ := typed
+          exact ⟨items, preserved address _ found, kinds⟩
+        · simp only [if_neg isSet] at typed ⊢
+          obtain ⟨items, found, kinds⟩ := typed
+          refine ⟨items, preserved address _ found, ?_⟩
+          rcases kinds with plain | ⟨elementKind, domain, elements⟩
+          · exact .inl plain
+          · refine .inr ⟨elementKind, domain, ?_⟩
+            intro item member
+            have inner := elements item member
+            cases item with
+            | scalar constant => cases constant <;> exact inner
+            | ref row => exact ⟨inner.1, inner.2.of_heap_preserved preserved⟩
+
+theorem Value.HasType.append (typed : Value.HasType heap value kind) (extra : Heap) :
+    Value.HasType (heap ++ extra) value kind := by
+  apply typed.of_heap_preserved
+  intro address object found
+  have bounded : address < heap.length := by
+    by_cases inside : address < heap.length
+    · exact inside
+    · have missing := List.getElem?_eq_none (Nat.le_of_not_gt inside)
+      simp [missing] at found
+  rw [List.getElem?_append_left bounded]
+  exact found
+
 /-- Nested annotations describe the same shared heap, so rows may alias. -/
 theorem Value.lists_of_hasType (typed : Value.HasType heap (.ref address) "list[list[int]]") :
     ∃ rows : List Nat, heap[address]? = some (.list (rows.map Value.ref)) ∧

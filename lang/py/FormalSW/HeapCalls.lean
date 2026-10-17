@@ -208,6 +208,14 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
               return left
           | _ => Mutable.binary op left right
 
+/-- List concatenation reads both lists before replacing the left object's contents. -/
+theorem inplace_add_lists (heap : Heap) (left right : Nat) (leftItems rightItems : List Value)
+    (leftFound : heap[left]? = some (.list leftItems))
+    (rightFound : heap[right]? = some (.list rightItems)) :
+    inplace .add (.ref left) (.ref right) heap =
+      some (.ok (.ref left), heap.set left (.list (leftItems ++ rightItems))) := by
+  simp [inplace, listInplace, Mutable.array, Mutable.sequence, leftFound, rightFound, Except.map]
+
 inductive Operation where
   | call (name : String)
   | raiseException (typeName : String)
