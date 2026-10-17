@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "formalsw"
-version = "0.2.0"
+version = "0.3.0"
 description = "Prove properties of Python source code with Lean"
 readme = {file = "README.adoc", content-type = "text/plain"}
 requires-python = "==3.14.4"
