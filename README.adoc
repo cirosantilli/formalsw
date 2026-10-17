@@ -190,6 +190,91 @@ cleanxy tests/py/range_sum.py
 
 which has a proof at link:tests/py/range_sum.py.lean[].
 
+=== Shared counter: the lost-update race
+
+link:tests/py/parallel_shared_counter.py[] is a runnable synchronization example with checked proofs in link:tests/py/parallel_shared_counter.py.lean[]. Two workers each increment the same counter once. Starting at zero, the expected final value is two.
+
+An increment reads the counter, computes the next value, then writes it back. Without synchronization, one update can overwrite another:
+
+[cols="1,2,2,1",options="header"]
+|===
+|Step |Worker 0 |Worker 1 |Counter
+|1 |Reads 0 | |0
+|2 | |Reads 0 |0
+|3 |Writes 0 + 1 | |1
+|4 | |Writes 0 + 1 |1
+|===
+
+`increment_safe` holds the same shared `threading.Lock` from before the read until after the write. While one worker holds the mutex, the other cannot acquire it. Its read therefore sees the first worker's completed update. Python spells these operations `mutex.acquire()` and `mutex.release()`; see the https://docs.python.org/3/library/threading.html#lock-objects[Python Lock documentation].
+
+The synchronized function asks for this guarantee:
+
+[source,python]
+----
+@cleanxy: theorem preserves_both_updates :
+  Ensures(Parallel(List.replicate 2 (this_function [.ref 0, .lock 0]),
+  { objects := [.array [.int 0]] }), fun state => state.item 0 0 = some (.int 2))
+----
+
+Read this as: “Run two copies of this function sharing a counter initially zero. Every modeled run must finish with counter equal to two.”
+
+The unsynchronized function proves the counterexample:
+
+[source,python]
+----
+@cleanxy: theorem can_lose_an_update :
+  CanReturn(Parallel(List.replicate 2 (this_function [.ref 0, .lock 0]),
+  { objects := [.array [.int 0]] }), { objects := [.array [.int 1]] })
+----
+
+It also proves `Not Ensures(...)` for the two-update guarantee. The proof file includes the concrete losing schedule from the table. The synchronized proof exhaustively checks every enabled interleaving of the actual compiled Python body; it includes deadlock as a failure rather than ignoring unfinished runs.
+
+Run the real threads, or check the proofs:
+
+[source,sh]
+----
+python3 tests/py/parallel_shared_counter.py
+./cleanxy tests/py/parallel_shared_counter.py
+----
+
+The executable runs 20 trials of each version. It prints actual failed assertions and the lost-update percentage for the unsafe version, then runs the synchronized version. Expected unsafe assertions are caught so both versions are visible; a synchronized failure is re-raised. Both versions call `sleep(0)` between reading and writing to make a thread switch easy to observe. The safe version holds the mutex during that yield. Failure percentages vary with scheduling; the proofs do not depend on observing a race in a particular run.
+
+The modeled setup is explicit: two workers, one integer cell, and one initially unlocked shared mutex. Primitive reads, writes, acquire, and release are atomic steps under sequentially consistent interleaving. This proves the stated two-worker property, not a claim about arbitrary worker counts or Python programs. Signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside this model.
+
+=== Doubly linked list: corrupted links
+
+link:tests/py/parallel_doubly_linked_list.py[] inserts two distinct, preallocated nodes after the same head sentinel. This exposes a structural invariant: whenever `node.next` points to another node, that node's `prev` must point back, and conversely for `prev`.
+
+Both workers can read the original tail as their successor. If node B wins the `HEAD.next` write but node A wins the `TAIL.prev` write, the resulting reachable links disagree:
+
+[source,text]
+----
+HEAD.next = B
+B.next    = TAIL
+TAIL.prev = A       # Should be B!
+----
+
+The unsafe worker proves this particular corrupt state is reachable and that reciprocal links are not guaranteed. The synchronized worker holds the same mutex across the entire insertion and proves both nodes remain reachable in either order, with matching forward/backward links and unchanged sentinel boundaries.
+
+Its specification uses two calls with different node arguments:
+
+[source,lean]
+----
+Ensures(Parallel([
+  this_function [.ref 0, .ref 2, .lock 0],
+  this_function [.ref 0, .ref 3, .lock 0]], DoublyLinked.initial), DoublyLinked.valid)
+----
+
+Here addresses 0 and 1 identify HEAD and TAIL; addresses 2 and 3 identify the inserted nodes. Both calls share mutex 0. `DoublyLinked.initial` and the invariant `DoublyLinked.valid` are ordinary Lean definitions in link:tests/py/parallel_doubly_linked_list.py.lean[], alongside the explicit corrupting schedule and checked proofs. They describe this example's data structure; the interpreter itself works with heap references and fields.
+
+[source,sh]
+----
+python3 tests/py/parallel_doubly_linked_list.py
+./cleanxy tests/py/parallel_doubly_linked_list.py
+----
+
+The executable prints actual assertion failures and corruption rates for the unsafe version, then runs the locked version. A regression test also replays the proven bad schedule against the real Python worker by pausing at statement boundaries, so testing does not depend on a lucky thread switch.
+
 == Further usage
 
 Directories are also accepted; every `.py` file under the directory is checked:
@@ -525,7 +610,75 @@ def f(n: int) -> int:
 
 Continuation lines are included until a blank line or another marker. The example above requires `f.returns_input` inside the file-derived proof namespace. Raw theorem markers may also appear in a module docstring; module docstrings do not support the function-specific short forms.
 
-The constructs below are custom Lean syntax available through `import CleanXY`. Lean parses and expands them to execution predicates. Use ordinary Lean negation, such as `Not Throws(...)` or `¬ Throws(...)`.
+The constructs below are available through `import CleanXY`. Lean parses the custom predicate and call syntax; state types and observation helpers are ordinary Lean definitions. Use ordinary Lean negation, such as `Not Throws(...)` or `¬ Throws(...)`.
+
+[[raw-lean-this-module]]
+==== _this_module
+
+CleanXY supplies `_this_module` as the enclosing Python module's AST. Comparison syntax uses it to look up Python comparison methods, including in nested parenthesized expressions. The binding appears in generated stubs alongside `this_function`.
+
+[[raw-lean-can-return]]
+==== CanReturn
+
+`CanReturn(run, state)` states that some modeled schedule finishes with exactly that shared state. For the counter, a final array containing one proves a lost update. For the doubly linked list, a final heap with inconsistent forward/backward links proves structural corruption. The state is the result of the concurrent run, not a worker's Python return value.
+
+It does not say every schedule fails or assign a probability to failure. `ParallelRun.Ensures.of_canReturn` says that any reachable state must satisfy an established guarantee; a reachable corrupt state can therefore disprove a proposed invariant.
+
+[[raw-lean-diverges]]
+==== diverges
+
+`diverges(this_function())` proves an infinite execution by supplying an invariant that contains the initial state and always permits another execution step. `Execution.diverges_not_halts` turns this proof into `Not Halts(this_function())`. See the `forever` example in link:tests/py/termination.py.lean[].
+
+[[raw-lean-ensures]]
+==== Ensures
+
+`Ensures(run, postcondition)` requires every maximal modeled run to finish successfully with a shared state satisfying the postcondition. For example:
+
+[source,lean]
+----
+Ensures(Parallel(List.replicate 2 (this_function [.ref 0, .lock 0]),
+  { objects := [.array [.int 0]] }), fun state => state.item 0 0 = some (.int 2))
+----
+
+This checks the value at index 0 of shared array 0 after both workers finish. A linked-list specification can instead check relationships between fields throughout the heap. Deadlocks, exceptions, incomplete exploration, and empty outcome sets cannot satisfy this guarantee.
+
+[[raw-lean-halts]]
+==== Halts
+
+`Halts(this_function(n))` states that this particular call terminates, either normally or by raising an exception. `Halts(left < right)` states the same for a comparison.
+
+The model in link:lang/py/CleanXY/Execution.lean[] and link:lang/py/CleanXY/Runtime.lean[] uses a deterministic transition system. Termination requires a finite derivation ending in a normal or exceptional outcome. Observation fuel only limits how long an observer runs; exhausting it produces `pending`, never a fabricated return.
+
+`Not Halts(this_function(values))` states that a call does not terminate. link:tests/py/sort.py[`Looping.__le__`] and its checked proof show that sorting two such objects does not halt. Unsupported source constructs cause validation errors and cannot be used to satisfy this requirement.
+
+[[raw-lean-parallel]]
+==== Parallel
+
+`Parallel(calls, initialState)` explores the interleavings of an explicit list of worker calls over one shared heap. Calls may invoke different functions with different argument lists. There is no required parameter count, parameter order, shared-cell layout, or mutex argument. link:tests/py/parallel_calls.py[] demonstrates workers with one and three arguments, nonzero list indices, and no mutex parameter.
+
+A call such as `this_function [.ref 0, .ref 2, .lock 0]` passes two object references and a mutex reference. Repeating an address shares the same object; repeating a lock identity shares the same mutex. Different mutex identities are independent: locking two different mutexes does not protect their shared data.
+
+The interpreter supports straight-line assignments of local scalar values and references, separate reads/writes of list items and plain object fields, integer arithmetic, mutex acquire/release, `sleep(0)`, and `pass`. Worker parameters use scalar, typed scalar-list, plain-class, or `Lock` annotations. Plain classes may initialize data fields in `__init__`; inheritance, descriptors, general method calls, allocation during a worker, branches, and loops need further model support. Split compound shared expressions into individual reads and writes so scheduling points are explicit. Primitive imports are checked only when needed.
+
+The explorer chooses every enabled worker at every step. Each step consumes one operation, so the initial total operation count bounds this finite exploration. Deadlocks, exceptions, unsupported operations, and budget exhaustion remain failing outcomes. The model uses sequentially consistent atomic field/item accesses and mutex operations, with progress through enabled steps. It does not model signals, resource exhaustion, or operating-system starvation.
+
+[[raw-lean-parallel-replay]]
+==== parallelReplay
+
+`parallelReplay initialState schedule` executes a concrete schedule, where the initial configuration contains the shared heap and initialized workers. Worker indices start at zero. Each index selects that worker's next operation. Selecting a blocked worker makes the schedule invalid; stopping before all workers finish is incomplete.
+
+The counter's schedule `[0, 1, 0, 1, 0, 1]` makes both workers read zero, both yield, and both write one. The doubly linked list's proof gives a longer schedule where different workers win the forward and backward pointer writes.
+
+[[raw-lean-python-comparison]]
+==== python_comparison
+
+`python_comparison(left < right)` produces the comparison execution used by `Returns`, `Halts`, and `Throws`. These wrappers expand comparisons automatically, so it is usually unnecessary to write this helper yourself.
+
+Supported operators are `<`, `<=`, `>`, `>=`, `==`, and `!=`, with operands of type `CleanXY.PyAst.Value`. Parentheses are allowed; Python comparison chains and arithmetic on modeled values are not yet supported. Ordinary `<` outside these wrappers retains its usual Lean meaning.
+
+For example, `python_comparison(left <= right)` expands to `comparison _this_module .ltE left right`. `.ltE` and `.lt` are Lean's shorthand for comparison-operation constructors, selected using the expected type.
+
+Custom same-class comparisons execute the supported method AST, including loops, on empty objects or objects with an integer `value` field. `.object "Looping"` represents an empty object; `.object "DummyInt" (some 2)` represents one with `value = 2`. These Lean constructors describe object state; they do not execute Python `__init__`. Reflected comparison, `NotImplemented`, general method calls, and arbitrary object layouts remain unsupported.
 
 [[raw-lean-returns]]
 ==== Returns
@@ -543,14 +696,33 @@ Returns(f(x)) ↔ Halts(f(x)) ∧ Not Throws(f(x))
 
 The merge-sort theorem above assumes successful termination of the `<=` operations the algorithm actually uses. Absence of `<` exceptions is insufficient: comparison methods may differ or loop forever. The execution model requires an exact match with the supported merge-sort AST template and produces the actual merged list. Changing the body outside that template causes a validation error for requirements needing this model.
 
-[[raw-lean-halts]]
-==== Halts
+[[raw-lean-shared-object]]
+==== SharedObject
 
-`Halts(this_function(n))` states that this particular call terminates, either normally or by raising an exception. `Halts(left < right)` states the same for a comparison.
+`.array values` represents a mutable Python list. `.object fields` represents a plain object's mutable fields, for example `.object [("prev", .none), ("next", .ref 1)]`. List indexing includes nonzero and negative integer indices; invalid indexing produces an exception. Field access uses the field name, independently of a worker's parameter names.
 
-The model in link:lang/py/CleanXY/Execution.lean[] and link:lang/py/CleanXY/Runtime.lean[] uses a deterministic transition system. Termination requires a finite derivation ending in a normal or exceptional outcome. Observation fuel only limits how long an observer runs; exhausting it produces `pending`, never a fabricated return.
+Objects used by workers are created in the initial heap. The current interpreter does not execute allocation or constructors during a worker call.
 
-`Not Halts(this_function(values))` states that a call does not terminate. link:tests/py/sort.py[`Looping.__le__`] and its checked proof show that sorting two such objects does not halt. Unsupported source constructs cause validation errors and cannot be used to satisfy this requirement.
+[[raw-lean-shared-state]]
+==== SharedState
+
+A shared state contains `objects`, a list of <<raw-lean-shared-object,SharedObject>> values indexed by their reference addresses, and `locked`, the identities of currently held mutexes. Both default to empty lists. For example, `{ objects := [.array [.int 0]] }` creates one zero-valued counter, with all mutexes initially unlocked.
+
+Specifications can observe `state.item address index` or `state.field address "name"`; each lookup returns `some value` when present. A successful concurrent outcome contains the complete final shared state, allowing invariants to relate multiple objects and fields.
+
+[[raw-lean-shared-value]]
+==== SharedValue
+
+A worker argument or local value can be `.int n`, `.string s`, `.bool b`, `.none`, `.ref address`, or `.lock identity`. References and mutex identities have distinct namespaces: `.ref 0` identifies heap object 0, while `.lock 0` identifies mutex 0. Copying a reference preserves identity and aliasing; it does not copy the object.
+
+[[raw-lean-this-function]]
+==== this_function
+
+`this_function` binds the enclosing Python function using its source module and name. For scalar execution, calls accept zero or more arguments, for example `Returns(this_function())`, `Throws(this_function(1))`, or `Returns(this_function(a, b))`.
+
+In a concurrent specification, `this_function arguments` describes one worker call. `arguments` is a list of <<raw-lean-shared-value,SharedValue>> values in Python parameter order, such as `[.ref 0, .ref 2, .lock 0]`. Each call receives its own local variables while references identify shared objects and mutexes. `parallelFunction module "name" arguments` constructs a call to another function in the same module.
+
+The binding appears in generated stubs; `dsimp only` exposes the proposition for a proof. Other Lean identifiers can be used when bound to compatible execution functions or worker-call builders.
 
 [[raw-lean-throws]]
 ==== Throws
@@ -563,34 +735,6 @@ Throws(f(x)) → Halts(f(x))
 ----
 
 `Not Throws(...)` permits an infinite execution. Use <<raw-lean-returns,Returns>> when successful termination is required.
-
-[[raw-lean-this-function]]
-==== this_function
-
-`this_function` is bound to the enclosing function's execution using its module and name. Calls accept zero or more arguments, for example `Returns(this_function())`, `Throws(this_function(1))`, or `Returns(this_function(a, b))`.
-
-The binding appears in generated stubs; `dsimp only` exposes the proposition for a proof. Other Lean identifiers can be used when bound to functions producing an `Execution`.
-
-[[raw-lean-this-module]]
-==== _this_module
-
-CleanXY supplies `_this_module` as the enclosing Python module's AST. Comparison syntax uses it to look up Python comparison methods, including in nested parenthesized expressions. The binding appears in generated stubs alongside `this_function`.
-
-[[raw-lean-python-comparison]]
-==== python_comparison
-
-`python_comparison(left < right)` produces the comparison execution used by `Returns`, `Halts`, and `Throws`. These wrappers expand comparisons automatically, so it is usually unnecessary to write this helper yourself.
-
-Supported operators are `<`, `<=`, `>`, `>=`, `==`, and `!=`, with operands of type `CleanXY.PyAst.Value`. Parentheses are allowed; Python comparison chains and arithmetic on modeled values are not yet supported. Ordinary `<` outside these wrappers retains its usual Lean meaning.
-
-For example, `python_comparison(left <= right)` expands to `comparison _this_module .ltE left right`. `.ltE` and `.lt` are Lean's shorthand for comparison-operation constructors, selected using the expected type.
-
-Custom same-class comparisons execute the supported method AST, including loops, on empty objects or objects with an integer `value` field. `.object "Looping"` represents an empty object; `.object "DummyInt" (some 2)` represents one with `value = 2`. These Lean constructors describe object state; they do not execute Python `__init__`. Reflected comparison, `NotImplemented`, general method calls, and arbitrary object layouts remain unsupported.
-
-[[raw-lean-diverges]]
-==== diverges
-
-`diverges(this_function())` proves an infinite execution by supplying an invariant that contains the initial state and always permits another execution step. `Execution.diverges_not_halts` turns this proof into `Not Halts(this_function())`. See the `forever` example in link:tests/py/termination.py.lean[].
 
 == How it works
 

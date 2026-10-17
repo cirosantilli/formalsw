@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -94,6 +95,15 @@ def print_result(result: TestResult) -> None:
 def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
+        TestCase("doubly linked list synchronization and corrupted links", Path("tests/py/parallel_doubly_linked_list.py"), 0),
+        TestCase("parallel calls with different signatures and arguments", Path("tests/py/parallel_calls.py"), 0),
+        TestCase("shared counter synchronization and lost update", Path("tests/py/parallel_shared_counter.py"), 0),
+        TestCase(
+            "missing synchronization invalidates the guarantee",
+            Path("tests/py/fail/parallel_missing_lock.py"),
+            1,
+            "Tactic `native_decide` evaluated that the proposition",
+        ),
         TestCase("termination and divergence", Path("tests/py/termination.py"), 0),
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
         TestCase("typed, object, and return sort equivalence", Path("tests/py/sort.py"), 0),
@@ -291,6 +301,28 @@ def main() -> int:
     print(f"{'PASS' if support_checks_passed else 'FAIL'} unsupported source validation", flush=True)
     if not support_checks_passed:
         print(textwrap.indent((support_checks.stdout + support_checks.stderr).rstrip(), "  "))
+    parallel_semantics = subprocess.run(
+        ["lake", "env", "lean", "-DwarningAsError=true", "tests/py/parallel_semantics.lean"],
+        cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    parallel_runtime = subprocess.run(
+        [sys.executable, "tests/py/parallel_checks"],
+        cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        timeout=30,
+    )
+    parallel_passed = parallel_semantics.returncode == 0 and parallel_runtime.returncode == 0
+    print(f"{'PASS' if parallel_passed else 'FAIL'} parallel semantics and real-thread data structures", flush=True)
+    if not parallel_passed:
+        for completed in (parallel_semantics, parallel_runtime):
+            print(textwrap.indent((completed.stdout + completed.stderr).rstrip(), "  "))
+    raw_docs = (REPO / "README.adoc").read_text().split("=== Raw Lean specification\n", 1)[1].split("\n== How it works", 1)[0]
+    raw_headers = re.findall(r"^==== (.+)$", raw_docs, re.MULTILINE)
+    raw_ids = re.findall(r"^\[\[(raw-lean-[^\]]+)\]\]\n==== ", raw_docs, re.MULTILINE)
+    raw_docs_passed = (
+        raw_headers == sorted(raw_headers, key=str.casefold)
+        and len(raw_ids) == len(raw_headers) == len(set(raw_ids))
+    )
+    print(f"{'PASS' if raw_docs_passed else 'FAIL'} alphabetical Raw Lean sections with unique IDs", flush=True)
     return 0 if (
         all(result.passed for result in results)
         and stub_passed
@@ -301,6 +333,8 @@ def main() -> int:
         and throws_syntax_passed
         and builtin_python_models_passed
         and support_checks_passed
+        and parallel_passed
+        and raw_docs_passed
     ) else 1
 
 

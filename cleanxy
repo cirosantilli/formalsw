@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from lang.py.support import SupportChecker, UnsupportedConstruct
+from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_model
 
 
 class UnsupportedSyntax(Exception):
@@ -349,7 +349,9 @@ def raw_theorem_type_for_function(
                 f"{function.name}: this_function supports positional arguments without variadics"
             )
         annotations = [argument.annotation for argument in arguments]
-        if len(arguments) == 1 and isinstance(annotations[0], ast.Name) and annotations[0].id == "list":
+        if uses_parallel_model(function) or re.search(r"\bParallel\(", referenced_text):
+            binding = f"CleanXY.PyAst.parallelFunction {ast_namespace}.module {lean_string(function.name)}"
+        elif len(arguments) == 1 and isinstance(annotations[0], ast.Name) and annotations[0].id == "list":
             binding = f"CleanXY.PyAst.listFunction {ast_namespace}.module {lean_string(function.name)}"
         elif all(isinstance(annotation, ast.Name) and annotation.id in {"int", "str", "bool"}
                  for annotation in annotations):
@@ -633,6 +635,12 @@ class AstJsonEmitter:
     def supported_stmt(self, stmt: ast.stmt) -> dict[str, object]:
         """Encode one represented Python statement."""
         match stmt:
+            case ast.ImportFrom(module=module, names=names, level=0) if module is not None:
+                return {
+                    "type": "ImportFrom",
+                    "module": module,
+                    "names": [{"name": alias.name, "binding": alias.asname or alias.name} for alias in names],
+                }
             case ast.ClassDef(name=name, bases=[], keywords=[], body=body):
                 if stmt.decorator_list:
                     raise UnsupportedSyntax(f"{name}: decorators are unsupported")

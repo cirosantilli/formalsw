@@ -15,6 +15,77 @@ def stub(path):
 
 
 CASES = [
+    ('parallel descriptors need a model', '''
+        class Node:
+            @property
+            def next(self):
+                return self
+        def f(node: Node):
+            """@cleanxy: theorem invalid :
+              Not Ensures(Parallel([this_function [.ref 0]], {}), fun _ => True)
+            """
+            following = node.next
+    ''', 'parallel objects currently support plain data fields'),
+    ('parallel array element types', '''
+        def f(data: list[int]):
+            """@cleanxy: theorem invalid :
+              Not Ensures(Parallel([this_function [.ref 0]], {}), fun _ => True)
+            """
+            data[0] = "wrong type"
+    ''', 'parallel list writes must preserve the annotated element type'),
+    ('parallel field layout', '''
+        class Box:
+            def __init__(self):
+                self.value = 0
+        def f(box: Box):
+            """@cleanxy: theorem invalid :
+              Not Ensures(Parallel([this_function [.ref 0]], {}), fun _ => True)
+            """
+            box.value = "wrong type"
+    ''', 'parallel field writes must preserve the declared scalar or reference layout'),
+    ('unmodeled parallel statement', '''
+        from threading import Lock
+        from time import sleep
+        def f(counter: list[int], mutex: Lock):
+            """@cleanxy: theorem invalid :
+              Not Ensures(Parallel([this_function [.ref 0, .lock 0]], { objects := [.array [.int 0]] }), fun _ => True)
+            """
+            print(counter)
+    ''', 'parallel execution supports'),
+    ('shadowed parallel primitive', '''
+        from threading import Lock
+        from time import sleep
+        def sleep(n):
+            pass
+        def f(counter: list[int], mutex: Lock):
+            """@cleanxy: theorem invalid :
+              CanReturn(Parallel([this_function [.ref 0, .lock 0]], { objects := [.array [.int 0]] }), {})
+            """
+            sleep(0)
+    ''', 'parallel execution requires an unshadowed from time import sleep'),
+    ('concurrent worker used as scalar execution', '''
+        from threading import Lock
+        from time import sleep
+        def f(counter: list[int], mutex: Lock):
+            """@cleanxy: Returns"""
+            pass
+    ''', 'concurrent workers require a raw Parallel specification'),
+    ('unmodeled parallel return', '''
+        """@cleanxy: theorem invalid :
+          Not Ensures(Parallel([parallelFunction ProbeAst.module "f" [.int 0]], {}), fun _ => True)
+        """
+        def f(n: int):
+            return n
+    ''', 'parallel execution supports'),
+    ('compound parallel heap expression', '''
+        from threading import Lock
+        from time import sleep
+        def f(counter: list[int], mutex: Lock):
+            """@cleanxy: theorem invalid :
+              Not Ensures(Parallel([this_function [.ref 0, .lock 0]], { objects := [.array [.int 0]] }), fun _ => True)
+            """
+            counter[1] = counter[0] + 2
+    ''', 'split shared reads into separate statements'),
     ('nested marker', '''
         class Example:
             def method(self):

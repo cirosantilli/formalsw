@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Run the real example and force one legal losing interleaving deterministically."""
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+from threading import Barrier
+
+REPO = Path(__file__).resolve().parents[2]
+example = REPO / 'tests/py/parallel_shared_counter.py'
+ns = runpy.run_path(str(example))
+unsafe = ns['increment_unsafe']
+both_read = Barrier(2)
+
+
+def force_lost_update(counter, mutex):
+    paused = False
+
+    def trace(frame, event, arg):
+        nonlocal paused
+        if not paused and frame.f_code is unsafe.__code__ and event == 'line' and 'snapshot' in frame.f_locals:
+            paused = True
+            # Both actual workers have read the counter, and neither has written.
+            both_read.wait(timeout=5)
+        return trace
+
+    sys.settrace(trace)
+    try:
+        unsafe(counter, mutex)
+    finally:
+        sys.settrace(None)
+
+
+try:
+    ns['run_trial'](force_lost_update)
+except AssertionError as error:
+    assert str(error) == 'expected counter == 2 after two increments; got 1', error
+else:
+    raise AssertionError('the forced lost-update schedule did not trigger the assertion')
+
+for _ in range(10):
+    ns['run_trial'](ns['increment_safe'])
+
+# The public demo runs both versions, prints rates, and catches only the expected
+# unsafe assertions. Do not make the test depend on a random failure percentage.
+completed = subprocess.run([sys.executable, str(example)], text=True, capture_output=True, timeout=20)
+assert completed.returncode == 0, completed.stderr
+assert 'increment_unsafe: 20 real-thread trials' in completed.stdout, completed.stdout
+assert 'increment_safe: 20 real-thread trials\n  Lost updates: 0/20 (0%)' in completed.stdout, completed.stdout
+print('Real-thread counter demo and forced lost-update assertion passed')
+
+# Replay the exact corrupting schedule against the actual linked-list worker.
+# The tracer pauses at statement boundaries; it does not change the worker body.
+import ast
+from threading import Condition
+
+linked_example = REPO / 'tests/py/parallel_doubly_linked_list.py'
+linked = runpy.run_path(str(linked_example))
+insert_unsafe = linked['insert_unsafe']
+module = ast.parse(linked_example.read_text())
+function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'insert_unsafe')
+lines = {statement.lineno for statement in function.body[1:]}
+schedule = [0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0]
+condition = Condition()
+position = 0
+arrivals = 0
+
+
+def force_corruption(head, node, mutex):
+    global arrivals
+    with condition:
+        identity = arrivals
+        arrivals += 1
+    active = False
+
+    def trace(frame, event, arg):
+        nonlocal active
+        global position
+        if frame.f_code is insert_unsafe.__code__ and (
+            event == 'return' or event == 'line' and frame.f_lineno in lines
+        ):
+            with condition:
+                if active:
+                    assert schedule[position] == identity
+                    position += 1
+                    active = False
+                    condition.notify_all()
+                if event == 'line':
+                    assert condition.wait_for(
+                        lambda: position < len(schedule) and schedule[position] == identity, timeout=5
+                    ), 'scheduled worker did not reach its next statement'
+                    active = True
+        return trace
+
+    sys.settrace(trace)
+    try:
+        insert_unsafe(head, node, mutex)
+    finally:
+        sys.settrace(None)
+
+
+try:
+    linked['run_trial'](force_corruption)
+except AssertionError as error:
+    assert 'corrupted link:' in str(error), error
+else:
+    raise AssertionError('the explicit schedule did not corrupt the doubly linked list')
+assert position == len(schedule), position
+for _ in range(10):
+    linked['run_trial'](linked['insert_safe'])
+completed = subprocess.run([sys.executable, str(linked_example)], text=True, capture_output=True, timeout=20)
+assert completed.returncode == 0, completed.stderr
+assert 'insert_unsafe: 20 real-thread trials' in completed.stdout, completed.stdout
+assert 'insert_safe: 20 real-thread trials\n  Corrupted lists: 0/20 (0%)' in completed.stdout, completed.stdout
+print('Real-thread linked-list demo and explicit corrupting schedule passed')

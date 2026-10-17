@@ -134,6 +134,8 @@ inductive Stmt where
   | expr : Expr -> Stmt
   /-- Source retained for diagnostics when it is outside the AST model. -/
   | unsupported : (description : String) -> Stmt
+  /-- Absolute imports retain both the original and bound names. -/
+  | importFrom : (module : String) -> (names : List (String × String)) -> Stmt
 deriving Repr, BEq, Lean.ToExpr
 
 /-- A Python module represented as a list of top-level statements. -/
@@ -285,6 +287,10 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
         (← optionalExpr json "returns")
         (← jsonArray json "body" Stmt.fromJson?)
   | "Unsupported" => return .unsupported ((← jsonString json "description") ++ ": " ++ (← jsonString json "source"))
+  | "ImportFrom" =>
+      return .importFrom (← jsonString json "module")
+        (← jsonArray json "names" fun item => do
+          return (← jsonString item "name", ← jsonString item "binding"))
   | "Return" => return .return (← Expr.fromJson? (← jsonField json "value"))
   | "Assign" =>
       return .assign
@@ -737,6 +743,7 @@ mutual
     | .raise exception => 1 + (exception.map Expr.operationCount).getD 0
     | .expr expression => 1 + expression.operationCount
     | .unsupported _ => 0
+    | .importFrom _ _ => 0
 end
 
 /-- Whether a statement is a `for` loop. -/

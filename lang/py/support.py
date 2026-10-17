@@ -85,6 +85,13 @@ def binary_comparison(function: ast.FunctionDef) -> bool:
             and body[0].value.comparators[0].id == arguments[1].arg)
 
 
+def uses_parallel_model(function: ast.FunctionDef) -> bool:
+    """Select the concurrent interpreter without imposing a particular signature."""
+    return (any(isinstance(arg.annotation, ast.Name) and arg.annotation.id == 'Lock'
+                for arg in function.args.args)
+            or bool(re.search(r'\bParallel\(', ast.get_docstring(function, clean=False) or '')))
+
+
 class SupportChecker:
     def __init__(self, module: ast.Module):
         self.module = module
@@ -106,10 +113,10 @@ class SupportChecker:
         return (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
                 and annotation.value.id == 'list' and isinstance(annotation.slice, ast.Name))
 
-    def check(self, name: str, stack: tuple[str, ...] = ()) -> tuple[UnsupportedConstruct, ...]:
+    def check(self, name: str, stack: tuple[str, ...] = (), *, parallel: bool = False) -> tuple[UnsupportedConstruct, ...]:
         if name in stack:
             return (UnsupportedConstruct(name, self.functions[name].lineno, 'recursive calls outside a recognized sorting implementation are unsupported', stack),)
-        if name in self.cache:
+        if name in self.cache and not parallel:
             return tuple(UnsupportedConstruct(issue.function, issue.line, issue.reason,
                 (*stack, *issue.dependency)) for issue in self.cache[name])
         function = self.functions.get(name)
@@ -129,6 +136,9 @@ class SupportChecker:
             reject(function, 'only plain positional arguments without defaults or variadics are supported')
         if issues:
             return tuple(issues)
+        if parallel or uses_parallel_model(function):
+            self.check_parallel(function, reject)
+            return tuple(dict.fromkeys(issues))
         arguments = args.args
         is_list = len(arguments) == 1 and (
             isinstance(arguments[0].annotation, ast.Name) and arguments[0].annotation.id == 'list'
@@ -184,6 +194,172 @@ class SupportChecker:
         if not stack:
             self.cache[name] = result
         return result
+
+    def check_parallel(self, function: ast.FunctionDef, reject) -> None:
+        """Validate heap operations, local values, plain objects, and mutex bindings."""
+        required_primitives = set()
+        env: dict[str, frozenset[str]] = {}
+        fields: dict[str, dict[str, frozenset[str]]] = {}
+
+        def plain_class(name):
+            if name in fields:
+                return
+            fields[name] = {}
+            cls = self.classes[name]
+            if cls.bases or cls.keywords or cls.decorator_list:
+                reject(cls, 'parallel objects must be plain classes without inheritance or decorators')
+            for member in body_of(cls):
+                if isinstance(member, ast.FunctionDef) and member.name == '__init__':
+                    if (not member.args.args or member.decorator_list or member.args.defaults
+                            or member.args.posonlyargs or member.args.vararg or member.args.kwonlyargs or member.args.kwarg):
+                        reject(member, 'parallel object constructors require plain positional arguments')
+                        continue
+                    self_name = member.args.args[0].arg
+                    params = {arg.arg for arg in member.args.args[1:]}
+                    for statement in body_of(member):
+                        if isinstance(statement, ast.Pass):
+                            continue
+                        if (isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                                and isinstance(statement.targets[0], ast.Attribute)
+                                and isinstance(statement.targets[0].value, ast.Name)
+                                and statement.targets[0].value.id == self_name
+                                and not statement.targets[0].attr.startswith('__')
+                                and (isinstance(statement.value, ast.Constant) and type(statement.value.value) in (int, bool, str, type(None))
+                                     or isinstance(statement.value, ast.Name) and statement.value.id in params)):
+                            value = statement.value
+                            kind = 'reference'
+                            if isinstance(value, ast.Constant):
+                                kind = {int: 'int', bool: 'bool', str: 'str', type(None): 'reference'}[type(value.value)]
+                            elif isinstance(value, ast.Name):
+                                parameter = next(arg for arg in member.args.args if arg.arg == value.id)
+                                if isinstance(parameter.annotation, ast.Name) and parameter.annotation.id in ('int', 'str', 'bool'):
+                                    kind = parameter.annotation.id
+                            fields[name][statement.targets[0].attr] = (
+                                frozenset(['reference', 'none']) if kind == 'reference' else frozenset([kind]))
+                        else:
+                            reject(statement, 'parallel object constructors may only initialize plain fields from constants or arguments')
+                else:
+                    reject(member, 'parallel objects currently support plain data fields and an __init__ method only')
+
+        for arg in function.args.args:
+            annotation = arg.annotation
+            if isinstance(annotation, ast.Name) and annotation.id in ('int', 'str', 'bool'):
+                env[arg.arg] = frozenset([annotation.id])
+            elif isinstance(annotation, ast.Name) and annotation.id == 'Lock':
+                env[arg.arg] = frozenset(['lock'])
+                required_primitives.add(('Lock', 'threading'))
+            elif isinstance(annotation, ast.Name) and annotation.id in self.classes:
+                plain_class(annotation.id)
+                env[arg.arg] = frozenset(['object:' + annotation.id])
+            elif (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
+                    and annotation.value.id == 'list' and isinstance(annotation.slice, ast.Name)
+                    and annotation.slice.id in ('int', 'str', 'bool')):
+                env[arg.arg] = frozenset(['array:' + annotation.slice.id])
+            else:
+                reject(arg, 'parallel arguments need scalar, list[int/str/bool], plain object, or Lock annotations')
+        if any(name in env for name in ('Lock', 'sleep')):
+            reject(function, 'parallel arguments must not shadow Lock or sleep')
+
+        def pure(expr):
+            if isinstance(expr, ast.Constant) and type(expr.value) in (int, bool, str, type(None)):
+                return frozenset([{int: 'int', bool: 'bool', str: 'str', type(None): 'none'}[type(expr.value)]])
+            if isinstance(expr, ast.Name):
+                if expr.id in env:
+                    return env[expr.id]
+                reject(expr, f'unbound local {expr.id!r} in parallel execution')
+                return frozenset()
+            if isinstance(expr, (ast.BinOp, ast.UnaryOp)):
+                # Reuse the conservative scalar arithmetic validator, with no heap reads.
+                if any(isinstance(node, (ast.Attribute, ast.Subscript, ast.Call, ast.Compare)) for node in ast.walk(expr)):
+                    reject(expr, 'parallel arithmetic must use local scalar values; split shared reads into separate statements')
+                    return frozenset()
+                if isinstance(expr, ast.UnaryOp) and not isinstance(expr.op, ast.USub):
+                    reject(expr, 'parallel unary expressions currently support integer negation only')
+                    return frozenset()
+                return self.expression(expr, env, reject)
+            reject(expr, 'parallel expressions require local values; split shared accesses into separate statements')
+            return frozenset()
+
+        def location(expr):
+            if isinstance(expr, ast.Subscript):
+                base = pure(expr.value)
+                index = pure(expr.slice)
+                if not index <= {'int'}:
+                    reject(expr, 'parallel list indices must be integers')
+                if not all(kind.startswith('array:') for kind in base):
+                    reject(expr, 'parallel indexing requires a list reference')
+                return frozenset(kind.removeprefix('array:') for kind in base)
+            if isinstance(expr, ast.Attribute):
+                base = pure(expr.value)
+                if expr.attr.startswith('__'):
+                    reject(expr, 'special attributes are unsupported in parallel execution')
+                for kind in base:
+                    if kind.startswith('object:'):
+                        name = kind.removeprefix('object:')
+                        if expr.attr not in fields[name]:
+                            reject(expr, f'{name}.{expr.attr} is not a declared plain field')
+                    elif kind not in ('reference', 'none'):
+                        reject(expr, 'parallel field access requires an object reference')
+                possible = []
+                for kind in base:
+                    if kind.startswith('object:'):
+                        possible.append(fields[kind.removeprefix('object:')].get(expr.attr, frozenset()))
+                    elif kind == 'reference':
+                        possible.extend(record[expr.attr] for record in fields.values() if expr.attr in record)
+                return frozenset().union(*possible) if possible else frozenset(['reference', 'none'])
+            reject(expr, 'parallel assignments require a local, list item, or plain object field')
+            return frozenset()
+
+        for statement in body_of(function):
+            if isinstance(statement, ast.Pass):
+                continue
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+                target = statement.targets[0]
+                if isinstance(target, ast.Name):
+                    if target.id in ('Lock', 'sleep'):
+                        reject(statement, 'parallel locals must not shadow Lock or sleep')
+                    env[target.id] = location(statement.value) if isinstance(statement.value, (ast.Attribute, ast.Subscript)) else pure(statement.value)
+                    continue
+                target_kind = location(target)
+                value_kind = pure(statement.value)
+                if isinstance(target, ast.Subscript) and not value_kind <= target_kind:
+                    reject(statement, 'parallel list writes must preserve the annotated element type')
+                if isinstance(target, ast.Attribute):
+                    normalized = frozenset('reference' if kind.startswith(('object:', 'array:')) else kind for kind in value_kind)
+                    if not normalized <= target_kind:
+                        reject(statement, 'parallel field writes must preserve the declared scalar or reference layout')
+                continue
+            if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                call = statement.value
+                if not call.keywords:
+                    if isinstance(call.func, ast.Attribute) and call.func.attr in ('acquire', 'release') and not call.args:
+                        if pure(call.func.value) != frozenset(['lock']):
+                            reject(call, 'acquire/release requires a mutex reference')
+                        required_primitives.add(('Lock', 'threading'))
+                        continue
+                    if (isinstance(call.func, ast.Name) and call.func.id == 'sleep' and len(call.args) == 1
+                            and isinstance(call.args[0], ast.Constant) and type(call.args[0].value) is int and call.args[0].value == 0):
+                        required_primitives.add(('sleep', 'time'))
+                        continue
+            reject(statement, 'parallel execution supports local assignments, separate heap reads/writes, acquire/release, sleep(0), and pass only')
+
+        for primitive, module in sorted(required_primitives):
+            definitions = []
+            for statement in self.module.body:
+                if isinstance(statement, ast.ImportFrom):
+                    for alias in statement.names:
+                        if (alias.asname or alias.name) == primitive:
+                            definitions.append(statement.level == 0 and statement.module == module and alias.name == primitive)
+                elif isinstance(statement, ast.Import):
+                    definitions.extend(False for alias in statement.names if (alias.asname or alias.name.split('.')[0]) == primitive)
+                elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if statement.name == primitive:
+                        definitions.append(False)
+                else:
+                    definitions.extend(False for node in ast.walk(statement)
+                                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == primitive)
+            if definitions != [True]:
+                reject(function, f'parallel execution requires an unshadowed from {module} import {primitive}')
 
     @staticmethod
     def is_integer_wrapper(cls: ast.ClassDef) -> bool:
@@ -371,6 +547,11 @@ class SupportChecker:
         issues = list(self.check(name)) if name else []
         if name:
             function = self.functions[name]
+            if uses_parallel_model(function) and (
+                not marker.startswith('theorem ') or re.search(r'\b(?:Returns|Halts|Throws|diverges)\(', marker)
+            ):
+                issues.append(UnsupportedConstruct(name, function.lineno,
+                    'concurrent workers require a raw Parallel specification with Ensures or CanReturn'))
             args = function.args.args
             unary_int = len(args) == 1 and isinstance(args[0].annotation, ast.Name) and args[0].annotation.id == 'int'
             unary_list = len(args) == 1 and (
@@ -398,11 +579,12 @@ class SupportChecker:
                 issues.append(UnsupportedConstruct(name, function.lineno, 'list execution currently supports only the exact merge-sort body'))
         targets = re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)', marker)
         # Explicit low-level calls in raw requirements are checked too.
-        executions = re.findall(r'\b(scalarFunction|listFunction)\s+\S+\.module\s+"([^"]+)"', marker)
+        executions = re.findall(r'\b(scalarFunction|listFunction|parallelFunction)\s+\S+\.module\s+"([^"]+)"', marker)
+        parallel_targets = {target for model, target in executions if model == 'parallelFunction'}
         targets += [target for _, target in executions]
         for target in dict.fromkeys(targets):
             if target != name:
-                issues.extend(self.check(target, (name,) if name else ()))
+                issues.extend(self.check(target, (name,) if name else (), parallel=target in parallel_targets))
                 if name and target in self.functions and property_name in ('Equiv', 'EquivReturn'):
                     target_args = self.functions[target].args.args
                     if len(args) != 1 or len(target_args) != 1 or (
@@ -415,6 +597,9 @@ class SupportChecker:
             function = self.functions.get(target)
             if function is None:
                 continue
+            if model == 'parallelFunction':
+                self.check_parallel(function, lambda node, reason: issues.append(UnsupportedConstruct(
+                    target, getattr(node, 'lineno', function.lineno), reason)))
             if model == 'listFunction' and not matches_sort(function, MERGE_SORT):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'list execution currently supports only the exact merge-sort body'))

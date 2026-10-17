@@ -16,6 +16,7 @@ roots = [
   "lang.py.CleanXY.Runtime",
   "lang.py.CleanXY.Sorting",
   "lang.py.CleanXY.Syntax",
+  "lang.py.CleanXY.Parallel",
   "lang.py.builtin.type.bool",
   "lang.py.builtin.type.bytearray",
   "lang.py.builtin.type.bytes",

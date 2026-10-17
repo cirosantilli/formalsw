@@ -1,6 +1,7 @@
 import Lean
 import lang.py.CleanXY.Model
 import lang.py.CleanXY.Syntax
+import lang.py.CleanXY.Parallel
 import lang.py.builtin.type.bool
 import lang.py.builtin.type.bytearray
 import lang.py.builtin.type.bytes
