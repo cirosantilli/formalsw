@@ -1100,6 +1100,10 @@ class AstJsonEmitter:
                 }
             case ast.Pass():
                 return {"type": "Expr", "value": self.constant(None)}
+            case ast.Break():
+                return {"type": "Break"}
+            case ast.Continue():
+                return {"type": "Continue"}
             case ast.Return(value=value):
                 return {
                     "type": "Return",

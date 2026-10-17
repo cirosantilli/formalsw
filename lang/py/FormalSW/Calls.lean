@@ -95,6 +95,32 @@ def rangeBounds (values : List Constant) : Except ExceptionObject (Int × Int ×
 def rangeContinues (next stop stride : Int) : Bool :=
   decide (0 < stride ∧ next < stop ∨ stride < 0 ∧ stop < next)
 
+mutual
+  /-- A transfer in a nested loop body belongs to that loop. A transfer in its
+  `else` block belongs to the surrounding loop instead. -/
+  def loopControlStmt : Stmt → Bool
+    | .breakLoop | .continueLoop => true
+    | .ifThen _ yes no => loopControl yes || loopControl no
+    | .whileDo _ _ otherwise | .forIn _ _ _ otherwise => loopControl otherwise
+    | _ => false
+
+  /-- Structural recursion keeps finite syntax inspection reducible in proofs. -/
+  def loopControl : List Stmt → Bool
+    | [] => false
+    | head :: tail => loopControlStmt head || loopControl tail
+end
+
+/-- Plain loops keep their original continuation; transfers need an explicit
+boundary so flattening an `if` cannot erase the nearest loop's exit point. -/
+def loopContinuation (body : List Stmt) (next : Stmt) : Stmt :=
+  if loopControl body then .loopResume next else next
+
+/-- Only entered loops have boundaries in the pending instruction list. -/
+def loopTarget : List Stmt → Option (Stmt × List Stmt)
+  | [] => none
+  | .loopResume next :: rest => some (next, rest)
+  | _ :: rest => loopTarget rest
+
 private def rangeState (name : String) (env : ScalarEnv) (done : List Constant)
     (expressions : List Expr) (body otherwise following : List Stmt) (stack : List Frame) : State :=
   match expressions with
@@ -182,12 +208,21 @@ def step (module : Module) (state : State) : Step State Constant :=
           .next ⟨.expr condition env, .branch yes no rest env :: stack⟩
       | .whileDo condition body otherwise :: rest =>
           .next ⟨.expr condition env,
-            .branch (body ++ [.whileDo condition body otherwise]) otherwise rest env :: stack⟩
+            .branch (body ++ [loopContinuation body (.whileDo condition body otherwise)]) otherwise rest env :: stack⟩
+      | .loopResume next :: rest => .next ⟨.block (next :: rest) env, stack⟩
+      | .breakLoop :: rest =>
+          match loopTarget rest with
+          | some (_, following) => .next ⟨.block following env, stack⟩
+          | none => .unsupported
+      | .continueLoop :: rest =>
+          match loopTarget rest with
+          | some (next, following) => .next ⟨.block (next :: following) env, stack⟩
+          | none => .unsupported
       | .forIn (.name name) (.call (.name "range") expressions) body otherwise :: rest =>
           .next (rangeState name env [] expressions body otherwise rest stack)
       | .rangeStepLoop name next stop stride body otherwise :: rest =>
           if rangeContinues next stop stride then
-            .next ⟨.block (body ++ [.rangeStepLoop name (next + stride) stop stride body otherwise] ++ rest)
+            .next ⟨.block (body ++ [loopContinuation body (.rangeStepLoop name (next + stride) stop stride body otherwise)] ++ rest)
               (env.set name (.int next)), stack⟩
           else .next ⟨.block (otherwise ++ rest) env, stack⟩
       | .expr expr :: rest => .next ⟨.expr expr env, .discard rest env :: stack⟩
@@ -511,7 +546,7 @@ theorem branch (h : Evaluates module env condition value)
 
 theorem while_loop (h : Evaluates module env condition value)
     (rest : BlockReturns module env
-      ((if scalarTruth value then loop ++ [.whileDo condition loop otherwise] else otherwise)
+      ((if scalarTruth value then loop ++ [loopContinuation loop (.whileDo condition loop otherwise)] else otherwise)
         ++ body) result) :
     BlockReturns module env (.whileDo condition loop otherwise :: body) result := by
   intro stack
@@ -539,10 +574,26 @@ theorem for_range (arguments : Evaluates.Arguments module env expressions values
 
 theorem range_step (continues : rangeContinues next stop stride = true)
     (rest : BlockReturns module (env.set name (.int next))
-      (body ++ [.rangeStepLoop name (next + stride) stop stride body otherwise] ++ following) result) :
+      (body ++ [loopContinuation body (.rangeStepLoop name (next + stride) stop stride body otherwise)] ++ following) result) :
     BlockReturns module env (.rangeStepLoop name next stop stride body otherwise :: following) result := by
   intro stack
   exact .next (by simp [step, continues]) (rest stack)
+
+theorem loop_resume (rest : BlockReturns module env (next :: following) result) :
+    BlockReturns module env (.loopResume next :: following) result :=
+  fun stack => .next rfl (rest stack)
+
+theorem break_loop (target : loopTarget body = some (next, following))
+    (rest : BlockReturns module env following result) :
+    BlockReturns module env (.breakLoop :: body) result := by
+  intro stack
+  exact .next (by simp [step, target]) (rest stack)
+
+theorem continue_loop (target : loopTarget body = some (next, following))
+    (rest : BlockReturns module env (next :: following) result) :
+    BlockReturns module env (.continueLoop :: body) result := by
+  intro stack
+  exact .next (by simp [step, target]) (rest stack)
 
 theorem range_done (finished : rangeContinues next stop stride = false)
     (rest : BlockReturns module env (otherwise ++ following) result) :

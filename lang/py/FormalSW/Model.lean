@@ -139,6 +139,12 @@ inductive Stmt where
   | ifThen : Expr -> List Stmt -> List Stmt -> Stmt
   /-- A Python `while` statement. -/
   | whileDo : Expr -> List Stmt -> List Stmt -> Stmt
+  /-- Exit the nearest enclosing loop, skipping its `else` block. -/
+  | breakLoop : Stmt
+  /-- Start the next iteration of the nearest enclosing loop. -/
+  | continueLoop : Stmt
+  /-- Internal loop boundary; the payload resumes iteration on normal completion. -/
+  | loopResume : Stmt → Stmt
   /-- A Python `assert` statement. -/
   | assert : Expr -> Option Expr -> Stmt
   /-- A Python `raise` statement. -/
@@ -345,6 +351,8 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
         (← Expr.fromJson? (← jsonField json "test"))
         (← jsonArray json "body" Stmt.fromJson?)
         (← jsonArray json "orelse" Stmt.fromJson?)
+  | "Break" => return .breakLoop
+  | "Continue" => return .continueLoop
   | "Assert" =>
       return .assert
         (← Expr.fromJson? (← jsonField json "test"))
@@ -773,6 +781,8 @@ mutual
 
   /-- Count statement operations, assigning unit cost to every AST node. -/
   partial def Stmt.operationCount : Stmt → Nat
+    | .breakLoop | .continueLoop => 1
+    | .loopResume loop => 1 + loop.operationCount
     | .rangeLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .rangeStepLoop _ _ _ _ body otherwise =>

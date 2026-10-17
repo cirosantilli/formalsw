@@ -120,6 +120,7 @@ def main() -> int:
         TestCase("execution preconditions across short and raw specifications", Path("tests/py/requires.py"), 0),
         TestCase("local helper calls and reused source proofs", Path("tests/py/linked_calls.py"), 0, "All 2 checks passed"),
         TestCase("variable and signed integer division", Path("tests/py/division.py"), 0, "All 4 checks passed"),
+        TestCase("nested break, continue, and loop else scopes", Path("tests/py/loop_control.py"), 0, "All 10 checks passed"),
         TestCase("generator sum scoping, filters, ranges and exceptions", Path("tests/py/generator_sums.py"), 0),
         TestCase("integer square root and imported builtin aliases", Path("tests/py/math_isqrt.py"), 0),
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),

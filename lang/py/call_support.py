@@ -55,7 +55,7 @@ def uses_calls_model(module, function):
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
     names.update(library_functions(module))
     return any(
-        isinstance(node, (ast.IfExp, ast.GeneratorExp))
+        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue))
         or general_division(node)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names
@@ -169,9 +169,14 @@ def check_calls(module, function, reject):
             else:
                 reject(node, f'{type(node).__name__} expression is unsupported by call execution')
 
-        def block(body):
+        def block(body, loop_depth=0):
             for node in body:
-                if isinstance(node, ast.Return):
+                if isinstance(node, (ast.Break, ast.Continue)):
+                    if not loop_depth:
+                        reject(node, 'break and continue require an enclosing loop body')
+                elif isinstance(node, ast.Pass):
+                    pass
+                elif isinstance(node, ast.Return):
                     if node.value is not None:
                         expr(node.value)
                 elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
@@ -186,8 +191,8 @@ def check_calls(module, function, reject):
                     expr(ast.BinOp(node.target, node.op, node.value))
                 elif isinstance(node, (ast.If, ast.While)):
                     expr(node.test)
-                    block(node.body)
-                    block(node.orelse)
+                    block(node.body, loop_depth + isinstance(node, ast.While))
+                    block(node.orelse, loop_depth)
                 elif (isinstance(node, ast.For) and isinstance(node.target, ast.Name)
                       and isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                       and node.iter.func.id == 'range' and 1 <= len(node.iter.args) <= 3
@@ -196,8 +201,8 @@ def check_calls(module, function, reject):
                         reject(node, 'range loops require the unshadowed builtin range')
                     for argument in node.iter.args:
                         expr(argument)
-                    block(node.body)
-                    block(node.orelse)
+                    block(node.body, loop_depth + 1)
+                    block(node.orelse, loop_depth)
                 elif isinstance(node, ast.Expr):
                     expr(node.value)
                 else:

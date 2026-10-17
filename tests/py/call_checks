@@ -3,6 +3,7 @@
 import ast
 from pathlib import Path
 import sys
+import subprocess
 import textwrap
 import tempfile
 
@@ -52,8 +53,14 @@ for suffix in ('range = g\n', 'from other import range\n', 'from other import *\
 for replacement in ('range()', 'range(n, 0, -1, 2)', 'range(n, stop=0)', 'iter(n)'):
     assert issues(range_source.replace('range(n, 0, -1)', replacement)), replacement
 assert issues(range_source.replace('def f(n: int)', 'def f(n: int, range: int)'))
-assert issues(range_source.replace('n = g(n)', 'break'))
-assert issues(range_source.replace('n = g(n)', 'continue'))
+assert not issues(range_source.replace('n = g(n)', 'break'))
+assert not issues(range_source.replace('n = g(n)', 'continue'))
+for transfer in ('break', 'continue'):
+    assert issues(f'def f(n: int):\n    {transfer}\n')
+    assert issues(f'def f(n: int):\n    for k in range(n):\n        pass\n    else:\n        {transfer}\n')
+    assert not issues(f'def f(n: int):\n    while n > 0:\n        n -= 1\n'
+                      f'        for k in range(n):\n            pass\n        else:\n            {transfer}\n'
+                      f'    return n\n')
 sqrt_source = 'from math import isqrt as root\ndef f(n: int) -> int:\n    return root(n)\n'
 assert not issues(sqrt_source)
 for suffix in ('root = f\n', 'from other import root\n', 'del root\n'):
@@ -86,4 +93,5 @@ for expression in (
 assert issues(sum_source.replace('def f(n: int)', 'def f(n: int, sum: int)'))
 assert not issues(sum_source.replace('sum(x for x in range(n) if x % 2 == 0)',
                                    'sum(n for n in range(n)) + n'))
-print("Recursive call coverage passed")
+subprocess.run([sys.executable, str(Path(__file__).with_name('loop_control.py'))], check=True)
+print("Recursive call and loop-control coverage passed")
