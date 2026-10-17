@@ -25,8 +25,6 @@ def git_output(*arguments):
 def main():
     if len(sys.argv) != 1:
         raise ValueError('usage: ./release')
-    if git_output('status', '--porcelain', '--untracked-files=all'):
-        raise ValueError('commit or stash working tree changes before releasing')
     branch = git_output('symbolic-ref', '--quiet', '--short', 'HEAD')
 
     project = REPO / 'pyproject.toml'
