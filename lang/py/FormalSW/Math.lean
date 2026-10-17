@@ -96,6 +96,25 @@ theorem combCall_naturals (n k : Nat) :
     combCall [.int n, .int k] = .ok (.int (comb n k)) := by
   simp [combCall]
 
+/-- Unbounded factorial, following the number of factors rather than a fuel budget. -/
+def factorial : Nat → Nat
+  | 0 => 1
+  | n + 1 => (n + 1) * factorial n
+
+/-- Factorial accepts integer indices, including Booleans, and rejects negatives. -/
+def factorialCall : List Constant → Except ExceptionObject Constant
+  | [value] =>
+      match scalarNumber value with
+      | some n =>
+          if n < 0 then .error { typeName := "ValueError", args := [] }
+          else .ok (.int (factorial n.toNat))
+      | none => .error { typeName := "TypeError", args := [] }
+  | _ => .error { typeName := "TypeError", args := [] }
+
+theorem factorialCall_natural (n : Nat) :
+    factorialCall [.int n] = .ok (.int (factorial n)) := by
+  simp [factorialCall, scalarNumber]
+
 end FormalSW.PyAst.Math
 
 namespace FormalSW.PyAst
@@ -105,7 +124,8 @@ includes the module alias, keeping it distinct from Python function names. -/
 def moduleImports (names : List (String × String)) : List ((String × String) × String) :=
   names.flatMap fun (library, alias) =>
     if library = "math" then [((library, "isqrt"), alias ++ ".isqrt"),
-      ((library, "gcd"), alias ++ ".gcd"), ((library, "comb"), alias ++ ".comb")]
+      ((library, "gcd"), alias ++ ".gcd"), ((library, "comb"), alias ++ ".comb"),
+      ((library, "factorial"), alias ++ ".factorial")]
     else []
 
 /-- Source import bindings are retained in the AST, including aliases. -/
@@ -128,6 +148,7 @@ def libraryFunction (module : Module) (name : String) :
   | some ("math", "isqrt") => some Math.isqrtCall
   | some ("math", "gcd") => some Math.gcdCall
   | some ("math", "comb") => some Math.combCall
+  | some ("math", "factorial") => some Math.factorialCall
   | _ => none
 
 def libraryCall (module : Module) (name : String) (values : List Constant) :

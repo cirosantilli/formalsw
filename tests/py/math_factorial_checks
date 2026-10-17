@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""
+Compare factorial results, import bindings, errors, and argument effects with Python.
+"""
+import ast
+import json
+import math
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    return f'(.string {json.dumps(value)})'
+
+
+values = [*range(-3, 31), 100, 1000, True, False, None, 'invalid', -(10**100)]
+cases = [(value,) for value in values] + [(), (1, 2)]
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192']
+for args in cases:
+    try:
+        expected = '.ok ' + constant(math.factorial(*args))
+    except (TypeError, ValueError) as error:
+        expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+    lines.append(f'example : Math.factorialCall [{", ".join(map(constant, args))}] = ({expected}) := by native_decide')
+
+source = '''
+import math as arithmetic
+from math import factorial as product
+
+def record(items: list[int], value: int) -> int:
+    items.append(value)
+    return value
+'''
+bodies = {
+    'qualified': 'return arithmetic.factorial(n)',
+    'imported': 'return product(n)',
+    'effects': 'return arithmetic.factorial(record(items, n))',
+    'bad_type': 'return product(items)',
+    'argument_error': 'return product(record(items, n) // 0)',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(items: list[int], n: int) -> int:\n    {body}\n'
+program = ast.parse(source)
+world = {}
+exec(source, world)
+lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
+checks = 0
+for name in bodies:
+    assert not SupportChecker(program).check(name), name
+    for n in (0, 1, 2, 10, 100, -1, -(10**100), True, False, None, 'invalid'):
+        items = []
+        try:
+            expected = '.ok (.scalar ' + constant(world[name](items, n)) + ')'
+        except (TypeError, ValueError, ZeroDivisionError) as error:
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+        heap = '[.list [' + ', '.join('.scalar ' + constant(x) for x in items) + ']]'
+        call = f'HeapCalls.call source "{name}" [.ref 0, .scalar {constant(n)}] [.list []]'
+        lines.append(f'example : ({call}).execution.observe 200 = .done (.ok ⟨{expected}, [], {heap}, 1⟩) := by native_decide')
+        checks += 1
+
+with project_temporary_directory(prefix='factorial-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+    base = 'from math import factorial as product\ndef f(n: int) -> int:\n    return product(n)\n'
+    def issues(text):
+        module = ast.parse(text)
+        module.formalsw_source = directory / 'probe.py'
+        return SupportChecker(module).check('f')
+
+    assert not issues(base)
+    for call in ('product()', 'product(n, 2)', 'product(n=n)', 'product(*n)', 'product(**n)'):
+        assert issues(base.replace('product(n)', call)), call
+    for suffix in ('product = f\n', 'del product\n', 'from other import product\n'):
+        assert issues(base + suffix), suffix
+    assert issues(base.replace('f(n: int)', 'f(n: int, product: int)'))
+    qualified = base.replace('from math import factorial as product', 'import math as m').replace('product(n)', 'm.factorial(n)')
+    assert not issues(qualified)
+    for suffix in ('m.factorial = f\n', 'del m.factorial\n', 'import math as alias\ndef mutate():\n    alias.factorial = f\n'):
+        assert issues(qualified + suffix), suffix
+    (directory / 'math.py').write_text('def factorial(n): return 1\n')
+    assert any('shadows the modeled standard library' in issue.reason for issue in issues(base))
+
+print(f'Factorial: {len(cases)} primitive and {checks} source/heap comparisons; import checks passed')
