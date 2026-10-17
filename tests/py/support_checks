@@ -203,16 +203,6 @@ CASES = [
                 n = "oops"
                 n = n - 1
     ''', 'Sub on these operand types is unsupported'),
-    ('unknown divisor', '''
-        def f(n: int):
-            """@formalsw: Returns"""
-            return 1 // n
-    ''', 'nonnegative integer literal divisor'),
-    ('negative divisor', '''
-        def f(n: int):
-            """@formalsw: Returns"""
-            return n % -2
-    ''', 'nonnegative integer literal divisor'),
     ('range shadowing', '''
         def f(range: int):
             """@formalsw: Returns"""

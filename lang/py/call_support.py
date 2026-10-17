@@ -31,6 +31,18 @@ def library_functions(module):
             for alias in node.names if alias.name == 'isqrt'}
 
 
+def general_division(node):
+    """Use the call interpreter for divisors outside the legacy literal subset."""
+    if isinstance(node, ast.BinOp):
+        divisor = node.right
+    elif isinstance(node, ast.AugAssign):
+        divisor = node.value
+    else:
+        return False
+    return (isinstance(node.op, (ast.FloorDiv, ast.Mod))
+            and not (isinstance(divisor, ast.Constant) and type(divisor.value) is int and divisor.value >= 0))
+
+
 def uses_calls_model(module, function):
     if not all(isinstance(arg.annotation, ast.Name) and arg.annotation.id in ('int', 'str', 'bool')
                for arg in function.args.args):
@@ -44,6 +56,7 @@ def uses_calls_model(module, function):
     names.update(library_functions(module))
     return any(
         isinstance(node, (ast.IfExp, ast.GeneratorExp))
+        or general_division(node)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
