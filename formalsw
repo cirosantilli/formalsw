@@ -18,6 +18,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_theorem
+from lang.py.call_support import uses_calls_model
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind
 
 
@@ -467,7 +468,8 @@ def raw_theorem_type_for_function(
                     [(name, annotation.id) for name, annotation in zip(names, annotations)],
                     [(item.name, item.name, item.kind) for item in global_args])
             else:
-                binding = (f"FormalSW.PyAst.scalarFunction {ast_namespace}.module "
+                runtime = "Calls.function" if module is not None and uses_calls_model(module, function) else "scalarFunction"
+                binding = (f"FormalSW.PyAst.{runtime} {ast_namespace}.module "
                            f"{lean_string(function.name)} [{values}]")
             if names:
                 binding = f"fun {lambda_params} => {binding}"
@@ -921,6 +923,9 @@ class AstJsonEmitter:
                     "op": self.boolop(op),
                     "values": [self.expr(value) for value in values],
                 }
+            case ast.IfExp(test=test, body=body, orelse=orelse):
+                return {"type": "IfExp", "test": self.expr(test),
+                        "body": self.expr(body), "orelse": self.expr(orelse)}
             case ast.Compare(left=left, ops=ops, comparators=comparators):
                 return {
                     "type": "Compare",
@@ -1066,6 +1071,14 @@ def lean_module_for_path(path: Path) -> str:
 
 def namespace_for_source(source: Path) -> str:
     """Return the generated Lean namespace for a Python source file."""
+    if source.stem[:1].isdigit():
+        # Numeric filenames need an identifier prefix, and files in different
+        # directories must remain importable together (e.g. two implementations).
+        relative = source.resolve().relative_to(Path.cwd().resolve())
+        return ".".join(
+            [*(camel_component(part) for part in relative.parent.parts),
+             "P" + camel_component(source.stem) + "Ast"]
+        )
     return camel_component(source.stem) + "Ast"
 
 
@@ -1314,7 +1327,7 @@ def require_executable(name: str) -> None:
 
 def module_with_python_builtins(source: Path, module: ast.Module) -> ast.Module:
     """Append plain-Python builtin-class definitions to a program AST."""
-    stdlib_source = Path.cwd() / "lang/py/builtin/type/str.py"
+    stdlib_source = Path(__file__).resolve().parent / "lang/py/builtin/type/str.py"
     if source.resolve().parent == stdlib_source.resolve().parent:
         return module
     if not stdlib_source.exists():

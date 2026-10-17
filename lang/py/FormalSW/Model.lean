@@ -83,6 +83,8 @@ inductive Expr where
   | unaryOp : UnaryOp -> Expr -> Expr
   /-- A Python boolean operation. -/
   | boolOp : BoolOp -> List Expr -> Expr
+  /-- Python's conditional expression evaluates only the selected branch. -/
+  | ifExp : Expr -> Expr -> Expr -> Expr
   /-- A Python comparison chain. -/
   | compare : Expr -> List (CmpOp × Expr) -> Expr
   /-- A Python call expression with positional arguments. -/
@@ -237,6 +239,11 @@ private partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       return .boolOp
         (← BoolOp.fromJson? (← jsonField json "op"))
         (← jsonArray json "values" Expr.fromJson?)
+  | "IfExp" =>
+      return .ifExp
+        (← Expr.fromJson? (← jsonField json "test"))
+        (← Expr.fromJson? (← jsonField json "body"))
+        (← Expr.fromJson? (← jsonField json "orelse"))
   | "Compare" =>
       let operators ← jsonArray json "ops" CmpOp.fromJson?
       let comparators ← jsonArray json "comparators" Expr.fromJson?
@@ -719,6 +726,8 @@ mutual
     | .binOp left _ right => 1 + left.operationCount + right.operationCount
     | .unaryOp _ operand => 1 + operand.operationCount
     | .boolOp _ values => 1 + (values.map Expr.operationCount).sum
+    | .ifExp condition yes no =>
+        1 + condition.operationCount + yes.operationCount + no.operationCount
     | .compare left comparisons =>
         1 + left.operationCount + (comparisons.map (Expr.operationCount ∘ Prod.snd)).sum
     | .call function args =>
@@ -1160,6 +1169,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
       some (-value)
   | Expr.unaryOp _ _ => none
   | Expr.boolOp _ _ => none
+  | Expr.ifExp _ _ _ => none
   | Expr.binOp
       (Expr.binOp
         (Expr.name name)

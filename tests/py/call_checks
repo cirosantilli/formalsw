@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Check conservative coverage of recursive call dependencies."""
+import ast
+from pathlib import Path
+import sys
+import textwrap
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from lang.py.support import SupportChecker
+
+
+def issues(source):
+    return SupportChecker(ast.parse(textwrap.dedent(source))).check("f")
+
+
+base = """
+def f(n: int) -> int:
+    return g(n)
+def g(n: int) -> int:
+    return n
+"""
+assert not issues(base)
+for suffix in (
+    "import other as g\n",
+    "from other import g\n",
+    "from other import *\n",
+    "class g: pass\n",
+    "if True:\n    def g(n: int): return n + 1\n",
+    "del g\n",
+    "g = 1\n",
+):
+    assert issues(base + suffix), suffix
+
+for body in (
+    'return missing(n)',
+    'if False: print(n)\n    return n',
+    'global counter\n    counter = n\n    return n',
+    'g = n\n    return n',
+):
+    assert issues(base.replace('return n', body)), body
+assert issues(base.replace('g(n: int)', 'g(n: int = 0)'))
+assert issues(base.replace('g(n: int)', 'g(n: list[int])'))
+assert not issues(base.replace('return n', 'return f(n - 1) if n else 0'))
+print("Recursive call coverage passed")

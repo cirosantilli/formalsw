@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind
 from lang.py.mutable_support import check_mutable
+from lang.py.call_support import check_calls, uses_calls_model
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,9 @@ class SupportChecker:
             if not stack and not mutable:
                 self.cache[name] = result
             return result
+        if uses_calls_model(self.module, function):
+            check_calls(self.module, function, reject)
+            return tuple(dict.fromkeys(issues))
         arguments = args.args
         is_list = len(arguments) == 1 and (
             isinstance(arguments[0].annotation, ast.Name) and arguments[0].annotation.id == 'list'
@@ -629,6 +633,9 @@ class SupportChecker:
             while short.startswith('Not '):
                 short = short[4:]
             property_name = short.split('(', 1)[0].strip()
+            if uses_calls_model(self.module, function) and property_name not in ('Returns', 'Halts') and not marker.startswith('theorem '):
+                issues.append(UnsupportedConstruct(name, function.lineno,
+                    'call execution requires a raw theorem for this property; legacy abstract properties do not model calls'))
             try:
                 global_targets = re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', marker)
                 stateful = bool(function_globals(self.module, function)) or any(

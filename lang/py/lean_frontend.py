@@ -2,6 +2,7 @@
 import atexit
 import json
 import subprocess
+from pathlib import Path
 
 from .concurrent_spec import ScenarioError
 
@@ -26,7 +27,8 @@ def parse_theorem(text):
         built = subprocess.run(['lake', 'build', 'FormalSW'], capture_output=True, text=True)
         if built.returncode:
             raise ScenarioError('failed to build Lean specification parser:\n' + built.stdout + built.stderr)
-        _parser = subprocess.Popen(['lake', 'env', 'lean', '--run', 'lang/py/spec_frontend.lean'],
+        frontend = Path(__file__).with_name('spec_frontend.lean').resolve()
+        _parser = subprocess.Popen(['lake', 'env', 'lean', '--run', str(frontend)],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
     _parser.stdin.write(json.dumps(text) + '\n')

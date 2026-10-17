@@ -113,6 +113,7 @@ def main() -> int:
             "Tactic `native_decide` evaluated that the proposition",
         ),
         TestCase("termination and divergence", Path("tests/py/termination.py"), 0),
+        TestCase("recursive scalar calls and short circuiting", Path("tests/py/recursive_calls.py"), 0),
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
         TestCase("typed, object, and return sort equivalence", Path("tests/py/sort.py"), 0),
         TestCase("equivalent throws pass", Path("tests/py/equiv_throw.py"), 0),
@@ -353,6 +354,22 @@ def main() -> int:
     if not parallel_passed:
         for completed in (parallel_semantics, parallel_liveness, parallel_runtime, concurrent_specs, quotations):
             print(textwrap.indent((completed.stdout + completed.stderr).rstrip(), "  "))
+    call_checks = subprocess.run(
+        [sys.executable, "tests/py/call_checks"],
+        cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    call_checks_passed = call_checks.returncode == 0
+    print(f"{'PASS' if call_checks_passed else 'FAIL'} recursive call coverage", flush=True)
+    if not call_checks_passed:
+        print(textwrap.indent((call_checks.stdout + call_checks.stderr).rstrip(), "  "))
+    project_checks = subprocess.run(
+        [sys.executable, "tests/py/project_checks"],
+        cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    project_checks_passed = project_checks.returncode == 0
+    print(f"{'PASS' if project_checks_passed else 'FAIL'} external projects and numeric filenames", flush=True)
+    if not project_checks_passed:
+        print(textwrap.indent((project_checks.stdout + project_checks.stderr).rstrip(), "  "))
     raw_docs = (REPO / "README.adoc").read_text().split("=== Raw Lean specification\n", 1)[1].split("\n== How it works", 1)[0]
     raw_headers = re.findall(r"^==== (.+)$", raw_docs, re.MULTILINE)
     raw_ids = re.findall(r"^\[\[(raw-lean-[^\]]+)\]\]\n==== ", raw_docs, re.MULTILINE)
@@ -374,6 +391,8 @@ def main() -> int:
         and support_checks_passed
         and parallel_passed
         and raw_docs_passed
+        and project_checks_passed
+        and call_checks_passed
     ) else 1
 
 
