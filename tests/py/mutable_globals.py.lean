@@ -184,7 +184,7 @@ theorem push_argument.«Returns» :
   simp [Mutable.function, MutableGlobalsAst.module, findFunctionIn,
     blockGlobals, declaredGlobals, blockLocals, assignedLocals, executableBody,
     Execution.observe, Execution.observeFrom, step, expr, array, assign, completion,
-    Except.map, List.lookup,  otherFound, updatedFound]
+    Except.map, List.lookup, Mutable.length, otherFound, updatedFound]
 
 theorem push.returns_on_heap :
     let _this_module := MutableGlobalsAst.module;
