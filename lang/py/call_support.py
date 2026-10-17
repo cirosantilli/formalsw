@@ -132,6 +132,24 @@ def uses_method(module, function, name):
     return False
 
 
+def uses_bytes(module, function):
+    """Byte literals in a function or one of its local callees."""
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    pending, visited = [function], set()
+    while pending:
+        current = pending.pop()
+        if current.name in visited:
+            continue
+        visited.add(current.name)
+        for statement in current.body:
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Constant) and type(node.value) is bytes:
+                    return True
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
+                    pending.append(functions[node.func.id])
+    return False
+
+
 def general_division(node):
     """Use the call interpreter for divisors outside the legacy literal subset."""
     if isinstance(node, ast.BinOp):
@@ -146,6 +164,7 @@ def general_division(node):
 
 def has_partial_primitives(module, function):
     """Follow local callees to operations that need a runtime coverage proof."""
+    byte_values = uses_bytes(module, function)
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     pending = [function]
     visited = set()
@@ -156,6 +175,8 @@ def has_partial_primitives(module, function):
         visited.add(current.name)
         for node in ast.walk(current):
             if isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow):
+                return True
+            if byte_values and isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Mod):
                 return True
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
                 pending.append(functions[node.func.id])
@@ -199,6 +220,7 @@ def uses_calls_model(module, function):
     names.update(library_functions(module))
     return bool(function.args.defaults) or uses_heap_calls(module, function) or uses_method(module, function, "bit_length") or any(
         isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript))
+        or isinstance(node, ast.Constant) and type(node.value) is bytes
         or range_sum(node) is not None
         or general_division(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
@@ -286,7 +308,7 @@ def check_calls(module, function, reject, *, heap=False):
                     expr(condition, inner_scope)
                 expr(comprehension.element, inner_scope)
                 return
-            if isinstance(node, ast.Constant) and type(node.value) in (int, str, bool, type(None)):
+            if isinstance(node, ast.Constant) and type(node.value) in (int, str, bytes, bool, type(None)):
                 return
             if isinstance(node, ast.Name) and node.id in scope:
                 return

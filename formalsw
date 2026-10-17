@@ -762,7 +762,7 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
             if kind and kind.startswith('list['):
                 values = ", ".join(f'.scalar ({scalar_term(name, kind)})' for name, kind in zip(names, kinds))
                 return f'FormalSW.PyAst.HeapCalls.call {ns}.module {lean_string(func.name)} [{values}] []'
-            if kind not in ('int', 'str', 'bool') and not (isinstance(func.returns, ast.Constant) and func.returns.value is None):
+            if kind not in ('int', 'str', 'bytes', 'bool') and not (isinstance(func.returns, ast.Constant) and func.returns.value is None):
                 raise InvalidRequirement("heap call contracts require a supported return annotation")
             runtime = "HeapCalls.scalarFunction"
         else:
@@ -1321,6 +1321,8 @@ class AstJsonEmitter:
 
     def constant(self, value: object) -> dict[str, object]:
         """Encode one Python constant."""
+        if isinstance(value, bytes):
+            return {"type": "Bytes", "value": list(value)}
         if isinstance(value, (bool, int, str)) or value is None:
             return {"type": "Constant", "value": value}
         raise UnsupportedSyntax(f"unsupported constant: {value!r}")

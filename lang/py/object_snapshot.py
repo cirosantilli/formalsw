@@ -1,6 +1,6 @@
 """Explicit observation boundary for graph_equivalence.same_snapshot.
 
-Exact int/bool/str/None, list/tuple/dict, and ordinary instances are supported.
+Exact int/bool/str/bytes/None, list/tuple/dict, and ordinary instances are supported.
 Never invoke user equality or getters. Unsupported objects raise TypeError.
 The adapter is executable Python; it is not a model of arbitrary CPython heaps.
 """
@@ -31,7 +31,7 @@ def _mro(cls):
 
 def _scalar(value):
     cls = type(value)
-    return cls is int or cls is bool or cls is str or cls is type(None)
+    return cls is int or cls is bool or cls is str or cls is bytes or cls is type(None)
 
 
 def snapshot_roots(roots):

@@ -9,6 +9,7 @@ namespace FormalSW.PyAst
 inductive SharedValue where
   | int (value : Int)
   | string (value : String)
+  | bytes (value : List UInt8)
   | bool (value : Bool)
   | none
   | ref (address : Nat)
@@ -17,9 +18,11 @@ inductive SharedValue where
 
 def SharedValue.ofConstant : Constant → SharedValue
   | .int n => .int n | .string s => .string s | .bool b => .bool b | .none => .none
+  | .bytes contents => .bytes contents
 
 def SharedValue.toConstant : SharedValue → Option Constant
   | .int n => some (.int n) | .string s => some (.string s)
+  | .bytes contents => some (.bytes contents)
   | .bool b => some (.bool b) | .none => some .none | _ => Option.none
 
 inductive SharedObject where

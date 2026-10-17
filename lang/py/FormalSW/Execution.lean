@@ -61,6 +61,7 @@ def ReturnType (execution : Execution Constant) (kind : String) : Prop :=
     (match value with
       | .int _ => kind = "int"
       | .string _ => kind = "str"
+      | .bytes _ => kind = "bytes"
       | .bool _ => kind = "bool"
       | .none => kind = "None")
 

@@ -12,6 +12,7 @@ def scalarTruth : Constant → Bool
   | .bool value => value
   | .int value => value != 0
   | .string value => !value.isEmpty
+  | .bytes value => !value.isEmpty
   | .none => false
 
 def scalarCompare (op : CmpOp) (left right : Constant) : Option Bool :=
@@ -31,6 +32,14 @@ def scalarCompare (op : CmpOp) (left right : Constant) : Option Bool :=
                 | .ltE => decide (left ≤ right)
                 | .gt => decide (left > right)
                 | .gtE => decide (left ≥ right)
+                | _ => false)
+          | .bytes left, .bytes right =>
+              let order := compare left right
+              some (match op with
+                | .lt => order == .lt
+                | .ltE => order != .gt
+                | .gt => order == .gt
+                | .gtE => order != .lt
                 | _ => false)
           | _, _ => none
 
@@ -58,7 +67,14 @@ def scalarBinary (op : BinOp) (left right : Constant) : Option (Except Exception
             let quotient := (-left) / (-right)
             some (.ok (.int (match op with | .mod => left - right * quotient | _ => quotient)))
   | _, _ => match op, left, right with
+      -- Bytes also use % for formatting, which needs a separate format parser.
+      | .mod, .bytes _, _ => none
       | .add, .string a, .string b => some (.ok (.string (a ++ b)))
+      | .add, .bytes a, .bytes b => some (.ok (.bytes (a ++ b)))
+      | .mult, .bytes text, count | .mult, count, .bytes text =>
+          match scalarNumber count with
+          | some n => some (.ok (.bytes (List.replicate n.toNat text).flatten))
+          | none => some (.error { typeName := "TypeError", args := [] })
       | .mult, .string text, count | .mult, count, .string text =>
           match scalarNumber count with
           | some n => some (.ok (.string (String.join (List.replicate n.toNat text))))
@@ -88,7 +104,8 @@ def scalarExpr (env : ScalarEnv) : Expr → Option (Except ExceptionObject Const
           match op, operand with
           | .not, value => return .ok (.bool (!scalarTruth value))
           | .uSub, .int value => return .ok (.int (-value))
-          | _, _ => none
+          | .uSub, .bool value => return .ok (.int (if value then -1 else 0))
+          | .uSub, _ => return .error { typeName := "TypeError", args := [] }
   | .compare left [(op, right)] => do
       let left ← scalarExpr env left
       match left with

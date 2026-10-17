@@ -15,6 +15,8 @@ inductive Constant where
   | int : Int -> Constant
   /-- A Python string constant. -/
   | string : String -> Constant
+  /-- An immutable Python byte string, distinct from Unicode text. -/
+  | bytes : List UInt8 → Constant
   /-- A Python boolean constant. -/
   | bool : Bool -> Constant
   /-- The Python `None` constant. -/
@@ -270,6 +272,11 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       | .null => return .constant .none
       | _ => throw "unsupported Constant.value"
   | "Name" => return .name (← jsonString json "id")
+  | "Bytes" =>
+      return .constant (.bytes (← jsonArray json "value" fun value => do
+        let n ← value.getNat?
+        if n < 256 then return UInt8.ofNat n
+        else throw "byte literal element must be in range(0, 256)"))
   | "Attribute" =>
       return .attribute
         (← Expr.fromJson? (← jsonField json "value"))

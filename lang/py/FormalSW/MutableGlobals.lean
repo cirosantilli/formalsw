@@ -21,6 +21,7 @@ def Value.HasType (heap : Heap) (value : Value) (kind : String) : Prop :=
   match value with
   | .scalar (.int _) => kind = "int"
   | .scalar (.string _) => kind = "str"
+  | .scalar (.bytes _) => kind = "bytes"
   | .scalar (.bool _) => kind = "bool"
   | .scalar .none => kind = "None"
   | .ref address => ∃ items, heap[address]? = some items ∧

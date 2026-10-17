@@ -185,6 +185,19 @@ def hex (values : ByteString) : String :=
   String.ofList <| values.flatMap fun byte =>
     [hexDigit (byte.toNat / 16), hexDigit (byte.toNat % 16)]
 
+/-- Python's printable bytes representation, including its quote choice. -/
+def repr (values : ByteString) : String :=
+  let quote := if values.contains 39 && !values.contains 34 then '"' else '\''
+  let escaped := values.flatMap fun byte =>
+    let n := byte.toNat
+    if n = quote.toNat || n = 92 then ['\\', Char.ofNat n]
+    else if n = 9 then ['\\', 't']
+    else if n = 10 then ['\\', 'n']
+    else if n = 13 then ['\\', 'r']
+    else if 32 ≤ n && n < 127 then [Char.ofNat n]
+    else ['\\', 'x', hexDigit (n / 16), hexDigit (n % 16)]
+  String.ofList (['b', quote] ++ escaped ++ [quote])
+
 private def hexValue (char : Char) : Option Nat :=
   let value := char.toNat
   if 48 ≤ value && value ≤ 57 then some (value - 48)

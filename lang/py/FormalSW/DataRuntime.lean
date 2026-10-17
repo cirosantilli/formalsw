@@ -18,6 +18,7 @@ def Data.typeName : Data → String
   | .scalar (.int _) => "int"
   | .scalar (.bool _) => "bool"
   | .scalar (.string _) => "str"
+  | .scalar (.bytes _) => "bytes"
   | .scalar .none => "NoneType"
   | .list _ => "list"
   | .type _ => "type"

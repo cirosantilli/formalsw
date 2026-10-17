@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Compare immutable byte execution, slicing, repr and snapshots with Python."""
+import ast
+from itertools import product
+import json
+import operator
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+from lang.py.object_snapshot import equivalent_roots
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    if type(value) is bytes:
+        return f'(.bytes {list(value)})'
+    return f'(.string {json.dumps(value, ensure_ascii=False)})'
+
+
+def expected(operation):
+    try:
+        return '.ok ' + constant(operation())
+    except (TypeError, ValueError, IndexError, AttributeError) as error:
+        return f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+
+
+equations = []
+for value in (b'', b'a\x00\xff', b'abcdef'):
+    for start, stop, step in product((None, -8, -1, 0, 2, 8), repeat=3):
+        result = expected(lambda: value[start:stop:step])
+        equations.append(f'example : Strings.slice {constant(value)} {constant(start)} {constant(stop)} {constant(step)} = ({result}) := by decide')
+    for index in (None, True, False, 'bad', *range(-8, 9)):
+        equations.append(f'example : Strings.get {constant(value)} {constant(index)} = ({expected(lambda: value[index])}) := by decide')
+    for n in (-3, 0, 1, 3, True, False, None, 'bad', b'x'):
+        for left, right in ((value, n), (n, value)):
+            result = expected(lambda: left * right)
+            equations.append(f'example : scalarBinary .mult {constant(left)} {constant(right)} = some ({result}) := by decide')
+    for other in (b'', b'a', b'a\x00', b'\xff', 'text', 0, True, None):
+        result = expected(lambda: value + other)
+        equations.append(f'example : scalarBinary .add {constant(value)} {constant(other)} = some ({result}) := by decide')
+        for name, operation in (('eq', operator.eq), ('notEq', operator.ne), ('lt', operator.lt), ('ltE', operator.le), ('gt', operator.gt), ('gtE', operator.ge)):
+            try:
+                result = 'some ' + str(operation(value, other)).lower()
+            except TypeError:
+                result = 'none'
+            equations.append(f'example : scalarCompare .{name} {constant(value)} {constant(other)} = {result} := by decide')
+
+for value in (*[bytes([byte]) for byte in range(256)], b'', b"'\"", b"'\\", bytes(range(256))):
+    tactic = 'native_decide' if len(value) > 32 else 'decide'
+    equations.append(f'example : Strings.str [{constant(value)}] = .ok {constant(str(value))} := by {tactic}')
+
+source = '''def repeated(n: int) -> bytes: return b"\\x01" * n
+def heap_repeat(n: int) -> bytes:
+    items = [b"\\x00\\xff"]
+    return items[0] * n
+def heap_index(n: int) -> int:
+    items = [b"\\x00\\xff"]
+    return items[0][n]
+def reverse(n: int) -> bytes: return (b"\\x00\\xff" * n)[::-1]
+def representation(n: int) -> str: return str(b"\\x00\\xff" * n)
+def negative(n: int): return -b"x"
+def missing(n: int): return b"x".bit_length()
+def conditional(n: int): return 7 if b"x" * n else 9
+'''
+program = ast.parse(source)
+namespace = {}
+exec(source, namespace)
+for name in ('repeated', 'heap_repeat', 'heap_index', 'reverse', 'representation', 'negative', 'missing', 'conditional'):
+    assert not SupportChecker(program).check(name), name
+    backend = 'HeapCalls.scalarFunction' if name.startswith('heap_') else 'Calls.function'
+    for n in (-2, -1, 0, 1, 2, 3, True, False, None, 'bad'):
+        result = expected(lambda: namespace[name](n))
+        equations.append(f'example : ({backend} Probe.module "{name}" [{constant(n)}]).observe 80 = .done ({result}) := by native_decide')
+
+with project_temporary_directory(prefix='bytes-check-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
+                     + 'open FormalSW.PyAst\nset_option maxRecDepth 8192\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+    # Byte formatting is partial, rather than incorrectly modeled as TypeError.
+    # Even a reflexive equivalence must establish that execution is supported.
+    for case, body in enumerate(('return b"%d" % n', 'return format_value(b"%d", n)')):
+        path = directory / f'formatting_{case}.py'
+        path.write_text('def f(n: int):\n    """\n    @formalsw: Equiv(f)\n    """\n    ' + body
+                        + '\ndef format_value(pattern: int, n: int): return pattern % n\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        assert any(item.marker == 'execution model coverage' and '.Supported' in item.property_type
+                   for item in obligations)
+
+base = 'def f(n: int) -> bytes: return b"x" * n\n'
+for text in (base, base.replace('return b"x" * n', 'return helper(n)') + 'def helper(n: int) -> bytes: return b"x" * n\n'):
+    checker = SupportChecker(ast.parse(text))
+    assert checker.requirement('f', 'theorem bad : (scalarFunction Probe.module "f" [.int n]).Throws')
+    assert checker.requirement('f', 'theorem bad : FormalSW.Property.Function.Throws Probe.module "f"')
+assert equivalent_roots([[b'x', b'\xff']], [[b'x', b'\xff']])
+assert not equivalent_roots([[b'x']], [['x']])
+assert not equivalent_roots([[b'x']], [[b'y']])
+print(f'Immutable bytes: {len(equations)} Python comparisons, source execution, coverage and snapshot checks passed')
