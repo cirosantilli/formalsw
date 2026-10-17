@@ -9,7 +9,7 @@
 :toclevels: 6
 :toc-title:
 
-Formally prove properties of https://www.python.org/[Python] code with the https://lean-lang.org/[Lean] proof assistant.
+Formally prove properties of https://www.python.org/[Python] code with the https://lean-lang.org/[Lean] proof assistant. Highly vibe-coded project obviously
 
 toc::[]
 
