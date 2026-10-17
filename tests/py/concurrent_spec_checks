@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Check ordinary Python trial compilation, source binding, and false claims."""
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+REPO = Path(__file__).resolve().parents[2]
+SOURCE = (REPO / 'tests/py/parallel_doubly_linked_list.py').read_text()
+PROOF = (REPO / 'tests/py/parallel_doubly_linked_list.py.lean').read_text()
+
+
+def run(path, *, stub=False):
+    return subprocess.run([str(REPO / 'cleanxy'), *(['--stub'] if stub else []), str(path)],
+                          cwd=REPO, text=True, capture_output=True, timeout=60)
+
+
+with tempfile.TemporaryDirectory(prefix='scenario_checks_', dir=REPO / 'tests' / 'py') as directory:
+    path = Path(directory) / 'probe.py'
+    path.write_text(SOURCE)
+    stub = run(path, stub=True)
+    assert stub.returncode == 0, stub.stderr
+    namespace = next(line for line in stub.stdout.splitlines() if line.startswith('namespace ')).split(' ', 1)[1]
+    proof = PROOF.replace(PROOF.splitlines()[0], stub.stdout.splitlines()[0]).replace(
+        'tests.py.parallel_doubly_linked_list', namespace).replace('ParallelDoublyLinkedListAst', 'ProbeAst')
+    path.with_suffix('.py.lean').write_text(proof)
+    result = run(path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'All 2 checks passed' in result.stdout
+
+    # Changing the source invalidates the saved proof, including changes that
+    # preserve the signature and the surrounding acquire/release pair.
+    for description, source in [
+        ('missing acquire', SOURCE.replace('    mutex.acquire()\n', '')),
+        ('missing release', SOURCE.replace('    mutex.release()\n', '')),
+        ('wrong backlink', SOURCE.replace('    following.prev = node\n', '    following.prev = head\n')),
+        ('changed setup', SOURCE.replace('left.next = right', 'left.next = left')),
+        ('changed assertion', SOURCE.replace('assert tail.next is None', 'assert tail.next is head')),
+    ]:
+        assert source != SOURCE, description
+        path.write_text(source)
+        result = run(path)
+        assert result.returncode != 0, f'{description} incorrectly accepted'
+        assert 'failed' in result.stderr + result.stdout, result.stdout + result.stderr
+
+    # A reference obtained from a field must not turn unknown fields into None.
+    bad_field = SOURCE.replace('    following.prev = node\n', '    following.unknown = node\n')
+    path.write_text(bad_field)
+    result = run(path, stub=True)
+    assert result.returncode != 0 and 'undeclared reference field' in result.stderr, result.stderr
+    assert 'proof' in result.stderr and 'unsupported Python constructs' in result.stderr, result.stderr
+
+    for description, source, diagnostic in [
+        ('duplicate allocations', SOURCE.replace('head, tail = Node(), Node()', 'head, head = Node(), Node()'), 'reassigned allocation'),
+        ('unknown assertion identifier', SOURCE.replace('assert tail.next is None', 'assert unknown.next is None'), 'unsupported trial expression'),
+        ('arbitrary setup code', SOURCE.replace('    head, tail = Node(), Node()', '    print("oops")\n    head, tail = Node(), Node()'), 'unsupported trial setup statement'),
+        ('unsupported scalar local', SOURCE.replace('    mutex.acquire()\n', '    mutex.acquire()\n    unused = 1\n'), 'reference-field reads and writes'),
+        ('missing wait', SOURCE.replace('future.result()', 'pass'), 'future.result()'),
+        ('unsafe pool size', SOURCE.replace('max(1, len(inserted))', 'len(inserted)'), 'max_workers'),
+        ('counterexample in a serial pool', SOURCE.replace('max(1, len(inserted))', '1'), 'counterexample trials need'),
+        ('counterexample with the wrong pool collection', SOURCE.replace('max(1, len(inserted))', 'max(1, len(existing))'), 'counterexample trials need'),
+        ('rebound input', SOURCE.replace('    chain = ', '    existing_count = 2\n    chain = '), 'inputs cannot be rebound'),
+        ('rebound builtin', SOURCE + '\nrange = lambda n: []\n', 'unshadowed range'),
+        ('rebound constructor', SOURCE + '\nNode = None\n', 'unshadowed Node'),
+        ('rebound helper', SOURCE + '\nrun_trial = None\n', 'unshadowed run_trial'),
+        ('local builtin shadowing', SOURCE.replace('    chain = ', '    zip = 0\n    chain = '), 'locals must not shadow'),
+        ('missing helper', SOURCE.replace('Concurrent(run_trial)', 'Concurrent(missing)'), 'unknown Python trial helper'),
+    ]:
+        assert source != SOURCE, description
+        path.write_text(source)
+        result = run(path, stub=True)
+        assert result.returncode != 0 and diagnostic in result.stderr, (description, result.stderr)
+
+    path.write_text(SOURCE.replace('self.prev = None', 'self.prev = None\n        self.extra = 0'))
+    result = run(path, stub=True)
+    assert result.returncode != 0 and '2 proofs failed because they depend on unsupported Python constructs' in result.stderr, result.stderr
+    assert 'constructors currently support self.field = None only' in result.stderr, result.stderr
+
+    # The compiler does not recognize any data-structure or helper spelling.
+    renamed_source = SOURCE.replace('Node', 'Cell').replace('.next', '.forward').replace('.prev', '.backward')
+    renamed_source = renamed_source.replace('insert_safe', 'splice').replace('run_trial', 'check_trial')
+    renamed_proof = proof.replace('"next"', '"forward"').replace('"prev"', '"backward"')
+    renamed_proof = renamed_proof.replace('insert_safe', 'splice').replace('run_trial', 'check_trial')
+    path.write_text(renamed_source)
+    path.with_suffix('.py.lean').write_text(renamed_proof)
+    result = run(path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    # Python identifiers can be Lean keywords, or resemble generated locals.
+    # Renaming helper-local variables preserves the existing theorem's meaning.
+    hygienic = SOURCE
+    for old, new in [('existing_count', 'by'), ('insertion_count', '_final'),
+                     ('head', '_heap1'), ('inserted', '_job')]:
+        # Only rename within the helper; worker field-operation names stay put.
+        start = hygienic.index('def run_trial(')
+        end = hygienic.index('\ndef main(', start)
+        hygienic = hygienic[:start] + re.sub(rf'\b{old}\b', new, hygienic[start:end]) + hygienic[end:]
+    path.write_text(hygienic)
+    path.with_suffix('.py.lean').write_text(proof)
+    result = run(path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+print('Concurrent Python trials: generic proofs, changed setup/assertions, unsupported code, and renamed fields/helpers passed')
+
+COUNTER = (REPO / 'tests/py/parallel_shared_counter.py').read_text()
+COUNTER_PROOF = (REPO / 'tests/py/parallel_shared_counter.py.lean').read_text()
+with tempfile.TemporaryDirectory(prefix='counter_trial_checks_', dir=REPO / 'tests' / 'py') as directory:
+    path = Path(directory) / 'probe.py'
+    path.write_text(COUNTER)
+    stub = run(path, stub=True)
+    assert stub.returncode == 0, stub.stderr
+    namespace = next(line for line in stub.stdout.splitlines() if line.startswith('namespace ')).split(' ', 1)[1]
+    proof = COUNTER_PROOF.replace(COUNTER_PROOF.splitlines()[0], stub.stdout.splitlines()[0]).replace(
+        'tests.py.parallel_shared_counter', namespace).replace('ParallelSharedCounterAst', 'ProbeAst')
+    path.with_suffix('.py.lean').write_text(proof)
+    result = run(path)
+    assert result.returncode == 0 and 'All 2 checks passed' in result.stdout, result.stdout + result.stderr
+
+    for description, source in [
+        ('changed initial list', COUNTER.replace('counter = [0]', 'counter = [1]')),
+        ('changed worker count', COUNTER.replace('range(2)', 'range(1)')),
+        ('changed assertion', COUNTER.replace('assert counter[0] == 2', 'assert counter[0] == 3')),
+        ('changed increment', COUNTER.replace('snapshot + 1', 'snapshot + 2')),
+        ('missing synchronization', COUNTER.replace('    mutex.acquire()\n', '').replace('    mutex.release()\n', '')),
+    ]:
+        assert source != COUNTER, description
+        path.write_text(source)
+        result = run(path)
+        assert result.returncode != 0 and 'failed' in result.stdout + result.stderr, (description, result.stdout, result.stderr)
+
+    for description, source, diagnostic in [
+        ('serial counterexample pool', COUNTER.replace('max_workers=2', 'max_workers=1'), 'counterexample trials need'),
+        ('effectful assertion message', COUNTER.replace('{counter[0]}', '{print(counter)}'), 'unsupported trial expression'),
+        ('missing wait', COUNTER.replace('future.result()', 'pass'), 'future.result()'),
+        ('unsupported initial value', COUNTER.replace('counter = [0]', 'counter = [object()]'), 'unsupported trial expression'),
+    ]:
+        path.write_text(source)
+        result = run(path, stub=True)
+        assert result.returncode != 0 and diagnostic in result.stderr, (description, result.stderr)
+        assert 'unsupported Python constructs' in result.stderr, result.stderr
+
+    # Different layout, positive/negative indices, names, and argument order:
+    # the compiler must translate Python operations, not recognize a counter.
+    source = COUNTER.replace('counter = [0]', 'counter = [7, 0, -2]')
+    source = source.replace('counter[0]', 'counter[1]').replace('assert counter[1]', 'assert counter[-2]')
+    source = source.replace('(counter: list[int], mutex: Lock)', '(mutex: Lock, counter: list[int])')
+    source = source.replace('workers.submit(increment, counter, mutex)', 'workers.submit(increment, mutex, counter)')
+    source = source.replace('run_trial', 'check_total').replace('counter', 'cells')
+    path.write_text(source)
+    stub = run(path, stub=True)
+    assert stub.returncode == 0, stub.stderr
+    proof = stub.stdout.replace('  sorry', '''  refine ⟨{ objects := [.array [.int 7, .int 1, .int (-2)]] }, ?_, ?_⟩
+  · native_decide
+  · decide''', 1).replace('  sorry', '  native_decide', 1)
+    path.with_suffix('.py.lean').write_text(proof)
+    result = run(path)
+    assert result.returncode == 0 and 'All 2 checks passed' in result.stdout, result.stdout + result.stderr
+
+    # Scalar arguments and a single worker need no mutex parameter or import.
+    path.write_text('''from concurrent.futures import ThreadPoolExecutor
+
+def add(amount: int, data: list[int]):
+    """@cleanxy: Concurrent(check_value)"""
+    before = data[0]
+    data[0] = before + amount
+
+def check_value(worker):
+    data = [7]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        futures = [pool.submit(worker, 2, data) for _ in range(1)]
+        for future in futures:
+            future.result()
+    assert data[0] == 9
+''')
+    stub = run(path, stub=True)
+    assert stub.returncode == 0, stub.stderr
+    path.with_suffix('.py.lean').write_text(stub.stdout.replace('  sorry', '  native_decide'))
+    result = run(path)
+    assert result.returncode == 0 and 'All 1 checks passed' in result.stdout, result.stdout + result.stderr
+
+print('Integer-list trials: actual setup, submissions, assertions, scalar messages, and alternate indices/signatures passed')

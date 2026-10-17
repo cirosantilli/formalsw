@@ -207,27 +207,34 @@ An increment reads the counter, computes the next value, then writes it back. Wi
 
 `increment_safe` holds the same shared `threading.Lock` from before the read until after the write. While one worker holds the mutex, the other cannot acquire it. Its read therefore sees the first worker's completed update. Python spells these operations `mutex.acquire()` and `mutex.release()`; see the https://docs.python.org/3/library/threading.html#lock-objects[Python Lock documentation].
 
-The synchronized function asks for this guarantee:
+Both workers refer to the ordinary Python helper that `main` runs:
 
 [source,python]
 ----
-@cleanxy: theorem preserves_both_updates :
-  Ensures(Parallel(List.replicate 2 (this_function [.ref 0, .lock 0]),
-  { objects := [.array [.int 0]] }), fun state => state.item 0 0 = some (.int 2))
+# In increment_safe's docstring:
+@cleanxy: Concurrent(run_trial)
+
+# In increment_unsafe's docstring:
+@cleanxy: Not Concurrent(run_trial)
 ----
 
-Read this as: “Run two copies of this function sharing a counter initially zero. Every modeled run must finish with counter equal to two.”
-
-The unsynchronized function proves the counterexample:
+The helper contains the setup, worker calls, and assertion being proved:
 
 [source,python]
 ----
-@cleanxy: theorem can_lose_an_update :
-  CanReturn(Parallel(List.replicate 2 (this_function [.ref 0, .lock 0]),
-  { objects := [.array [.int 0]] }), { objects := [.array [.int 1]] })
+def run_trial(increment):
+    counter = [0]
+    mutex = Lock()
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        futures = [workers.submit(increment, counter, mutex) for _ in range(2)]
+        for future in futures:
+            future.result()
+    assert counter[0] == 2, f"expected counter == 2 after two increments; got {counter[0]}"
 ----
 
-It also proves `Not Ensures(...)` for the two-update guarantee. The proof file includes the concrete losing schedule from the table. The synchronized proof exhaustively checks every enabled interleaving of the actual compiled Python body; it includes deadlock as a failure rather than ignoring unfinished runs.
+`Concurrent(run_trial)` proves that every modeled interleaving finishes successfully and passes this assertion. `Not Concurrent(run_trial)` proves that a completed interleaving fails it; the witness ends with the counter at one. The setup and checks come from this Python source, so changing them changes the proof obligation. See <<dsl-concurrent>>.
+
+Integer-list trials use the general finite interleaving interpreter. The synchronized proof checks every enabled interleaving of the actual compiled worker body, including deadlocks and exceptions as failures. The proof file also checks the concrete losing schedule from the table.
 
 Run the real threads, or check the proofs:
 
@@ -243,29 +250,40 @@ The modeled setup is explicit: two workers, one integer cell, and one initially 
 
 === Doubly linked list: corrupted links
 
-link:tests/py/parallel_doubly_linked_list.py[] inserts two distinct, preallocated nodes after the same head sentinel. This exposes a structural invariant: whenever `node.next` points to another node, that node's `prev` must point back, and conversely for `prev`.
+link:tests/py/parallel_doubly_linked_list.py[] inserts fresh nodes after a shared head sentinel. Each worker's comment refers to an ordinary Python helper:
 
-Both workers can read the original tail as their successor. If node B wins the `HEAD.next` write but node A wins the `TAIL.prev` write, the resulting reachable links disagree:
-
-[source,text]
+[source,python]
 ----
-HEAD.next = B
-B.next    = TAIL
-TAIL.prev = A       # Should be B!
-----
+def insert_safe(head: Node, node: Node, mutex: Lock):
+    """@cleanxy: Concurrent(run_trial)"""
+    # Acquire mutex, insert the node, release mutex.
 
-The unsafe worker proves this particular corrupt state is reachable and that reciprocal links are not guaranteed. The synchronized worker holds the same mutex across the entire insertion and proves both nodes remain reachable in either order, with matching forward/backward links and unchanged sentinel boundaries.
-
-Its specification uses two calls with different node arguments:
-
-[source,lean]
-----
-Ensures(Parallel([
-  this_function [.ref 0, .ref 2, .lock 0],
-  this_function [.ref 0, .ref 3, .lock 0]], DoublyLinked.initial), DoublyLinked.valid)
+def insert_unsafe(head: Node, node: Node, mutex: Lock):
+    """@cleanxy: Not Concurrent(run_trial)"""
+    # The same insertion without locking.
 ----
 
-Here addresses 0 and 1 identify HEAD and TAIL; addresses 2 and 3 identify the inserted nodes. Both calls share mutex 0. `DoublyLinked.initial` and the invariant `DoublyLinked.valid` are ordinary Lean definitions in link:tests/py/parallel_doubly_linked_list.py.lean[], alongside the explicit corrupting schedule and checked proofs. They describe this example's data structure; the interpreter itself works with heap references and fields.
+`run_trial(insert, existing_count=0, insertion_count=2)` constructs the list, submits the workers, waits for them, and checks ordinary Python assertions. `main` calls this same helper. For example, part of its final traversal is:
+
+[source,python]
+----
+current = head
+for _ in inserted:
+    following = current.next
+    assert following in inserted, "an inserted node was lost"
+    assert following.prev is current, "corrupted link: next.prev is not current"
+    current = following
+for node in [*existing, tail]:
+    assert current.next is node, "the original chain changed"
+    assert node.prev is current, "corrupted link: prev is not current"
+    current = node
+----
+
+The synchronized proof covers *any finite initial list and any finite number of insertions*, including zero. The helper's default arguments are only runtime defaults; they do not restrict the proof. Every modeled scheduling order must finish successfully and pass the helper's assertions. The unsafe marker requires an actual counterexample: some input and completed interleaving fail those same checks. It does not claim every run fails.
+
+The proof in link:tests/py/parallel_doubly_linked_list.py.lean[] verifies the actual worker body, establishes that one insertion preserves an arbitrary chain, and applies an inductive mutex rule to arbitrarily many workers. Each read and write remains an individual execution step. There is no fixed node count, worker count, or exploration limit in the positive theorem. Mathematical chain lemmas belong to this example's proof; the compiler has no linked-list operations. It translates the helper's Python assignments, loops, submissions, and assertions. Changing that source changes the proof obligation.
+
+See <<dsl-concurrent>> for the supported Python subset. link:tests/py/parallel_trial.py[] uses the same mechanism for cells that refer to themselves, with a different worker signature and no list links.
 
 [source,sh]
 ----
@@ -273,7 +291,7 @@ python3 tests/py/parallel_doubly_linked_list.py
 ./cleanxy tests/py/parallel_doubly_linked_list.py
 ----
 
-The executable prints actual assertion failures and corruption rates for the unsafe version, then runs the locked version. A regression test also replays the proven bad schedule against the real Python worker by pausing at statement boundaries, so testing does not depend on a lucky thread switch.
+The executable prints actual assertion failures and corruption rates for the unsafe version, then runs the locked version. A regression test also forces a corrupting schedule against the real Python worker by pausing at statement boundaries, so testing does not depend on a lucky thread switch.
 
 == Further usage
 
@@ -313,6 +331,52 @@ There are two types of ways to write the specification:
 The DSL specification is a magic custom and very simple language that allows specifying commonly used properties easily.
 
 The DSL gets converted to corresponding Lean code behind the scenes.
+
+[[dsl-concurrent]]
+==== Concurrent
+
+`@cleanxy: Concurrent(helper)` requires every modeled execution of `helper(enclosing_function, ...)` to finish successfully and pass its assertions. The helper is an ordinary Python function in the same module, usable by tests and `main`. Its first argument receives the worker; its remaining integer arguments are universally quantified. Defaults do not bound the proof.
+
+[source,python]
+----
+def mark(item: Cell, mutex: Lock):
+    """@cleanxy: Concurrent(check_marks)"""
+    mutex.acquire()
+    item.value = item
+    mutex.release()
+
+def check_marks(worker, count: int = 3):
+    items = [Cell() for _ in range(count)]
+    mutex = Lock()
+    with ThreadPoolExecutor(max_workers=max(1, len(items))) as pool:
+        futures = [pool.submit(worker, item, mutex) for item in items]
+        for future in futures:
+            future.result()
+    for item in items:
+        assert item.value is item
+----
+
+Here `Cell.__init__` sets `self.value = None`. The theorem is named `mark.«Concurrent(check_marks)»`. `./cleanxy --stub file.py` shows its generated Lean statement. The proof must establish the property for the actual parsed worker, helper setup, and final assertions. No names inside the Python helper resolve to definitions in the proof file.
+
+===== Counterexamples
+
+`@cleanxy: Not Concurrent(helper)` requires a concrete counterexample: integer inputs and a completed worker interleaving after which the helper's assertion checks fail. A missing lock or an unsuccessful proof is not a counterexample. The finite witness executes the actual compiled worker using <<raw-lean-parallel>>. A failed reference lookup in the checks also fails the trial, as it does in Python.
+
+Counterexample helpers need `max_workers=max(1, len(jobs))`, where `jobs` is the submitted collection, or a positive literal pool size large enough for a literal `range` of jobs (for example, two workers for `range(2)`). This ensures the real pool can run the witnessed interleaving. Positive proofs also allow a positive literal pool size or the default pool size, since covering additional scheduling choices is safe for a universal claim.
+
+===== Supported Python
+
+The helper consists of setup statements, one `ThreadPoolExecutor` block, and final assertions. Setup supports fresh objects, `[Class() for _ in range(count)]`, nonempty integer-list literals such as `[0]` or `[3, -1]`, mutexes, list construction and unpacking, nonnegative slices, `zip`, `for` loops, and reference-field assignments. The executor submits a list comprehension of positional worker calls and waits for every `future.result()`. Submissions can iterate over an object collection or `range(count)`. Assertions support field reads, integer-list indexing (including negative indices), identity, membership, equality, `len`, and loops, including up to two reference locals carried between iterations. Messages may be literal strings or f-strings with plain integer or Boolean interpolations; arbitrary calls and formatting operations remain unsupported.
+
+The reference-object model supports one plain class per helper. Its no-argument constructor initializes its fields to `None`. Object identities are fresh and distinct; collection lengths are arbitrary, with negative `range` bounds giving empty collections as in Python. Class, field, helper, and argument names are unrestricted except for shadowing supported primitives. Worker arity and argument order are taken from the source.
+
+Trials containing integer lists use <<raw-lean-parallel>> and its supported scalar arithmetic and list operations. Calls may pass scalar arguments and multiple mutexes, or omit mutexes entirely. Their proof covers the batch described by the helper; the counter example explicitly uses two workers. The compiler generates both positive guarantees and counterexamples from the same helper.
+
+For the unbounded reference-object guarantee, the worker must acquire the common mutex before its body and release it at the end. The body supports separate reference-field reads and writes, `pass`, and `sleep(0)`. Unsupported Python causes a coverage error for each dependent proof. Missing or misplaced synchronization prevents the positive guarantee from being proved.
+
+===== Execution model
+
+The mutex model permits only its owner to execute body operations; every other worker is blocked at acquire. An inductive proof covers all choices of the next owner and every individual body step. It uses an unbounded reference heap. The scope is these workers and their shared objects, with no outside mutation. As with <<raw-lean-parallel>>, steps are sequentially consistent; signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside the execution model.
 
 ==== Returns
 
@@ -624,6 +688,56 @@ CleanXY supplies `_this_module` as the enclosing Python module's AST. Comparison
 
 It does not say every schedule fails or assign a probability to failure. `ParallelRun.Ensures.of_canReturn` says that any reachable state must satisfy an established guarantee; a reachable corrupt state can therefore disprove a proposed invariant.
 
+[[raw-lean-concurrent-check]]
+==== Concurrent.check
+
+`Concurrent.check condition` evaluates one Python assertion condition. It returns `some ()` for true and `none` for false. The trial compiler combines it with field reads and loops to execute the helper's final checks.
+
+[[raw-lean-concurrent-ensures]]
+==== Concurrent.Ensures
+
+`Concurrent.Ensures module function parameters mutex arguments jobs heap post` ties an unbounded mutex proof to the actual function AST. It extracts a complete acquire/body/release region, compiles every body statement into reference operations, and requires `Concurrent.LockedEnsures` for that program. The parameter names and argument list come from the helper's submitted worker call. Extraction failure cannot satisfy this positive guarantee.
+
+[[raw-lean-concurrent-heap]]
+==== Concurrent.Heap
+
+An unbounded reference heap maps object identities and field names to either another identity or `none`. The trial compiler quantifies fresh distinct identities and translates constructor initialization and setup assignments. Source validation restricts accesses to the declared reference fields. This model has no fixed bound on object count.
+
+[[raw-lean-concurrent-invariant]]
+==== Concurrent.invariant
+
+The reusable mutex theorem lifts a one-worker preservation proof to all finite job lists and every possible acquisition order. Its invariant relates the pending jobs to the heap. The body obligation verifies a selected worker for every split of that list and leaves the invariant true for the remaining jobs. Induction on pending-job count proves the whole batch; induction on body operations accounts for each separate step.
+
+[[raw-lean-concurrent-locked-ensures]]
+==== Concurrent.LockedEnsures
+
+An inductive successful-execution predicate for a batch sharing one mutex. Its constructors model acquire, each body step, release, and completion. Acquire must cover every pending worker choice. A body step must succeed, and completion must satisfy the postcondition. With an active owner, other workers remain blocked. An inductive proof rules out faults and infinite enabled executions; it does not merely describe completed runs.
+
+[[raw-lean-concurrent-put]]
+==== Concurrent.put
+
+`Concurrent.put heap object field value` updates one reference field in an unbounded heap. Other fields and objects retain their previous values.
+
+[[raw-lean-concurrent-put-concrete]]
+==== Concurrent.putConcrete
+
+`Concurrent.putConcrete heap object field value` performs the corresponding setup assignment in a finite `SharedState`. The trial compiler restricts targets to allocated objects and declared fields. This representation supports checking concrete counterexamples.
+
+[[raw-lean-concurrent-read]]
+==== Concurrent.read
+
+`Concurrent.read heap object field` evaluates a reference-field read. Dereferencing Python `None` returns outer `none`; a successful read returns `some value`, where the field value may itself represent Python `None`.
+
+[[raw-lean-concurrent-read-concrete]]
+==== Concurrent.readConcrete
+
+`Concurrent.readConcrete heap object field` reads a reference field from a finite `SharedState`. Missing fields, invalid addresses, scalar fields, and dereferencing Python `None` fail. Counterexample checks use this function with the same assertion translation as positive proofs.
+
+[[raw-lean-concurrent-read-int-item]]
+==== Concurrent.readIntItem
+
+`Concurrent.readIntItem heap object index` reads an integer from a mutable list in a finite `SharedState`, using Python's positive or negative indexing. Invalid addresses, out-of-range indices, and non-integer elements fail the trial check.
+
 [[raw-lean-diverges]]
 ==== diverges
 
@@ -709,6 +823,11 @@ Objects used by workers are created in the initial heap. The current interpreter
 A shared state contains `objects`, a list of <<raw-lean-shared-object,SharedObject>> values indexed by their reference addresses, and `locked`, the identities of currently held mutexes. Both default to empty lists. For example, `{ objects := [.array [.int 0]] }` creates one zero-valued counter, with all mutexes initially unlocked.
 
 Specifications can observe `state.item address index` or `state.field address "name"`; each lookup returns `some value` when present. A successful concurrent outcome contains the complete final shared state, allowing invariants to relate multiple objects and fields.
+
+[[raw-lean-shared-state-read-path]]
+==== SharedState.readPath
+
+`state.readPath (.ref address) ["prev", "next"]` follows fields through a finite shared heap. It returns `none` on a missing field or an attempt to dereference Python `None`. A path ending in a field containing Python `None` succeeds with `some .none`; a path that tries to continue through it fails.
 
 [[raw-lean-shared-value]]
 ==== SharedValue

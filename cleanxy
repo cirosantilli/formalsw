@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_model
+from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 
 
 class UnsupportedSyntax(Exception):
@@ -453,6 +454,26 @@ def collect_requirements(
             ast.get_docstring(stmt, clean=False),
             docstring_start_line(stmt),
         ):
+            concurrent = re.fullmatch(r"(Not )?Concurrent\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", marker.text)
+            if concurrent:
+                unsupported = support.requirement(stmt.name, "theorem trial : True")
+                property_type = "False"
+                if not unsupported:
+                    try:
+                        trial = Trial(concurrent.group(2), module, stmt, ast_namespace, bool(concurrent.group(1)))
+                        unsupported += tuple(UnsupportedConstruct(stmt.name, line, reason)
+                                             for line, reason in trial.unsupported())
+                        if not unsupported:
+                            property_type = trial.proposition()
+                    except ScenarioUnsupported as error:
+                        unsupported = (UnsupportedConstruct(concurrent.group(2), error.line, str(error)),)
+                    except ScenarioError as error:
+                        raise InvalidRequirement(str(error)) from error
+                requirements.append(Requirement(
+                    f"{proof_namespace}.{lean_import_component(stmt.name)}.«{marker.text}»",
+                    property_type, source_path, marker.line, marker.text, unsupported,
+                ))
+                continue
             unsupported = support.requirement(stmt.name, marker.text)
             raw_theorem = parse_raw_theorem(marker.text)
             if raw_theorem is not None:

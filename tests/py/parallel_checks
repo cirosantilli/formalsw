@@ -102,14 +102,20 @@ def force_corruption(head, node, mutex):
 try:
     linked['run_trial'](force_corruption)
 except AssertionError as error:
-    assert 'corrupted link:' in str(error), error
+    assert str(error) == 'an inserted node was lost', error
 else:
     raise AssertionError('the explicit schedule did not corrupt the doubly linked list')
 assert position == len(schedule), position
-for _ in range(10):
-    linked['run_trial'](linked['insert_safe'])
+for existing_count in (0, 1, 5):
+    for insertion_count in (0, 1, 2, 8):
+        linked['run_trial'](linked['insert_safe'], existing_count, insertion_count)
 completed = subprocess.run([sys.executable, str(linked_example)], text=True, capture_output=True, timeout=20)
 assert completed.returncode == 0, completed.stderr
 assert 'insert_unsafe: 20 real-thread trials' in completed.stdout, completed.stdout
 assert 'insert_safe: 20 real-thread trials\n  Corrupted lists: 0/20 (0%)' in completed.stdout, completed.stdout
 print('Real-thread linked-list demo and explicit corrupting schedule passed')
+
+cells = runpy.run_path(str(REPO / 'tests/py/parallel_trial.py'))
+for count in (-1, 0, 1, 8):
+    cells['check_marks'](cells['mark'], count)
+print('Real-thread cell trials passed')

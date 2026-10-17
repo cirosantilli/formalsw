@@ -89,7 +89,7 @@ def uses_parallel_model(function: ast.FunctionDef) -> bool:
     """Select the concurrent interpreter without imposing a particular signature."""
     return (any(isinstance(arg.annotation, ast.Name) and arg.annotation.id == 'Lock'
                 for arg in function.args.args)
-            or bool(re.search(r'\bParallel\(', ast.get_docstring(function, clean=False) or '')))
+            or bool(re.search(r'\b(?:Parallel|Concurrent)\(', ast.get_docstring(function, clean=False) or '')))
 
 
 class SupportChecker:

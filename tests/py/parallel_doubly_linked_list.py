@@ -4,11 +4,12 @@
 Run: python3 tests/py/parallel_doubly_linked_list.py
 Prove: ./cleanxy tests/py/parallel_doubly_linked_list.py
 
-HEAD <-> TAIL starts empty. Two workers insert distinct, preallocated nodes
-immediately after HEAD. Each worker receives the same mutex.
+The proof covers any existing list and any finite number of fresh insertions.
+The executable demonstrates the race with two workers and an initially empty
+HEAD <-> TAIL list. Each worker receives the same mutex.
 """
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Lock
+from threading import Lock
 from time import sleep
 
 
@@ -21,15 +22,7 @@ class Node:
 def insert_unsafe(head: Node, node: Node, mutex: Lock) -> None:
     """Concurrent inserts can leave next and prev disagreeing.
 
-    @cleanxy: theorem can_corrupt_links :
-      CanReturn(Parallel([
-        this_function [.ref 0, .ref 2, .lock 0],
-        this_function [.ref 0, .ref 3, .lock 0]], DoublyLinked.initial), DoublyLinked.broken)
-
-    @cleanxy: theorem links_not_guaranteed :
-      Not Ensures(Parallel([
-        this_function [.ref 0, .ref 2, .lock 0],
-        this_function [.ref 0, .ref 3, .lock 0]], DoublyLinked.initial), DoublyLinked.linksAgree)
+    @cleanxy: Not Concurrent(run_trial)
     """
     following = head.next
     node.prev = head
@@ -40,19 +33,9 @@ def insert_unsafe(head: Node, node: Node, mutex: Lock) -> None:
 
 
 def insert_safe(head: Node, node: Node, mutex: Lock) -> None:
-    """The shared mutex protects the complete insertion, including its first read.
+    """Every run_trial input and scheduling order must pass its assertions.
 
-    @cleanxy: theorem preserves_list :
-      Ensures(
-        Parallel(
-          [
-            this_function [.ref 0, .ref 2, .lock 0],
-            this_function [.ref 0, .ref 3, .lock 0]
-          ],
-          DoublyLinked.initial
-        ),
-        DoublyLinked.valid
-      )
+    @cleanxy: Concurrent(run_trial)
     """
     mutex.acquire()
     following = head.next
@@ -64,38 +47,34 @@ def insert_safe(head: Node, node: Node, mutex: Lock) -> None:
     mutex.release()
 
 
-def run_trial(insert):
-    head, tail, first_node, second_node = Node(), Node(), Node(), Node()
-    head.next = tail
-    tail.prev = head
+def run_trial(insert, existing_count: int = 0, insertion_count: int = 2):
+    head, tail = Node(), Node()
+    existing = [Node() for _ in range(existing_count)]
+    inserted = [Node() for _ in range(insertion_count)]
+    chain = [head, *existing, tail]
+    for left, right in zip(chain, chain[1:]):
+        left.next = right
+        right.prev = left
     mutex = Lock()
-    ready = Barrier(2)
+    with ThreadPoolExecutor(max_workers=max(1, len(inserted))) as workers:
+        futures = [workers.submit(insert, head, node, mutex) for node in inserted]
+        for future in futures:
+            future.result()
 
-    def worker(node):
-        ready.wait(timeout=5)
-        insert(head, node, mutex)
-
-    with ThreadPoolExecutor(max_workers=2) as workers:
-        first = workers.submit(worker, first_node)
-        second = workers.submit(worker, second_node)
-        first.result(timeout=5)
-        second.result(timeout=5)
-
-    # Every forward edge must have a matching backward edge, and vice versa.
-    for node in (head, tail, first_node, second_node):
-        if node.next is not None:
-            assert node.next.prev is node, "corrupted link: node.next.prev is not node"
-        if node.prev is not None:
-            assert node.prev.next is node, "corrupted link: node.prev.next is not node"
-    assert head.prev is None and tail.next is None, "sentinel links changed"
-    # Neither a lost node nor a cycle counts as a valid list.
-    seen = []
-    current = head.next
-    while current is not tail:
-        assert current is not None and current not in seen, "broken chain or cycle"
-        seen.append(current)
-        current = current.next
-    assert len(seen) == 2 and first_node in seen and second_node in seen, "an inserted node was lost"
+    # Walk one step for each inserted node. Check membership and backlinks.
+    current = head
+    for _ in inserted:
+        following = current.next
+        assert following in inserted, "an inserted node was lost"
+        assert following.prev is current, "corrupted link: next.prev is not current"
+        current = following
+    # The original nodes must still follow in their original order.
+    for node in [*existing, tail]:
+        assert current.next is node, "the original chain changed"
+        assert node.prev is current, "corrupted link: prev is not current"
+        current = node
+    assert head.prev is None, "head sentinel changed"
+    assert tail.next is None, "tail sentinel changed"
 
 
 def main():

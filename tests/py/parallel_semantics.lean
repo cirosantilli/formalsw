@@ -46,3 +46,33 @@ example : CanReturn(Parallel([some ⟨[
 example : ¬ Ensures(Parallel([some ⟨[.read "x" (.field (.name "p") "absent")],
     [("p", .ref 0)]⟩], { objects := [.object []] }), fun _ => True) := by native_decide
 example : ¬ Ensures(Parallel([worker increment], {}), fun _ => True) := by native_decide
+
+-- The unbounded rule cannot prove a false postcondition even for zero workers.
+example (heap : Concurrent.Heap) :
+    ¬ Concurrent.LockedEnsures (fun (_ : Unit) => ([], [])) (fun _ => False) [] none heap := by
+  intro guarantee
+  cases guarantee with
+  | done falsehood => exact falsehood
+  | acquire nonempty _ => exact nonempty rfl
+
+-- An invalid dereference is a fault, not a successful early completion.
+example (heap : Concurrent.Heap) :
+    ¬ Concurrent.LockedEnsures
+      (fun (_ : Unit) => ([.read "value" "missing" "next"], [("missing", none)]))
+      (fun _ => True) [()] none heap := by
+  intro guarantee
+  cases guarantee with
+  | acquire _ choices =>
+      have active := choices [] () [] rfl
+      cases active with
+      | step execution _ => simp [Concurrent.step, List.lookup] at execution
+
+-- A missing path cannot masquerade as an unequal reference in Sometimes.
+example : SharedState.readPath { objects := [.object [("next", .none)]] }
+    (.ref 0) ["next", "prev"] = none := rfl
+
+-- Trial assertions reuse the interpreter's integer-list indexing semantics.
+example : Concurrent.readIntItem { objects := [.array [.int 7, .int 9]] } 0 (-1) = some 9 := by decide
+example : Concurrent.readIntItem { objects := [.array [.int 7, .int 9]] } 0 (-3) = none := by decide
+example : Concurrent.readIntItem { objects := [.array [.int 7, .int 9]] } 0 2 = none := by decide
+example : Concurrent.readIntItem { objects := [.array [.bool true]] } 0 0 = none := by decide
