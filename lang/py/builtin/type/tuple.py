@@ -2,7 +2,7 @@
 """Plain-Python model of tuple over the primitive list model.
 
 @formalsw theorem modeled : TupleAst.module.hasExactlyClassMethods "tuple" ["__init__", "__eq__", "__lt__", "__le__", "__gt__", "__ge__", "__len__", "__getitem__"] = true
-@formalsw theorem source_fingerprint : TupleAst.module.fingerprint = 4542874346801578048
+@formalsw theorem source_fingerprint : TupleAst.module.fingerprint = 2897589769102299673
 """
 
 

@@ -10,7 +10,7 @@ theorem modeled :
       ["__init__", "__len__", "__getitem__", "append", "clear", "extend", "reverse"] = true := by
   rfl
 
-theorem source_fingerprint : BytearrayAst.module.fingerprint = 2252873034453815805 := by
+theorem source_fingerprint : BytearrayAst.module.fingerprint = 10588877109633031859 := by
   native_decide
 
 theorem append_equivalent (value : FormalSW.Py.Builtin.ByteArray.ByteArray) (byte : UInt8) :

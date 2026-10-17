@@ -10,7 +10,7 @@ theorem modeled :
       ["__init__", "__len__", "__contains__", "__getitem__", "__setitem__", "__delitem__", "clear", "copy", "keys"] = true := by
   rfl
 
-theorem source_fingerprint : DictAst.module.fingerprint = 7577762083236604724 := by
+theorem source_fingerprint : DictAst.module.fingerprint = 13275742418967923092 := by
   native_decide
 
 theorem insertion_order_equivalent (value : FormalSW.Py.Builtin.Dict.Dict α β cmp) :

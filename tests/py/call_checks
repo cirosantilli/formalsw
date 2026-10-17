@@ -38,11 +38,12 @@ for body in (
     'if False: print(n)\n    return n',
     'global counter\n    counter = n\n    return n',
     'g = n\n    return n',
-    'a, b = (n,)\n    return a',
     'a, *b = n, n + 1\n    return a',
     '(a, b), c = (n, n), n\n    return c',
 ):
     assert issues(base.replace('return n', body)), body
+# Flat unpacking checks its length at runtime, before assigning either target.
+assert not issues(base.replace('return n', 'a, b = (n,)\n    return a'))
 with_default = base.replace('g(n: int)', 'g(n: int = 0)')
 assert not issues(with_default)
 assert not issues(with_default.replace('return g(n)', 'return g()'))

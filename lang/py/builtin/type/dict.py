@@ -2,7 +2,7 @@
 """Plain-Python dict facade over the primitive balanced-tree store.
 
 @formalsw theorem modeled : DictAst.module.hasExactlyClassMethods "dict" ["__init__", "__len__", "__contains__", "__getitem__", "__setitem__", "__delitem__", "clear", "copy", "keys"] = true
-@formalsw theorem source_fingerprint : DictAst.module.fingerprint = 7577762083236604724
+@formalsw theorem source_fingerprint : DictAst.module.fingerprint = 13275742418967923092
 """
 
 

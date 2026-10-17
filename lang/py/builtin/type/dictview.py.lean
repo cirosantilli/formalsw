@@ -11,7 +11,7 @@ theorem modeled :
     DictviewAst.module.hasExactlyClassMethods "dict_items" ["__init__", "__iter__", "__len__"] = true := by
   decide
 
-theorem source_fingerprint : DictviewAst.module.fingerprint = 16014740732965182136 := by
+theorem source_fingerprint : DictviewAst.module.fingerprint = 14077084308288124826 := by
   native_decide
 
 end lang.py.builtin.type.dictview

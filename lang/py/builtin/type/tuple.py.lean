@@ -11,7 +11,7 @@ theorem modeled :
       ["__init__", "__eq__", "__lt__", "__le__", "__gt__", "__ge__", "__len__", "__getitem__"] = true := by
   rfl
 
-theorem source_fingerprint : TupleAst.module.fingerprint = 4542874346801578048 := by
+theorem source_fingerprint : TupleAst.module.fingerprint = 2897589769102299673 := by
   native_decide
 
 theorem length_equivalent (value : FormalSW.Py.Builtin.Tuple.Tuple α) :

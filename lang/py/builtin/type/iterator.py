@@ -2,7 +2,7 @@
 """Plain-Python finite iterator state machine.
 
 @formalsw theorem modeled : IteratorAst.module.hasExactlyClassMethods "iterator" ["__init__", "__iter__", "__next__"] = true ∧ IteratorAst.module.hasExactlyClassMethods "async_iterator" ["__init__", "__aiter__", "__anext__"] = true
-@formalsw theorem source_fingerprint : IteratorAst.module.fingerprint = 17427386455943285696
+@formalsw theorem source_fingerprint : IteratorAst.module.fingerprint = 13916440456041736003
 """
 
 

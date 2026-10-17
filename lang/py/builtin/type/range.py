@@ -2,7 +2,7 @@
 """Plain-Python constant-space model of range.
 
 @formalsw theorem modeled : RangeAst.module.hasExactlyClassMethods "range" ["__init__", "__len__", "__contains__", "__getitem__"] = true
-@formalsw theorem source_fingerprint : RangeAst.module.fingerprint = 6424005208048408203
+@formalsw theorem source_fingerprint : RangeAst.module.fingerprint = 14079189947378742754
 """
 
 

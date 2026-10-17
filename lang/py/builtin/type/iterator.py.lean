@@ -10,7 +10,7 @@ theorem modeled :
     IteratorAst.module.hasExactlyClassMethods "async_iterator" ["__init__", "__aiter__", "__anext__"] = true := by
   decide
 
-theorem source_fingerprint : IteratorAst.module.fingerprint = 17427386455943285696 := by
+theorem source_fingerprint : IteratorAst.module.fingerprint = 13916440456041736003 := by
   native_decide
 
 theorem next_equivalent (value : α) (rest : List α) :
