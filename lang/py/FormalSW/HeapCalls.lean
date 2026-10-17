@@ -238,9 +238,12 @@ inductive Operation where
   | add (address : Nat)
   | builtin (name : Builtin)
   | reversedList
+  | sumSequence
+  | sumGenerator (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env) (start : Expr)
   | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
 
 inductive Frame where
+  | sumStart (loop : Stmt) (env : Env)
   | initialized (address : Nat)
   | attribute (name : String)
   | methodReceiver (name : String) (arguments : List Expr) (env : Env)
@@ -370,6 +373,60 @@ def comprehensionStart (anchors : Nat) (element : Expr)
           | [value] => run anchors heap (Mutable.sequence value) fun _ heap =>
               .next ⟨.block [.sequenceStepLoop name (sequenceSource value) 0 body []] env,
                 .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩
+          | _ => .unsupported
+
+/-- These internal names cannot collide with Python identifiers. -/
+def sumAccumulator : String := "$formalsw.sum"
+def sumItem : String := "$formalsw.item"
+
+/-- Sum uses ordinary addition, never in-place mutation of its starting value. -/
+def sumBody (element : Expr) : List (String × Expr × List Expr) → List Stmt
+  | [] => [.assign [.name sumAccumulator] (.binOp (.name sumAccumulator) .add element)]
+  | (name, iterable, filters) :: rest =>
+      [.forIn (.name name) iterable (comprehensionFilters filters (sumBody element rest)) []]
+
+/-- Python rejects textual starting values before requesting the first item. -/
+def sumInitial (value : Value) : Eval Value := do
+  match value with
+  | .scalar (.string _) | .scalar (.bytes _) => Mutable.error "TypeError"
+  | .ref address => match (← get)[address]? with
+      | some (.bytearray _) => Mutable.error "TypeError"
+      | none => Mutable.unsupported
+      | _ => return value
+  | _ => return value
+
+def sumEnter (anchors : Nat) (loop : Stmt) (env : Env) (value : Value)
+    (stack : List Frame) (heap : Heap) : Step State Completion :=
+  run anchors heap (sumInitial value) fun value heap =>
+    .next ⟨.block [loop, .return (.name sumAccumulator)] (setLocal env sumAccumulator value), stack, heap⟩
+
+/-- Ordinary call arguments finish evaluating before the iterable is validated. -/
+def sumSequenceStart (anchors : Nat) (values : List Value)
+    (stack : List Frame) (heap : Heap) : Step State Completion :=
+  match values with
+  | [source, start] => run anchors heap (Mutable.sequence source) fun _ heap =>
+      sumEnter anchors (.sequenceStepLoop sumItem (sequenceSource source) 0 (sumBody (.name sumItem) []) [])
+        (fun _ => none) start stack heap
+  | _ => .unsupported
+
+/-- Generator creation validates its first iterator before evaluating the starting value.
+Subsequent iterables, filters, and elements remain lazy. -/
+def sumGeneratorStart (anchors : Nat) (element : Expr)
+    (generators : List (String × Expr × List Expr)) (env : Env) (start : Expr)
+    (values : List Value) (stack : List Frame) (heap : Heap) : Step State Completion :=
+  match generators with
+  | [] => .unsupported
+  | (name, iterable, filters) :: rest =>
+      let body := comprehensionFilters filters (sumBody element rest)
+      let enter := fun loop heap => Step.next
+        ⟨.expr start env, .sumStart loop (comprehensionEnv env generators) :: stack, heap⟩
+      match iterable with
+      | .call (.name "range") _ => match rangeBounds values with
+          | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
+          | .error error => done anchors heap (.error error)
+      | _ => match values with
+          | [value] => run anchors heap (Mutable.sequence value) fun _ heap =>
+              enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
           | _ => .unsupported
 
 /-- Enumerate accepts an integer start, including a Boolean, with no size limit. -/
@@ -556,6 +613,9 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | none => construct module anchors name values stack heap
   | .operation (.method receiver args body) values =>
       invokeMethod anchors receiver args body values stack heap
+  | .operation .sumSequence values => sumSequenceStart anchors values stack heap
+  | .operation (.sumGenerator element generators env start) values =>
+      sumGeneratorStart anchors element generators env start values stack heap
   | .operation (.comprehension element generators env) values =>
       comprehensionStart anchors element generators env values stack heap
   | .operation operation values => result anchors heap (primitive operation values) stack
@@ -574,6 +634,16 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .ifExp test yes no => .next ⟨.expr test env, .conditional yes no env :: stack, heap⟩
       | .list expressions => .next (argumentsState .list env [] expressions stack heap)
       | .tuple expressions => .next (argumentsState .tuple env [] expressions stack heap)
+      | .sumSequence iterable start =>
+          .next (argumentsState .sumSequence env [] [iterable, start] stack heap)
+      | .sumRange name element bounds filters =>
+          .next ⟨.expr (.sumGenerator element [(name, .call (.name "range") bounds, filters)]
+            (.constant (.int 0))) env, stack, heap⟩
+      | .sumGenerator element (generators@((_, iterable, _) :: _)) start =>
+          let expressions := match iterable with
+            | .call (.name "range") expressions => expressions
+            | _ => [iterable]
+          .next (argumentsState (.sumGenerator element generators env start) env [] expressions stack heap)
       | .listComp element (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
             | .call (.name "range") expressions => expressions
@@ -693,6 +763,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       match stack with
       | [] => done anchors heap (.ok value)
       | frame :: stack => match frame with
+          | .sumStart loop env => sumEnter anchors loop env value stack heap
           | .initialized address => match value with
               | .scalar .none => .next ⟨.value (.ref address), stack, heap⟩
               | _ => done anchors heap (.error { typeName := "TypeError", args := [] })
@@ -992,7 +1063,7 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList | raiseException _ | comprehension _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList | sumSequence | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>
       cases stack with

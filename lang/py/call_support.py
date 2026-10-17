@@ -63,6 +63,27 @@ def range_sum(node):
     return RangeSum(name, element, iterable.args, conditions)
 
 
+def sequence_sum(node):
+    """Recognize a consumed iterable or generator, retaining the optional start."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'sum' and range_sum(node) is None):
+        return None
+    if len(node.args) in (1, 2) and not node.keywords:
+        iterable, start = node.args[0], node.args[1] if len(node.args) == 2 else ast.Constant(value=0)
+    elif len(node.args) == 1 and len(node.keywords) == 1 and node.keywords[0].arg == 'start':
+        iterable, start = node.args[0], node.keywords[0].value
+    else:
+        return None
+    if (isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+            and iterable.func.id == 'range'):
+        # A range is constructed before the start expression, just as the
+        # first iterator of an immediately consumed generator is constructed.
+        iterable = ast.copy_location(ast.GeneratorExp(
+            elt=ast.Name(id='', ctx=ast.Load()), generators=[ast.comprehension(
+                target=ast.Name(id='', ctx=ast.Store()), iter=iterable, ifs=[], is_async=0)]), iterable)
+    return iterable, start
+
+
 def reversed_list(node):
     """Recognize the eager builtin composition without exposing an iterator."""
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -245,6 +266,7 @@ def uses_heap_calls(module, function):
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
             if (isinstance(node, (ast.List, ast.ListComp)) or reversed_list(node) is not None
+                    or sequence_sum(node) is not None and not bindings(module, "sum")
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
@@ -365,7 +387,7 @@ def check_calls(module, function, reject, *, heap=False):
             if heap and isinstance(node, ast.ListComp):
                 if any(generator.is_async or not isinstance(generator.target, ast.Name)
                        for generator in node.generators):
-                    reject(node, 'list comprehensions require synchronous loops with local name targets')
+                    reject(node, 'comprehensions require synchronous loops with local name targets')
                     return
                 inner_scope = scope | {generator.target.id for generator in node.generators}
                 for index, generator in enumerate(node.generators):
@@ -385,6 +407,20 @@ def check_calls(module, function, reject, *, heap=False):
                         expr(condition, inner_scope)
                 expr(node.elt, inner_scope)
                 return
+            summed = sequence_sum(node)
+            if summed is not None and not bindings(module, "sum"):
+                if not heap:
+                    reject(node, 'sequence sums require heap call execution')
+                    return
+                if 'sum' in scope:
+                    reject(node, 'sums require the unshadowed builtin sum')
+                iterable, start = summed
+                if isinstance(iterable, ast.GeneratorExp):
+                    recurse(ast.copy_location(ast.ListComp(elt=iterable.elt, generators=iterable.generators), iterable))
+                else:
+                    recurse(iterable)
+                recurse(start)
+                return
             comprehension = range_sum(node)
             reversed_value = reversed_list(node)
             if heap and reversed_value is not None:
@@ -393,9 +429,7 @@ def check_calls(module, function, reject, *, heap=False):
                         reject(node, f'reversed copies require the unshadowed builtin {builtin}')
                 recurse(reversed_value)
                 return
-            if comprehension is not None:
-                if heap:
-                    reject(node, "generator sums are not yet supported by heap call execution")
+            if comprehension is not None and not bindings(module, "sum"):
                 for builtin in ('sum', 'range'):
                     if builtin in scope or bindings(module, builtin):
                         reject(node, f'generator sums require the unshadowed builtin {builtin}')

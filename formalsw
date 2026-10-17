@@ -19,7 +19,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
-from lang.py.call_support import range_sum, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
+from lang.py.call_support import range_sum, sequence_sum, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
 from lang.py.imports import bindings, identify_classes, resolve_function, resolve_python_function
@@ -1321,11 +1321,18 @@ class AstJsonEmitter:
     def expr(self, expr: ast.expr) -> dict[str, object]:
         """Encode one Python expression."""
         comprehension = range_sum(expr)
-        if comprehension is not None:
+        if comprehension is not None and not bindings(self.bindings_module, "sum"):
             return {"type": "SumRange", "name": comprehension.name,
                     "element": self.expr(comprehension.element),
                     "bounds": [self.expr(arg) for arg in comprehension.bounds],
                     "conditions": [self.expr(condition) for condition in comprehension.conditions]}
+        summed = sequence_sum(expr)
+        if summed is not None and not bindings(self.bindings_module, "sum"):
+            iterable, start = summed
+            if isinstance(iterable, ast.GeneratorExp):
+                encoded = self.expr(ast.ListComp(elt=iterable.elt, generators=iterable.generators))
+                return {**encoded, "type": "SumGenerator", "start": self.expr(start)}
+            return {"type": "SumSequence", "iter": self.expr(iterable), "start": self.expr(start)}
         match expr:
             case ast.JoinedStr(values=values):
                 if not plain_fstring(expr):

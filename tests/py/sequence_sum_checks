@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""
+Compare sequence sums, lazy generator effects, and starting values with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n
+
+def fail(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n // 0
+
+def bad_iterable(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return 0
+
+def grow(xs: list[int], n: int) -> int:
+    if len(xs) < 4:
+        xs.append(n + 1)
+    return n
+
+def start_alias(xs: list[int], n: int) -> list[int]:
+    xs.append(n)
+    return xs
+'''
+bodies = {
+    'plain': 'return sum(xs)',
+    'positional_start': 'return sum(xs, n)',
+    'keyword_start': 'return sum(xs, start=n)',
+    'empty_bool': 'return sum([], True)',
+    'empty_none': 'return sum([], None)',
+    'none_start': 'return sum(xs, None)',
+    'bool_items': 'return sum([True, False, n], True)',
+    'bytes_items': 'return sum(b"123", n)',
+    'string_items': 'return sum("12", n)',
+    'bytearray_items': 'return sum(bytearray(b"12"), n)',
+    'tuple_items': 'return sum((n, 2, 3), n)',
+    'list_start': 'return sum([xs, xs], [])',
+    'tuple_start': 'return sum([(n,), (n,)], ())',
+    'empty_alias': 'return sum([], xs)',
+    'string_start': 'return sum(xs, "")',
+    'bytes_start': 'return sum(xs, b"")',
+    'bytearray_start': 'return sum(xs, bytearray())',
+    'direct_argument_order': 'return sum(bad_iterable(xs, 10), touch(xs, 20))',
+    'generator_argument_order': 'return sum((x for x in bad_iterable(xs, 10)), touch(xs, 20))',
+    'generator': 'return sum(x for x in xs)',
+    'generator_start': 'return sum((x for x in xs), touch(xs, n))',
+    'generator_filters': 'return sum(x * x for x in xs if x > 0 if x % 2)',
+    'nested_generators': 'return sum(x + y for x in xs for y in range(x))',
+    'repeated_target': 'return sum(x for x in xs for x in range(x))',
+    'generator_scope': 'x = n\na = sum(x for x in xs)\nreturn a + x',
+    'later_target': 'return sum(xs[0] for x in xs for xs in [[x]])',
+    'live_generator': 'return sum(grow(xs, x) for x in xs)',
+    'lazy_empty': 'return sum(fail(xs, x) for x in [] for y in range(fail(xs, n)))',
+    'lazy_filter': 'return sum(fail(xs, x) for x in xs if False)',
+    'element_failure': 'return sum(fail(xs, x) for x in xs)',
+    'element_order': 'return sum(touch(xs, x) for x in range(n))',
+    'start_before_elements': 'return sum((touch(xs, x) for x in range(n)), touch(xs, 50))',
+    'reject_start_before_elements': 'return sum((fail(xs, x) for x in range(n)), "")',
+    'range_start': 'return sum(range(n), n)',
+    'stepped_range': 'return sum(range(n, -3, -1), start=2)',
+    'bad_range_before_start': 'return sum(range(n, 3, 0), touch(xs, 20))',
+    'bad_generator_range_before_start': 'return sum((x for x in range(n, 3, 0)), touch(xs, 20))',
+    'converted_strings': 'return sum(int(s) for s in [str(n), "12", "-3"])',
+    'generator_list_start': 'return sum((xs for x in range(2)), xs)',
+    'start_mutates_source': 'return sum((x for x in xs), len(start_alias(xs, n)))',
+    'unsupported': 'return sum(set())',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(xs: list[int], n: int):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, n in itertools.product((name for name in bodies if name not in ('unsupported', 'converted_strings')),
+                                         ([], [0, 2], [-2, 1]), (-2, 3)):
+    value = initial.copy()
+    try:
+        result = world[name](value, n)
+        error = None
+    except (TypeError, ValueError, ZeroDivisionError, UnboundLocalError) as exception:
+        result, error = None, type(exception).__name__
+    snapshot = data(snapshot_roots([value] + ([result] if error is None else [])))
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    call = f'HeapCalls.call source "{name}" [.ref 0, .scalar (.int ({n}))] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, n={n}',
+        f'example : (match ({call}).execution.observe 5000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+# Decimal parsing is a separate primitive; unsupported elements must propagate.
+lines.append('example : (HeapCalls.call source "converted_strings" [.ref 0, .scalar (.int 3)] [.list []]).execution.observe 5000 = .unsupported := by decide')
+lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
+for expression in ('sum()', 'sum(xs, n, n)', 'sum(xs, other=n)', 'sum(xs, n, start=n)',
+                   'sum(x for x, y in xs)', 'sum(x async for x in xs)',
+                   'sum(x for x in xs for range in range(n))',
+                   'sum(len(xs) for len in xs)', '(x for x in xs)',
+                   'sum(x for x in xs) + x', 'sum(range(), n)'):
+    text = source + f'\ndef rejected(xs: list[int], n: int):\n    return {expression}\n'
+    assert SupportChecker(ast.parse(text)).check('rejected'), expression
+for binding in ('sum = 1\n', 'from elsewhere import sum\n'):
+    text = binding + 'def rejected(xs: list[int]) -> int:\n    return sum(xs)\n'
+    assert SupportChecker(ast.parse(text)).check('rejected'), text
+custom = ast.parse('def sum(n: int) -> int: return n + 2\ndef local(n: int) -> int: return sum(n)\n')
+assert not SupportChecker(custom).check('local')
+assert not api['uses_heap_calls'](custom, custom.body[1])
+assert 'SumSequence' not in api['AstJsonEmitter'](custom).emit()
+lines.extend(['def custom : Module := pyast_from_json% (include_str "custom.json")',
+              'example : (Calls.function custom "local" [.int 3]).observe 100 = .done (.ok (.int 5)) := by decide'])
+with project_temporary_directory(prefix='sequence-sums-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(n: int) -> int:\n    """\n    @formalsw: ' + marker
+                        + '\n    """\n    return sum(set())\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    (directory / 'custom.json').write_text(api['AstJsonEmitter'](custom).emit())
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'{count} sequence-sum Python comparisons passed, including lazy effects, aliases, and start values')

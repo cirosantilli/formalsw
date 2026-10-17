@@ -69,7 +69,8 @@ for suffix in ('sum = f\n', 'range = f\n', 'from other import range\n', 'del sum
 for name in ('sum', 'range'):
     assert checker(base.replace('f(n: int)', f'f(n: int, {name}: int)')).check('f')
     assert checker(base.replace('    return', f'    {name} = n\n    return')).check('f')
-for expression in ('sum(range(n), 1)', 'sum(range(stop=n))', 'sum(range(*n))', 'sum(range())'):
+assert not checker(base.replace('sum(range(n))', 'sum(range(n), 1)')).check('f')
+for expression in ('sum(range(stop=n))', 'sum(range(*n))', 'sum(range())'):
     assert checker(base.replace('sum(range(n))', expression)).check('f'), expression
 for expression in ('sum(range(n))', 'sum(x for x in range(n))'):
     support = checker(base.replace('sum(range(n))', expression))

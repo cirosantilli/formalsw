@@ -112,6 +112,10 @@ inductive Expr where
   /-- Normalized `sum(element for name in range(bounds) if conditions...)`.
   Coverage checking verifies the builtin bindings before this node executes. -/
   | sumRange : String → Expr → List Expr → List Expr → Expr
+  /-- Consume an ordinary iterable with an optional evaluated starting value. -/
+  | sumSequence : Expr → Expr → Expr
+  /-- Immediately consumed generator expression, with lazy element evaluation. -/
+  | sumGenerator : Expr → List (String × Expr × List Expr) → Expr → Expr
   /-- Eager `list(reversed(value))` with both builtin bindings resolved. -/
   | reversedList : Expr → Expr
   /-- Eager list comprehension: local target, iterable, and ordered filters. -/
@@ -347,6 +351,16 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         (← Expr.fromJson? (← jsonField json "element"))
         (← jsonArray json "bounds" Expr.fromJson?)
         (← jsonArray json "conditions" Expr.fromJson?)
+  | "SumSequence" =>
+      return .sumSequence (← Expr.fromJson? (← jsonField json "iter"))
+        (← Expr.fromJson? (← jsonField json "start"))
+  | "SumGenerator" =>
+      return .sumGenerator (← Expr.fromJson? (← jsonField json "elt"))
+        (← jsonArray json "generators" fun generator => do
+          return (← jsonString generator "name",
+            ← Expr.fromJson? (← jsonField generator "iter"),
+            ← jsonArray generator "ifs" Expr.fromJson?))
+        (← Expr.fromJson? (← jsonField json "start"))
   | "BuiltinCall" =>
       let builtin ← match ← jsonString json "name" with
         | "int" => pure Builtin.int
@@ -884,6 +898,10 @@ mutual
         1 + function.operationCount + (args.map Expr.operationCount).sum
     | .builtinCall _ args => 2 + (args.map Expr.operationCount).sum
     | .reversedList value => 4 + value.operationCount
+    | .sumSequence iterable start => 2 + iterable.operationCount + start.operationCount
+    | .sumGenerator element generators start =>
+        2 + element.operationCount + start.operationCount + (generators.map fun (_, iterable, filters) =>
+          1 + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
     | .listComp element generators =>
         1 + element.operationCount + (generators.map fun (_, iterable, filters) =>
           1 + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
@@ -1336,7 +1354,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.unaryOp _ _ => none
   | Expr.boolOp _ _ => none
   | Expr.ifExp _ _ _ => none
-  | Expr.sumRange _ _ _ _ => none
+  | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
   | Expr.reversedList _ => none
   | Expr.listComp _ _ => none

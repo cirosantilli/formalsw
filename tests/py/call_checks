@@ -84,8 +84,6 @@ assert not issues(sum_source)
 for suffix in ('sum = f\n', 'range = f\n', 'from other import sum\n', 'from other import *\n'):
     assert issues(sum_source + suffix), suffix
 for expression in (
-    'sum(x for x in range(n) for y in range(n))',
-    'sum((x for x in range(n)), 1)',
     'sum(x for x in range(n) if missing(x))',
     'sum(x for x in range(n)) + x',
     'x + sum(x for x in range(n))',
@@ -117,6 +115,7 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("unpack_loop_checks
 subprocess.run([sys.executable, str(Path(__file__).with_name("math_gcd_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("math_module_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("range_sum_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("sequence_sum_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("bit_length_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("int_conversion_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("sequence_checks"))], check=True)

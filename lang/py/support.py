@@ -658,9 +658,9 @@ class SupportChecker:
             if uses_method(self.module, function, 'bit_length') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'int.bit_length requires a call interpreter'))
-            if uses_builtin(self.module, function, 'sum') and model != 'Calls.function':
+            if uses_builtin(self.module, function, 'sum') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
-                    'range sums require the scalar call interpreter'))
+                    'sums require a call interpreter'))
             if uses_builtin(self.module, function, 'int') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'integer conversion requires a call interpreter'))
