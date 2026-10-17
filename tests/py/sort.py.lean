@@ -201,10 +201,10 @@ theorem merge_sort_untyped.«Throws» :
 
 /-- Untyped merge sort succeeds when `<` is defined for every input pair. -/
 theorem merge_sort_untyped_not_throws_of_lt_safe
-    (values : List CleanXY.PyAst.Value)
+    (values : List Value)
     (_safe : ∀ left ∈ values, ∀ right ∈ values,
-      ∃ result, CleanXY.PyAst.evalValueCmp .lt left right = .ok result) :
-    ∃ result, CleanXY.PyAst.evalUnaryListFunctionOutcome
+      ∃ result, evalValueCmp .lt left right = .ok result) :
+    ∃ result, evalUnaryListFunctionOutcome
       SortAst.module "merge_sort_untyped" values = some (.ok result) := by
   have homogeneous :
       ∀ left ∈ values, ∀ right ∈ values, sameValueKind left right := by
@@ -221,7 +221,7 @@ theorem merge_sort_untyped_not_throws_of_lt_safe
 
 /-- The generic untyped semantics also sort comparable modeled objects. -/
 example :
-    CleanXY.PyAst.evalUnaryListFunctionOutcome SortAst.module "merge_sort_untyped"
+    evalUnaryListFunctionOutcome SortAst.module "merge_sort_untyped"
       [.object "DummyInt" 2, .object "DummyInt" 1] =
         some (.ok [.object "DummyInt" 1, .object "DummyInt" 2]) := by
   rfl

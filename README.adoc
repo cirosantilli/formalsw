@@ -458,7 +458,7 @@ For a bare-list function, `Throws` instead provides a modeled runtime-value-list
 
 === Raw Lean specification
 
-If the specification starts with "theorem", then it is interpretred as an arbitrary Lean code to be proven.
+If the specification starts with "theorem", then it is interpreted as an arbitrary Lean code to be proven.
 
 Function-level raw theorems infer referenced Python arguments that the theorem does not bind explicitly. For example, `values` below is assigned `List CleanXY.PyAst.Value` from the bare `list` annotation while the comparison premise and evaluator conclusion remain visible:
 
@@ -468,8 +468,8 @@ def merge_sort_untyped(values: list) -> list:
     """
     @cleanxy: theorem merge_sort_untyped_not_throws_of_lt_safe
       (_safe : ∀ left ∈ values, ∀ right ∈ values,
-        ∃ result, CleanXY.PyAst.evalValueCmp .lt left right = .ok result) :
-      ∃ result, CleanXY.PyAst.evalUnaryListFunctionOutcome
+        ∃ result, evalValueCmp .lt left right = .ok result) :
+      ∃ result, evalUnaryListFunctionOutcome
         SortAst.module "merge_sort_untyped" values = some (.ok result)
     """
     # ...
