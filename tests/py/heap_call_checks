@@ -75,6 +75,19 @@ bodies = {
     'conditional': 'return push(items, n) if n > 0 else push(alias)',
     'short_circuit': 'return items and push(alias, n)',
     'index_side_effect': 'return items[touch(alias, n)]',
+    'range_loop': 'for k in range(n):\n    push(items, k)\nreturn alias',
+    'range_negative': 'for k in range(n, -3, -2):\n    push(items, k)\nreturn items',
+    'range_boolean': 'for k in range(False, True):\n    push(items, k)\nreturn items',
+    'range_arguments': 'for k in range(touch(items, n), touch(alias, n + 2)):\n    push(items, k)\nreturn items',
+    'range_argument_failure': 'for k in range(touch(items, n), fail(alias, n)):\n    push(items, k)\nreturn items',
+    'range_zero_step': 'for k in range(touch(items, n), touch(alias, n + 2), 0):\n    push(items, k)\nreturn items',
+    'range_invalid_index': 'for k in range(items, touch(alias, n)):\n    push(items, k)\nreturn items',
+    'range_else': 'for k in range(n):\n    push(items, k)\nelse:\n    push(alias, 7)\nreturn items',
+    'range_break': 'for k in range(n):\n    push(items, k)\n    break\nelse:\n    push(alias, 7)\nreturn items',
+    'range_continue': 'for k in range(n):\n    push(items, k)\n    continue\n    push(alias, 99)\nelse:\n    push(alias, 7)\nreturn items',
+    'range_nested': 'for k in range(n):\n    for j in range(k, n):\n        push(items, k * 10 + j)\nreturn alias',
+    'range_rebind_target': 'for k in range(n):\n    push(items, k)\n    k = 42\nreturn items',
+    'range_else_break_outer': 'for k in range(n):\n    for j in range(0):\n        push(items, j)\n    else:\n        push(items, k)\n        break\nelse:\n    push(alias, 7)\nreturn items',
 }
 for name, body in bodies.items():
     source += f'\ndef {name}(n: int, items: list[int], alias: list[int]):\n'
@@ -84,6 +97,12 @@ checker = SupportChecker(program)
 for name in bodies:
     issues = checker.check(name, heap_calls=True)
     assert not issues, (name, issues)
+range_source = 'def f(n: int) -> list[int]:\n    items = []\n    for k in range(n):\n        items.append(k)\n    return items\n'
+assert not SupportChecker(ast.parse(range_source)).check('f')
+for suffix in ('range = f\n', 'from other import range\n', 'from other import *\n'):
+    assert SupportChecker(ast.parse(range_source + suffix)).check('f')
+for iterator in ('range()', 'range(n, stop=0)', 'range(n, n, n, n)', '[n]'):
+    assert SupportChecker(ast.parse(range_source.replace('range(n)', iterator))).check('f')
 lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
          'def source : Module := pyast_from_json% (include_str "source.json")']
 count = 0
@@ -97,7 +116,7 @@ for name in bodies:
                 try:
                     value = world[name](n, anchors[0], anchors[0 if shared else 1])
                     error = None
-                except (IndexError, TypeError, AttributeError, ZeroDivisionError) as exception:
+                except (IndexError, TypeError, AttributeError, ZeroDivisionError, ValueError) as exception:
                     value, error = None, type(exception).__name__
                 expected = data(snapshot_roots(anchors + ([value] if error is None else [])))
                 heap = '[' + ', '.join('[' + ', '.join('.scalar (' + constant(v) + ')' for v in xs) + ']'

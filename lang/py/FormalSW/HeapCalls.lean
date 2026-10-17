@@ -92,12 +92,16 @@ inductive Frame where
   | assign (name : String) (rest : List Stmt) (env : Env)
   | branch (yes no rest : List Stmt) (env : Env)
   | discard (rest : List Stmt) (env : Env)
+  | rangeArguments (name : String) (done : List Value) (rest : List Expr)
+      (body otherwise following : List Stmt) (env : Env)
 
 inductive Work where
   | expr (expression : Expr) (env : Env)
   | block (body : List Stmt) (env : Env)
   | value (value : Value)
   | operation (operation : Operation) (values : List Value)
+  | startRange (name : String) (values : List Value)
+      (body otherwise following : List Stmt) (env : Env)
 
 structure State where
   work : Work
@@ -123,6 +127,21 @@ def argumentsState (operation : Operation) (env : Env) (done : List Value)
   | [] => ⟨.operation operation done, stack, heap⟩
   | first :: rest => ⟨.expr first env, .arguments operation done rest env :: stack, heap⟩
 
+/-- Evaluate all range arguments before converting their values to indices. -/
+def rangeBounds (values : List Value) : Except ExceptionObject (Int × Int × Int) := do
+  let scalars ← values.mapM fun value => match value with
+    | .scalar value => .ok value
+    | .ref _ => .error { typeName := "TypeError", args := [] }
+  Calls.rangeBounds scalars
+
+private def rangeState (name : String) (env : Env) (done : List Value)
+    (expressions : List Expr) (body otherwise following : List Stmt)
+    (stack : List Frame) (heap : Heap) : State :=
+  match expressions with
+  | [] => ⟨.startRange name done body otherwise following env, stack, heap⟩
+  | first :: rest =>
+      ⟨.expr first env, .rangeArguments name done rest body otherwise following env :: stack, heap⟩
+
 def primitive : Operation → List Value → Eval Value
   | .list, values => Mutable.allocate values
   | .subscript, [base, index] => do
@@ -147,6 +166,11 @@ def primitive : Operation → List Value → Eval Value
 def step (module : Module) (anchors : Nat) (state : State) : Step State Completion :=
   let ⟨work, stack, heap⟩ := state
   match work with
+  | .startRange name values body otherwise following env =>
+      match rangeBounds values with
+      | .ok (start, stop, stride) =>
+          .next ⟨.block (.rangeStepLoop name start stop stride body otherwise :: following) env, stack, heap⟩
+      | .error error => done anchors heap (.error error)
   | .operation (.call name) values =>
       match findFunctionIn module.body name with
       | some (args, body) =>
@@ -183,6 +207,14 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .whileDo condition body otherwise :: rest =>
           .next ⟨.expr condition env,
             .branch (body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)]) otherwise rest env :: stack, heap⟩
+      | .forIn (.name name) (.call (.name "range") expressions) body otherwise :: rest =>
+          .next (rangeState name env [] expressions body otherwise rest stack heap)
+      | .rangeStepLoop name next stop stride body otherwise :: rest =>
+          if Calls.rangeContinues next stop stride then
+            .next ⟨.block (body ++ [Calls.loopContinuation body
+              (.rangeStepLoop name (next + stride) stop stride body otherwise)] ++ rest)
+              (setLocal env name (.scalar (.int next))), stack, heap⟩
+          else .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
       | .loopResume next :: rest => .next ⟨.block (next :: rest) env, stack, heap⟩
       | .breakLoop :: rest => match Calls.loopTarget rest with
           | some (_, following) => .next ⟨.block following env, stack, heap⟩
@@ -218,6 +250,8 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | .branch yes no rest env => run anchors heap (Mutable.truth value) fun truth heap =>
               .next ⟨.block ((if truth then yes else no) ++ rest) env, stack, heap⟩
           | .discard rest env => .next ⟨.block rest env, stack, heap⟩
+          | .rangeArguments name done rest body otherwise following env =>
+              .next (rangeState name env (done ++ [value]) rest body otherwise following stack heap)
 
 /-- Entry references stay observable; freshly allocated unreachable lists do not
 become roots in the completion's alias-preserving graph. -/
@@ -316,7 +350,7 @@ theorem step_extend (extension : Calls.Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | list | subscript | append _ | builtin _ => rfl
-  | expr _ _ | block _ _ | value _ => rfl
+  | expr _ _ | block _ _ | value _ | startRange _ _ _ _ _ _ => rfl
 
 theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Calls.Extends target source) :
     Reaches target anchors initial final := by
@@ -452,6 +486,60 @@ theorem while_loop (evaluated : Evaluates module env condition heap value middle
     BlockReturns module env (.whileDo condition body otherwise :: following) heap answer finalHeap := by
   intro anchors stack
   exact .next rfl ((evaluated anchors _).trans (.next (by simp [step, run, truth]) (rest anchors stack)))
+
+private theorem range_reach
+    (h : Evaluates.Arguments module env expressions heap values finalHeap) (done : List Value)
+    (anchors : Nat) (stack : List Frame) :
+    Reaches module anchors (rangeState name env done expressions body otherwise following stack heap)
+      ⟨.startRange name (done ++ values) body otherwise following env, stack, finalHeap⟩ := by
+  induction h generalizing done with
+  | nil => simp [rangeState]; exact .refl
+  | @cons expression heap value middle expressions values finalHeap head tail ih =>
+      apply (head _ _).trans
+      refine .next rfl ?_
+      simpa [List.append_assoc] using ih (done ++ [value])
+
+theorem for_range (arguments : Evaluates.Arguments module env expressions heap values middle)
+    (bounds : rangeBounds values = .ok (start, stop, stride))
+    (rest : BlockReturns module env (.rangeStepLoop name start stop stride body otherwise :: following)
+      middle answer finalHeap) :
+    BlockReturns module env (.forIn (.name name) (.call (.name "range") expressions) body otherwise :: following)
+      heap answer finalHeap := by
+  intro anchors stack
+  exact .next rfl ((range_reach arguments [] anchors stack).trans
+    (.next (by simp [step, bounds]) (rest anchors stack)))
+
+theorem range_step (continues : Calls.rangeContinues next stop stride = true)
+    (rest : BlockReturns module (setLocal env name (.scalar (.int next)))
+      (body ++ [Calls.loopContinuation body (.rangeStepLoop name (next + stride) stop stride body otherwise)] ++ following)
+      heap answer finalHeap) :
+    BlockReturns module env (.rangeStepLoop name next stop stride body otherwise :: following)
+      heap answer finalHeap := by
+  intro anchors stack
+  exact .next (by simp [step, continues]) (rest anchors stack)
+
+theorem range_done (finished : Calls.rangeContinues next stop stride = false)
+    (rest : BlockReturns module env (otherwise ++ following) heap answer finalHeap) :
+    BlockReturns module env (.rangeStepLoop name next stop stride body otherwise :: following)
+      heap answer finalHeap := by
+  intro anchors stack
+  exact .next (by simp [step, finished]) (rest anchors stack)
+
+theorem loop_resume (rest : BlockReturns module env (next :: following) heap answer finalHeap) :
+    BlockReturns module env (.loopResume next :: following) heap answer finalHeap :=
+  fun anchors stack => .next rfl (rest anchors stack)
+
+theorem break_loop (target : Calls.loopTarget body = some (next, following))
+    (rest : BlockReturns module env following heap answer finalHeap) :
+    BlockReturns module env (.breakLoop :: body) heap answer finalHeap := by
+  intro anchors stack
+  exact .next (by simp [step, target]) (rest anchors stack)
+
+theorem continue_loop (target : Calls.loopTarget body = some (next, following))
+    (rest : BlockReturns module env (next :: following) heap answer finalHeap) :
+    BlockReturns module env (.continueLoop :: body) heap answer finalHeap := by
+  intro anchors stack
+  exact .next (by simp [step, target]) (rest anchors stack)
 
 theorem function (found : findFunctionIn module.body name = some (args, body))
     (arguments : completeArguments args values = some completed)

@@ -285,8 +285,6 @@ def check_calls(module, function, reject, *, heap=False):
                       and isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                       and node.iter.func.id == 'range' and 1 <= len(node.iter.args) <= 3
                       and not node.iter.keywords):
-                    if heap:
-                        reject(node, 'for loops are not yet supported by heap call execution')
                     if 'range' in locals_ or bindings(module, 'range'):
                         reject(node, 'range loops require the unshadowed builtin range')
                     for argument in node.iter.args:
