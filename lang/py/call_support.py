@@ -241,7 +241,7 @@ def uses_heap_calls(module, function):
                            and len(node.targets[0].elts) == len(node.value.elts)
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
-            if (isinstance(node, ast.List) or reversed_list(node) is not None
+            if (isinstance(node, (ast.List, ast.ListComp)) or reversed_list(node) is not None
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
@@ -344,6 +344,29 @@ def check_calls(module, function, reject, *, heap=False):
         def expr(node, scope=None):
             scope = locals_ if scope is None else scope
             recurse = lambda child: expr(child, scope)
+            if heap and isinstance(node, ast.ListComp):
+                if any(generator.is_async or not isinstance(generator.target, ast.Name)
+                       for generator in node.generators):
+                    reject(node, 'list comprehensions require synchronous loops with local name targets')
+                    return
+                inner_scope = scope | {generator.target.id for generator in node.generators}
+                for index, generator in enumerate(node.generators):
+                    iterable_scope = scope if index == 0 else inner_scope
+                    iterable = generator.iter
+                    if (isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+                            and iterable.func.id == 'range'):
+                        if 'range' in iterable_scope or bindings(module, 'range'):
+                            reject(iterable, 'comprehensions require the unshadowed builtin range')
+                        if not 1 <= len(iterable.args) <= 3 or iterable.keywords:
+                            reject(iterable, 'range requires one to three positional arguments')
+                        for argument in iterable.args:
+                            expr(argument, iterable_scope)
+                    else:
+                        expr(iterable, iterable_scope)
+                    for condition in generator.ifs:
+                        expr(condition, inner_scope)
+                expr(node.elt, inner_scope)
+                return
             comprehension = range_sum(node)
             reversed_value = reversed_list(node)
             if heap and reversed_value is not None:

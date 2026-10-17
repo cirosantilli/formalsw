@@ -221,8 +221,10 @@ inductive Operation where
   | add (address : Nat)
   | builtin (name : Builtin)
   | reversedList
+  | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
 
 inductive Frame where
+  | comprehensionResult (address : Nat)
   | binaryLeft (op : BinOp) (right : Expr) (env : Env) (inPlace : Bool)
   | binaryRight (op : BinOp) (left : Value) (inPlace : Bool)
   | compareLeft (op : CmpOp) (right : Expr) (env : Env)
@@ -309,6 +311,42 @@ def sequenceValue : SequenceSource → Value
 
 @[simp] theorem sequenceValue_source (value : Value) :
     sequenceValue (sequenceSource value) = value := by cases value <;> rfl
+
+/-- All targets are local to the comprehension, including targets in later loops.
+The first iterable is evaluated separately in the enclosing environment. -/
+def comprehensionEnv (env : Env) (generators : List (String × Expr × List Expr)) : Env :=
+  fun name => if generators.any (fun generator => generator.1 == name) then none else env name
+
+/-- Filters short-circuit in source order before entering the next loop. -/
+def comprehensionFilters (filters : List Expr) (body : List Stmt) : List Stmt :=
+  filters.foldr (fun condition rest => [.ifThen condition rest []]) body
+
+/-- Reuse ordinary loop semantics, retaining live references to mutable iterables. -/
+def comprehensionBody (address : Nat) (element : Expr) : List (String × Expr × List Expr) → List Stmt
+  | [] => [.comprehensionAppend address element]
+  | (name, iterable, filters) :: rest =>
+      [.forIn (.name name) iterable
+        (comprehensionFilters filters (comprehensionBody address element rest)) []]
+
+/-- Validate the first iterator before allocating the private result list. -/
+def comprehensionStart (anchors : Nat) (element : Expr)
+    (generators : List (String × Expr × List Expr)) (env : Env)
+    (values : List Value) (stack : List Frame) (heap : Heap) : Step State Completion :=
+  match generators with
+  | [] => .unsupported
+  | (name, iterable, filters) :: rest =>
+      let body := comprehensionFilters filters (comprehensionBody heap.length element rest)
+      let enter := fun loop => Step.next
+        ⟨.block [loop] env, .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩
+      match iterable with
+      | .call (.name "range") _ => match rangeBounds values with
+          | .ok (start, stop, stride) => enter (.rangeStepLoop name start stop stride body [])
+          | .error error => done anchors heap (.error error)
+      | _ => match values with
+          | [value] => run anchors heap (Mutable.sequence value) fun _ heap =>
+              .next ⟨.block [.sequenceStepLoop name (sequenceSource value) 0 body []] env,
+                .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩
+          | _ => .unsupported
 
 /-- Enumerate accepts an integer start, including a Boolean, with no size limit. -/
 def enumerateStart : Value → Eval Int
@@ -423,6 +461,8 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | some values => .next ⟨.block (executableBody body) (argumentEnv args values), stack, heap⟩
           | none => done anchors heap (.error { typeName := "TypeError", args := [] })
       | none => result anchors heap (library module name values) stack
+  | .operation (.comprehension element generators env) values =>
+      comprehensionStart anchors element generators env values stack heap
   | .operation operation values => result anchors heap (primitive operation values) stack
   | .expr expression env =>
       match expression with
@@ -438,6 +478,12 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .ifExp test yes no => .next ⟨.expr test env, .conditional yes no env :: stack, heap⟩
       | .list expressions => .next (argumentsState .list env [] expressions stack heap)
       | .tuple expressions => .next (argumentsState .tuple env [] expressions stack heap)
+      | .listComp element (generators@((_, iterable, _) :: _)) =>
+          let expressions := match iterable with
+            | .call (.name "range") expressions => expressions
+            | _ => [iterable]
+          .next (argumentsState (.comprehension element generators (comprehensionEnv env generators))
+            env [] expressions stack heap)
       | .reversedList expression => .next (argumentsState .reversedList env [] [expression] stack heap)
       | .subscript base (.slice lower upper stride) =>
           .next (argumentsState .slice env [] [base, lower.getD (.constant .none),
@@ -515,11 +561,14 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | some (next, following) => .next ⟨.block (next :: following) env, stack, heap⟩
           | none => .unsupported
       | .expr expression :: rest => .next ⟨.expr expression env, .discard rest env :: stack, heap⟩
+      | .comprehensionAppend address expression :: rest =>
+          .next (argumentsState (.append address) env [] [expression] (.discard rest env :: stack) heap)
       | _ => .unsupported
   | .value value =>
       match stack with
       | [] => done anchors heap (.ok value)
       | frame :: stack => match frame with
+          | .comprehensionResult address => .next ⟨.value (.ref address), stack, heap⟩
           | .binaryLeft op right env inPlace => .next ⟨.expr right env, .binaryRight op value inPlace :: stack, heap⟩
           | .binaryRight op left inPlace =>
               result anchors heap (if inPlace then inplace op left value else Mutable.binary op left value) stack
@@ -713,7 +762,7 @@ theorem step_extend (extension : Calls.Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList | raiseException _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList | raiseException _ | comprehension _ _ _ => rfl
   | expr _ _ | block _ _ | value _ | startRange _ _ _ _ _ _ => rfl
 
 theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Calls.Extends target source) :
@@ -1422,6 +1471,69 @@ theorem returns (first : BlockContinues module env body heap middleEnv middleHea
   fun anchors stack => (first following anchors stack).trans (rest anchors stack)
 
 end BlockContinues
+
+/-- Emission keeps the current comprehension locals and appends the actual value,
+including shared references, after evaluating the element's effects. -/
+theorem BlockContinues.comprehension_append
+    (evaluated : Evaluates module env expression heap value middle)
+    (found : middle[address]? = some (.list items)) :
+    BlockContinues module env [.comprehensionAppend address expression] heap env
+      (middle.set address (.list (items ++ [value]))) := by
+  intro following anchors stack
+  apply Reaches.next rfl
+  apply (Evaluates.arguments_reach (.cons evaluated .nil) (.append address) [] anchors _).trans
+  exact .next (following := ⟨.value (.scalar .none), .discard following env :: stack,
+    middle.set address (.list (items ++ [value]))⟩)
+    (by simp [step, result, run, primitive, Mutable.appendItem, found, Except.map])
+    (.next rfl .refl)
+
+/-- Prove a range comprehension by composing ordinary loop proofs. Only its
+first range arguments use the enclosing scope. -/
+theorem Evaluates.list_comp_range
+    (arguments : Arguments module env expressions heap values middle)
+    (bounds : rangeBounds values = .ok (start, stop, stride))
+    (executed : BlockContinues module
+      (comprehensionEnv env ((name, .call (.name "range") expressions, filters) :: generators))
+      [.rangeStepLoop name start stop stride
+        (comprehensionFilters filters (comprehensionBody middle.length element generators)) []]
+      (middle ++ [.list []]) finalEnv finalHeap) :
+    Evaluates module env
+      (.listComp element ((name, .call (.name "range") expressions, filters) :: generators))
+      heap (.ref middle.length) finalHeap := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (arguments_reach arguments _ [] anchors stack).trans
+  exact .next (by simp [step, comprehensionStart, bounds])
+    ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
+      (.next rfl (.next rfl .refl)))
+
+/-- The first sequence is evaluated and validated outside the comprehension's
+local scope; the loop continues to read the same shared object. -/
+theorem Evaluates.list_comp_sequence
+    (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
+    (evaluated : Evaluates module env iterable heap value middle)
+    (sequence : Mutable.sequence value middle = some (.ok items, middle))
+    (executed : BlockContinues module
+      (comprehensionEnv env ((name, iterable, filters) :: generators))
+      [.sequenceStepLoop name (sequenceSource value) 0
+        (comprehensionFilters filters (comprehensionBody middle.length element generators)) []]
+      (middle ++ [.list []]) finalEnv finalHeap) :
+    Evaluates module env (.listComp element ((name, iterable, filters) :: generators))
+      heap (.ref middle.length) finalHeap := by
+  intro anchors stack
+  have first : step module anchors
+      ⟨.expr (.listComp element ((name, iterable, filters) :: generators)) env, stack, heap⟩ =
+      .next (argumentsState
+        (.comprehension element ((name, iterable, filters) :: generators)
+          (comprehensionEnv env ((name, iterable, filters) :: generators)))
+        env [] [iterable] stack heap) := by
+    cases iterable <;> simp_all [step]
+  apply Reaches.next first
+  apply (arguments_reach (.cons evaluated .nil) _ [] anchors stack).trans
+  refine .next ?_
+    ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
+      (.next rfl (.next rfl .refl)))
+  cases iterable <;> simp_all [step, comprehensionStart, run]
 end FormalSW.PyAst.HeapCalls
 
 namespace FormalSW.PyAst.Mutable.Call

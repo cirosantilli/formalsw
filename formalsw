@@ -1343,6 +1343,14 @@ class AstJsonEmitter:
                 }
             case ast.List(elts=elts):
                 return {"type": "List", "elts": [self.expr(elt) for elt in elts]}
+            case ast.ListComp(elt=elt, generators=generators):
+                if any(generator.is_async or not isinstance(generator.target, ast.Name)
+                       for generator in generators):
+                    raise UnsupportedSyntax('list comprehensions require synchronous loops with local name targets')
+                return {"type": "ListComp", "elt": self.expr(elt), "generators": [
+                    {"name": generator.target.id, "iter": self.expr(generator.iter),
+                     "ifs": [self.expr(condition) for condition in generator.ifs]}
+                    for generator in generators]}
             case ast.Tuple(elts=elts):
                 return {"type": "Tuple", "elts": [self.expr(elt) for elt in elts]}
             case ast.BinOp(left=left, op=op, right=right):

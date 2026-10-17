@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""
+Compare comprehension scope, evaluation order, exceptions, and shared mutations with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n
+def fail(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n // 0
+def grow(xs: list[int], n: int) -> int:
+    if len(xs) < 4:
+        xs.append(n + 1)
+    return n
+def replace(xs: list[int], n: int) -> int:
+    xs[-1] = n
+    return n
+def unsupported(xs: list[int], n: int):
+    return [x for x in set()]
+'''
+bodies = {
+    'range_values': 'return [x * x for x in range(n)]',
+    'stepped': 'return [x for x in range(n, -4, -2)]',
+    'filtered': 'return [10 // x for x in range(n) if x != 0 if x % 2 == 0]',
+    'dependent': 'return [[x, y] for x in range(n) for y in range(x) if y % 2 == 0]',
+    'shadow_outer': 'out = [n for n in range(n)]\nreturn [out, n]',
+    'same_target': 'return [x for x in range(n) for x in range(x)]',
+    'later_target': 'x = 2\nreturn [y for y in range(n) if x for x in range(2)]',
+    'no_leak': 'x = 42\nout = [x for x in xs]\nreturn [out, x]',
+    'first_scope': 'return [xs for xs in xs]',
+    'nested_scope': 'return [[x for x in range(x)] for x in range(n)]',
+    'text': 'return [x for x in "λ😀x"]',
+    'bytes_value': 'return [x for x in b"az"]',
+    'tuple_value': 'return [x for x in (n, n + 1)]',
+    'references': 'return [x for x in [xs, xs] if touch(xs, n)]',
+    'live_growth': 'return [grow(xs, x) for x in xs]',
+    'live_replace': 'return [replace(xs, x) for x in xs]',
+    'filter_order': 'return [touch(xs, x + 10) for x in range(n) if touch(xs, x) if touch(xs, x + 20)]',
+    'inner_order': 'return [touch(xs, y) for x in range(n) for y in range(touch(xs, x))]',
+    'first_order': 'return [x for x in range(touch(xs, n), touch(xs, n + 2))]',
+    'zero_step': 'return [x for x in range(touch(xs, n), touch(xs, n + 2), 0)]',
+    'range_type': 'return [x for x in range("bad", touch(xs, n))]',
+    'sequence_type': 'return [x for x in touch(xs, n)]',
+    'first_failure': 'return [x for x in range(touch(xs, n), fail(xs, n + 1))]',
+    'element_failure': 'return [fail(xs, x) for x in range(n)]',
+    'filter_failure': 'return [x for x in range(n) if fail(xs, x)]',
+    'empty_lazy': 'return [fail(xs, x) for x in [] for y in range(fail(xs, 2))]',
+    'filter_lazy': 'return [fail(xs, x) for x in range(n) if False if fail(xs, x)]',
+    'builtin_target': 'return [range for range in range(n)]',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(xs: list[int], n: int):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, n in itertools.product(bodies, ([], [0, 2]), (-2, 3)):
+    value = initial.copy()
+    try:
+        result = world[name](value, n)
+        error = None
+    except (TypeError, ValueError, ZeroDivisionError, UnboundLocalError) as exception:
+        result, error = None, type(exception).__name__
+    snapshot = data(snapshot_roots([value] + ([result] if error is None else [])))
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    call = f'HeapCalls.call source "{name}" [.ref 0, .scalar (.int ({n}))] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, n={n}',
+        f'example : (match ({call}).execution.observe 3000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
+for expression in ('[x for x in range()]', '[x for x in range(1, 2, 3, 4)]',
+                   '[x for x in range(stop=2)]', '[x for x, y in xs]',
+                   '[x for xs[0] in xs]', '[x async for x in xs]',
+                   '[x for x in xs for range in range(n)]',
+                   '[len(xs) for len in xs]', '[touch(xs, n) for touch in xs]',
+                   '[x for x in xs] + [x]'):
+    text = source + f'\ndef f(xs: list[int], n: int):\n    return {expression}\n'
+    assert SupportChecker(ast.parse(text)).check('f'), expression
+for binding in ('range = 1\n', 'from somewhere import range\n'):
+    text = binding + 'def f(n: int):\n    return [x for x in range(n)]\n'
+    assert SupportChecker(ast.parse(text)).check('f'), text
+
+with project_temporary_directory(prefix='comprehension-checks-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(n: int) -> list[int]:\n    """\n    @formalsw: ' + marker
+                        + '\n    """\n    return [x for x in set()]\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} list-comprehension Python comparisons passed, including scope, mutations, and errors')
