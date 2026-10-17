@@ -4,7 +4,7 @@ from copy import deepcopy
 import sys
 
 from lang.py.contracts import ContractError
-from lang.py.imports import resolve_function
+from lang.py.imports import bindings, resolve_function
 
 
 def imported_calls(module):
@@ -44,6 +44,38 @@ def free_calls(module):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)} - scope_names(module)
 
 
+def shared_library_bindings(left, right):
+    """Identical, unmodified modeled from-imports can share one binding."""
+    from lang.py.call_support import library_functions
+    left_imports, right_imports = library_functions(left), library_functions(right)
+    shared = set()
+    for name in left_imports.keys() & right_imports.keys():
+        first, second = left_imports[name], right_imports[name]
+        if first[:2] != second[:2]:
+            continue
+        if all(isinstance(entry[2], ast.ImportFrom)
+               and bindings(module, name) == [entry[2]]
+               and sum((alias.asname or alias.name) == name for alias in entry[2].names) == 1
+               for module, entry in ((left, first), (right, second))):
+            shared.add(name)
+    return shared
+
+
+def without_import_bindings(body, names):
+    """Keep the dependency's imports, removing redundant imports from its prefix."""
+    result = []
+    for node in body:
+        if isinstance(node, ast.ImportFrom):
+            remaining = [alias for alias in node.names if (alias.asname or alias.name) not in names]
+            if len(remaining) != len(node.names):
+                if not remaining:
+                    continue
+                node = deepcopy(node)
+                node.names = remaining
+        result.append(node)
+    return result
+
+
 def link_imports(source, module, load):
     """
     Append complete helper modules so existing execution proofs can be transported
@@ -81,7 +113,8 @@ def link_imports(source, module, load):
         dependency = load(path)
         names = scope_names(dependency)
         dependency_free = free_calls(dependency)
-        collisions = (names & occupied) | (names & free) | (dependency_free & occupied)
+        shared = shared_library_bindings(linked, dependency)
+        collisions = ((names & occupied) - shared) | (names & free) | (dependency_free & occupied)
         if collisions:
             raise ContractError(f'local helper imports have conflicting module bindings: {", ".join(sorted(collisions))}')
         # Check each selected function in its own module before flattening. A
@@ -112,6 +145,10 @@ def link_imports(source, module, load):
                 wrapper.formalsw_imported = True
                 aliases.append(wrapper)
                 occupied.add(alias)
+        # Preserve the complete dependency suffix so its existing source proofs
+        # remain reusable. Only identical, immutable library bindings are merged.
+        prefix = without_import_bindings(prefix, shared)
+        linked.body = without_import_bindings(linked.body, shared)
         body = deepcopy(dependency.body)
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

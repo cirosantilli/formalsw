@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""
+Check that linking shares identical library imports without changing name resolution.
+"""
+import ast
+import math
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.call_support import library_functions
+from lang.py.imports import bindings
+from lang.py.linking import link_imports
+from lang.py.support import SupportChecker
+from lang.py.contracts import ContractError
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+with project_temporary_directory(prefix='library-link-') as temporary:
+    directory = Path(temporary)
+    source = directory / 'main.py'
+    helper = directory / 'helper.py'
+    helper.with_suffix('.py.lean').write_text('')
+    lines = ['import FormalSW', 'open FormalSW.PyAst']
+    for index, (main_import, helper_import, call) in enumerate((
+        ('from math import factorial', 'from math import factorial', 'factorial'),
+        ('from math import factorial, gcd', 'from math import factorial', 'factorial'),
+        ('from math import factorial as fact', 'from math import factorial as fact', 'fact'),
+    )):
+        source.write_text(f'{main_import}\nfrom helper import g\ndef f(n: int) -> int:\n    return {call}(n) + g(n)\n')
+        helper.write_text(f'{helper_import}\ndef g(n: int) -> int:\n    return {call}(n + 1)\n')
+        module = ast.parse(source.read_text())
+        module.formalsw_source = source
+        dependency = ast.parse(helper.read_text())
+        link_imports(source, module, lambda path: dependency)
+        assert not SupportChecker(module).check('f')
+        assert len(bindings(module, call)) == 1
+        assert ast.dump(ast.Module(body=module.body[-len(dependency.body):], type_ignores=[])) == ast.dump(dependency)
+        if 'gcd' in main_import:
+            assert 'gcd' in library_functions(module)
+        (directory / f'source{index}.json').write_text(api['AstJsonEmitter'](module).emit())
+        lines.append(f'def source{index} : Module := pyast_from_json% (include_str "source{index}.json")')
+        for n in (0, 1, 10, 30, -1):
+            if n < 0:
+                expected = '.error { typeName := "ValueError", args := [] }'
+            else:
+                expected = f'.ok (.int {math.factorial(n) + math.factorial(n + 1)})'
+            lines.append(f'example : (Calls.function source{index} "f" [.int ({n})]).observe 200 = .done ({expected}) := by native_decide')
+
+    base_main = 'from math import factorial\nfrom helper import g\ndef f(n: int) -> int: return factorial(n) + g(n)\n'
+    base_helper = 'from math import factorial\ndef g(n: int) -> int: return factorial(n)\n'
+    for main, dependency in (
+        (base_main, base_helper.replace('import factorial', 'import isqrt as factorial')),
+        (base_main + 'factorial = f\n', base_helper),
+        (base_main, base_helper + 'factorial = g\n'),
+        (base_main + 'del factorial\n', base_helper),
+        (base_main, base_helper + 'def mutate():\n    global factorial\n    factorial = g\n'),
+        (base_main.replace('import factorial', 'import factorial, factorial'), base_helper),
+        (base_main, base_helper.replace('import factorial', 'import factorial, factorial')),
+        (base_main, base_helper.replace('from math import factorial', 'def factorial(n): return n')),
+    ):
+        source.write_text(main)
+        helper.write_text(dependency)
+        try:
+            link_imports(source, ast.parse(main), lambda path: ast.parse(dependency))
+        except ContractError:
+            pass
+        else:
+            raise AssertionError('conflicting library binding accepted')
+
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+print('Shared library imports: 15 execution comparisons and binding/capture checks passed')

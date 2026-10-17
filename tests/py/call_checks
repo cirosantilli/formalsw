@@ -118,6 +118,7 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("unpack_loop_checks
 subprocess.run([sys.executable, str(Path(__file__).with_name("math_gcd_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("math_comb_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("math_factorial_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("link_library_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("minimum_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("divmod_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("dictionary_checks"))], check=True)
