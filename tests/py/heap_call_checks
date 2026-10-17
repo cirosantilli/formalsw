@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Compare helper calls, shared references, and exceptional heaps with Python."""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def push(items: list[int], value: int = 10) -> list[int]:
+    items.append(value)
+    return items
+
+def touch(items: list[int], value: int) -> int:
+    items.append(value)
+    return value
+
+def fail(items: list[int], value: int) -> int:
+    items.append(value)
+    return value // 0
+
+def recursive(items: list[int], n: int) -> list[int]:
+    if n <= 0:
+        return items
+    push(items, n)
+    return recursive(items, n - 1)
+'''
+bodies = {
+    'defaults': 'return push(items)',
+    'returned_alias': 'other = push(items, n)\nother.append(n + 1)\nreturn alias',
+    'argument_order': 'return touch(items, n) + touch(alias, n + 1)',
+    'rhs_mutation': 'items.append(touch(items, n))\nreturn items',
+    'argument_failure': 'items.append(fail(alias, n))\nreturn items',
+    'receiver_failure': 'n.append(fail(items, n))\nreturn items',
+    'left_error': 'return fail(items, n) + touch(alias, n)',
+    'right_error': 'return touch(items, n) + fail(alias, n)',
+    'new_list': 'return push([n], n + 1)',
+    'nested_aliases': 'return [push(items, n), push(alias, n + 1)]',
+    'cycle': 'items.append(items)\nreturn items',
+    'recursion': 'return recursive(items, n)',
+    'inplace': 'items += push(alias, n)\nreturn items',
+    'repeat': 'items *= n\nreturn alias',
+    'repeat_bool': 'items *= False\nreturn alias',
+    'extend_string': 'items += "λ😀"\nreturn items',
+    'read_after': 'push(items, n)\nreturn alias[-1]',
+    'list_truth': 'if items:\n    push(alias, n)\nreturn items',
+    'loop': 'while n > 0:\n    push(items, n)\n    n -= 1\nreturn alias',
+    'loop_else': 'while n > 0:\n    push(items, n)\n    break\nelse:\n    push(alias, 0)\nreturn items',
+    'conditional': 'return push(items, n) if n > 0 else push(alias)',
+    'short_circuit': 'return items and push(alias, n)',
+    'index_side_effect': 'return items[touch(alias, n)]',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int, items: list[int], alias: list[int]):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    issues = checker.check(name, heap_calls=True)
+    assert not issues, (name, issues)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name in bodies:
+    for initial in ([], [4]):
+        for n in (-1, 0, 2):
+            for shared in (False, True):
+                world = {}
+                exec(source, world)
+                anchors = [initial.copy(), [9]]
+                try:
+                    value = world[name](n, anchors[0], anchors[0 if shared else 1])
+                    error = None
+                except (IndexError, TypeError, AttributeError, ZeroDivisionError) as exception:
+                    value, error = None, type(exception).__name__
+                expected = data(snapshot_roots(anchors + ([value] if error is None else [])))
+                heap = '[' + ', '.join('[' + ', '.join('.scalar (' + constant(v) + ')' for v in xs) + ']'
+                                      for xs in (initial, [9])) + ']'
+                call = f'HeapCalls.call source {json.dumps(name)} [.scalar (.int ({n})), .ref 0, .ref {0 if shared else 1}] {heap}'
+                outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+                           f'match c.outcome with | .error e => decide (e = ⟨{json.dumps(error)}, []⟩) | _ => false')
+                lines.extend([
+                    f'-- {name}, {initial!r}, n={n}, shared={shared}',
+                    f'example : (match ({call}).execution.observe 1000 with',
+                    f'  | .done (.ok c) => ({outcome}) &&',
+                    f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+                    '  | _ => false) = true := by native_decide',
+                ])
+                count += 1
+with tempfile.TemporaryDirectory(prefix='formalsw-heap-calls-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    (directory / 'Checks.lean').write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(directory / 'Checks.lean')], cwd=ROOT, check=True)
+
+# Partial heap operations must not turn an unsupported computation into a proof
+# of divergence or equivalence. Coverage is independent of Not and Requires.
+with tempfile.TemporaryDirectory(prefix='.heap-coverage-', dir=ROOT) as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'probe{index}.py'
+        path.write_text(f'def f(n: int) -> bool:\n    """\n    @formalsw: {marker}\n    """\n    return [n] == [n]\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    path = directory / 'vacuous.py'
+    path.write_text('def f(n: int) -> bool:\n    """\n    @formalsw: Equiv(f)\n    """\n    return [n] == [n]\n')
+    stub = subprocess.run([str(ROOT / 'formalsw'), '--stub', str(path)], cwd=ROOT,
+                          text=True, capture_output=True, check=True).stdout
+    before = stub.split('theorem f.«Supported»')[0]
+    namespace = next(line.split(' ', 1)[1] for line in stub.splitlines() if line.startswith('namespace '))
+    path.with_suffix('.py.lean').write_text(before.replace('  sorry', '  intro n outcome\n  rfl') + f'end {namespace}\n')
+    rejected = subprocess.run([str(ROOT / 'formalsw'), str(path)], cwd=ROOT, text=True, capture_output=True)
+    assert rejected.returncode != 0 and 'Supported' in rejected.stdout + rejected.stderr
+    assert 'Unknown identifier' in rejected.stdout + rejected.stderr, rejected.stdout + rejected.stderr
+
+    # Existing interpreters cannot be used to bypass the coverage obligation.
+    module = ast.parse('def f(n: int) -> list[int]: return [n]\n')
+    issues = SupportChecker(module).requirement('f', 'theorem wrong : Not (HeapCalls.scalarFunction Probe.module "f" []).Halts')
+    assert any('list results require HeapCalls.call' in issue.reason for issue in issues)
+    for model in ('Calls.function', 'scalarFunction', 'Mutable.function'):
+        issues = SupportChecker(module).requirement('f', f'theorem wrong : Not ({model} Probe.module \"f\" []).Halts')
+        assert any('require the heap call interpreter' in issue.reason for issue in issues), model
+    globals_module = ast.parse('items: list[int] = []\ndef f(n: int) -> None: items.append(n)\n')
+    issues = SupportChecker(globals_module).requirement('f', 'theorem wrong : Not (HeapCalls.call Probe.module "f" [] []).Halts')
+    assert any('does not support globals' in issue.reason for issue in issues)
+
+subprocess.run([sys.executable, str(ROOT / 'tests/py/heap_calls.py')], check=True)
+print(f'Heap helper calls: {count} Python comparisons, aliases, exception ordering, and coverage checks passed')

@@ -19,7 +19,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
-from lang.py.call_support import range_sum, uses_calls_model, has_partial_primitives
+from lang.py.call_support import range_sum, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.contracts import ContractError, input_condition
 from lang.py.defaults import literal_default
 from lang.py.imports import bindings, resolve_function, resolve_python_function
@@ -743,7 +743,16 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
             raise InvalidRequirement(f"{func.name}: constrained or imported contracts with globals are unsupported")
         if [annotation_kind(arg.annotation) for arg in func.args.args] != kinds:
             raise InvalidRequirement("Equiv requires matching supported argument domains")
-        runtime = "Calls.function" if uses_calls_model(program, func) else "scalarFunction"
+        if uses_heap_calls(program, func):
+            kind = annotation_kind(func.returns)
+            if kind and kind.startswith('list['):
+                values = ", ".join(f'.scalar ({scalar_term(name, kind)})' for name, kind in zip(names, kinds))
+                return f'FormalSW.PyAst.HeapCalls.call {ns}.module {lean_string(func.name)} [{values}] []'
+            if kind not in ('int', 'str', 'bool') and not (isinstance(func.returns, ast.Constant) and func.returns.value is None):
+                raise InvalidRequirement("heap call contracts require a supported return annotation")
+            runtime = "HeapCalls.scalarFunction"
+        else:
+            runtime = "Calls.function" if uses_calls_model(program, func) else "scalarFunction"
         values = ", ".join(scalar_term(name, kind) for name, kind in zip(names, kinds))
         return f'FormalSW.PyAst.{runtime} {ns}.module {lean_string(func.name)} [{values}]'
 
@@ -755,8 +764,8 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
         kind = annotation_kind(function.returns)
         if kind is None and isinstance(function.returns, ast.Constant) and function.returns.value is None:
             kind = "None"
-        if kind not in ("int", "bool", "str", "None"):
-            raise InvalidRequirement("ReturnType needs a supported scalar return annotation")
+        if kind not in ("int", "bool", "str", "None") and not (uses_heap_calls(module, function) and kind and kind.startswith("list[")):
+            raise InvalidRequirement("ReturnType needs a supported return annotation")
         body += f" {lean_string(kind)}"
     body = guarded_type(body, conditions, existential=property_name == "Throws")
     if names:
@@ -940,7 +949,8 @@ def collect_requirements(
                 marker.text,
                 unsupported,
             ))
-        if (properties or module_markers or stmt.name in raw_targets) and any(has_partial_primitives(program, function)
+        if (properties or stmt.name in raw_targets) and any(has_partial_primitives(program, function) or
+                uses_calls_model(program, function) and uses_heap_calls(program, function)
                 for program, function, _ in coverage_targets):
             covered = []
             issues = list(condition_unsupported)
@@ -949,9 +959,11 @@ def collect_requirements(
                 if (namespace, function.name) in seen:
                     continue
                 seen.add((namespace, function.name))
-                issues.extend(SupportChecker(program).check(function.name))
-                covered.append(scalar_contract_type(program, function, namespace,
-                    'Supported', conditions, 0, input_function=stmt))
+                function_issues = SupportChecker(program).check(function.name)
+                issues.extend(function_issues)
+                if not function_issues:
+                    covered.append(scalar_contract_type(program, function, namespace,
+                        'Supported', conditions, 0, input_function=stmt))
             property_type = 'False' if issues else ' ∧ '.join(f'({term})' for term in covered)
             requirements.append(Requirement(f'{proof_namespace}.{lean_import_component(stmt.name)}.«Supported»',
                 property_type, source_path, stmt.lineno, 'execution model coverage',

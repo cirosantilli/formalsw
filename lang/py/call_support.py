@@ -1,7 +1,7 @@
 """Coverage checks for scalar functions with ordinary recursive calls."""
 import ast
 from pathlib import Path
-from lang.py.global_inputs import GlobalInputError, function_globals
+from lang.py.global_inputs import GlobalInputError, function_globals, annotation_kind
 from lang.py.imports import bindings
 from lang.py.defaults import literal_default
 
@@ -62,6 +62,29 @@ def has_partial_primitives(module, function):
     return False
 
 
+def uses_heap_calls(module, function):
+    """Find list allocation or use in the transitive local call graph."""
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    pending, visited = [function], set()
+    while pending:
+        current = pending.pop()
+        if current.name in visited:
+            continue
+        visited.add(current.name)
+        kinds = [annotation_kind(arg.annotation) for arg in current.args.args]
+        kinds.append(annotation_kind(current.returns))
+        if any(kind and kind.startswith('list[') for kind in kinds):
+            return True
+        # Defaults are evaluated at definition time, outside the modeled body.
+        # Their validation must not select a different execution backend.
+        for node in (part for statement in current.body for part in ast.walk(statement)):
+            if isinstance(node, ast.List) or (isinstance(node, ast.Attribute) and node.attr == 'append'):
+                return True
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
+                pending.append(functions[node.func.id])
+    return False
+
+
 def uses_calls_model(module, function):
     if not all(isinstance(arg.annotation, ast.Name) and arg.annotation.id in ('int', 'str', 'bool')
                for arg in function.args.args):
@@ -73,7 +96,7 @@ def uses_calls_model(module, function):
         return False
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
     names.update(library_functions(module))
-    return bool(function.args.defaults) or any(
+    return bool(function.args.defaults) or uses_heap_calls(module, function) or any(
         isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript))
         or general_division(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
@@ -85,7 +108,7 @@ def uses_calls_model(module, function):
     )
 
 
-def check_calls(module, function, reject):
+def check_calls(module, function, reject, *, heap=False):
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     libraries = library_functions(module)
     visited = set()
@@ -132,14 +155,18 @@ def check_calls(module, function, reject):
         if locals_ & functions.keys():
             reject(function, 'local bindings must not shadow module-level call targets')
         for arg in function.args.args:
-            if not isinstance(arg.annotation, ast.Name) or arg.annotation.id not in ('int', 'str', 'bool'):
-                reject(arg, 'call arguments require scalar int, str, or bool annotations')
+            kind = annotation_kind(arg.annotation)
+            if kind not in ('int', 'str', 'bool') and not (heap and kind and kind.startswith('list[')):
+                reject(arg, 'call arguments require scalar annotations or supported heap list annotations' if heap
+                       else 'call arguments require scalar int, str, or bool annotations')
 
         def expr(node, scope=None):
             scope = locals_ if scope is None else scope
             recurse = lambda child: expr(child, scope)
             comprehension = range_sum(node)
             if comprehension is not None:
+                if heap:
+                    reject(node, "generator sums are not yet supported by heap call execution")
                 generator, loop = comprehension
                 for builtin in ('sum', 'range'):
                     if builtin in scope or bindings(module, builtin):
@@ -155,6 +182,15 @@ def check_calls(module, function, reject):
                 return
             if isinstance(node, ast.Name) and node.id in scope:
                 return
+            if heap and isinstance(node, ast.List):
+                for item in node.elts:
+                    recurse(item)
+                return
+            if (heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'append' and len(node.args) == 1 and not node.keywords):
+                recurse(node.func.value)
+                recurse(node.args[0])
+                return
             if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow)):
                 recurse(node.left)
                 recurse(node.right)
@@ -162,6 +198,8 @@ def check_calls(module, function, reject):
                 recurse(node.operand)
             elif isinstance(node, ast.Compare) and all(isinstance(
                     op, (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in node.ops):
+                if heap and len(node.ops) != 1:
+                    reject(node, "chained comparisons are not yet supported by heap call execution")
                 recurse(node.left)
                 for comparator in node.comparators:
                     recurse(comparator)
@@ -175,6 +213,8 @@ def check_calls(module, function, reject):
             elif isinstance(node, ast.Subscript):
                 recurse(node.value)
                 if isinstance(node.slice, ast.Slice):
+                    if heap:
+                        reject(node, "slices are not yet supported by heap call execution")
                     for bound in (node.slice.lower, node.slice.upper, node.slice.step):
                         if bound is not None:
                             recurse(bound)
@@ -191,6 +231,8 @@ def check_calls(module, function, reject):
                 visit(target)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in libraries:
                 target = node.func.id
+                if heap:
+                    reject(node, "standard-library calls are not yet supported by heap call execution")
                 if target in scope or bindings(module, target) != [libraries[target][2]]:
                     reject(node, 'standard-library call targets must not be rebound or shadowed')
                 if node.keywords or len(node.args) != 1:
@@ -206,6 +248,8 @@ def check_calls(module, function, reject):
                     reject(node, 'string conversion requires the unshadowed builtin str')
                 if node.keywords or len(node.args) > 1:
                     reject(node, 'scalar str supports zero or one positional argument')
+                if heap and any(isinstance(item, ast.List) for item in node.args):
+                    reject(node, 'list string conversion is not yet supported by heap call execution')
                 for item in node.args:
                     recurse(item)
             else:
@@ -227,6 +271,8 @@ def check_calls(module, function, reject):
                       and isinstance(node.targets[0], ast.Tuple) and isinstance(node.value, ast.Tuple)
                       and all(isinstance(target, ast.Name) for target in node.targets[0].elts)
                       and len(node.targets[0].elts) == len(node.value.elts)):
+                    if heap:
+                        reject(node, "tuple unpacking is not yet supported by heap call execution")
                     for value in node.value.elts:
                         expr(value)
                 elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
@@ -239,6 +285,8 @@ def check_calls(module, function, reject):
                       and isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                       and node.iter.func.id == 'range' and 1 <= len(node.iter.args) <= 3
                       and not node.iter.keywords):
+                    if heap:
+                        reject(node, 'for loops are not yet supported by heap call execution')
                     if 'range' in locals_ or bindings(module, 'range'):
                         reject(node, 'range loops require the unshadowed builtin range')
                     for argument in node.iter.args:

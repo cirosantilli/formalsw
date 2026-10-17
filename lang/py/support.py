@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind
 from lang.py.mutable_support import check_mutable
-from lang.py.call_support import check_calls, uses_calls_model
+from lang.py.call_support import check_calls, uses_calls_model, uses_heap_calls
 
 
 @dataclass(frozen=True)
@@ -116,10 +116,10 @@ class SupportChecker:
         return (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
                 and annotation.value.id == 'list' and isinstance(annotation.slice, ast.Name))
 
-    def check(self, name: str, stack: tuple[str, ...] = (), *, parallel: bool = False, mutable: bool = False) -> tuple[UnsupportedConstruct, ...]:
+    def check(self, name: str, stack: tuple[str, ...] = (), *, parallel: bool = False, mutable: bool = False, heap_calls: bool = False) -> tuple[UnsupportedConstruct, ...]:
         if name in stack:
             return (UnsupportedConstruct(name, self.functions[name].lineno, 'recursive calls outside a recognized sorting implementation are unsupported', stack),)
-        if name in self.cache and not parallel and not mutable:
+        if name in self.cache and not parallel and not mutable and not heap_calls:
             return tuple(UnsupportedConstruct(issue.function, issue.line, issue.reason,
                 (*stack, *issue.dependency)) for issue in self.cache[name])
         function = self.functions.get(name)
@@ -140,7 +140,7 @@ class SupportChecker:
         if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
             reject(function, 'only plain positional arguments without variadics are supported')
         if args.defaults and (mutable or parallel or uses_parallel_model(function)
-                              or not uses_calls_model(self.module, function)):
+                              or not heap_calls and not uses_calls_model(self.module, function)):
             reject(function, 'default arguments currently require scalar call execution')
         if issues:
             return tuple(issues)
@@ -151,12 +151,18 @@ class SupportChecker:
             globals = function_globals(self.module, function)
         except GlobalInputError as error:
             return (UnsupportedConstruct(name, error.line, str(error), stack),)
+        if heap_calls and globals:
+            reject(function, 'heap call execution does not support globals')
+            return tuple(issues)
         if mutable or any(item.kind.startswith('list[') for item in globals):
             check_mutable(function, globals, self.bindings, reject)
             result = tuple(dict.fromkeys(issues))
             if not stack and not mutable:
                 self.cache[name] = result
             return result
+        if heap_calls or (uses_calls_model(self.module, function) and uses_heap_calls(self.module, function)):
+            check_calls(self.module, function, reject, heap=True)
+            return tuple(dict.fromkeys(issues))
         if uses_calls_model(self.module, function):
             check_calls(self.module, function, reject)
             return tuple(dict.fromkeys(issues))
@@ -610,7 +616,7 @@ class SupportChecker:
 
     @staticmethod
     def execution_targets(marker: str):
-        return re.findall(r'\b(Calls\.function|Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
+        return re.findall(r'\b(HeapCalls\.call|HeapCalls\.scalarFunction|Calls\.function|Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
 
     def requirement(self, name: str | None, marker: str) -> tuple[UnsupportedConstruct, ...]:
         """Check the enclosing function and any explicitly named proof dependencies."""
@@ -694,7 +700,20 @@ class SupportChecker:
             function = self.functions.get(target)
             if function is None:
                 continue
-            if function.args.defaults and model != 'Calls.function':
+            if (uses_calls_model(self.module, function) and uses_heap_calls(self.module, function)
+                    and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction')):
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'list helper calls require the heap call interpreter'))
+            if model in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
+                if any(annotation_kind(arg.annotation) not in ('int', 'str', 'bool') for arg in function.args.args):
+                    issues.append(UnsupportedConstruct(target, function.lineno,
+                        'heap-call specifications currently require scalar entry arguments'))
+                kind = annotation_kind(function.returns)
+                if model == 'HeapCalls.scalarFunction' and kind and kind.startswith('list['):
+                    issues.append(UnsupportedConstruct(target, function.lineno,
+                        'list results require HeapCalls.call rather than its scalar adapter'))
+                issues.extend(self.check(target, heap_calls=True))
+            if function.args.defaults and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'default arguments require Calls.function execution'))
             if model == 'Mutable.function':
@@ -729,6 +748,10 @@ class SupportChecker:
         for prop, target, other in properties:
             if target in self.functions:
                 issues.extend(self.requirement(target, f'{prop}({other})' if other else prop))
+                if any(uses_calls_model(self.module, self.functions[f]) and uses_heap_calls(self.module, self.functions[f])
+                       for f in (target, other) if f in self.functions):
+                    issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
+                        'legacy Function properties omit heap calls; use the short DSL or HeapCalls'))
                 try:
                     if any(function_globals(self.module, self.functions[f])
                            for f in (target, other) if f in self.functions):

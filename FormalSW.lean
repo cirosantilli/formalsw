@@ -1,5 +1,6 @@
 import lang.py.FormalSW.ParallelLiveness
 import lang.py.FormalSW.MutableGlobals
+import lang.py.FormalSW.HeapCalls
 import Lean
 import lang.py.FormalSW.Model
 import lang.py.FormalSW.Calls
