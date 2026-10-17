@@ -185,6 +185,8 @@ inductive Stmt where
   | rangeStepLoop : String → Int → Int → Int → List Stmt → List Stmt → Stmt
   /-- Internal sequence iterator: a scalar sequence or a shared heap address. -/
   | sequenceStepLoop : String → SequenceSource → Nat → List Stmt → List Stmt → Stmt
+  /-- Internal sequence iterator with immediate, left-to-right flat unpacking. -/
+  | unpackStepLoop : List String → SequenceSource → Nat → List Stmt → List Stmt → Stmt
   /-- Internal enumerate iterator with an unobservable, immediately unpacked pair. -/
   | enumerateStepLoop : String → String → SequenceSource → Nat → Int → List Stmt → List Stmt → Stmt
   /-- Internal comprehension emission; the result address is not a Python local. -/
@@ -883,7 +885,7 @@ mutual
     | .rangeLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .rangeStepLoop _ _ _ _ body otherwise | .sequenceStepLoop _ _ _ body otherwise
-      | .enumerateStepLoop _ _ _ _ _ body otherwise =>
+      | .enumerateStepLoop _ _ _ _ _ body otherwise | .unpackStepLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
     | .functionDef _ args returns body =>

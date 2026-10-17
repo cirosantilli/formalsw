@@ -254,6 +254,7 @@ inductive Frame where
   | assertion (message : Option Expr) (rest : List Stmt) (env : Env)
   | assertionMessage
   | sequence (name : String) (body otherwise following : List Stmt) (env : Env)
+  | unpackSequence (names : List String) (body otherwise following : List Stmt) (env : Env)
   | enumerateSource (index name : String) (start : Expr) (body otherwise following : List Stmt) (env : Env)
   | enumerateStart (index name : String) (source : Value) (body otherwise following : List Stmt) (env : Env)
   | assignItem (base index : Expr) (rest : List Stmt) (env : Env)
@@ -518,6 +519,9 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .assign [.subscript base index] expression :: rest =>
           .next ⟨.expr expression env, .assignItem base index rest env :: stack, heap⟩
       | .assign [.name name] expression :: rest => .next ⟨.expr expression env, .assign name rest env :: stack, heap⟩
+      | .annAssign (.name name) _ (some expression) :: rest =>
+          .next ⟨.expr expression env, .assign name rest env :: stack, heap⟩
+      | .annAssign (.name _) _ none :: rest => .next ⟨.block rest env, stack, heap⟩
       | .assign [.tuple targets] expression :: rest | .assign [.list targets] expression :: rest =>
           match Calls.targetNames targets with
           | some names => .next ⟨.expr expression env, .unpack names rest env :: stack, heap⟩
@@ -548,6 +552,21 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
             | some value => .next ⟨.block (body ++ [Calls.loopContinuation body
                 (.enumerateStepLoop index name source (position + 1) (counter + 1) body otherwise)] ++ rest)
                 (setLocal (setLocal env index (.scalar (.int counter))) name value), stack, heap⟩
+      | .forIn (.tuple targets) iterable body otherwise :: rest
+        | .forIn (.list targets) iterable body otherwise :: rest =>
+          match Calls.targetNames targets with
+          | some names => .next ⟨.expr iterable env, .unpackSequence names body otherwise rest env :: stack, heap⟩
+          | none => .unsupported
+      | .unpackStepLoop names source position body otherwise :: rest =>
+          run anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
+            match items[position]? with
+            | none => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
+            | some value => run anchors heap (Mutable.sequence value) fun fields heap =>
+                if names.length = fields.length then
+                  .next ⟨.block (body ++ [Calls.loopContinuation body
+                    (.unpackStepLoop names source (position + 1) body otherwise)] ++ rest)
+                    (assignNames env names fields), stack, heap⟩
+                else done anchors heap (.error { typeName := "ValueError", args := [] })
       | .sequenceStepLoop name source position body otherwise :: rest =>
           run anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
             match items[position]? with
@@ -628,6 +647,10 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | .sequence name body otherwise following env =>
               run anchors heap (Mutable.sequence value) fun _ heap =>
                 .next ⟨.block (.sequenceStepLoop name (sequenceSource value) 0 body otherwise :: following) env,
+                  stack, heap⟩
+          | .unpackSequence names body otherwise following env =>
+              run anchors heap (Mutable.sequence value) fun _ heap =>
+                .next ⟨.block (.unpackStepLoop names (sequenceSource value) 0 body otherwise :: following) env,
                   stack, heap⟩
           | .enumerateSource index name start body otherwise following env =>
               .next ⟨.expr start env, .enumerateStart index name value body otherwise following env :: stack, heap⟩
@@ -1278,6 +1301,14 @@ theorem assign (evaluated : Evaluates module env expression heap value finalHeap
       (setLocal env name value) finalHeap :=
   fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
 
+theorem annAssign (evaluated : Evaluates module env expression heap value finalHeap) :
+    BlockContinues module env [.annAssign (.name name) annotation (some expression)] heap
+      (setLocal env name value) finalHeap :=
+  fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
+
+theorem annotation (annotation : Expr) : BlockContinues module env [.annAssign (.name name) annotation none] heap env heap :=
+  fun _ _ _ => .next rfl .refl
+
 theorem unpack (targets : Calls.targetNames expressions = some names)
     (evaluated : Evaluates module env expression heap value middle)
     (sequence : Mutable.sequence value middle = some (.ok items, finalHeap))
@@ -1401,6 +1432,47 @@ theorem sequence_done (sequence : Mutable.sequence (sequenceValue source) heap =
     (finished : items[position]? = none)
     (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
     BlockContinues module env [.sequenceStepLoop name source position body otherwise]
+      heap finalEnv finalHeap :=
+  fun following anchors stack => .next (by simp [step, run, sequence, finished]) (rest following anchors stack)
+
+/-- The outer sequence is evaluated once; each item is unpacked just before its body. -/
+theorem for_unpack
+    (ordinary : ∀ expressions, iterable ≠ .call (.name "enumerate") expressions)
+    (targets : Calls.targetNames expressions = some names)
+    (evaluated : Evaluates module env iterable heap value middle)
+    (sequence : Mutable.sequence value middle = some (.ok items, middle))
+    (rest : BlockContinues module env
+      [.unpackStepLoop names (sequenceSource value) 0 body otherwise] middle finalEnv finalHeap) :
+    BlockContinues module env [.forIn (.tuple expressions) iterable body otherwise]
+      heap finalEnv finalHeap := by
+  intro following anchors stack
+  have start : step module anchors
+      ⟨.block (.forIn (.tuple expressions) iterable body otherwise :: following) env, stack, heap⟩ =
+      .next ⟨.expr iterable env, .unpackSequence names body otherwise following env :: stack, heap⟩ := by
+    cases iterable <;> simp_all [step]
+  exact .next start ((evaluated anchors _).trans
+    (.next (by simp [step, run, sequence]) (rest following anchors stack)))
+
+/-- Validate the entire item before assigning names left to right, preserving aliases. -/
+theorem unpack_step
+    (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
+    (item : items[position]? = some value)
+    (fields : Mutable.sequence value heap = some (.ok values, heap))
+    (arity : names.length = values.length)
+    (rest : BlockContinues module (assignNames env names values)
+      (body ++ [Calls.loopContinuation body (.unpackStepLoop names source (position + 1) body otherwise)])
+      heap finalEnv finalHeap) :
+    BlockContinues module env [.unpackStepLoop names source position body otherwise]
+      heap finalEnv finalHeap := by
+  intro following anchors stack
+  refine .next ?_ (rest following anchors stack)
+  simp [step, run, sequence, item, fields, arity, List.append_assoc]
+
+theorem unpack_done
+    (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
+    (finished : items[position]? = none)
+    (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
+    BlockContinues module env [.unpackStepLoop names source position body otherwise]
       heap finalEnv finalHeap :=
   fun following anchors stack => .next (by simp [step, run, sequence, finished]) (rest following anchors stack)
 

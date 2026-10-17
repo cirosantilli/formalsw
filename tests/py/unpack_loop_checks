@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""
+Compare flat unpacking loops and unevaluated local annotations with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+from lang.py.tuple_support import unpacked_tuple_displays
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n
+def fail(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n // 0
+def unsupported(xs: list[int], n: int) -> int:
+    for a, b in set():
+        xs.append(a)
+    return 0
+def scalar_annotation(n: int) -> int:
+    value: 1 // 0 = n + 1
+    value: missing_name
+    return value
+'''
+bodies = {
+    'ordinary': 'for a, b in [[n, 2], [3, n]]:\n    out.append([a, b])',
+    'list_target': 'for [a, b] in [[n, 2], [3, n]]:\n    out.append([a, b])',
+    'duplicate_target': 'for a, a in [[n, 2], [3, n]]:\n    out.append(a)',
+    'empty_target': 'for [] in [[], (), []]:\n    out.append(1)',
+    'too_short': 'for a, b in [[touch(xs, n)]]:\n    out.append(a)',
+    'too_long': 'for a, b in [[touch(xs, n), 2, 3]]:\n    out.append(a)',
+    'empty_mismatch': 'for [] in [[touch(xs, n)]]:\n    out.append(1)',
+    'item_type': 'for a, b in [touch(xs, n)]:\n    out.append(a)',
+    'source_type': 'for a, b in touch(xs, n):\n    out.append(a)',
+    'text_items': 'for a, b in ["λ😀", "ab"]:\n    out.append([a, b])',
+    'bytes_items': 'for a, b in [b"ab", b"xy"]:\n    out.append([a, b])',
+    'buffer_items': 'for a, b in [bytearray([1, 2])]:\n    out.append([a, b])',
+    'text_source': 'for a, in "λ😀":\n    out.append(a)',
+    'input_aliases': 'for a, b in [[xs, xs]]:\n    a.append(n)\n    out.append(b)',
+    'rebound_source': 'rows = [[n, 1], [2, 3]]\nfor a, b in rows:\n    rows = []\n    out.append([a, b])',
+    'source_as_target': 'rows = [[n, 1], [2, 3]]\nfor rows, b in rows:\n    out.append([rows, b])',
+    'grow': 'rows = [[n, 1]]\nfor a, b in rows:\n    out.append([a, b])\n    if len(rows) < 3:\n        rows.append([a + 1, b + 1])',
+    'replace': 'rows = [[n, 1], [2, 3]]\nfor a, b in rows:\n    out.append([a, b])\n    rows[-1] = [4, 5]',
+    'mutate_item': 'rows = [[n, 1], [2, 3]]\nfor a, b in rows:\n    out.append([a, b])\n    rows[-1][0] = 8',
+    'shrink': 'rows = [[n, 1], [2, 3]]\nfor a, b in rows:\n    out.append([a, b])\n    rows[:] = []',
+    'stop': 'for a, b in [[n, 1], [2, 3]]:\n    out.append(a)\n    if a > 0:\n        break\nelse:\n    out.append(9)',
+    'skip': 'for a, b in [[n, 1], [2, 3]]:\n    if a > 0:\n        continue\n    out.append(a)\nelse:\n    out.append(9)',
+    'nested': 'for a, b in [[n, 1], [2, 3]]:\n    for c, d in [[b, a]]:\n        out.append([c, d])',
+    'return_early': 'for a, b in [[n, 1], [2, 3]]:\n    return [a, b]',
+    'source_failure': 'for a, b in [[touch(xs, n), fail(xs, n + 1)]]:\n    out.append(a)',
+    'inline_constants': 'for a, b in [(0, 1), (1, 0), (1, 1), (1, -1)]:\n    out.append(a * n + b)',
+    'constant_table': 'table = [(0, 1), (1, 0), (1, 1), (1, -1)]\nfor a, b in table:\n    out.append(a * n + b)',
+    'annotated_table': 'table: list[tuple[int, int]] = [(0, 1), (1, 0), (1, 1), (1, -1)]\nfor a, b in table:\n    out.append(a * n + b)',
+    'table_repeat': 'table = [(1, 2), (1, 2)]\nfor a, b in table:\n    for c, d in table:\n        out.append(a + b + c + d)',
+    'constant_wrong_arity': 'table = [(1, 2, 3)]\nfor a, b in table:\n    out.append(a)',
+    'unobserved_table': 'table = [(1, 2), (1, 2)]\nout.append(n)',
+    'annotation_effect': 'a: fail(xs, n) = touch(xs, n)\nout.append(a)',
+    'annotation_only': 'a = n\na: fail(xs, n)\nout.append(a)',
+    'annotation_unbound': 'a: fail(xs, n)\nout.append(a)',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(xs: list[int], n: int):\n    out = []\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+    source += '    return out\n'
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in (*bodies, 'scalar_annotation'):
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, n in itertools.product(bodies, ([], [0, 2]), (-2, 3)):
+    value = initial.copy()
+    try:
+        result = world[name](value, n)
+        error = None
+    except (TypeError, ValueError, ZeroDivisionError, UnboundLocalError) as exception:
+        result, error = None, type(exception).__name__
+    snapshot = data(snapshot_roots([value] + ([result] if error is None else [])))
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    call = f'HeapCalls.call source "{name}" [.ref 0, .scalar (.int ({n}))] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, n={n}',
+        f'example : (match ({call}).execution.observe 3000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+for n in (-3, 0, 10 ** 30):
+    lines.append(f'example : (Calls.function source "scalar_annotation" [.int ({n})]).observe 100 = .done (.ok (.int ({n + 1}))) := by decide')
+lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
+
+# Do not permit constant tuple pooling to become observable through the table.
+for extra in ('return table', 'alias = table', 'xs.append(table)', 'touch(table, n)',
+              'table.append((n, 3))', 'table[0] = (n, 3)', 'del table[0]',
+              'for pair in table:\n    xs.append(pair)',
+              'for table, b in table:\n    pass',
+              'for a, *b in table:\n    xs.append(b)',
+              'for (a, b), c in table:\n    pass',
+              'for a, xs[0] in table:\n    pass',
+              'table: list[int]', 'table = []', 'return table[:]', 'return len(table)'):
+    text = source + '\ndef f(xs: list[int], n: int):\n    table = [(1, 2), (1, 2)]\n'
+    text += ''.join('    ' + line + '\n' for line in extra.splitlines())
+    assert SupportChecker(ast.parse(text)).check('f'), extra
+for target in ('a, (b, c)', 'a, *rest', 'a, xs[0]'):
+    text = f'def f(xs: list[int]):\n    for {target} in [[1, 2]]:\n        pass\n'
+    assert SupportChecker(ast.parse(text)).check('f'), target
+nested_literal = 'def f(n: int):\n    table = [((1, 2), 3)]\n    for a, b in table:\n        return a\n'
+assert SupportChecker(ast.parse(nested_literal)).check('f')
+# A parameter's entry value may already expose the constant table.
+parameter_table = ast.parse('def f(table: list[int]):\n    table = [(1, 2)]\n    for a, b in table:\n        return a\n')
+assert not unpacked_tuple_displays(parameter_table.body[0])
+
+with project_temporary_directory(prefix='unpack-loop-checks-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(n: int) -> int:\n    """\n    @formalsw: ' + marker
+                        + '\n    """\n    for a, b in set():\n        pass\n    return 0\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} unpacking-loop Python comparisons passed, including local annotations and hidden tuples')

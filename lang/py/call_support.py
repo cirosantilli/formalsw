@@ -7,6 +7,7 @@ from lang.py.global_inputs import GlobalInputError, function_globals, annotation
 from lang.py.imports import bindings
 from lang.py.defaults import literal_default
 from lang.py.sorting_support import uses_sort_model
+from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays
 
 
 # These builtin constructors preserve positional arguments without the special
@@ -276,7 +277,7 @@ def uses_calls_model(module, function):
             or uses_method(module, function, "bit_length")):
         return True
     return any(
-        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript, ast.Assert, ast.JoinedStr))
+        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript, ast.Assert, ast.JoinedStr, ast.AnnAssign))
         or isinstance(node, ast.Constant) and type(node.value) is bytes
         or range_sum(node) is not None
         or general_division(node)
@@ -333,6 +334,7 @@ def check_calls(module, function, reject, *, heap=False):
                 return {node.id}
             return set().union(*(stored_names(child) for child in ast.iter_child_nodes(node)))
         locals_.update(stored_names(function))
+        hidden_tuples = unpacked_tuple_displays(function) if heap else set()
         if locals_ & functions.keys():
             reject(function, 'local bindings must not shadow module-level call targets')
         for arg in function.args.args:
@@ -400,7 +402,7 @@ def check_calls(module, function, reject, *, heap=False):
                         recurse(part.value)
                 return
             if heap and isinstance(node, (ast.List, ast.Tuple)):
-                if (isinstance(node, ast.Tuple) and node.elts
+                if (isinstance(node, ast.Tuple) and node.elts and node not in hidden_tuples
                         and not any(isinstance(item, (ast.Name, ast.Call, ast.Subscript, ast.List))
                                     for item in node.elts)):
                     reject(node, 'nonempty tuple displays need a runtime element; constant-tuple pooling is not modeled')
@@ -537,6 +539,10 @@ def check_calls(module, function, reject, *, heap=False):
                         expr(node.value)
                 elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                     expr(node.value)
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    # Function-local annotations are never evaluated by Python.
+                    if node.value is not None:
+                        expr(node.value)
                 elif (heap and isinstance(node, ast.Assign) and len(node.targets) == 1
                       and isinstance(node.targets[0], (ast.Tuple, ast.List))
                       and all(isinstance(target, ast.Name) for target in node.targets[0].elts)):
@@ -601,6 +607,10 @@ def check_calls(module, function, reject, *, heap=False):
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)
                 elif heap and isinstance(node, ast.For) and isinstance(node.target, ast.Name):
+                    expr(node.iter)
+                    block(node.body, loop_depth + 1)
+                    block(node.orelse, loop_depth)
+                elif heap and isinstance(node, ast.For) and flat_unpacking(node.target):
                     expr(node.iter)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)

@@ -272,6 +272,9 @@ def step (module : Module) (state : State) : Step State Constant :=
           .next (primitiveState (.raiseException typeName) env [] [] stack)
       | .assign [.name name] expr :: rest =>
           .next ⟨.expr expr env, .assign name rest env :: stack⟩
+      | .annAssign (.name name) _ (some expr) :: rest =>
+          .next ⟨.expr expr env, .assign name rest env :: stack⟩
+      | .annAssign (.name _) _ none :: rest => .next ⟨.block rest env, stack⟩
       | .assign [.tuple targets] (.tuple expressions) :: rest =>
           match targetNames targets with
           | none => .unsupported
@@ -666,6 +669,16 @@ theorem assign (h : Evaluates module env expression value)
     BlockReturns module env (.assign [.name name] expression :: body) result := by
   intro stack
   exact .next rfl ((h _).trans (.next rfl (rest stack)))
+
+theorem annAssign (h : Evaluates module env expression value)
+    (rest : BlockReturns module (env.set name value) body result) :
+    BlockReturns module env (.annAssign (.name name) annotation (some expression) :: body) result := by
+  intro stack
+  exact .next rfl ((h _).trans (.next rfl (rest stack)))
+
+theorem annotation (annotation : Expr) (rest : BlockReturns module env body result) :
+    BlockReturns module env (.annAssign (.name name) annotation none :: body) result :=
+  fun stack => .next rfl (rest stack)
 
 theorem augAssign (h : Evaluates module env (.binOp (.name name) op expression) value)
     (rest : BlockReturns module (env.set name value) body result) :
