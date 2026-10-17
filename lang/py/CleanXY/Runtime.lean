@@ -208,6 +208,28 @@ end CleanXY.PyAst
 
 namespace CleanXY.Property.Function
 
+/-- A unary integer function finishes with an integer or a Python exception.
+The scalar case uses execution semantics, including arbitrary supported loops.
+The CLI separately rejects requirements whose source falls outside the model. -/
+def ReturnType (module : PyAst.Module) (name : String) : Prop :=
+  match module.findFunctionArgKind name, module.findFunctionReturnKind name with
+  | some .int, some .int => ∀ n : Int,
+      (∃ value : Int, PyAst.Finishes (PyAst.scalarFunction module name [.int n]).step
+        (PyAst.scalarFunction module name [.int n]).initial (.ok (.int value))) ∨
+      (PyAst.scalarFunction module name [.int n]).Throws
+  | _, _ => AbstractReturnType module name
+
+/-- Successful scalar executions return equal values. -/
+def EquivReturn (module : PyAst.Module) (left right : String) : Prop :=
+  match module.findFunctionArgKind left, module.findFunctionArgKind right with
+  | some .int, some .int => ∀ n leftResult rightResult,
+      PyAst.Finishes (PyAst.scalarFunction module left [.int n]).step
+        (PyAst.scalarFunction module left [.int n]).initial (.ok leftResult) →
+      PyAst.Finishes (PyAst.scalarFunction module right [.int n]).step
+        (PyAst.scalarFunction module right [.int n]).initial (.ok rightResult) →
+      leftResult = rightResult
+  | _, _ => AbstractEquivReturn module left right
+
 /-- Scalar equivalence preserves actual finite execution outcomes, including
 exceptions. The older list equivalence model remains an abstraction. -/
 def Equiv (module : PyAst.Module) (left right : String) : Prop :=

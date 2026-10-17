@@ -51,15 +51,10 @@ example : Returns(binary(1, 2)) := ⟨3, .done rfl⟩
 example : diverges(forever()) := ⟨fun _ => True, trivial, fun _ _ => ⟨(), rfl, trivial⟩⟩
 example : Not Halts(forever()) := Execution.diverges_not_halts
   ⟨fun _ => True, trivial, fun _ _ => ⟨(), rfl, trivial⟩⟩
-example : Not Throws(unsupported(0)) ∧ ¬ Returns(unsupported(0)) := by
-  constructor <;> rintro ⟨_, h⟩ <;> cases h <;> contradiction
--- Unsupported is not evidence of a supported infinite execution.
-example : ¬ diverges(unsupported(0)) := by
-  rintro ⟨invariant, initial, closed⟩
-  obtain ⟨_, next, _⟩ := closed _ initial
-  contradiction
 example : Execution.observe forever 100 = .pending := rfl
 example : Execution.observe (successful 0) 0 = .pending := rfl
+-- Internal coverage failures remain detectable by the observer. The CLI rejects
+-- requirements depending on unsupported source before accepting Lean proofs.
 example : Execution.observe (unsupported 0) 1 = .unsupported := rfl
 
 example (this_function : List Value → Execution (List Value)) (values : List Value) :

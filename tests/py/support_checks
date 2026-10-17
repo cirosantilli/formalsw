@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Exercise unsupported-source rejection through the public CLI."""
+from pathlib import Path
+import subprocess
+import tempfile
+import textwrap
+
+REPO = Path(__file__).resolve().parents[2]
+CLEANXY = REPO / 'cleanxy'
+
+
+def stub(path):
+    return subprocess.run([str(CLEANXY), '--stub', str(path)], cwd=REPO,
+                          text=True, capture_output=True)
+
+
+CASES = [
+    ('nested marker', '''
+        class Example:
+            def method(self):
+                """@cleanxy: Returns"""
+                return 1
+    ''', 'requirements on nested functions and class methods are unsupported'),
+    ('type-changing loop', '''
+        def f(n: int):
+            """@cleanxy: Not Halts"""
+            while n:
+                n = "oops"
+                n = n - 1
+    ''', 'Sub on these operand types is unsupported'),
+    ('unknown divisor', '''
+        def f(n: int):
+            """@cleanxy: Returns"""
+            return 1 // n
+    ''', 'nonnegative integer literal divisor'),
+    ('negative divisor', '''
+        def f(n: int):
+            """@cleanxy: Returns"""
+            return n % -2
+    ''', 'nonnegative integer literal divisor'),
+    ('range shadowing', '''
+        def f(range: int):
+            """@cleanxy: Returns"""
+            for n in range(3):
+                pass
+    ''', 'only for name in range(stop) is supported'),
+    ('exception shadowing', '''
+        def f(ValueError: int):
+            """@cleanxy: Halts"""
+            raise ValueError()
+    ''', 'only builtin exception constructors are supported'),
+    ('unsupported Throws signature', '''
+        def f(a: int, b: int):
+            """@cleanxy: Not Throws"""
+            return a + b
+    ''', 'Throws has no function model for this argument signature'),
+    ('unsupported ReturnType signature', '''
+        def f(n: int) -> str:
+            """@cleanxy: Not ReturnType"""
+            return "a"
+    ''', 'ReturnType currently requires matching supported argument and return annotations'),
+    ('equivalence domains', '''
+        def f(n: int):
+            """@cleanxy: Not Equiv(g)"""
+            return n
+        def g(n: str):
+            return n
+    ''', 'Equiv requires matching supported argument domains'),
+    ('module raw dependency', '''
+        """@cleanxy: theorem invalid :
+          Not (scalarFunction ProbeAst.module "f" [.int 0]).Halts
+        """
+        def f(n: int):
+            return abs(n)
+    ''', "call to 'abs' is unsupported"),
+    ('unknown object', '''
+        def f(n: int):
+            """@cleanxy: theorem invalid :
+              Not Halts(.object "Unknown" < .object "Unknown")
+            """
+            return n
+    ''', "object class 'Unknown' is not defined"),
+    ('async function', '''
+        async def f(n: int):
+            """@cleanxy: Returns"""
+            return n
+    ''', 'async functions are unsupported'),
+    ('default argument', '''
+        def f(n: int = 1):
+            """@cleanxy: Returns"""
+            return n
+    ''', 'only plain positional arguments without defaults or variadics are supported'),
+    ('unrepresented annotation', '''
+        def f(n: int) -> int | str:
+            """@cleanxy: theorem irrelevant : True"""
+            return n
+    ''', 'this return annotation is unsupported by the AST model'),
+    ('raw property dependency', '''
+        """@cleanxy: theorem invalid :
+          Not (CleanXY.Property.Function.Throws ProbeAst.module "f")
+        """
+        def f(n: int):
+            return abs(n)
+    ''', "call to 'abs' is unsupported"),
+    ('raw list model mismatch', '''
+        """@cleanxy: theorem invalid :
+          Not (listFunction ProbeAst.module "f" []).Halts
+        """
+        def f(n: int):
+            return n
+    ''', 'list execution currently supports only the exact merge-sort body'),
+]
+
+with tempfile.TemporaryDirectory(prefix='.support-check-', dir=REPO) as directory:
+    path = Path(directory) / 'probe.py'
+    for name, source, reason in CASES:
+        path.write_text(textwrap.dedent(source))
+        result = stub(path)
+        assert result.returncode == 1, (name, result.stdout, result.stderr)
+        assert reason in result.stderr, (name, result.stderr)
+        assert '1 proof failed because it depends on unsupported Python constructs.' in result.stderr, (name, result.stderr)
+        assert 'sorry' not in result.stdout, (name, result.stdout)
+
+    # Change an actual comparison dependency while leaving the sorting AST intact.
+    source = (REPO / 'tests/py/sort.py').read_text()
+    path.write_text(source.replace('return self.value <= other.value', 'return abs(self.value) <= other.value'))
+    result = stub(path)
+    assert result.returncode == 1, result.stdout
+    assert "call to 'abs' is unsupported" in result.stderr, result.stderr
+    assert 'merge_sort_untyped -> DummyInt' in result.stderr, result.stderr
+
+    # Supported scalar methods can still fall outside the legacy typed-list model.
+    path.write_text(source.replace('return self.value <= other.value', 'while True:\n            pass'))
+    result = stub(path)
+    assert result.returncode == 1, result.stdout
+    assert 'typed object lists require' in result.stderr, result.stderr
+
+    path.write_text(source + '''
+def twice_wrapped(values: list[int]) -> list[int]:
+    """@cleanxy: Not ReturnType"""
+    return merge_sort_int(values)
+''')
+    result = stub(path)
+    assert result.returncode == 1, result.stdout
+    assert 'only one delegation directly to a sorting implementation' in result.stderr, result.stderr
+
+    # Changing a previously recognized sorting body must invalidate its contracts.
+    path.write_text(source.replace('middle = len(values) // 2', 'print(values)\n    middle = len(values) // 2'))
+    result = stub(path)
+    assert result.returncode == 1, result.stdout
+    assert 'this body does not match' in result.stderr, result.stderr
+
+result = stub(REPO / 'tests/py/fail/unsupported/b_mixed.py')
+assert result.returncode == 1, result.stdout
+assert result.stdout.count('sorry') == 1, result.stdout
+assert 'theorem identity.«Returns»' in result.stdout, result.stdout
+assert '2 proofs failed because they depend on unsupported Python constructs.' in result.stderr, result.stderr
+print('Unsupported-source CLI regressions passed')

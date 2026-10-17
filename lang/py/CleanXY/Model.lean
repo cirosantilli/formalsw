@@ -132,6 +132,8 @@ inductive Stmt where
   | raise : Option Expr -> Stmt
   /-- A Python expression statement. -/
   | expr : Expr -> Stmt
+  /-- Source retained for diagnostics when it is outside the AST model. -/
+  | unsupported : (description : String) -> Stmt
 deriving Repr, BEq, Lean.ToExpr
 
 /-- A Python module represented as a list of top-level statements. -/
@@ -282,6 +284,7 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
         (← jsonArray json "args" Arg.fromJson?)
         (← optionalExpr json "returns")
         (← jsonArray json "body" Stmt.fromJson?)
+  | "Unsupported" => return .unsupported ((← jsonString json "description") ++ ": " ++ (← jsonString json "source"))
   | "Return" => return .return (← Expr.fromJson? (← jsonField json "value"))
   | "Assign" =>
       return .assign
@@ -733,6 +736,7 @@ mutual
     | .assert test message => 1 + test.operationCount + (message.map Expr.operationCount).getD 0
     | .raise exception => 1 + (exception.map Expr.operationCount).getD 0
     | .expr expression => 1 + expression.operationCount
+    | .unsupported _ => 0
 end
 
 /-- Whether a statement is a `for` loop. -/
@@ -1283,7 +1287,7 @@ namespace CleanXY.Property.Function
 A function either throws or successfully returns a value of its annotated type
 for every input in its annotated domain.
 -/
-def ReturnType (module : PyAst.Module) (name : String) : Prop :=
+def AbstractReturnType (module : PyAst.Module) (name : String) : Prop :=
   match module.findFunctionArgKind name, module.findFunctionReturnKind name with
   | some .int, some .int =>
       ∀ n : Int, ∃ outcome,
@@ -1354,7 +1358,7 @@ def AbstractEquiv (module : PyAst.Module) (left right : String) : Prop :=
 Whenever both supported unary functions return successfully on an input, their
 return values are equal. Exception objects need not be equal.
 -/
-def EquivReturn (module : PyAst.Module) (left right : String) : Prop :=
+def AbstractEquivReturn (module : PyAst.Module) (left right : String) : Prop :=
   match module.findFunctionArgKind left, module.findFunctionArgKind right with
   | some .int, some .int =>
       ∀ n leftResult rightResult,

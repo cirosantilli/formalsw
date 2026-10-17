@@ -14,6 +14,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from lang.py.support import SupportChecker, UnsupportedConstruct
+
 
 class UnsupportedSyntax(Exception):
     """Raised when the input uses Python syntax not represented by PyAst yet."""
@@ -36,6 +38,16 @@ class Requirement:
     source_path: Path
     source_line: int
     marker: str
+    unsupported: tuple[UnsupportedConstruct, ...] = ()
+
+
+@dataclass
+class CheckReport:
+    """Aggregate successful obligations and rejected source coverage across files."""
+
+    passed: int = 0
+    unsupported: int = 0
+    failed_files: int = 0
 
 
 @dataclass(frozen=True)
@@ -413,6 +425,7 @@ def collect_requirements(
 ) -> list[Requirement]:
     """Collect proof obligations requested by source docstring markers."""
     requirements: list[Requirement] = []
+    support = SupportChecker(module)
     for marker in docstring_markers(
         ast.get_docstring(module, clean=False),
         docstring_start_line(module),
@@ -429,14 +442,16 @@ def collect_requirements(
             source_path,
             marker.line,
             marker.text,
+            support.requirement(None, marker.text),
         ))
     for stmt in module.body:
-        if not isinstance(stmt, ast.FunctionDef):
+        if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for marker in docstring_markers(
             ast.get_docstring(stmt, clean=False),
             docstring_start_line(stmt),
         ):
+            unsupported = support.requirement(stmt.name, marker.text)
             raw_theorem = parse_raw_theorem(marker.text)
             if raw_theorem is not None:
                 theorem_name = raw_theorem.theorem_name
@@ -444,10 +459,11 @@ def collect_requirements(
                     theorem_name = f"{proof_namespace}.{lean_import_component(stmt.name)}.{theorem_name}"
                 requirements.append(Requirement(
                     theorem_name,
-                    raw_theorem_type_for_function(raw_theorem, stmt, ast_namespace),
+                    "False" if unsupported else raw_theorem_type_for_function(raw_theorem, stmt, ast_namespace),
                     source_path,
                     marker.line,
                     marker.text,
+                    unsupported,
                 ))
                 continue
             parsed = parse_short_marker(marker.text)
@@ -464,7 +480,7 @@ def collect_requirements(
                     args,
                     marker.text,
                 ),
-                property_type_for_short_requirement(
+                "False" if unsupported else property_type_for_short_requirement(
                     ast_namespace,
                     stmt.name,
                     property_name,
@@ -475,6 +491,21 @@ def collect_requirements(
                 source_path,
                 marker.line,
                 marker.text,
+                unsupported,
+            ))
+    top_level = {id(stmt) for stmt in module.body}
+    for stmt in ast.walk(module):
+        if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) or id(stmt) in top_level:
+            continue
+        for marker in docstring_markers(ast.get_docstring(stmt, clean=False), docstring_start_line(stmt)):
+            requirements.append(Requirement(
+                f"{proof_namespace}.{stmt.name}",
+                "False",
+                source_path,
+                marker.line,
+                marker.text,
+                (UnsupportedConstruct(stmt.name, stmt.lineno,
+                    "requirements on nested functions and class methods are unsupported"),),
             ))
     return requirements
 
@@ -593,7 +624,14 @@ class AstJsonEmitter:
         return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
 
     def stmt(self, stmt: ast.stmt) -> dict[str, object]:
-        """Encode one Python statement."""
+        """Retain unsupported statements as explicit diagnostic AST nodes."""
+        try:
+            return self.supported_stmt(stmt)
+        except UnsupportedSyntax as error:
+            return {"type": "Unsupported", "description": str(error), "source": ast.dump(stmt)}
+
+    def supported_stmt(self, stmt: ast.stmt) -> dict[str, object]:
+        """Encode one represented Python statement."""
         match stmt:
             case ast.ClassDef(name=name, bases=[], keywords=[], body=body):
                 if stmt.decorator_list:
@@ -1130,7 +1168,7 @@ def module_with_python_builtins(source: Path, module: ast.Module) -> ast.Module:
     )
 
 
-def check_source(source: Path) -> int:
+def check_source(source: Path, report: CheckReport) -> int:
     """Compile-check one Python file and its paired Lean proof."""
     ast_path = ast_path_for_source(source)
     ast_json_path = ast_json_path_for_source(source)
@@ -1146,7 +1184,13 @@ def check_source(source: Path) -> int:
         failure_hint="Fix the Python syntax error before running Lean proofs.",
     )
     module = ast.parse(source.read_text(), filename=str(source))
+    rejected_before = report.unsupported
     requirements = collect_requirements(source, module, proof_namespace, namespace)
+    requirements = filter_supported_requirements(requirements, report)
+    if not requirements and report.unsupported > rejected_before:
+        return 0
+    if not requirements and not proof_path.exists():
+        return 0
     semantic_module = module_with_python_builtins(source, module)
     if requirements and not proof_path.exists():
         first = requirements[0]
@@ -1235,7 +1279,7 @@ def check_source(source: Path) -> int:
     return len(requirements)
 
 
-def stub_source(source: Path) -> str:
+def stub_source(source: Path, report: CheckReport) -> str:
     """Return a complete Lean proof stub for one Python source file."""
     module = ast.parse(source.read_text(), filename=str(source))
     AstJsonEmitter(module).emit()
@@ -1246,6 +1290,7 @@ def stub_source(source: Path) -> str:
         proof_namespace,
         namespace_for_source(source),
     )
+    requirements = filter_supported_requirements(requirements, report)
     return ProofStubEmitter(
         lean_module_for_path(ast_path_for_source(source)),
         proof_namespace,
@@ -1263,23 +1308,50 @@ def iter_python_sources(directory: Path) -> list[Path]:
     return sources
 
 
-def check_directory(directory: Path) -> int:
-    """Check all Python files under a directory."""
-    sources = iter_python_sources(directory)
-    if not sources:
-        raise SystemExit(f"error: {directory}: no Python files found")
-    failed = False
-    checks = 0
+def check_sources(sources: list[Path], report: CheckReport) -> None:
+    """Continue after errors and retain the unsupported-proof count."""
     for source in sources:
         try:
-            checks += check_source(source)
+            report.passed += check_source(source, report)
+        except (UnsupportedSyntax, InvalidRequirement) as error:
+            print(f"error: {source}: {error}", file=sys.stderr)
+            report.failed_files += 1
         except SystemExit as error:
-            failed = True
-            if error.code == 0:
-                continue
-    if failed:
+            if error.code != 0:
+                if isinstance(error.code, str):
+                    print(error.code, file=sys.stderr)
+                report.failed_files += 1
+
+
+def filter_supported_requirements(requirements: list[Requirement], report: CheckReport) -> list[Requirement]:
+    supported = []
+    for requirement in requirements:
+        if not requirement.unsupported:
+            supported.append(requirement)
+            continue
+        report.unsupported += 1
+        print(f"error: {requirement.source_path}:{requirement.source_line}: "
+              f"cannot check {requirement.theorem_name}: unsupported Python constructs", file=sys.stderr)
+        for issue in requirement.unsupported:
+            via = " -> ".join((*issue.dependency, issue.function))
+            print(f"  {requirement.source_path}:{issue.line}: {via}: {issue.reason}", file=sys.stderr)
+    return supported
+
+
+def finish_report(report: CheckReport, *, stub: bool = False) -> None:
+    if report.unsupported or report.failed_files:
+        if not stub:
+            noun = "check" if report.passed == 1 else "checks"
+            print(f"{report.passed} {noun} passed.", flush=True)
+        if report.unsupported:
+            noun = "proof" if report.unsupported == 1 else "proofs"
+            verb = "it depends" if report.unsupported == 1 else "they depend"
+            print(f"{report.unsupported} {noun} failed because {verb} on unsupported Python constructs.", file=sys.stderr)
+        if report.failed_files:
+            print(f"{report.failed_files} source file(s) also failed validation or proof checking.", file=sys.stderr)
         raise SystemExit(1)
-    return checks
+    if not stub:
+        print(f"All {report.passed} checks passed")
 
 
 def main() -> None:
@@ -1295,16 +1367,27 @@ def main() -> None:
     args = parser.parse_args()
 
     source = args.source
+    report = CheckReport()
     if args.stub:
         if not source.is_file():
             parser.error("--stub requires one Python source file")
-        print(stub_source(source), end="")
+        try:
+            print(stub_source(source, report), end="")
+        except (UnsupportedSyntax, InvalidRequirement) as error:
+            print(f"error: {source}: {error}", file=sys.stderr)
+            report.failed_files += 1
+        except SystemExit as error:
+            if error.code != 0:
+                if isinstance(error.code, str):
+                    print(error.code, file=sys.stderr)
+                report.failed_files += 1
+        finish_report(report, stub=True)
         return
-    if source.is_dir():
-        checks = check_directory(source)
-    else:
-        checks = check_source(source)
-    print(f"All {checks} checks passed")
+    sources = iter_python_sources(source) if source.is_dir() else [source]
+    if not sources:
+        raise SystemExit(f"error: {source}: no Python files found")
+    check_sources(sources, report)
+    finish_report(report)
 
 
 if __name__ == "__main__":

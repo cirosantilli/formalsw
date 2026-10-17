@@ -229,7 +229,7 @@ The DSL specification is a magic custom and very simple language that allows spe
 
 The DSL gets converted to corresponding Lean code behind the scenes.
 
-==== Returns and Halts
+==== Returns
 
 `Returns` means that every input in the modeled argument domain finishes successfully. This is the usual marker for a total function:
 
@@ -243,25 +243,21 @@ def sum_naive(n: int) -> int:
     return total
 ----
 
+The generated obligation is named `sum_naive.«Returns»`. `Returns` implies <<halts,Halts>> and <<not,Not>> <<throws,Throws>>. `Not Throws` alone permits nontermination.
+
+Successful completion includes falling off the end, bare `return`, and `return None`; all three return Python `None`, represented by `Constant.none` in Lean.
+
+This marker supports scalar `int`, `str`, and `bool` positional arguments (including multiple or no arguments), and bare-list calls to the exact supported merge-sort implementation. Requirements involving unsupported Python constructs are rejected before proof checking; see <<unsupported-python-constructs>>.
+
+==== Halts
+
 `Halts` means that every modeled input finishes, either normally or by raising an exception. For example, link:tests/py/throws.py[`reject_odd`] has both `Halts` and `Throws`: all inputs terminate, and some inputs raise.
 
-For an individual call, Lean proves these laws in link:lang/py/CleanXY/Execution.lean[]:
+The generated obligation is named `function.«Halts»`. It supports the same argument domains as <<returns,Returns>>. `Not` negates the whole obligation: for a function with arguments, `Not Halts` says that not all inputs halt. Use a raw universally quantified theorem to say that every input fails to halt.
 
-[source,lean]
-----
-Returns(f(x)) ↔ Halts(f(x)) ∧ Not Throws(f(x))
-Throws(f(x)) → Halts(f(x))
-----
+For an individual call, <<raw-lean-throws,Throws>> implies <<raw-lean-halts,Halts>>. The DSL `Throws` quantifies existentially over inputs, while `Halts` and `Returns` quantify universally: a function-level `Throws` marker therefore does not imply a function-level `Halts` marker.
 
-`Returns` implies `Halts` and `Not Throws`. Returning and throwing are mutually exclusive. `Not Throws` alone permits nontermination. The DSL `Throws` quantifies existentially over inputs, while `Halts` and `Returns` quantify universally: a function-level `Throws` marker therefore does not imply a function-level `Halts` marker.
-
-Successful completion includes falling off the end, bare `return`, and `return None`; all three return Python `None`. The model represents that value as `Constant.none`, distinct from unsupported execution.
-
-The generated obligations are named `function.«Returns»` and `function.«Halts»`. `Not` negates the whole obligation: for a function with arguments, `Not Halts` says that not all inputs halt. Use a raw universally quantified theorem to say that every input diverges.
-
-See link:tests/py/termination.py[] and link:tests/py/termination.py.lean[] for an infinite `while True` loop and a termination proof for subtraction-based Euclid. Euclid preserves positive operands while strictly decreasing `a + b` until they agree; the guards handle nonpositive inputs. Its proof covers arbitrarily many iterations, rather than relying on a timeout. The infinite-loop proof supplies an invariant closed under execution steps.
-
-These markers currently support scalar `int`, `str`, and `bool` positional arguments (including multiple or no arguments), and bare-list calls to the exact supported merge-sort implementation. Variadic and keyword-only functions are rejected. General list programs, typed sorting wrappers, recursive scalar calls, and arbitrary Python objects still need execution-model support before receiving these markers.
+See link:tests/py/termination.py[] and link:tests/py/termination.py.lean[] for an infinite `while True` loop and a termination proof for subtraction-based Euclid. Euclid preserves positive operands while strictly decreasing `a + b` until they agree; the guards handle nonpositive inputs. Its proof covers arbitrarily many iterations. The infinite-loop proof supplies an invariant closed under execution steps.
 
 ==== BigO
 
@@ -370,9 +366,9 @@ For unary integer functions, `Equiv` now compares actual execution outcomes for 
 
 `Execution.Equiv` says that each finite outcome is produced on one side exactly when it is produced on the other. An outcome is `.ok value` or `.error exception`; exceptions include their class name and evaluated positional arguments. It preserves `Returns` and `Halts` through the proved lemmas `Execution.Equiv.returns_iff` and `Execution.Equiv.halts_iff`. Thus the `sum` demo needs no duplicate `Returns` marker: its proof transfers the reference implementation's `Returns`. The exception demo similarly transfers `Halts`.
 
-An equivalence proof by itself does not establish termination. Computations with no finite outcomes may be equivalent. Unsupported execution also has no finite outcomes, so equivalence alone does not certify source coverage; a successful-termination proof cannot be obtained that way.
+An equivalence proof by itself does not establish termination: two infinite computations may be equivalent. Requirements depending on unsupported Python constructs are rejected before proof checking, including negated equivalence requirements.
 
-The existing list `Equiv` and `EquivReturn` demos still use the older abstract sorting model. Their canonical-result proofs do not establish termination of arbitrary Python comparison methods and do not transfer the new execution contracts. The raw merge-sort termination theorem below uses the execution model directly. `ReturnType` also retains its older abstract evaluator.
+The existing list `Equiv` and `EquivReturn` demos still use the older abstract sorting model. Their canonical-result proofs do not establish termination of arbitrary Python comparison methods and do not transfer the new execution contracts. The raw merge-sort termination theorem below uses the execution model directly. List `ReturnType` also retains its older abstract evaluator.
 
 ==== EquivReturn
 
@@ -444,12 +440,13 @@ For the supported `int -> int` case, this expands to:
 
 [source,lean]
 ----
-∀ n : Int, ∃ outcome,
-  CleanXY.PyAst.evalUnaryIntFunctionOutcome TmpAst.module "sum" n =
-    some outcome
+∀ n : Int,
+  let execution := scalarFunction TmpAst.module "sum" [.int n]
+  (∃ value : Int, Finishes execution.step execution.initial (.ok (.int value))) ∨
+  execution.Throws
 ----
 
-A successful outcome contains an `Int`, while an exception outcome is also accepted because it has no return value. An unsupported evaluation, including a modeled return value that does not match the annotation, produces `none` and cannot satisfy `ReturnType`. Unary `list -> list` functions are also supported by the structural list evaluator, with heterogeneous `int` and `str` inputs and exception-aware list outcomes. `list[int] -> list[int]` selects the homogeneous integer-list model.
+A successful outcome must contain an `Int`; an exception outcome is also accepted because it has no return value. This property requires termination. A supported function returning the wrong type fails the property; a function containing unsupported Python constructs is rejected before proof checking. Unary `list -> list` functions are also supported by the structural list evaluator, with heterogeneous `int` and `str` inputs and exception-aware list outcomes. `list[int] -> list[int]` selects the homogeneous integer-list model.
 
 ==== Throws
 
@@ -513,17 +510,7 @@ def merge_sort_untyped(values: list) -> list:
 
 The enclosing function automatically prefixes an unqualified raw theorem name. This marker requires `tests.py.sort.merge_sort_untyped.returns_of_le_safe`, just as `Throws` requires `tests.py.sort.merge_sort_untyped.«Throws»`. An explicitly qualified name is used unchanged. Module-level raw theorems retain the file's proof namespace without a function prefix.
 
-`Returns(left <= right)`, `Throws(left < right)`, and `Halts(left < right)` are custom Lean syntax available through `import CleanXY`. Lean parses and expands them to predicates on `comparison _this_module .ltE left right` or `.lt` as appropriate. `.lt` is Lean's shorthand for the comparison-operation constructor, selected using the expected type. Ordinary `<` outside these wrappers retains its usual Lean meaning.
-
-Use ordinary Lean negation, `Not Throws(...)` or `¬ Throws(...)`. Both `true` and `false` count as successful comparison results; `Returns(left < right)` does not assert that `left < right` is true. Supported operators are `<`, `<=`, `>`, `>=`, `==`, and `!=`, with operands of type `CleanXY.PyAst.Value`. Parentheses are allowed; Python comparison chains and arithmetic on modeled values are not yet supported.
-
-`this_function` is bound to the enclosing function's execution using its module and name. CleanXY also supplies `_this_module` for comparisons, including nested parenthesized expressions. These bindings appear in generated stubs; `dsimp only` exposes the proposition for a proof. Calls accept zero or more arguments, for example `Returns(this_function())`, `Throws(this_function(1))`, or `Returns(this_function(a, b))`. Other Lean identifiers can be used when bound to functions producing an `Execution`.
-
-The termination model in link:lang/py/CleanXY/Execution.lean[] and link:lang/py/CleanXY/Runtime.lean[] is a deterministic transition system. `Halts` requires a finite derivation ending in a normal or exceptional outcome; `Returns` requires a normal outcome. Observation fuel only limits how long an observer runs. Exhausting it produces `pending`, never a fabricated return. Unsupported code has its own state and cannot witness termination. `Not Halts(...)` alone does not distinguish unsupported code from an infinite execution; `diverges(...)` additionally proves an invariant whose executions always take another supported step.
-
-The scalar interpreter supports literals, local variables, supported arithmetic and comparisons, assignments, `if`, `while`, one-argument `range` loops, `raise`, and returns. Unsupported operations stop without manufacturing an outcome. Custom same-class comparisons execute the actual supported method AST, including loops, on empty objects or objects with an integer `value` field. `.object "Looping"` represents an empty object; `.object "DummyInt" (some 2)` represents one with `value = 2`. These Lean constructors describe object state; they do not execute Python `__init__`. Reflected comparison, `NotImplemented`, general method calls, and arbitrary object layouts remain unsupported.
-
-The merge-sort execution model requires an exact match with the supported AST template and produces the actual merged list, without canonical normalization. Its theorem assumes successful termination of the `<=` operations it actually uses. Absence of `<` exceptions is insufficient: methods may differ or loop forever. link:tests/py/sort.py[`Looping.__le__`] and its checked proof show that sorting two such objects does not halt. Modifying the sorting body outside the recognized template makes it unsupported; the older broad shape recognizer is not used for this termination theorem.
+Arguments can also be bound explicitly, and hypotheses may be named, anonymous, or written as implications in ordinary Lean:
 
 [source,python]
 ----
@@ -536,11 +523,74 @@ def f(n: int) -> int:
     return n
 ----
 
-Continuation lines are included until a blank line or another marker.
+Continuation lines are included until a blank line or another marker. The example above requires `f.returns_input` inside the file-derived proof namespace. Raw theorem markers may also appear in a module docstring; module docstrings do not support the function-specific short forms.
 
-The example above requires `f.returns_input` inside the file-derived proof namespace. Arguments can also be bound explicitly, as shown; a hypothesis may be named, anonymous, or written as an implication in ordinary Lean.
+The constructs below are custom Lean syntax available through `import CleanXY`. Lean parses and expands them to execution predicates. Use ordinary Lean negation, such as `Not Throws(...)` or `¬ Throws(...)`.
 
-Raw theorem markers may also appear in a module docstring; module docstrings do not support the function-specific short forms.
+[[raw-lean-returns]]
+==== Returns
+
+`Returns(this_function(values))` states that this particular call terminates successfully. Implicit `None`, bare `return`, and `return None` all count as successful returns.
+
+`Returns(left <= right)` states that the Python comparison terminates successfully. Both `true` and `false` count as successful comparison results; it does not assert that the comparison is true.
+
+The execution model proves:
+
+[source,lean]
+----
+Returns(f(x)) ↔ Halts(f(x)) ∧ Not Throws(f(x))
+----
+
+The merge-sort theorem above assumes successful termination of the `<=` operations the algorithm actually uses. Absence of `<` exceptions is insufficient: comparison methods may differ or loop forever. The execution model requires an exact match with the supported merge-sort AST template and produces the actual merged list. Changing the body outside that template causes a validation error for requirements needing this model.
+
+[[raw-lean-halts]]
+==== Halts
+
+`Halts(this_function(n))` states that this particular call terminates, either normally or by raising an exception. `Halts(left < right)` states the same for a comparison.
+
+The model in link:lang/py/CleanXY/Execution.lean[] and link:lang/py/CleanXY/Runtime.lean[] uses a deterministic transition system. Termination requires a finite derivation ending in a normal or exceptional outcome. Observation fuel only limits how long an observer runs; exhausting it produces `pending`, never a fabricated return.
+
+`Not Halts(this_function(values))` states that a call does not terminate. link:tests/py/sort.py[`Looping.__le__`] and its checked proof show that sorting two such objects does not halt. Unsupported source constructs cause validation errors and cannot be used to satisfy this requirement.
+
+[[raw-lean-throws]]
+==== Throws
+
+`Throws(this_function(n))` states that this particular call terminates by raising an exception. `Throws(left < right)` states the same for a comparison. The execution model proves:
+
+[source,lean]
+----
+Throws(f(x)) → Halts(f(x))
+----
+
+`Not Throws(...)` permits an infinite execution. Use <<raw-lean-returns,Returns>> when successful termination is required.
+
+[[raw-lean-this-function]]
+==== this_function
+
+`this_function` is bound to the enclosing function's execution using its module and name. Calls accept zero or more arguments, for example `Returns(this_function())`, `Throws(this_function(1))`, or `Returns(this_function(a, b))`.
+
+The binding appears in generated stubs; `dsimp only` exposes the proposition for a proof. Other Lean identifiers can be used when bound to functions producing an `Execution`.
+
+[[raw-lean-this-module]]
+==== _this_module
+
+CleanXY supplies `_this_module` as the enclosing Python module's AST. Comparison syntax uses it to look up Python comparison methods, including in nested parenthesized expressions. The binding appears in generated stubs alongside `this_function`.
+
+[[raw-lean-python-comparison]]
+==== python_comparison
+
+`python_comparison(left < right)` produces the comparison execution used by `Returns`, `Halts`, and `Throws`. These wrappers expand comparisons automatically, so it is usually unnecessary to write this helper yourself.
+
+Supported operators are `<`, `<=`, `>`, `>=`, `==`, and `!=`, with operands of type `CleanXY.PyAst.Value`. Parentheses are allowed; Python comparison chains and arithmetic on modeled values are not yet supported. Ordinary `<` outside these wrappers retains its usual Lean meaning.
+
+For example, `python_comparison(left <= right)` expands to `comparison _this_module .ltE left right`. `.ltE` and `.lt` are Lean's shorthand for comparison-operation constructors, selected using the expected type.
+
+Custom same-class comparisons execute the supported method AST, including loops, on empty objects or objects with an integer `value` field. `.object "Looping"` represents an empty object; `.object "DummyInt" (some 2)` represents one with `value = 2`. These Lean constructors describe object state; they do not execute Python `__init__`. Reflected comparison, `NotImplemented`, general method calls, and arbitrary object layouts remain unsupported.
+
+[[raw-lean-diverges]]
+==== diverges
+
+`diverges(this_function())` proves an infinite execution by supplying an invariant that contains the initial state and always permits another execution step. `Execution.diverges_not_halts` turns this proof into `Not Halts(this_function())`. See the `forever` example in link:tests/py/termination.py.lean[].
 
 == How it works
 
@@ -602,6 +652,17 @@ Finally, cleanxy runs Lean putting everything together:
   evaluator, and Python proof properties
 * plain-Python builtin models under link:lang/py/builtin/type[] and their
   adjacent, generated-AST-bound Lean proofs
+
+[[unsupported-python-constructs]]
+=== Unsupported Python constructs
+
+A requirement on a function is rejected if its body or a modeled dependency contains Python constructs that CleanXY cannot handle. The coverage check examines the whole body, including unreachable statements and both branches of conditionals. This applies to DSL properties, negated properties, and raw Lean requirements alike. Equivalence targets and modeled comparison methods are checked too.
+
+The diagnostic identifies the requirement, function, source location, and unsupported construct. Supported requirements and other files continue through checking. The command exits unsuccessfully and ends with a count such as `3 proofs failed because they depend on unsupported Python constructs.` Multiple unsupported constructs in one requirement count as one failed proof. Stub generation reports the same errors and emits only supported obligations.
+
+The scalar interpreter supports literals, local variables, supported arithmetic and comparisons, assignments, `if`, `while`, one-argument `range` loops, builtin exception raises, and returns. Coverage checking is conservative: for example, division and modulo currently require a nonnegative integer literal divisor. General scalar calls, variadics, keyword-only arguments, and arbitrary list programs need further execution-model support.
+
+Functions without requirements do not need execution coverage unless a requirement depends on them. Module-level raw theorems about source metadata, such as AST fingerprints, can inspect source without requesting its execution semantics.
 
 === Python builtin model
 

@@ -23,7 +23,7 @@ class TestCase:
     name: str
     source: Path
     expected_returncode: int
-    expected_output: str | None = None
+    expected_output: str | tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,8 @@ def run_case(case: TestCase) -> TestResult:
     output = completed.stdout + completed.stderr
     passed = completed.returncode == case.expected_returncode
     if case.expected_output is not None:
-        passed = passed and case.expected_output in output
+        expected = (case.expected_output,) if isinstance(case.expected_output, str) else case.expected_output
+        passed = passed and all(fragment in output for fragment in expected)
     return TestResult(
         case=case,
         passed=passed,
@@ -104,13 +105,13 @@ def main() -> int:
             "this_function rejects unsupported arity",
             Path("tests/py/fail/this_function_arity.py"),
             1,
-            "this_function supports positional arguments without variadics",
+            "only plain positional arguments without defaults or variadics are supported",
         ),
         TestCase(
             "this_function rejects unsupported argument annotations",
             Path("tests/py/fail/this_function_annotation.py"),
             1,
-            "this_function supports scalar int/str/bool arguments or one bare list",
+            "needs a supported int, str, bool, or list annotation",
         ),
         TestCase(
             "sorrys are rejected",
@@ -129,6 +130,17 @@ def main() -> int:
             Path("tests/py/fail/missing_lean.py"),
             1,
             "missing proof file",
+        ),
+        TestCase(
+            "unsupported proofs are aggregated while supported proofs continue",
+            Path("tests/py/fail/unsupported"),
+            1,
+            (
+                "7 proofs failed because they depend on unsupported Python constructs.",
+                "2 checks passed.",
+                "equivalent -> unsupported_call",
+                "Try statements are unsupported",
+            ),
         ),
         TestCase(
             "directories check all Python files",
@@ -271,6 +283,14 @@ def main() -> int:
         output = builtin_python_models.stdout + builtin_python_models.stderr
         if output:
             print(textwrap.indent(output.rstrip(), "  "))
+    support_checks = subprocess.run(
+        [sys.executable, "tests/py/support_checks"],
+        cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    support_checks_passed = support_checks.returncode == 0
+    print(f"{'PASS' if support_checks_passed else 'FAIL'} unsupported source validation", flush=True)
+    if not support_checks_passed:
+        print(textwrap.indent((support_checks.stdout + support_checks.stderr).rstrip(), "  "))
     return 0 if (
         all(result.passed for result in results)
         and stub_passed
@@ -280,6 +300,7 @@ def main() -> int:
         and builtin_models_passed
         and throws_syntax_passed
         and builtin_python_models_passed
+        and support_checks_passed
     ) else 1
 
 

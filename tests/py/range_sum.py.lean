@@ -152,13 +152,6 @@ private theorem sum.abstract_equiv :
       hn,
     ]
 
-/-- `sum` returns its annotated integer type whenever it does not throw. -/
-theorem sum.«ReturnType» :
-    CleanXY.Property.Function.ReturnType RangeSumAst.module "sum" := by
-  intro n
-  obtain ⟨outcome, hsum, _⟩ := sum.abstract_equiv n
-  exact ⟨outcome, hsum⟩
-
 /-- The closed-form implementation has constant worst-case cost. -/
 theorem sum.«BigO(1)» :
     CleanXY.Property.Function.BigO RangeSumAst.module "sum"
@@ -283,6 +276,12 @@ private theorem sum.result (n : Int) :
     simp [Execution.observe, Execution.observeFrom, scalarFunction, findFunctionIn,
       scalarBlock, executableBody, scalarStep, scalarExpr, scalarCompare, scalarBinary,
       scalarTruth, argumentEnv, evalCmpOp, RangeSumAst.module, nonpositive]
+
+/-- The closed form finishes with an integer of its annotated return type. -/
+theorem sum.«ReturnType» :
+    CleanXY.Property.Function.ReturnType RangeSumAst.module "sum" := by
+  intro n
+  exact Or.inl ⟨_, sum.result n⟩
 
 /-- Actual execution outcomes agree, so termination contracts transfer too. -/
 theorem sum.«Equiv(sum_naive)» :
