@@ -25,6 +25,22 @@ def slice (values : List α) (bounds : Slice) : Result (List α) := do
   let indices ← Slice.indexList bounds values.length
   return indices.filterMap fun index => values[index]?
 
+private theorem get_range (values : List α) :
+    (List.range values.length).filterMap (fun index => values[index]?) = values := by
+  induction values with
+  | nil => rfl
+  | cons value values ih =>
+      simpa [List.range_succ_eq_map, List.filterMap_map, Function.comp_def] using
+        congrArg (List.cons value) ih
+
+/-- A full negative-unit slice reverses any sequence of values. -/
+theorem slice_reverse (values : List α) :
+    slice values { step := some (-1) } = .ok values.reverse := by
+  unfold slice
+  rw [Slice.indexList_reverse]
+  change Except.ok ((List.range values.length).reverse.filterMap (fun index => values[index]?)) = _
+  rw [List.filterMap_reverse, get_range]
+
 def contains [BEq α] (values : List α) (needle : α) : Bool := values.contains needle
 def concat (left right : List α) : List α := left ++ right
 def repeated (values : List α) (count : Int) : List α :=

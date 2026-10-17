@@ -60,6 +60,22 @@ def indexList (slice : Slice) (length : Nat) : Result (List Nat) := do
   let (start, stop, step) ← indices slice length
   return indexListFuel length start stop step
 
+private theorem reverse_indices (length : Nat) :
+    indexListFuel length ((length : Int) - 1) (-1) (-1) = (List.range length).reverse := by
+  induction length with
+  | zero => rfl
+  | succ length ih =>
+      have position : ((length + 1 : Nat) : Int) - 1 = length := by omega
+      have within : (-1 : Int) < length := by omega
+      simpa [indexListFuel, position, within, List.range_succ, List.reverse_append] using
+        congrArg (List.cons length) ih
+
+/-- A full negative-unit slice visits each index once in reverse order. -/
+theorem indexList_reverse (length : Nat) :
+    indexList { step := some (-1) } length = .ok (List.range length).reverse := by
+  change (.ok (indexListFuel length ((length : Int) - 1) (-1) (-1)) : Result (List Nat)) = _
+  exact congrArg (Except.ok (ε := Error)) (reverse_indices length)
+
 example : indexList {} 4 = .ok [0, 1, 2, 3] := rfl
 example : indexList { step := some (-1) } 4 = .ok [3, 2, 1, 0] := rfl
 
