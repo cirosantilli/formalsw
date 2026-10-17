@@ -283,7 +283,7 @@ with tempfile.TemporaryDirectory(prefix='.support-check-', dir=REPO) as director
         result = stub(path)
         assert result.returncode == 1, (name, result.stdout, result.stderr)
         assert reason in result.stderr, (name, result.stderr)
-        assert '1 proof failed because it depends on unsupported Python constructs.' in result.stderr, (name, result.stderr)
+        assert result.stderr.count('cannot check ') == 1, (name, result.stderr)
         assert 'sorry' not in result.stdout, (name, result.stdout)
 
     # Change an actual comparison dependency while leaving the sorting AST intact.
@@ -319,5 +319,5 @@ result = stub(REPO / 'tests/py/fail/unsupported/b_mixed.py')
 assert result.returncode == 1, result.stdout
 assert result.stdout.count('sorry') == 1, result.stdout
 assert 'theorem identity.«Returns»' in result.stdout, result.stdout
-assert '2 proofs failed because they depend on unsupported Python constructs.' in result.stderr, result.stderr
+assert result.stderr.count('cannot check ') == 2, result.stderr
 print('Unsupported-source CLI regressions passed')

@@ -103,7 +103,7 @@ def main() -> int:
         TestCase("mutable global lists, aliases, and exceptional state", Path("tests/py/mutable_globals.py"), 0),
         TestCase("global inputs and normal/exceptional state", Path("tests/py/globals.py"), 0),
         TestCase("dictionary globals are explicitly unsupported", Path("tests/py/fail/global_mutable.py"), 1,
-                 ("supported state is int, str, bool, or homogeneous scalar lists", "1 proof failed because it depends on unsupported Python constructs")),
+                 "supported state is int, str, bool, or homogeneous scalar lists"),
         TestCase("legacy equivalence cannot discard globals", Path("tests/py/fail/global_legacy.py"), 1,
                  "legacy Function properties omit globals"),
         TestCase("parallel calls with different signatures and arguments", Path("tests/py/parallel_calls.py"), 0),
@@ -164,12 +164,11 @@ def main() -> int:
             "missing proof file",
         ),
         TestCase(
-            "unsupported proofs are aggregated while supported proofs continue",
+            "unsupported proofs are diagnosed while supported proofs continue",
             Path("tests/py/fail/unsupported"),
             1,
             (
-                "9 proofs failed because they depend on unsupported Python constructs.",
-                "2 checks passed.",
+                "equivalent.«Not Equiv(unsupported_call)»: unsupported Python constructs",
                 "equivalent -> unsupported_call",
                 "Try statements are unsupported",
             ),

@@ -1461,7 +1461,7 @@ Finally, formalsw runs Lean putting everything together:
 
 A requirement on a function is rejected if its body or a modeled dependency contains Python constructs that FormalSW cannot handle. The coverage check examines the whole body, including unreachable statements and both branches of conditionals. This applies to DSL properties, negated properties, and raw Lean requirements alike. Equivalence targets and modeled comparison methods are checked too.
 
-The diagnostic identifies the requirement, function, source location, and unsupported construct. Supported requirements and other files continue through checking. The command exits unsuccessfully and ends with a count such as `3 proofs failed because they depend on unsupported Python constructs.` Multiple unsupported constructs in one requirement count as one failed proof. Stub generation reports the same errors and emits only supported obligations.
+The diagnostic identifies the requirement, function, source location, and unsupported construct. Supported requirements and other files continue through checking. The command exits unsuccessfully without appending summary counts to the diagnostics. Stub generation reports the same errors and emits only supported obligations.
 
 The scalar interpreter supports literals, local variables, supported arithmetic and comparisons, assignments, `if`, `while`, one-argument `range` loops, builtin exception raises, and returns. The simpler execution model keeps literal-divisor arithmetic; scalar functions with variable, negative, or computed divisors use the call interpreter. Variadics, keyword-only arguments, and arbitrary list programs need further execution-model support.
 

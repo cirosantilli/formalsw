@@ -1957,15 +1957,6 @@ def filter_supported_requirements(requirements: list[Requirement], report: Check
 
 def finish_report(report: CheckReport, *, stub: bool = False) -> None:
     if report.unsupported or report.failed_files:
-        if not stub:
-            noun = "check" if report.passed == 1 else "checks"
-            print(f"{report.passed} {noun} passed.", flush=True)
-        if report.unsupported:
-            noun = "proof" if report.unsupported == 1 else "proofs"
-            verb = "it depends" if report.unsupported == 1 else "they depend"
-            print_diagnostic(f"{report.unsupported} {noun} failed because {verb} on unsupported Python constructs.", file=sys.stderr)
-        if report.failed_files:
-            print_diagnostic(f"{report.failed_files} source file(s) also failed validation or proof checking.", file=sys.stderr)
         raise SystemExit(1)
     if not stub:
         print(f"All {report.passed} checks passed")
