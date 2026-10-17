@@ -79,4 +79,110 @@ theorem indexList_reverse (length : Nat) :
 example : indexList {} 4 = .ok [0, 1, 2, 3] := rfl
 example : indexList { step := some (-1) } 4 = .ok [3, 2, 1, 0] := rfl
 
+private theorem count_next (start stop stride : Nat) (positive : 0 < stride) (within : start < stop) :
+    (stop - start + stride - 1) / stride =
+      (stop - (start + stride) + stride - 1) / stride + 1 := by
+  have rearrange : stop - start + stride - 1 = (stop - start - 1) + stride := by omega
+  rw [rearrange, Nat.add_div_right _ positive]
+  by_cases near : stop ≤ start + stride
+  · have zero : stop - (start + stride) = 0 := by omega
+    have small : stop - start - 1 < stride := by omega
+    simp [zero, Nat.div_eq_of_lt small, Nat.div_eq_of_lt (show stride - 1 < stride by omega)]
+  · congr 1
+    congr 1
+    omega
+
+private theorem indexListFuel_positive (fuel start stop stride : Nat)
+    (positive : 0 < stride) (enough : stop ≤ start + fuel) :
+    indexListFuel fuel start stop stride =
+      List.range' start ((stop - start + stride - 1) / stride) stride := by
+  induction fuel generalizing start with
+  | zero =>
+      have empty : stop - start = 0 := by omega
+      simp [indexListFuel, empty, Nat.div_eq_of_lt (show stride - 1 < stride by omega)]
+  | succ fuel ih =>
+      have stridePositive : (0 : Int) < stride := by omega
+      by_cases within : start < stop
+      · have withinInt : (start : Int) < stop := by omega
+        rw [indexListFuel]
+        simp only [stridePositive, withinInt, ↓reduceIte, Int.toNat_natCast]
+        rw [← Int.natCast_add, ih (start + stride) (by omega), count_next start stop stride positive within]
+        rw [List.range'_succ]
+      · have outside : ¬ (start : Int) < stop := by omega
+        have empty : stop - start = 0 := by omega
+        simp only [indexListFuel, stridePositive, outside, ↓reduceIte, empty, Nat.zero_add,
+          Nat.div_eq_of_lt (show stride - 1 < stride by omega), List.range'_zero]
+
+/-- A positive slice to the end selects an arithmetic progression. -/
+private theorem indexList_positive_end_of_le (length start stride : Nat) (positive : 0 < stride)
+    (within : start ≤ length) :
+    indexList { start := some start, step := some stride } length =
+      .ok (List.range' start ((length - start + stride - 1) / stride) stride) := by
+  have stridePositive : (0 : Int) < stride := by omega
+  have strideNonzero : (stride : Int) ≠ 0 := by omega
+  have startNonnegative : ¬ (start : Int) < 0 := by omega
+  have castWithin : (start : Int) ≤ length := by omega
+  have clamped : max (0 : Int) (min (start : Int) length) = start := by omega
+  simp only [indexList, indices, Option.getD_some, strideNonzero, ↓reduceIte,
+    stridePositive, normalizePositiveBound, startNonnegative, clamp,
+    clamped]
+  change Except.ok (indexListFuel length start length stride) = _
+  rw [indexListFuel_positive length start length stride positive (by omega)]
+
+/-- Positive slices to the end remain empty when their start is beyond the sequence. -/
+theorem indexList_positive_end (length start stride : Nat) (positive : 0 < stride) :
+    indexList { start := some start, step := some stride } length =
+      .ok (List.range' start ((length - start + stride - 1) / stride) stride) := by
+  by_cases within : start ≤ length
+  · exact indexList_positive_end_of_le length start stride positive within
+  · have stridePositive : (0 : Int) < stride := by omega
+    have strideNonzero : (stride : Int) ≠ 0 := by omega
+    have startNonnegative : ¬ (start : Int) < 0 := by omega
+    have clamped : max (0 : Int) (min (start : Int) length) = length := by omega
+    have empty : length - start = 0 := by omega
+    simp only [indexList, indices, Option.getD_some, strideNonzero, ↓reduceIte,
+      stridePositive, normalizePositiveBound, startNonnegative, clamp, clamped]
+    change Except.ok (indexListFuel length length length stride) = _
+    rw [indexListFuel_positive length length length stride positive (by omega)]
+    simp [empty, Nat.div_eq_of_lt (show stride - 1 < stride by omega)]
+
+/-- Python's inclusive count expression matches the number of selected positions. -/
+theorem positive_end_count (length start stride : Nat) (positive : 0 < stride) :
+    (((length : Int) - 1 - start) / stride + 1).toNat =
+      (length - start + stride - 1) / stride := by
+  by_cases within : start < length
+  · have rearrange : (length : Int) - 1 - start = ((length - start - 1 : Nat) : Int) := by omega
+    rw [rearrange]
+    change (↑((length - start - 1) / stride) + (1 : Int)).toNat = _
+    change (length - start - 1) / stride + 1 = _
+    have rearrangeNat : length - start + stride - 1 = (length - start - 1) + stride := by omega
+    rw [rearrangeNat, Nat.add_div_right _ positive]
+  · have empty : length - start = 0 := by omega
+    have negative : (length : Int) - 1 - start < 0 := by omega
+    have quotient := Int.ediv_neg_of_neg_of_pos negative (by omega : (0 : Int) < stride)
+    rw [Int.toNat_of_nonpos (by omega), empty]
+    simp [Nat.div_eq_of_lt (show stride - 1 < stride by omega)]
+
+/-- Membership in a positive slice is a bound check and a divisibility test. -/
+theorem mem_positive_end (length start stride index : Nat) (positive : 0 < stride) :
+    index ∈ List.range' start ((length - start + stride - 1) / stride) stride ↔
+      start ≤ index ∧ index < length ∧ stride ∣ index - start := by
+  by_cases within : start < length
+  · have count : (length - start + stride - 1) / stride = (length - start - 1) / stride + 1 := by
+      have rearrange : length - start + stride - 1 = (length - start - 1) + stride := by omega
+      rw [rearrange, Nat.add_div_right _ positive]
+    have bound (k : Nat) : k < (length - start + stride - 1) / stride ↔ start + stride * k < length := by
+      rw [count, Nat.lt_succ_iff, Nat.le_div_iff_mul_le positive, Nat.mul_comm k stride]
+      omega
+    rw [List.mem_range']
+    constructor
+    · rintro ⟨k, inRange, rfl⟩
+      exact ⟨by omega, (bound k).mp inRange, ⟨k, by omega⟩⟩
+    · rintro ⟨lower, upper, k, multiple⟩
+      have equal : index = start + stride * k := by omega
+      exact ⟨k, (bound k).mpr (by simpa [← equal] using upper), equal⟩
+  · have empty : length - start = 0 := by omega
+    simp [empty, Nat.div_eq_of_lt (show stride - 1 < stride by omega)]
+    omega
+
 end FormalSW.Py.Builtin.Slice

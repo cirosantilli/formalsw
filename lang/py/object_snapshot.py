@@ -1,6 +1,6 @@
 """Explicit observation boundary for graph_equivalence.same_snapshot.
 
-Exact int/bool/str/bytes/None, list/tuple/dict, and ordinary instances are supported.
+Exact int/bool/str/bytes/None, list/tuple/dict/bytearray, and ordinary instances are supported.
 Never invoke user equality or getters. Unsupported objects raise TypeError.
 The adapter is executable Python; it is not a model of arbitrary CPython heaps.
 """
@@ -54,7 +54,7 @@ def snapshot_roots(roots):
     while cursor < len(objects):
         value = objects[cursor]
         cls = type(value)
-        if cls is list or cls is tuple:
+        if cls is list or cls is tuple or cls is bytearray:
             node = [cls.__name__, [], [edge(item) for item in value]]
         elif cls is dict:
             children = []

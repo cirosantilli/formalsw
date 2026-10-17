@@ -17,7 +17,7 @@ class GlobalInput:
 
 
 def annotation_kind(annotation):
-    if isinstance(annotation, ast.Name) and annotation.id in ('int', 'str', 'bytes', 'bool'):
+    if isinstance(annotation, ast.Name) and annotation.id in ('int', 'str', 'bytes', 'bytearray', 'bool'):
         return annotation.id
     if (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
             and annotation.value.id == 'list' and isinstance(annotation.slice, ast.Name)

@@ -1,5 +1,7 @@
 import lang.py.FormalSW.Globals
 import lang.py.FormalSW.GraphEquivalence
+import lang.py.builtin.type.bytearray
+import lang.py.FormalSW.Strings
 
 namespace FormalSW.PyAst.Mutable
 
@@ -9,7 +11,13 @@ inductive Value where
   | ref (address : Nat)
 deriving Repr, DecidableEq
 
-abbrev Heap := List (List Value)
+/-- Mutable objects have stable addresses and retain their runtime type. -/
+inductive Object where
+  | list (items : List Value)
+  | bytearray (bytes : List UInt8)
+deriving Repr, DecidableEq
+
+abbrev Heap := List Object
 abbrev Globals := List (String × Value)
 abbrev Env := String → Option Value
 
@@ -24,7 +32,9 @@ def Value.HasType (heap : Heap) (value : Value) (kind : String) : Prop :=
   | .scalar (.bytes _) => kind = "bytes"
   | .scalar (.bool _) => kind = "bool"
   | .scalar .none => kind = "None"
-  | .ref address => ∃ items, heap[address]? = some items ∧
+  | .ref address => if kind = "bytearray" then
+      ∃ bytes, heap[address]? = some (.bytearray bytes)
+    else ∃ items, heap[address]? = some (.list items) ∧
       (kind = "list" ∨ ∃ elementKind, kind = "list[" ++ elementKind ++ "]" ∧
         ∀ item ∈ items, match item with
           | .scalar (.int _) => elementKind = "int"
@@ -34,9 +44,11 @@ def Value.HasType (heap : Heap) (value : Value) (kind : String) : Prop :=
 
 /-- Every reference points into the heap; cycles and sharing are permitted. -/
 def Heap.Valid (heap : Heap) : Prop :=
-  ∀ items ∈ heap, ∀ value ∈ items, match value with
-    | .scalar _ => True
-    | .ref address => address < heap.length
+  ∀ object ∈ heap, match object with
+    | .bytearray _ => True
+    | .list items => ∀ value ∈ items, match value with
+        | .scalar _ => True
+        | .ref address => address < heap.length
 
 structure Completion where
   outcome : Except ExceptionObject Value
@@ -50,7 +62,9 @@ def Completion.snapshot (c : Completion) : Data :=
   let result := match c.outcome with | .ok v => [v.edge] | .error _ => []
   (Graph.Heap.mk ((List.range c.anchors).map Graph.Edge.ref ++
     c.globals.map (fun (_, v) => v.edge) ++ result)
-    (c.heap.map fun items => ⟨.list, [], items.map Value.edge⟩)).encode
+    (c.heap.map fun object => match object with
+      | .list items => ⟨.list, [], items.map Value.edge⟩
+      | .bytearray bytes => ⟨.bytearray, [], bytes.map (fun byte => .scalar (.int byte.toNat))⟩)).encode
 
 /-- Exact identical states are a fast path. Otherwise compare the rooted object
  graph using the interpreted Python comparison, preserving aliases and cycles. -/
@@ -190,18 +204,53 @@ def error (name : String) : Eval α := throw { typeName := name, args := [] }
 
 def allocate (items : List Value) : Eval Value := do
   let heap ← get
-  set (heap ++ [items])
+  set (heap ++ [.list items])
   return .ref heap.length
+
+/-- A buffer owns bytes, never references to other heap objects. -/
+def allocateBuffer (bytes : List UInt8) : Eval Value := do
+  let heap ← get
+  set (heap ++ [.bytearray bytes])
+  return .ref heap.length
+
+def integer : Value → Eval Int
+  | .scalar (.int n) => pure n
+  | .scalar (.bool b) => pure (if b then 1 else 0)
+  | _ => error "TypeError"
+
+def byte (value : Value) : Eval UInt8 := do
+  let n ← integer value
+  if 0 ≤ n ∧ n < 256 then return UInt8.ofNat n.toNat
+  else error "ValueError"
+
+/-- Convert an existing buffer or iterable of integers; a bare size is not iterable. -/
+def byteValues : Value → Eval (List UInt8)
+  | .scalar (.bytes bytes) => pure bytes
+  | .ref address => do
+      match (← get)[address]? with
+      | some (.bytearray bytes) => return bytes
+      | some (.list items) => items.mapM byte
+      | none => unsupported
+  | _ => error "TypeError"
+
+def bytearray : List Value → Eval Value
+  | [] => allocateBuffer []
+  | [.scalar (.int n)] =>
+      if n < 0 then error "ValueError" else allocateBuffer (List.replicate n.toNat 0)
+  | [.scalar (.bool b)] => allocateBuffer (if b then [0] else [])
+  | [value] => do allocateBuffer (← byteValues value)
+  | _ => error "TypeError"
 
 def array (value : Value) : Eval (Nat × List Value) := do
   match value with
   | .ref address =>
       match (← get)[address]? with
-      | some items => return (address, items)
+      | some (.list items) => return (address, items)
+      | some (.bytearray _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
 
-def index (items : List Value) (value : Value) : Eval Nat := do
+def index (items : List α) (value : Value) : Eval Nat := do
   let i ← match value with
     | .scalar (.int n) => pure n
     | .scalar (.bool b) => pure (if b then 1 else 0)
@@ -212,19 +261,59 @@ def index (items : List Value) (value : Value) : Eval Nat := do
 def truth (value : Value) : Eval Bool := do
   match value with
   | .scalar c => return scalarTruth c
-  | .ref _ => return !(← array value).2.isEmpty
+  | .ref address =>
+      match (← get)[address]? with
+      | some (.list items) => return !items.isEmpty
+      | some (.bytearray bytes) => return !bytes.isEmpty
+      | none => unsupported
+
+/-- Formatting is partial; ordinary invalid operand combinations raise TypeError. -/
+def invalidBinary (op : BinOp) (left : Value) : Eval Value := do
+  if op == .mod then
+    match left with
+    | .scalar (.bytes _) => unsupported
+    | .ref address =>
+        match (← get)[address]? with
+        | some (.bytearray _) => unsupported
+        | some (.list _) => error "TypeError"
+        | none => unsupported
+    | _ => error "TypeError"
+  else error "TypeError"
 
 def binary (op : BinOp) (a b : Value) : Eval Value := do
   let number : Value → Value
     | .scalar (.bool b) => .scalar (.int (if b then 1 else 0))
     | v => v
   match number a, number b with
-  | .ref _, .ref _ =>
-      if op == .add then allocate ((← array a).2 ++ (← array b).2)
-      else error "TypeError"
+  | .ref left, .ref right =>
+      if op == .add then
+        match (← get)[left]?, (← get)[right]? with
+        | some (.bytearray xs), some (.bytearray ys) => allocateBuffer (xs ++ ys)
+        | some (.list _), some (.list _) => allocate ((← array a).2 ++ (← array b).2)
+        | none, _ | _, none => unsupported
+        | _, _ => error "TypeError"
+      else invalidBinary op a
   | .ref address, .scalar (.int n) | .scalar (.int n), .ref address =>
-      if op == .mult then allocate ((List.replicate n.toNat (← array (.ref address)).2).flatten)
-      else error "TypeError"
+      if op == .mult then
+        match (← get)[address]? with
+        | some (.bytearray bytes) => allocateBuffer (List.replicate n.toNat bytes).flatten
+        | some (.list _) => allocate ((List.replicate n.toNat (← array (.ref address)).2).flatten)
+        | none => unsupported
+      else invalidBinary op a
+  | .ref address, .scalar (.bytes bytes) =>
+      if op == .add then
+        match (← get)[address]? with
+        | some (.bytearray left) => allocateBuffer (left ++ bytes)
+        | some (.list _) => error "TypeError"
+        | none => unsupported
+      else invalidBinary op a
+  | .scalar (.bytes bytes), .ref address =>
+      if op == .add then
+        match (← get)[address]? with
+        | some (.bytearray right) => return .scalar (.bytes (bytes ++ right))
+        | some (.list _) => error "TypeError"
+        | none => unsupported
+      else invalidBinary op a
   | .scalar (.string s), .scalar (.int n) | .scalar (.int n), .scalar (.string s) =>
       if op == .mult then return .scalar (.string (String.join (List.replicate n.toNat s)))
       else error "TypeError"
@@ -235,7 +324,153 @@ def binary (op : BinOp) (a b : Value) : Eval Value := do
       | some (.ok v) => return .scalar v
       | some (.error e) => throw e
       | none => unsupported
+  | .ref _, _ => invalidBinary op a
   | _, _ => error "TypeError"
+
+/-- Sequence iteration for the builtin list, text and buffer types. -/
+def sequence : Value → Eval (List Value)
+  | .scalar (.bytes bytes) => pure (bytes.map (fun byte => .scalar (.int byte.toNat)))
+  | .scalar (.string text) => pure (text.toList.map (fun char => .scalar (.string (String.singleton char))))
+  | .ref address => do
+      match (← get)[address]? with
+      | some (.list items) => pure items
+      | some (.bytearray bytes) => pure (bytes.map (fun byte => .scalar (.int byte.toNat)))
+      | none => unsupported
+  | _ => error "TypeError"
+
+def getItem (value subscript : Value) : Eval Value := do
+  match value, subscript with
+  | .scalar value, .scalar subscript =>
+      match Strings.get value subscript with
+      | .ok value => return .scalar value
+      | .error exception => throw exception
+  | .ref address, subscript =>
+      match (← get)[address]? with
+      | some (.list items) => return (items[← index items subscript]?).getD (.scalar .none)
+      | some (.bytearray bytes) => return .scalar (.int ((bytes[← index bytes subscript]?).getD 0).toNat)
+      | none => unsupported
+  | _, _ => error "TypeError"
+
+/-- Index type is checked before the byte, but its range is checked after it. -/
+def setItem (value subscript replacement : Value) : Eval Value := do
+  match value with
+  | .ref address =>
+      match (← get)[address]? with
+      | some (.list items) =>
+          let i ← index items subscript
+          modify fun heap => heap.set address (.list (items.set i replacement))
+          return .scalar .none
+      | some (.bytearray bytes) =>
+          let n ← integer subscript
+          let byte ← byte replacement
+          let i ← index bytes (.scalar (.int n))
+          modify fun heap => heap.set address (.bytearray (bytes.set i byte))
+          return .scalar .none
+      | none => unsupported
+  | _ => error "TypeError"
+
+/-- Writing an in-range byte preserves the buffer address and every other object. -/
+theorem setItem_buffer (heap : Heap) (address position : Nat) (bytes : List UInt8) (value : UInt8)
+    (found : heap[address]? = some (.bytearray bytes)) (valid : position < bytes.length) :
+    setItem (.ref address) (.scalar (.int position)) (.scalar (.int value.toNat)) heap =
+      some (.ok (.scalar .none), heap.set address (.bytearray (bytes.set position value))) := by
+  have byteRange : (value.toNat : Int) < 256 := by
+    have bound := value.toNat_lt
+    omega
+  have nonnegative : ¬ (position : Int) < 0 := by omega
+  have inside : ¬ bytes.length ≤ position := by omega
+  simp [setItem, found, integer, byte, index, byteRange, nonnegative, inside, Except.map]
+
+private def sliceBound : Value → Eval (Option Int)
+  | .scalar .none => pure none
+  | value => some <$> integer value
+
+/-- Expressions are already evaluated; index conversion checks the step first. -/
+def sliceBounds (lower upper stride : Value) : Eval Py.Builtin.Slice.Slice := do
+  let stride ← sliceBound stride
+  if stride = some 0 then error "ValueError"
+  else
+    let lower ← sliceBound lower
+    let upper ← sliceBound upper
+    return ⟨lower, upper, stride⟩
+
+private def sequenceResult (result : Py.Builtin.Result α) : Eval α :=
+  match result with
+  | .ok value => pure value
+  | .error (.indexError _) => error "IndexError"
+  | .error (.valueError _) => error "ValueError"
+  | .error (.typeError _) => error "TypeError"
+  | .error _ => unsupported
+
+def getSlice (value lower upper stride : Value) : Eval Value := do
+  match value with
+  | .scalar scalar =>
+      match scalar with
+      | .bytes _ | .string _ =>
+          let bounds ← sliceBounds lower upper stride
+          let encode := fun (bound : Option Int) => (bound.map Constant.int).getD .none
+          match Strings.slice scalar (encode bounds.start) (encode bounds.stop) (encode bounds.step) with
+          | .ok value => return .scalar value
+          | .error exception => throw exception
+      | _ => error "TypeError"
+  | .ref address =>
+      match (← get)[address]? with
+      | some (.list items) =>
+          let bounds ← sliceBounds lower upper stride
+          allocate (← sequenceResult (Py.Builtin.Sequence.slice items bounds))
+      | some (.bytearray bytes) =>
+          let bounds ← sliceBounds lower upper stride
+          allocateBuffer (← sequenceResult (Py.Builtin.Sequence.slice bytes bounds))
+      | none => unsupported
+
+def setSlice (value lower upper stride replacement : Value) : Eval Value := do
+  match value with
+  | .ref address =>
+      match (← get)[address]? with
+      | some (.list items) =>
+          let bounds ← sliceBounds lower upper stride
+          let replacement ← sequence replacement
+          let result ← sequenceResult (Py.Builtin.List.setSlice items bounds replacement)
+          modify fun heap => heap.set address (.list result)
+          return .scalar .none
+      | some (.bytearray bytes) =>
+          let bounds ← sliceBounds lower upper stride
+          let replacement ← byteValues replacement
+          let result ← sequenceResult (Py.Builtin.ByteArray.setSlice bytes bounds replacement)
+          modify fun heap => heap.set address (.bytearray result)
+          return .scalar .none
+      | none => unsupported
+  | _ => error "TypeError"
+
+/-- Lift a pure buffer slice update to the shared heap without changing its address. -/
+theorem setSlice_buffer (heap : Heap) (address : Nat) (bytes replacement updated : List UInt8)
+    (lower upper stride : Value) (bounds : Py.Builtin.Slice.Slice)
+    (found : heap[address]? = some (.bytearray bytes))
+    (normalized : sliceBounds lower upper stride heap = some (.ok bounds, heap))
+    (update : Py.Builtin.ByteArray.setSlice bytes bounds replacement = .ok updated) :
+    setSlice (.ref address) lower upper stride (.scalar (.bytes replacement)) heap =
+      some (.ok (.scalar .none), heap.set address (.bytearray updated)) := by
+  simp [setSlice, found, normalized, byteValues, update, sequenceResult, Except.map]
+
+/-- Resolve append before its argument is evaluated. Both heap object kinds expose it. -/
+def appendReceiver (value : Value) : Eval Nat := do
+  match value with
+  | .ref address =>
+      match (← get)[address]? with
+      | some _ => return address
+      | none => unsupported
+  | .scalar _ => error "AttributeError"
+
+def appendItem (address : Nat) (value : Value) : Eval Value := do
+  match (← get)[address]? with
+  | some (.list items) =>
+      modify fun heap => heap.set address (.list (items ++ [value]))
+      return .scalar .none
+  | some (.bytearray bytes) =>
+      let byte ← byte value
+      modify fun heap => heap.set address (.bytearray (bytes ++ [byte]))
+      return .scalar .none
+  | none => unsupported
 
 def expr (env : Env) : Expr → Eval Value
   | .constant c => pure (.scalar c)
@@ -274,7 +509,7 @@ def expr (env : Env) : Expr → Eval Value
       let value ← expr env base
       let item ← expr env item
       let (address, items) ← array value
-      modify fun heap => heap.set address (items ++ [item])
+      modify fun heap => heap.set address (.list ((items ++ [item])))
       return .scalar .none
   | _ => unsupported
 
@@ -286,7 +521,7 @@ def assign (env : Env) (target : Expr) (value : Value) : Eval Env := do
       let sub ← expr env sub
       let (address, items) ← array base
       let i ← index items sub
-      modify fun heap => heap.set address (items.set i value)
+      modify fun heap => heap.set address (.list ((items.set i value)))
       return env
   | _ => unsupported
 
@@ -328,7 +563,7 @@ def step (initial : Globals) (declared : List String) (anchors : Nat)
         let result ← binary op left right
         let (address, updated) ← array base
         let i ← index updated sub
-        modify fun heap => heap.set address (updated.set i result)
+        modify fun heap => heap.set address (.list ((updated.set i result)))
         pure state.env) fun env heap => .next ⟨rest, env, heap⟩
   | .augAssign target op value :: rest =>
       run (do
@@ -337,21 +572,21 @@ def step (initial : Globals) (declared : List String) (anchors : Nat)
         let result ← match left, right, op with
           | .ref address, .ref _, .add => do
               let items := (← array left).2 ++ (← array right).2
-              modify fun heap => heap.set address items
+              modify fun heap => heap.set address (.list (items))
               pure left
           | .ref address, .scalar (.string text), .add => do
               let items := (← array left).2 ++ text.toList.map (fun c =>
                 Value.scalar (.string (String.singleton c)))
-              modify fun heap => heap.set address items
+              modify fun heap => heap.set address (.list (items))
               pure left
           | .ref address, .scalar (.int n), .mult => do
               let items := (List.replicate n.toNat (← array left).2).flatten
-              modify fun heap => heap.set address items
+              modify fun heap => heap.set address (.list (items))
               pure left
           | .ref address, .scalar (.bool b), .mult => do
               let old ← array left
               let items := if b then old.2 else []
-              modify fun heap => heap.set address items
+              modify fun heap => heap.set address (.list (items))
               pure left
           | _, _, _ => binary op left right
         assign state.env target result) fun env heap => .next ⟨rest, env, heap⟩

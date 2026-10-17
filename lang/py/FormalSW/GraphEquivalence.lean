@@ -77,7 +77,7 @@ inductive Edge where
 deriving Repr
 
 inductive Kind where
-  | list | tuple | dict
+  | list | tuple | dict | bytearray
   | object (typeIdentity : Nat)
 deriving Repr
 
@@ -100,6 +100,7 @@ def Kind.encode : Kind → Data
   | .list => .scalar (.string "list")
   | .tuple => .scalar (.string "tuple")
   | .dict => .scalar (.string "dict")
+  | .bytearray => .scalar (.string "bytearray")
   | .object identity => .list [.scalar (.string "object"), .scalar (.int identity)]
 
 def Node.encode (node : Node) : Data :=

@@ -99,7 +99,7 @@ def main():
                     if error is None:
                         roots.append(result)
                     expected = data(snapshot_roots(roots))
-                    heap = '[' + ', '.join('[' + ', '.join('.scalar (' + constant(v) + ')' for v in xs) + ']' for xs in (initial, [9])) + ']'
+                    heap = '[' + ', '.join('.list [' + ', '.join('.scalar (' + constant(v) + ')' for v in xs) + ']' for xs in (initial, [9])) + ']'
                     globals = f'[("alias", .ref {0 if shared else 1}), ("items", .ref 0), ("total", .scalar (.int 7))]'
                     call = f'Mutable.function source {json.dumps(name)} [.scalar (.int ({n}))] {globals} {heap}'
                     # Implicit builtin exception messages remain abstracted, as

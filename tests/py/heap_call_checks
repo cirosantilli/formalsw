@@ -163,7 +163,7 @@ for name in bodies:
                 except (IndexError, TypeError, AttributeError, ZeroDivisionError, ValueError) as exception:
                     value, error = None, type(exception).__name__
                 expected = data(snapshot_roots(anchors + ([value] if error is None else [])))
-                heap = '[' + ', '.join('[' + ', '.join('.scalar (' + constant(v) + ')' for v in xs) + ']'
+                heap = '[' + ', '.join('.list [' + ', '.join('.scalar (' + constant(v) + ')' for v in xs) + ']'
                                       for xs in (initial, [9])) + ']'
                 call = f'HeapCalls.call source {json.dumps(name)} [.scalar (.int ({n})), .ref 0, .ref {0 if shared else 1}] {heap}'
                 outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else

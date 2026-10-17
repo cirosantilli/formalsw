@@ -72,10 +72,11 @@ inductive CmpOp where
 deriving Repr, DecidableEq, BEq, Lean.ToExpr
 
 /-- Builtins resolved by the frontend after rejecting shadowed bindings. -/
-inductive ScalarBuiltin where
+inductive Builtin where
   | str
   | max
   | intBitLength
+  | bytearray
 deriving Repr, BEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
@@ -103,7 +104,7 @@ inductive Expr where
   /-- A Python call expression with positional arguments. -/
   | call : Expr -> List Expr -> Expr
   /-- A resolved builtin call; local functions retain the ordinary call node. -/
-  | builtinCall : ScalarBuiltin → List Expr → Expr
+  | builtinCall : Builtin → List Expr → Expr
   /-- Normalized `sum(element for name in range(bounds) if conditions...)`.
   Coverage checking verifies the builtin bindings before this node executes. -/
   | sumRange : String → Expr → List Expr → List Expr → Expr
@@ -320,9 +321,10 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         (← jsonArray json "conditions" Expr.fromJson?)
   | "BuiltinCall" =>
       let builtin ← match ← jsonString json "name" with
-        | "str" => pure ScalarBuiltin.str
-        | "max" => pure ScalarBuiltin.max
-        | "int.bit_length" => pure ScalarBuiltin.intBitLength
+        | "str" => pure Builtin.str
+        | "max" => pure Builtin.max
+        | "bytearray" => pure Builtin.bytearray
+        | "int.bit_length" => pure Builtin.intBitLength
         | builtinName => throw s!"unsupported scalar builtin: {builtinName}"
       return .builtinCall builtin (← jsonArray json "args" Expr.fromJson?)
   | "ReversedList" =>

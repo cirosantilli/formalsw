@@ -12,18 +12,18 @@ private abbrev call (name : String) (n : Int) (address : Nat) (heap : Heap) :=
   Mutable.function MutableGlobalsAst.module name [.scalar (.int n)] [("items", .ref address)] heap
 
 private theorem push_done (heap : Heap) (address : Nat) (items : List Mutable.Value) (n : Int)
-    (found : heap[address]? = some items) :
+    (found : heap[address]? = some (.list items)) :
     (call "push" n address heap).Finishes
-      ⟨.ok (.scalar .none), [("items", .ref address)], heap.set address (items ++ [.scalar (.int n)]), heap.length⟩ := by
+      ⟨.ok (.scalar .none), [("items", .ref address)], heap.set address (Mutable.Object.list (items ++ [.scalar (.int n)])), heap.length⟩ := by
   apply Call.finishes_of_observe (fuel := 2)
   simp [call, Mutable.function, MutableGlobalsAst.module, findFunctionIn,
     blockGlobals, declaredGlobals, blockLocals, assignedLocals, executableBody,
     Execution.observe, Execution.observeFrom, step, expr, array, completion, Except.map, List.lookup,  found]
 
 private theorem alias_done (heap : Heap) (address : Nat) (items : List Mutable.Value) (n : Int)
-    (found : heap[address]? = some items) :
+    (found : heap[address]? = some (.list items)) :
     (call "push_via_alias" n address heap).Finishes
-      ⟨.ok (.scalar .none), [("items", .ref address)], heap.set address (items ++ [.scalar (.int n)]), heap.length⟩ := by
+      ⟨.ok (.scalar .none), [("items", .ref address)], heap.set address (Mutable.Object.list (items ++ [.scalar (.int n)])), heap.length⟩ := by
   apply Call.finishes_of_observe (fuel := 3)
   simp [call, Mutable.function, MutableGlobalsAst.module, findFunctionIn,
     blockGlobals, declaredGlobals, blockLocals, assignedLocals, executableBody,
@@ -31,10 +31,10 @@ private theorem alias_done (heap : Heap) (address : Nat) (items : List Mutable.V
     Except.map, List.lookup,  found]
 
 private theorem raise_done (heap : Heap) (address : Nat) (items : List Mutable.Value) (n : Int)
-    (found : heap[address]? = some items) :
+    (found : heap[address]? = some (.list items)) :
     (call "push_then_raise" n address heap).Finishes
       ⟨.error ⟨"ValueError", [.string "failure"]⟩, [("items", .ref address)],
-        heap.set address (items ++ [.scalar (.int n)]), heap.length⟩ := by
+        heap.set address (Mutable.Object.list (items ++ [.scalar (.int n)])), heap.length⟩ := by
   apply Call.finishes_of_observe (fuel := 2)
   simp [call, Mutable.function, MutableGlobalsAst.module, findFunctionIn,
     blockGlobals, declaredGlobals, blockLocals, assignedLocals, executableBody,
@@ -42,21 +42,21 @@ private theorem raise_done (heap : Heap) (address : Nat) (items : List Mutable.V
     Except.map, List.lookup,  found]
 
 private theorem replace_done (heap : Heap) (address : Nat) (items : List Mutable.Value) (n : Int)
-    (found : heap[address]? = some items) :
+    (found : heap[address]? = some (.list items)) :
     (call "replace" n address heap).Finishes
       ⟨.ok (.scalar .none), [("items", .ref (heap.length + 1))],
-        heap ++ [[.scalar (.int n)]] ++ [items ++ [.scalar (.int n)]], heap.length⟩ := by
+        heap ++ [Mutable.Object.list ([.scalar (.int n)])] ++ [Mutable.Object.list (items ++ [.scalar (.int n)])], heap.length⟩ := by
   have lt := (List.getElem?_eq_some_iff.mp found).1
+  have getItem := (List.getElem?_eq_some_iff.mp found).2
   have add : (BinOp.add == BinOp.add) = true := rfl
   apply Call.finishes_of_observe (fuel := 3)
   simp [call, Mutable.function, MutableGlobalsAst.module, findFunctionIn,
     blockGlobals, declaredGlobals, blockLocals, assignedLocals, executableBody,
     Execution.observe, Execution.observeFrom, step, expr, array, assign, completion,
-    Except.map, List.lookup,  found, binary, allocate, List.getElem?_append, lt, add]
-  exact (List.getElem?_eq_some_iff.mp found).2
+    Except.map, List.lookup,  found, binary, allocate, List.getElem?_append, lt, add, getItem]
 
-private theorem empty_valid : Heap.Valid [[]] := by simp [Heap.Valid]
-private theorem empty_ints : Mutable.Value.HasType [[]] (.ref 0) "list[int]" := by
+private theorem empty_valid : Heap.Valid [Mutable.Object.list []] := by simp [Heap.Valid]
+private theorem empty_ints : Mutable.Value.HasType [Mutable.Object.list []] (.ref 0) "list[int]" := by
   exact ⟨[], rfl, Or.inr ⟨"int", rfl, by simp⟩⟩
 
 theorem push.«Returns» :
@@ -117,8 +117,8 @@ theorem replace.«Not Equiv(push)» :
     (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "replace" [.scalar (.int n)] [("items", .ref items)] heap).Equiv (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push" [.scalar (.int n)] [("items", .ref items)] heap))
   := by
   intro all
-  obtain ⟨result, done, eq⟩ := (all [[]] 1 0 empty_valid empty_ints).1 _ (replace_done [[]] 0 [] 1 rfl)
-  have actual := Call.unique done (push_done [[]] 0 [] 1 rfl)
+  obtain ⟨result, done, eq⟩ := (all [Mutable.Object.list []] 1 0 empty_valid empty_ints).1 _ (replace_done [Mutable.Object.list []] 0 [] 1 rfl)
+  have actual := Call.unique done (push_done [Mutable.Object.list []] 0 [] 1 rfl)
   subst result
   rcases eq with exact | ⟨_, _, _, graph⟩
   · cases exact
@@ -137,7 +137,7 @@ theorem push_then_raise.«Throws» :
     ∃ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
     (FormalSW.PyAst.Mutable.Heap.Valid heap) ∧ (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") ∧ ((FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push_then_raise" [.scalar (.int n)] [("items", .ref items)] heap).Throws)
   := by
-  exact ⟨[[]], 1, 0, empty_valid, empty_ints, _, _, _, _, raise_done [[]] 0 [] 1 rfl⟩
+  exact ⟨[Mutable.Object.list []], 1, 0, empty_valid, empty_ints, _, _, _, _, raise_done [Mutable.Object.list []] 0 [] 1 rfl⟩
 
 theorem push_then_raise.«Not Equiv(raise_without_push)» :
     Not (∀ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
@@ -145,9 +145,9 @@ theorem push_then_raise.«Not Equiv(raise_without_push)» :
     (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "push_then_raise" [.scalar (.int n)] [("items", .ref items)] heap).Equiv (FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "raise_without_push" [.scalar (.int n)] [("items", .ref items)] heap))
   := by
   intro all
-  obtain ⟨result, done, eq⟩ := (all [[]] 1 0 empty_valid empty_ints).1 _ (raise_done [[]] 0 [] 1 rfl)
-  have before : (call "raise_without_push" 1 0 [[]]).Finishes
-      ⟨.error ⟨"ValueError", [.string "failure"]⟩, [("items", .ref 0)], [[]], 1⟩ :=
+  obtain ⟨result, done, eq⟩ := (all [Mutable.Object.list []] 1 0 empty_valid empty_ints).1 _ (raise_done [Mutable.Object.list []] 0 [] 1 rfl)
+  have before : (call "raise_without_push" 1 0 [Mutable.Object.list []]).Finishes
+      ⟨.error ⟨"ValueError", [.string "failure"]⟩, [("items", .ref 0)], [Mutable.Object.list []], 1⟩ :=
     Call.finishes_of_observe (fuel := 1) (by native_decide)
   have actual := Call.unique done before
   subst result
@@ -159,7 +159,7 @@ theorem read_first.«Throws» :
     ∃ (heap : FormalSW.PyAst.Mutable.Heap) (n : Int) (items : Nat),
     (FormalSW.PyAst.Mutable.Heap.Valid heap) ∧ (FormalSW.PyAst.Mutable.Value.HasType heap (.ref items) "list[int]") ∧ ((FormalSW.PyAst.Mutable.function MutableGlobalsAst.module "read_first" [.scalar (.int n)] [("items", .ref items)] heap).Throws)
   := by
-  refine ⟨[[]], 1, 0, empty_valid, empty_ints, ⟨"IndexError", []⟩, [("items", .ref 0)], [[]], 1, ?_⟩
+  refine ⟨[Mutable.Object.list []], 1, 0, empty_valid, empty_ints, ⟨"IndexError", []⟩, [("items", .ref 0)], [Mutable.Object.list []], 1, ?_⟩
   exact Call.finishes_of_observe (fuel := 1) (by native_decide)
 
 theorem push_argument.«Returns» :
@@ -171,7 +171,7 @@ theorem push_argument.«Returns» :
   obtain ⟨otherItems, otherFound, _⟩ := otherTyped
   obtain ⟨items, found, _⟩ := typed
   have lt := (List.getElem?_eq_some_iff.mp found).1
-  have lookup : ∃ updated, (heap.set other (otherItems ++ [.scalar (.int n)]))[address]? = some updated := by
+  have lookup : ∃ updated, (heap.set other (Mutable.Object.list (otherItems ++ [.scalar (.int n)])))[address]? = some (.list updated) := by
     have otherLt := (List.getElem?_eq_some_iff.mp otherFound).1
     simp only [List.getElem?_set, if_pos otherLt]
     split
@@ -179,7 +179,7 @@ theorem push_argument.«Returns» :
     · exact ⟨items, found⟩
   obtain ⟨updated, updatedFound⟩ := lookup
   refine ⟨.scalar (.int updated.length), [("items", .ref address)],
-    heap.set other (otherItems ++ [.scalar (.int n)]), heap.length, ?_⟩
+    heap.set other (Mutable.Object.list (otherItems ++ [.scalar (.int n)])), heap.length, ?_⟩
   apply Call.finishes_of_observe (fuel := 2)
   simp [Mutable.function, MutableGlobalsAst.module, findFunctionIn,
     blockGlobals, declaredGlobals, blockLocals, assignedLocals, executableBody,

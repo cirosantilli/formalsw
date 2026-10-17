@@ -77,33 +77,52 @@ theorem equalLists_ints (left right : List Int) :
   · have different : left ≠ right := fun same => lengths (congrArg List.length same)
     simp [equalLists, lengths, different]
 
+@[simp] def compareScalars (op : CmpOp) (left right : Constant) : Eval Value :=
+  match scalarCompare op left right with
+  | some value => pure (.scalar (.bool value))
+  | none => Mutable.error "TypeError"
+
+@[simp] def compareDifferent (op : CmpOp) : Eval Value :=
+  match op with
+  | .eq => pure (.scalar (.bool false))
+  | .notEq => pure (.scalar (.bool true))
+  | _ => Mutable.error "TypeError"
+
 def compare (op : CmpOp) (left right : Value) : Eval Value := do
   match left, right with
-  | .scalar a, .scalar b =>
-      match scalarCompare op a b with
-      | some value => return .scalar (.bool value)
-      | none => Mutable.error "TypeError"
+  | .scalar a, .scalar b => compareScalars op a b
   | .ref a, .ref b =>
-      let (_, xs) ← Mutable.array left
-      let (_, ys) ← Mutable.array right
-      match op with
-      | .eq | .notEq =>
-          let some equal := if a = b then some true else equalLists xs ys | Mutable.unsupported
-          return .scalar (.bool (if op == .eq then equal else !equal))
-      | _ => Mutable.unsupported
-  | _, _ => match op with
-      | .eq => pure (.scalar (.bool false))
-      | .notEq => pure (.scalar (.bool true))
-      | _ => Mutable.error "TypeError"
+      match (← get)[a]?, (← get)[b]? with
+      | some (.bytearray xs), some (.bytearray ys) => compareScalars op (.bytes xs) (.bytes ys)
+      | some (.list _), some (.list _) =>
+          let (_, xs) ← Mutable.array left
+          let (_, ys) ← Mutable.array right
+          match op with
+          | .eq | .notEq =>
+              let some equal := if a = b then some true else equalLists xs ys | Mutable.unsupported
+              return .scalar (.bool (if op == .eq then equal else !equal))
+          | _ => Mutable.unsupported
+      | none, _ | _, none => Mutable.unsupported
+      | _, _ => compareDifferent op
+  | .ref address, .scalar scalar =>
+      match (← get)[address]?, scalar with
+      | some (.bytearray bytes), .bytes other => compareScalars op (.bytes bytes) (.bytes other)
+      | none, _ => Mutable.unsupported
+      | _, _ => compareDifferent op
+  | .scalar scalar, .ref address =>
+      match scalar, (← get)[address]? with
+      | .bytes bytes, some (.bytearray other) => compareScalars op (.bytes bytes) (.bytes other)
+      | _, none => Mutable.unsupported
+      | _, _ => compareDifferent op
 
 theorem compare_int_lists (left right : List Int)
-    (foundLeft : heap[a]? = some (left.map fun n => .scalar (.int n)))
-    (foundRight : heap[b]? = some (right.map fun n => .scalar (.int n))) :
+    (foundLeft : heap[a]? = some (.list (left.map fun n => .scalar (.int n))))
+    (foundRight : heap[b]? = some (.list (right.map fun n => .scalar (.int n)))) :
     compare .eq (.ref a) (.ref b) heap = some (.ok (.scalar (.bool (decide (left = right)))), heap) := by
   by_cases same : a = b
   · subst b
     have encoded : (left.map fun n => Mutable.Value.scalar (.int n)) =
-        right.map (fun n => Mutable.Value.scalar (.int n)) := Option.some.inj (foundLeft.symm.trans foundRight)
+        right.map (fun n => Mutable.Value.scalar (.int n)) := Mutable.Object.list.inj (Option.some.inj (foundLeft.symm.trans foundRight))
     have injective : left = right := by
       clear foundLeft foundRight
       induction left generalizing right with
@@ -122,33 +141,69 @@ theorem compare_int_lists (left right : List Int)
 
 /-- In-place list operations preserve the left reference. Scalar operations
 fall back to ordinary binary evaluation. -/
-def inplace (op : BinOp) (left right : Value) : Eval Value := do
+private def listInplace (op : BinOp) (left right : Value) : Eval Value := do
   match left, right, op with
   | .ref address, .ref _, .add =>
-      let items := (← Mutable.array left).2 ++ (← Mutable.array right).2
-      modify fun heap => heap.set address items
+      let items := (← Mutable.array left).2 ++ (← Mutable.sequence right)
+      modify fun heap => heap.set address (.list (items))
+      return left
+  | .ref address, .scalar (.bytes bytes), .add =>
+      let items := (← Mutable.array left).2 ++ bytes.map (fun byte => .scalar (.int byte.toNat))
+      modify fun heap => heap.set address (.list items)
       return left
   | .ref address, .scalar (.string text), .add =>
       let items := (← Mutable.array left).2 ++ text.toList.map (fun c =>
         Mutable.Value.scalar (.string (String.singleton c)))
-      modify fun heap => heap.set address items
+      modify fun heap => heap.set address (.list (items))
       return left
   | .ref address, .scalar (.int n), .mult =>
       let items := (List.replicate n.toNat (← Mutable.array left).2).flatten
-      modify fun heap => heap.set address items
+      modify fun heap => heap.set address (.list (items))
       return left
   | .ref address, .scalar (.bool b), .mult =>
       let items := (← Mutable.array left).2
-      modify fun heap => heap.set address (if b then items else [])
+      modify fun heap => heap.set address (.list ((if b then items else [])))
       return left
   | _, _, _ => Mutable.binary op left right
+
+/-- In-place buffer updates preserve the address observed by every alias. -/
+def inplace (op : BinOp) (left right : Value) : Eval Value := do
+  match left with
+  | .scalar _ => Mutable.binary op left right
+  | .ref address =>
+      match (← get)[address]? with
+      | none => Mutable.unsupported
+      | some (.list _) => listInplace op left right
+      | some (.bytearray bytes) =>
+          match op with
+          | .mult =>
+              let n ← Mutable.integer right
+              modify fun heap => heap.set address (.bytearray (List.replicate n.toNat bytes).flatten)
+              return left
+          | .add =>
+              let more ← match right with
+                | .scalar (.bytes more) => pure more
+                | .ref other =>
+                    match (← get)[other]? with
+                    | some (.bytearray more) =>
+                        if other = address ∧ !more.isEmpty then Mutable.error "BufferError"
+                        else pure more
+                    | some (.list _) => Mutable.error "TypeError"
+                    | none => Mutable.unsupported
+                | _ => Mutable.error "TypeError"
+              modify fun heap => heap.set address (.bytearray (bytes ++ more))
+              return left
+          | _ => Mutable.binary op left right
 
 inductive Operation where
   | call (name : String)
   | list
   | subscript
+  | slice
+  | setItem (replacement : Value)
+  | setSlice (replacement : Value)
   | append (address : Nat)
-  | builtin (name : ScalarBuiltin)
+  | builtin (name : Builtin)
   | reversedList
 
 inductive Frame where
@@ -167,6 +222,8 @@ inductive Frame where
   | discard (rest : List Stmt) (env : Env)
   | assertion (message : Option Expr) (rest : List Stmt) (env : Env)
   | assertionMessage
+  | assignItem (base index : Expr) (rest : List Stmt) (env : Env)
+  | assignSlice (base lower upper stride : Expr) (rest : List Stmt) (env : Env)
   | rangeArguments (name : String) (done : List Value) (rest : List Expr)
       (body otherwise following : List Stmt) (env : Env)
 
@@ -220,23 +277,13 @@ private def rangeState (name : String) (env : Env) (done : List Value)
 def primitive : Operation → List Value → Eval Value
   | .list, values => Mutable.allocate values
   | .reversedList, [value] => do
-      let items : List Value ← match value with
-        | .ref _ => do pure (← Mutable.array value).2
-        | .scalar (.string text) => pure (text.toList.map fun c => .scalar (.string (String.singleton c)))
-        | _ => Mutable.error "TypeError"
-      Mutable.allocate items.reverse
-  | .subscript, [base, index] => do
-      match base, index with
-      | .scalar base, .scalar index =>
-          scalarResult (some (Strings.get base index))
-      | .ref _, index =>
-          let (_, items) ← Mutable.array base
-          return (items[← Mutable.index items index]?).getD (.scalar .none)
-      | _, _ => Mutable.error "TypeError"
-  | .append address, [value] => do
-      let (_, items) ← Mutable.array (.ref address)
-      modify fun heap => heap.set address (items ++ [value])
-      return .scalar .none
+      Mutable.allocate (← Mutable.sequence value).reverse
+  | .subscript, [base, index] => Mutable.getItem base index
+  | .slice, [base, lower, upper, stride] => Mutable.getSlice base lower upper stride
+  | .setItem replacement, [base, index] => Mutable.setItem base index replacement
+  | .setSlice replacement, [base, lower, upper, stride] => Mutable.setSlice base lower upper stride replacement
+  | .append address, [value] => Mutable.appendItem address value
+  | .builtin .bytearray, values => Mutable.bytearray values
   | .builtin .intBitLength, [.scalar value] => scalarResult (some (Math.bitLengthCall value))
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
   | .builtin .str, values => do
@@ -287,6 +334,9 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .ifExp test yes no => .next ⟨.expr test env, .conditional yes no env :: stack, heap⟩
       | .list expressions => .next (argumentsState .list env [] expressions stack heap)
       | .reversedList expression => .next (argumentsState .reversedList env [] [expression] stack heap)
+      | .subscript base (.slice lower upper stride) =>
+          .next (argumentsState .slice env [] [base, lower.getD (.constant .none),
+            upper.getD (.constant .none), stride.getD (.constant .none)] stack heap)
       | .subscript base index => .next (argumentsState .subscript env [] [base, index] stack heap)
       | .builtinCall name expressions => .next (argumentsState (.builtin name) env [] expressions stack heap)
       | .call (.name name) expressions => .next (argumentsState (.call name) env [] expressions stack heap)
@@ -298,6 +348,11 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       match body with
       | [] => .next ⟨.value (.scalar .none), stack, heap⟩
       | .return expression :: _ => .next ⟨.expr expression env, stack, heap⟩
+      | .assign [.subscript base (.slice lower upper stride)] expression :: rest =>
+          .next ⟨.expr expression env, .assignSlice base (lower.getD (.constant .none))
+            (upper.getD (.constant .none)) (stride.getD (.constant .none)) rest env :: stack, heap⟩
+      | .assign [.subscript base index] expression :: rest =>
+          .next ⟨.expr expression env, .assignItem base index rest env :: stack, heap⟩
       | .assign [.name name] expression :: rest => .next ⟨.expr expression env, .assign name rest env :: stack, heap⟩
       | .augAssign (.name name) op expression :: rest =>
           .next ⟨.expr (.name name) env, .binaryLeft op expression env true :: .assign name rest env :: stack, heap⟩
@@ -344,8 +399,13 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | .arguments operation done rest env => .next (argumentsState operation env (done ++ [value]) rest stack heap)
           | .appendReceiver item env => match value with
               | .scalar _ => done anchors heap (.error { typeName := "AttributeError", args := [] })
-              | .ref address => run anchors heap (Mutable.array value) fun _ heap =>
+              | .ref address => run anchors heap (Mutable.appendReceiver value) fun _ heap =>
                   .next (argumentsState (.append address) env [] [item] stack heap)
+          | .assignItem base index rest env =>
+              .next (argumentsState (.setItem value) env [] [base, index] (.discard rest env :: stack) heap)
+          | .assignSlice base lower upper stride rest env =>
+              .next (argumentsState (.setSlice value) env [] [base, lower, upper, stride]
+                (.discard rest env :: stack) heap)
           | .assign name rest env => .next ⟨.block rest (setLocal env name value), stack, heap⟩
           | .branch yes no rest env => run anchors heap (Mutable.truth value) fun truth heap =>
               .next ⟨.block ((if truth then yes else no) ++ rest) env, stack, heap⟩
@@ -463,7 +523,7 @@ theorem step_extend (extension : Calls.Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | subscript | append _ | builtin _ | reversedList => rfl
+      | list | subscript | slice | setItem _ | setSlice _ | append _ | builtin _ | reversedList => rfl
   | expr _ _ | block _ _ | value _ | startRange _ _ _ _ _ _ => rfl
 
 theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Calls.Extends target source) :
@@ -553,20 +613,20 @@ theorem qualified_call (notAppend : field ≠ "append")
   exact (arguments_reach arguments (.call (alias ++ "." ++ field)) [] anchors stack).trans (callee anchors stack)
 
 theorem list (arguments : Arguments module env expressions heap values finalHeap) :
-    Evaluates module env (.list expressions) heap (.ref finalHeap.length) (finalHeap ++ [values]) := by
+    Evaluates module env (.list expressions) heap (.ref finalHeap.length) (finalHeap ++ [.list values]) := by
   intro anchors stack
   apply Reaches.next rfl
   apply (arguments_reach arguments .list [] anchors stack).trans
   exact .next (by simp [step, result, run, primitive, Mutable.allocate, Except.map]) .refl
 
 theorem reversed_list (evaluated : Evaluates module env expression heap (.ref address) middle)
-    (found : middle[address]? = some items) :
+    (found : middle[address]? = some (.list items)) :
     Evaluates module env (.reversedList expression) heap (.ref middle.length)
-      (middle ++ [items.reverse]) := by
+      (middle ++ [.list items.reverse]) := by
   intro anchors stack
   apply Reaches.next rfl
   apply (arguments_reach (.cons evaluated .nil) .reversedList [] anchors stack).trans
-  exact .next (by simp [step, result, run, primitive, Mutable.array, found,
+  exact .next (by simp [step, result, run, primitive, Mutable.sequence, found,
     Mutable.allocate, Except.map]) .refl
 
 theorem builtin (arguments : Arguments module env expressions heap values middle)
@@ -577,20 +637,20 @@ theorem builtin (arguments : Arguments module env expressions heap values middle
     (.next (by simp [step, result, run, operation]) .refl))
 
 theorem append (receiver : Evaluates module env base heap (.ref address) middle)
-    (found : middle[address]? = some old)
+    (found : middle[address]? = some (.list old))
     (item : Evaluates module env expression middle value afterItem)
-    (items : afterItem[address]? = some current) :
+    (items : afterItem[address]? = some (.list current)) :
     Evaluates module env (.call (.attribute base "append") [expression]) heap (.scalar .none)
-      (afterItem.set address (current ++ [value])) := by
+      (afterItem.set address (.list (current ++ [value]))) := by
   intro anchors stack
   apply Reaches.next rfl
   apply (receiver anchors _).trans
   apply Reaches.next (following := ⟨.expr expression env,
     .arguments (.append address) [] [] env :: stack, middle⟩)
-    (by simp [step, run, Mutable.array, found, argumentsState])
+    (by simp [step, run, Mutable.appendReceiver, found, argumentsState])
   apply (item anchors _).trans
   apply Reaches.next (following := ⟨.operation (.append address) [value], stack, afterItem⟩) rfl
-  exact .next (by simp [step, result, run, primitive, Mutable.array, items, Except.map]) .refl
+  exact .next (by simp [step, result, run, primitive, Mutable.appendItem, items, Except.map]) .refl
 
 end Evaluates
 
@@ -608,6 +668,44 @@ theorem assign (evaluated : Evaluates module env expression heap value middle)
     (rest : BlockReturns module (setLocal env name value) body middle answer finalHeap) :
     BlockReturns module env (.assign [.name name] expression :: body) heap answer finalHeap :=
   fun anchors stack => .next rfl ((evaluated anchors _).trans (.next rfl (rest anchors stack)))
+
+/-- Subscription assignment evaluates the RHS before the receiver and index. -/
+theorem setItem
+    (ordinary : ∀ a b c, index ≠ .slice a b c)
+    (rhs : Evaluates module env expression heap value afterRhs)
+    (target : Evaluates.Arguments module env [base, index] afterRhs [receiver, subscript] afterTarget)
+    (write : Mutable.setItem receiver subscript value afterTarget = some (.ok (.scalar .none), afterWrite))
+    (rest : BlockReturns module env body afterWrite answer finalHeap) :
+    BlockReturns module env (.assign [.subscript base index] expression :: body) heap answer finalHeap := by
+  intro anchors stack
+  have start : step module anchors ⟨.block (.assign [.subscript base index] expression :: body) env, stack, heap⟩ =
+      .next ⟨.expr expression env, .assignItem base index body env :: stack, heap⟩ := by
+    cases index <;> simp_all [step]
+  apply Reaches.next start
+  apply (rhs anchors _).trans
+  apply Reaches.next rfl
+  apply (Evaluates.arguments_reach target (.setItem value) [] anchors _).trans
+  exact .next (following := ⟨.value (.scalar .none), .discard body env :: stack, afterWrite⟩)
+    (by simp [step, result, run, primitive, write]) (.next rfl (rest anchors stack))
+
+/-- Slice bounds run left to right after the RHS and receiver; conversion follows. -/
+theorem setSlice
+    (rhs : Evaluates module env expression heap value afterRhs)
+    (target : Evaluates.Arguments module env [base, lower.getD (.constant .none),
+      upper.getD (.constant .none), stride.getD (.constant .none)] afterRhs
+      [receiver, lowerValue, upperValue, strideValue] afterTarget)
+    (write : Mutable.setSlice receiver lowerValue upperValue strideValue value afterTarget =
+      some (.ok (.scalar .none), afterWrite))
+    (rest : BlockReturns module env body afterWrite answer finalHeap) :
+    BlockReturns module env (.assign [.subscript base (.slice lower upper stride)] expression :: body)
+      heap answer finalHeap := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (rhs anchors _).trans
+  apply Reaches.next rfl
+  apply (Evaluates.arguments_reach target (.setSlice value) [] anchors _).trans
+  exact .next (following := ⟨.value (.scalar .none), .discard body env :: stack, afterWrite⟩)
+    (by simp [step, result, run, primitive, write]) (.next rfl (rest anchors stack))
 
 theorem augAssign (lookup : env name = some left)
     (evaluated : Evaluates module env expression heap right middle)
@@ -739,6 +837,42 @@ theorem assign (evaluated : Evaluates module env expression heap value finalHeap
     BlockContinues module env [.assign [.name name] expression] heap
       (setLocal env name value) finalHeap :=
   fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
+
+/-- Subscription assignment evaluates the RHS before the receiver and index. -/
+theorem setItem
+    (ordinary : ∀ a b c, index ≠ .slice a b c)
+    (rhs : Evaluates module env expression heap value afterRhs)
+    (target : Evaluates.Arguments module env [base, index] afterRhs [receiver, subscript] afterTarget)
+    (write : Mutable.setItem receiver subscript value afterTarget = some (.ok (.scalar .none), afterWrite)) :
+    BlockContinues module env [.assign [.subscript base index] expression] heap env afterWrite := by
+  intro body anchors stack
+  have start : step module anchors ⟨.block (.assign [.subscript base index] expression :: body) env, stack, heap⟩ =
+      .next ⟨.expr expression env, .assignItem base index body env :: stack, heap⟩ := by
+    cases index <;> simp_all [step]
+  apply Reaches.next start
+  apply (rhs anchors _).trans
+  apply Reaches.next rfl
+  apply (Evaluates.arguments_reach target (.setItem value) [] anchors _).trans
+  exact .next (following := ⟨.value (.scalar .none), .discard body env :: stack, afterWrite⟩)
+    (by simp [step, result, run, primitive, write]) (.next rfl .refl)
+
+/-- Slice bounds run left to right after the RHS and receiver; conversion follows. -/
+theorem setSlice
+    (rhs : Evaluates module env expression heap value afterRhs)
+    (target : Evaluates.Arguments module env [base, lower.getD (.constant .none),
+      upper.getD (.constant .none), stride.getD (.constant .none)] afterRhs
+      [receiver, lowerValue, upperValue, strideValue] afterTarget)
+    (write : Mutable.setSlice receiver lowerValue upperValue strideValue value afterTarget =
+      some (.ok (.scalar .none), afterWrite)) :
+    BlockContinues module env [.assign [.subscript base (.slice lower upper stride)] expression]
+      heap env afterWrite := by
+  intro body anchors stack
+  apply Reaches.next rfl
+  apply (rhs anchors _).trans
+  apply Reaches.next rfl
+  apply (Evaluates.arguments_reach target (.setSlice value) [] anchors _).trans
+  exact .next (following := ⟨.value (.scalar .none), .discard body env :: stack, afterWrite⟩)
+    (by simp [step, result, run, primitive, write]) (.next rfl .refl)
 
 theorem discard (evaluated : Evaluates module env expression heap value finalHeap) :
     BlockContinues module env [.expr expression] heap env finalHeap :=

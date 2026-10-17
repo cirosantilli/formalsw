@@ -9,7 +9,7 @@ namespace FormalSW.PyAst.Calls
 
 /-- Operations whose bindings have already been resolved by source checking. -/
 inductive Primitive where
-  | builtin (function : ScalarBuiltin)
+  | builtin (function : Builtin)
   | subscript
   | slice
 

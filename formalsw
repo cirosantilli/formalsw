@@ -759,7 +759,7 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
             raise InvalidRequirement("Equiv requires matching supported argument domains")
         if uses_heap_calls(program, func):
             kind = annotation_kind(func.returns)
-            if kind and kind.startswith('list['):
+            if kind == 'bytearray' or kind and kind.startswith('list['):
                 values = ", ".join(f'.scalar ({scalar_term(name, kind)})' for name, kind in zip(names, kinds))
                 return f'FormalSW.PyAst.HeapCalls.call {ns}.module {lean_string(func.name)} [{values}] []'
             if kind not in ('int', 'str', 'bytes', 'bool') and not (isinstance(func.returns, ast.Constant) and func.returns.value is None):
@@ -778,7 +778,7 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
         kind = annotation_kind(function.returns)
         if kind is None and isinstance(function.returns, ast.Constant) and function.returns.value is None:
             kind = "None"
-        if kind not in ("int", "bool", "str", "None") and not (uses_heap_calls(module, function) and kind and kind.startswith("list[")):
+        if kind not in ("int", "bool", "str", "None") and not (uses_heap_calls(module, function) and kind and (kind.startswith("list[") or kind == "bytearray")):
             raise InvalidRequirement("ReturnType needs a supported return annotation")
         body += f" {lean_string(kind)}"
     body = guarded_type(body, conditions, existential=property_name == "Throws")
@@ -1295,7 +1295,7 @@ class AstJsonEmitter:
                 if (reversed_value is not None
                         and not any(bindings(self.bindings_module, name) for name in ('list', 'reversed'))):
                     return {"type": "ReversedList", "value": self.expr(reversed_value)}
-                if isinstance(func, ast.Name) and func.id in ('str', 'max') and not bindings(self.bindings_module, func.id):
+                if isinstance(func, ast.Name) and func.id in ('str', 'max', 'bytearray') and not bindings(self.bindings_module, func.id):
                     return {"type": "BuiltinCall", "name": func.id,
                             "args": [self.expr(arg) for arg in args]}
                 return {

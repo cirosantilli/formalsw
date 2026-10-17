@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""
+Compare buffer execution, aliases and slice assignment order with Python.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.object_snapshot import snapshot_roots, equivalent_roots
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes ' + str(list(value))
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''def record(log: list[int], n: int) -> int:
+    log.append(n)
+    return n
+
+def receiver(buf: bytearray, log: list[int]) -> bytearray:
+    log.append(2)
+    return buf
+
+def payload(log: list[int], n: int) -> bytes:
+    log.append(1)
+    return b"x" * n
+
+'''
+bodies = {
+    'empty': 'return bytearray()',
+    'size': 'return bytearray(n)',
+    'literal': 'return bytearray(b"\\x00\\xff")',
+    'iterable': 'return bytearray([n, True])',
+    'copy': 'return bytearray(buf)',
+    'bad_text': 'return bytearray("text")',
+    'repeat': 'return buf * n',
+    'repeat_left': 'return n * buf',
+    'repeat_alias': 'buf *= n\nreturn alias',
+    'concat': 'return buf + b"\\xff"',
+    'concat_left': 'return b"\\xff" + buf',
+    'concat_buffers': 'return buf + alias',
+    'extend_alias': 'buf += b"\\xff"\nreturn alias',
+    'extend_self': 'buf += buf\nreturn alias',
+    'extend_list_invalid': 'buf += [n]\nreturn buf',
+    'append': 'buf.append(n)\nreturn alias',
+    'index': 'return buf[n]',
+    'set_index': 'buf[n] = 255\nreturn alias',
+    'set_value': 'buf[0] = n\nreturn alias',
+    'value_before_bounds': 'buf[999] = n\nreturn buf',
+    'invalid_index_first': 'buf["bad"] = n\nreturn buf',
+    'slice': 'return buf[n::2]',
+    'reverse': 'return buf[::-1]',
+    'slice_copy': 'other = buf[:]\nother.append(7)\nreturn [buf, other]',
+    'extended': 'buf[1::2] = b"\\x00" * n\nreturn alias',
+    'reverse_assignment': 'buf[::-1] = b"\\x07" * n\nreturn alias',
+    'delete_extended': 'buf[::2] = b""\nreturn alias',
+    'insert_empty': 'buf[n:1] = b"x"\nreturn alias',
+    'assign_self': 'buf[1:2] = buf\nreturn alias',
+    'assign_bad_byte': 'buf[1:2] = [n]\nreturn alias',
+    'zero_step_before_bad_byte': 'buf[::0] = [n]\nreturn alias',
+    'bad_replacement': 'buf[:] = n\nreturn alias',
+    'write_order': 'receiver(buf, log)[record(log, n)] = record(log, 255)\nreturn alias',
+    'slice_order': 'receiver(buf, log)[record(log, 0):record(log, 3):record(log, 2)] = payload(log, n)\nreturn alias',
+    'zero_step_order': 'receiver(buf, log)[record(log, 1)::record(log, 0)] = payload(log, n)\nreturn alias',
+    'equal_buffers': 'return buf == alias',
+    'equal_bytes': 'return buf == b"\\x00\\x01\\xff"',
+    'equal_list': 'return buf == [0, 1, 255]',
+    'compare_buffers': 'return buf < alias',
+    'compare_bytes': 'return b"a" >= buf',
+    'compare_list_error': 'return buf < log',
+    'truth': 'return 1 if buf else 0',
+    'reversed_list': 'return list(reversed(buf))',
+    'list_extend': 'log += buf\nreturn log',
+    'list_slice_insert': 'log[2:0] = buf\nreturn log',
+    'list_slice_extended': 'log[::2] = buf\nreturn log',
+}
+for name, body in bodies.items():
+    source += f'def {name}(n: int, buf: bytearray, alias: bytearray, log: list[int]):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines()) + '\n'
+module = ast.parse(source)
+checker = SupportChecker(module)
+for name in bodies:
+    issues = checker.check(name, heap_calls=True)
+    assert not issues, (name, issues)
+namespace = {}
+exec(source, namespace)
+equations = []
+for name in bodies:
+    for original in (b'', b'\x00\x01\xff'):
+        for n in (-1, 0, 2, 256):
+            for shared in (False, True):
+                buf, other, log = bytearray(original), bytearray(b'a'), [5, 6]
+                roots = [buf, other, log]
+                try:
+                    value = namespace[name](n, buf, buf if shared else other, log)
+                    expected_outcome = 'match result.outcome with | .ok _ => true | _ => false'
+                    roots.append(value)
+                except (TypeError, ValueError, IndexError, BufferError) as error:
+                    expected_outcome = f'match result.outcome with | .error e => decide (e = ⟨"{type(error).__name__}", []⟩) | _ => false'
+                expected = data(snapshot_roots(roots))
+                heap = f'[.bytearray {list(original)}, .bytearray [97], .list [.scalar (.int 5), .scalar (.int 6)]]'
+                call = f'HeapCalls.call Probe.module "{name}" [.scalar (.int ({n})), .ref 0, .ref {0 if shared else 1}, .ref 2] {heap}'
+                equations.append(f'-- {name}, {list(original)}, n={n}, shared={shared}\nexample : (match ({call}).execution.observe 300 with\n'
+                                 f' | .done (.ok result) => ({expected_outcome}) &&\n'
+                                 f'   (Graph.observedBool ((Graph.compare result.snapshot ({expected})).observe 1000000) == some true)\n'
+                                 ' | _ => false) = true := by native_decide')
+
+with project_temporary_directory(prefix='buffer-check-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+                     + 'open FormalSW.PyAst\nset_option maxRecDepth 16384\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+shared = bytearray(b'a')
+assert equivalent_roots([shared, shared], [shared, shared])
+assert not equivalent_roots([shared, shared], [bytearray(b'a'), bytearray(b'a')])
+assert not equivalent_roots([shared], [[97]])
+assert not equivalent_roots([shared], [b'a'])
+for suffix in ('bytearray = 0\n', 'from other import bytearray\n'):
+    assert SupportChecker(ast.parse('def f(n: int) -> int:\n    return bytearray(n)[0]\n' + suffix)).check('f')
+assert SupportChecker(ast.parse('def f(bytearray: int) -> int:\n    return bytearray(1)[0]\n')).check('f')
+print(f'Buffers: {len(equations)} Python comparisons, object identity, assignment effects and binding checks passed')

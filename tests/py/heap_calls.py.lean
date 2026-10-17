@@ -7,7 +7,7 @@ private abbrev program := HeapCallsAst.module
 
 private theorem make.result (n : Int) (heap : Mutable.Heap) :
     HeapCalls.ReturnsValue program "make" [.scalar (.int n)] heap (.ref heap.length)
-      (heap ++ [[.scalar (.int n)]]) := by
+      (heap ++ [Mutable.Object.list ([.scalar (.int n)])]) := by
   apply HeapCalls.BlockReturns.function rfl rfl
   apply HeapCalls.BlockReturns.return_value
   exact HeapCalls.Evaluates.list (.cons (HeapCalls.Evaluates.lookup rfl) .nil)
@@ -22,9 +22,9 @@ theorem make.«Supported» (n : Int) :
 
 /-- The returned object is the caller's original object, for any caller heap. -/
 theorem push.result (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
-    (found : heap[address]? = some items) (value : Int) :
+    (found : heap[address]? = some (.list items)) (value : Int) :
     HeapCalls.ReturnsValue program "push" [.ref address, .scalar (.int value)] heap (.ref address)
-      (heap.set address (items ++ [.scalar (.int value)])) := by
+      (heap.set address (Mutable.Object.list (items ++ [.scalar (.int value)]))) := by
   apply HeapCalls.BlockReturns.function rfl rfl
   apply HeapCalls.BlockReturns.discard
   · exact HeapCalls.Evaluates.append (HeapCalls.Evaluates.lookup rfl) found

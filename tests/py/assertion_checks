@@ -106,7 +106,7 @@ for name in ('shared', 'array_truth'):
             lifted = expected.replace('.ok (', '.ok (.scalar (', 1) + (')' if expected.startswith('.ok') else '')
             heap = '[' + ', '.join(f'.scalar (.int ({value}))' for value in original) + ']'
             final = '[' + ', '.join(f'.scalar (.int ({value}))' for value in values) + ']'
-            equations.append(f'example : (HeapCalls.call Probe.module "{name}" [.ref 0, .scalar (.int ({n}))] [{heap}]).execution.observe 100 = .done (.ok ⟨{lifted}, [], [{final}], 1⟩) := by native_decide')
+            equations.append(f'example : (HeapCalls.call Probe.module "{name}" [.ref 0, .scalar (.int ({n}))] [.list {heap}]).execution.observe 100 = .done (.ok ⟨{lifted}, [], [.list {final}], 1⟩) := by native_decide')
 
 # A mutable assertion message cannot be represented as scalar exception arguments.
 # It remains explicitly unsupported, and the short DSL demands a coverage proof.

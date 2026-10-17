@@ -203,12 +203,13 @@ def uses_heap_calls(module, function):
         visited.add(current.name)
         kinds = [annotation_kind(arg.annotation) for arg in current.args.args]
         kinds.append(annotation_kind(current.returns))
-        if any(kind and kind.startswith('list[') for kind in kinds):
+        if any(kind and (kind.startswith('list[') or kind == 'bytearray') for kind in kinds):
             return True
         # Defaults are evaluated at definition time, outside the modeled body.
         # Their validation must not select a different execution backend.
         for node in (part for statement in current.body for part in ast.walk(statement)):
             if (isinstance(node, ast.List) or reversed_list(node) is not None
+                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "bytearray"
                     or isinstance(node, ast.Attribute) and node.attr == 'append'):
                 return True
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
@@ -289,7 +290,7 @@ def check_calls(module, function, reject, *, heap=False):
             reject(function, 'local bindings must not shadow module-level call targets')
         for arg in function.args.args:
             kind = annotation_kind(arg.annotation)
-            if kind not in ('int', 'str', 'bool') and not (heap and kind and kind.startswith('list[')):
+            if kind not in ('int', 'str', 'bool') and not (heap and kind and (kind.startswith('list[') or kind in ('bytes', 'bytearray'))):
                 reject(arg, 'call arguments require scalar annotations or supported heap list annotations' if heap
                        else 'call arguments require scalar int, str, or bool annotations')
 
@@ -352,8 +353,6 @@ def check_calls(module, function, reject, *, heap=False):
             elif isinstance(node, ast.Subscript):
                 recurse(node.value)
                 if isinstance(node.slice, ast.Slice):
-                    if heap:
-                        reject(node, "slices are not yet supported by heap call execution")
                     for bound in (node.slice.lower, node.slice.upper, node.slice.step):
                         if bound is not None:
                             recurse(bound)
@@ -395,6 +394,13 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'a local math module shadows the modeled standard library')
                 for item in node.args:
                     recurse(item)
+            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'bytearray':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'buffer construction requires the unshadowed builtin bytearray')
+                if node.keywords or len(node.args) > 1:
+                    reject(node, 'bytearray supports zero or one positional argument; encoding arguments are not modeled')
+                for item in node.args:
+                    recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'str':
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, 'string conversion requires the unshadowed builtin str')
@@ -434,6 +440,9 @@ def check_calls(module, function, reject, *, heap=False):
                         reject(node, "tuple unpacking is not yet supported by heap call execution")
                     for value in node.value.elts:
                         expr(value)
+                elif heap and isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript):
+                    expr(node.value)
+                    expr(node.targets[0])
                 elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
                     expr(ast.BinOp(node.target, node.op, node.value))
                 elif isinstance(node, ast.Assert):
