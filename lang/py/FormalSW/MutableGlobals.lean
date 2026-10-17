@@ -233,7 +233,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value := do
       match scalarBinary op a b with
       | some (.ok v) => return .scalar v
       | some (.error e) => throw e
-      | none => error "TypeError"
+      | none => unsupported
   | _, _ => error "TypeError"
 
 def expr (env : Env) : Expr → Eval Value

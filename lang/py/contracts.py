@@ -13,6 +13,7 @@ class InputCondition:
     expression: ast.expr
     arguments: tuple[ast.arg, ...]
     unsupported: tuple
+    needs_coverage: bool
 
 
 def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Module) -> InputCondition:
@@ -26,7 +27,7 @@ def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Mod
     except SyntaxError as error:
         raise ContractError(f'invalid Requires predicate: {text}') from error
     # These imports are local because call coverage itself uses import resolution.
-    from lang.py.call_support import check_calls
+    from lang.py.call_support import check_calls, has_partial_primitives
     from lang.py.support import UnsupportedConstruct
     names = {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
     arguments = tuple(arg for arg in function.args.args if arg.arg in names) if function else ()
@@ -50,4 +51,4 @@ def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Mod
         issues.append(UnsupportedConstruct(function.name if function else '<module>',
             getattr(function, 'lineno', 1), f'Requires: {reason}'))
     check_calls(context, helper, reject)
-    return InputCondition(expression, arguments, tuple(dict.fromkeys(issues)))
+    return InputCondition(expression, arguments, tuple(dict.fromkeys(issues)), has_partial_primitives(context, helper))

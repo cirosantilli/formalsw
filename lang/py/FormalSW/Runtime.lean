@@ -46,6 +46,9 @@ def scalarBinary (op : BinOp) (left right : Constant) : Option (Except Exception
       | .add => some (.ok (.int (left + right)))
       | .sub => some (.ok (.int (left - right)))
       | .mult => some (.ok (.int (left * right)))
+      | .pow =>
+          if right < 0 then none
+          else some (.ok (.int (left ^ right.toNat)))
       | .floorDiv | .mod =>
           if right = 0 then
             some (.error { typeName := "ZeroDivisionError", args := [] })

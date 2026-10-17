@@ -267,6 +267,51 @@ def observeFrom (step : σ → Step σ α) : Nat → σ → Observation α
 def observe (execution : Execution α) (fuel : Nat) : Observation α :=
   observeFrom execution.step fuel execution.initial
 
+/-- Every finite execution prefix stays inside the model. This covers both
+terminating and infinite executions, and is not a bounded test. -/
+def Supported (execution : Execution α) : Prop :=
+  ∀ fuel, execution.observe fuel ≠ .unsupported
+
+private theorem safe_observation {step : σ → Step σ α} (run : Finishes step state outcome) :
+    ∀ fuel, observeFrom step fuel state ≠ .unsupported := by
+  induction run with
+  | done transition =>
+      intro fuel
+      cases fuel <;> simp [observeFrom, transition]
+  | next transition _ ih =>
+      intro fuel
+      cases fuel with
+      | zero => simp [observeFrom]
+      | succ fuel => simpa [observeFrom, transition] using ih fuel
+
+theorem supported_of_finishes {execution : Execution α}
+    (run : Finishes execution.step execution.initial outcome) : execution.Supported :=
+  safe_observation run
+
+theorem Returns.supported {execution : Execution α} (run : execution.Returns) :
+    execution.Supported := by
+  obtain ⟨value, run⟩ := run
+  exact supported_of_finishes run
+
+theorem Halts.supported {execution : Execution α} (run : execution.Halts) :
+    execution.Supported := by
+  obtain ⟨outcome, run⟩ := run
+  exact supported_of_finishes run
+
+theorem Diverges.supported {execution : Execution α} (run : execution.Diverges) :
+    execution.Supported := by
+  obtain ⟨invariant, initial, closed⟩ := run
+  have safe_observation : ∀ fuel state, invariant state →
+      observeFrom execution.step fuel state ≠ .unsupported := by
+    intro fuel
+    induction fuel with
+    | zero => intro state _; simp [observeFrom]
+    | succ fuel ih =>
+        intro state valid
+        obtain ⟨following, transition, valid⟩ := closed state valid
+        simpa [observeFrom, transition] using ih following valid
+  exact fun fuel => safe_observation fuel execution.initial initial
+
 theorem finishes_of_observeFrom {step : σ → Step σ α} {state : σ}
     (h : observeFrom step fuel state = .done outcome) : Finishes step state outcome := by
   induction fuel generalizing state with

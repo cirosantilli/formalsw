@@ -45,6 +45,8 @@ inductive BinOp where
   | sub
   /-- Python `*`. -/
   | mult
+  /-- Python exponentiation. Float-producing cases require another value model. -/
+  | pow
   /-- Python floor division `//`. -/
   | floorDiv
   /-- Python remainder `%`. -/
@@ -215,6 +217,7 @@ private def BinOp.fromJson? (json : Lean.Json) : Except String BinOp := do
   | "Add" => return .add
   | "Sub" => return .sub
   | "Mult" => return .mult
+  | "Pow" => return .pow
   | "FloorDiv" => return .floorDiv
   | "Mod" => return .mod
   | name => throw s!"unsupported binary operator: {name}"
@@ -1255,6 +1258,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
       | BinOp.add => some (leftValue + rightValue)
       | BinOp.sub => some (leftValue - rightValue)
       | BinOp.mult => some (leftValue * rightValue)
+      | BinOp.pow => if rightValue < 0 then none else some (leftValue ^ rightValue.toNat)
       | BinOp.floorDiv => none
       | BinOp.mod => if rightValue = 0 then none else some (leftValue % rightValue)
   | Expr.compare _ _ => none

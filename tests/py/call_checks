@@ -95,4 +95,5 @@ assert not issues(sum_source.replace('sum(x for x in range(n) if x % 2 == 0)',
                                    'sum(n for n in range(n)) + n'))
 subprocess.run([sys.executable, str(Path(__file__).with_name('loop_control.py'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('string_checks'))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name('power_checks'))], check=True)
 print("Recursive call and loop-control coverage passed")

@@ -19,7 +19,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
-from lang.py.call_support import range_sum, uses_calls_model
+from lang.py.call_support import range_sum, uses_calls_model, has_partial_primitives
 from lang.py.contracts import ContractError, input_condition
 from lang.py.imports import bindings, resolve_function, resolve_python_function
 from lang.py.linking import link_imports
@@ -690,7 +690,7 @@ def guarded_type(body, conditions, *, existential=False):
     return " → ".join(f"({condition})" for condition in conditions) + f" →\n({body})"
 
 
-def collect_conditions(markers, function, module, namespace):
+def collect_conditions(markers, function, module, namespace, prior_conditions=()):
     conditions, properties, unsupported = [], [], []
     for marker in markers:
         parsed = parse_short_marker(marker.text)
@@ -713,15 +713,23 @@ def collect_conditions(markers, function, module, namespace):
         for arg in reversed(predicate.arguments):
             kind = annotation_kind(arg.annotation)
             env = f"if _arg = {lean_string(arg.arg)} then some ({scalar_term('«' + arg.arg + '»', kind)}) else {env}"
+        if predicate.needs_coverage:
+            covered = f"(FormalSW.PyAst.Calls.evaluate {namespace}.module (fun _arg => {env}) {namespace}.{name}).Supported"
+            covered = guarded_type(covered, [*prior_conditions, *conditions])
+            arguments = function.args.args if function else ()
+            if arguments:
+                binders = " ".join(f"(«{arg.arg}» : {scalar_lean_type(annotation_kind(arg.annotation))})" for arg in arguments)
+                covered = f"∀ {binders},\n{covered}"
+            module.formalsw_condition_coverage.append((name + '_supported', covered, marker.line))
         conditions.append(f"FormalSW.PyAst.Calls.Condition {namespace}.module (fun _arg => {env}) {namespace}.{name}")
     if function is not None and conditions and not properties:
         raise InvalidRequirement("Requires needs a property obligation")
     return conditions, properties, tuple(dict.fromkeys(unsupported))
 
 
-def scalar_contract_type(module, function, namespace, property_name, conditions, negations, target=None):
+def scalar_contract_type(module, function, namespace, property_name, conditions, negations, target=None, input_function=None):
     """Quantify scalar inputs and keep any explicit domain inside the quantifier."""
-    arguments = function.args.args
+    arguments = (input_function or function).args.args
     kinds = [annotation_kind(arg.annotation) for arg in arguments]
     if any(kind not in ('int', 'str', 'bool') for kind in kinds):
         raise InvalidRequirement(f"{function.name}: this contract requires scalar argument annotations")
@@ -771,6 +779,10 @@ def collect_requirements(
     prepare_specification(source_path, module)
     support = SupportChecker(module)
     module.formalsw_conditions = {}
+    module.formalsw_condition_coverage = []
+    raw_targets = {target for node in (module, *module.body)
+                   for marker in getattr(node, 'formalsw_markers', ())
+                   for _, target in support.execution_targets(marker.text)}
     module_conditions, module_markers, module_unsupported = collect_conditions(
         module.formalsw_markers,
         None, module, ast_namespace)
@@ -795,10 +807,12 @@ def collect_requirements(
         if getattr(stmt, 'formalsw_imported', False):
             continue
         markers = stmt.formalsw_markers
-        conditions, properties, condition_unsupported = collect_conditions(markers, stmt, module, ast_namespace)
+        conditions, properties, condition_unsupported = collect_conditions(markers, stmt, module, ast_namespace, module_conditions)
         conditions = [*module_conditions, *conditions]
         condition_unsupported = (*module_unsupported, *condition_unsupported)
         first_requirement = len(requirements)
+        coverage_targets = [(module, stmt, ast_namespace)]
+        coverage_dependencies = []
         for marker in properties:
             parsed = parse_short_marker(marker.text)
             scalar_equiv = (parsed and parsed[0] in ("Equiv", "EquivReturn") and len(parsed[1]) == 1 and
@@ -834,6 +848,9 @@ def collect_requirements(
                 property_type = "False" if unsupported else scalar_contract_type(
                     module, stmt, ast_namespace, property_name, conditions, negations,
                     (target_module, target, target_namespace) if target else None)
+                if target:
+                    coverage_targets.append((target_module, target, target_namespace))
+                    coverage_dependencies.extend(dependencies)
                 requirements.append(Requirement(theorem_name, property_type, source_path,
                     marker.line, marker.text, tuple(unsupported), dependencies))
                 continue
@@ -922,10 +939,29 @@ def collect_requirements(
                 marker.text,
                 unsupported,
             ))
+        if (properties or module_markers or stmt.name in raw_targets) and any(has_partial_primitives(program, function)
+                for program, function, _ in coverage_targets):
+            covered = []
+            issues = list(condition_unsupported)
+            seen = set()
+            for program, function, namespace in coverage_targets:
+                if (namespace, function.name) in seen:
+                    continue
+                seen.add((namespace, function.name))
+                issues.extend(SupportChecker(program).check(function.name))
+                covered.append(scalar_contract_type(program, function, namespace,
+                    'Supported', conditions, 0, input_function=stmt))
+            property_type = 'False' if issues else ' ∧ '.join(f'({term})' for term in covered)
+            requirements.append(Requirement(f'{proof_namespace}.{lean_import_component(stmt.name)}.«Supported»',
+                property_type, source_path, stmt.lineno, 'execution model coverage',
+                tuple(dict.fromkeys(issues)), tuple(dict.fromkeys(coverage_dependencies))))
         for index in range(first_requirement, len(requirements)):
             if condition_unsupported:
                 requirements[index] = replace(requirements[index], property_type="False",
                     unsupported=tuple(dict.fromkeys((*condition_unsupported, *requirements[index].unsupported))))
+    for name, property_type, line in module.formalsw_condition_coverage:
+        requirements.append(Requirement(f'{proof_namespace}.{name}', property_type,
+            source_path, line, 'precondition model coverage', ()))
     top_level = {id(stmt) for stmt in module.body}
     for stmt in ast.walk(module):
         if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) or id(stmt) in top_level:
@@ -1295,6 +1331,8 @@ class AstJsonEmitter:
                 return "Sub"
             case ast.Mult():
                 return "Mult"
+            case ast.Pow():
+                return "Pow"
             case ast.FloorDiv():
                 return "FloorDiv"
             case ast.Mod():

@@ -43,6 +43,24 @@ def general_division(node):
             and not (isinstance(divisor, ast.Constant) and type(divisor.value) is int and divisor.value >= 0))
 
 
+def has_partial_primitives(module, function):
+    """Follow local callees to operations that need a runtime coverage proof."""
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    pending = [function]
+    visited = set()
+    while pending:
+        current = pending.pop()
+        if current.name in visited:
+            continue
+        visited.add(current.name)
+        for node in ast.walk(current):
+            if isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow):
+                return True
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
+                pending.append(functions[node.func.id])
+    return False
+
+
 def uses_calls_model(module, function):
     if not all(isinstance(arg.annotation, ast.Name) and arg.annotation.id in ('int', 'str', 'bool')
                for arg in function.args.args):
@@ -57,6 +75,7 @@ def uses_calls_model(module, function):
     return any(
         isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript))
         or general_division(node)
+        or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names | {'str'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
@@ -128,7 +147,7 @@ def check_calls(module, function, reject):
                 return
             if isinstance(node, ast.Name) and node.id in scope:
                 return
-            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod)):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow)):
                 recurse(node.left)
                 recurse(node.right)
             elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):

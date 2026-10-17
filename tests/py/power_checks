@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Check integer powers and prevent partial execution from satisfying contracts."""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import tempfile
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if isinstance(value, bool):
+        return f'(.bool {str(value).lower()})'
+    if isinstance(value, int):
+        return f'(.int ({value}))'
+    return f'(.string {json.dumps(value)})'
+
+
+equations = []
+for base in (*range(-5, 6), True, False, None, 'bad'):
+    for exponent in (*range(9), True, False, None, 'bad'):
+        try:
+            expected = f'Except.ok {constant(base ** exponent)}'
+        except TypeError:
+            expected = 'Except.error { typeName := "TypeError", args := [] }'
+        equations.append(f'example : scalarBinary .pow {constant(base)} {constant(exponent)} = some ({expected}) := by decide')
+equations.extend([
+    'example : scalarBinary .pow (.int 2) (.int (-1)) = none := rfl',
+    'example : scalarBinary .pow (.int 0) (.int (-1)) = none := rfl',
+    'example : ¬ (Execution.unsupported : Execution Constant).Supported := by intro h; exact h 1 rfl',
+    'private def spin : Execution Constant := ⟨Unit, (), fun state => .next state⟩',
+    'example : spin.Supported := Execution.Diverges.supported ⟨fun _ => True, trivial, fun _ _ => ⟨(), rfl, trivial⟩⟩',
+])
+
+with tempfile.TemporaryDirectory(prefix='.power-check-', dir=REPO) as directory:
+    directory = Path(directory)
+    proof = directory / 'PrimitiveChecks.lean'
+    proof.write_text('import FormalSW\nopen FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+    def requirements(name, text):
+        source = directory / (name + '.py')
+        source.write_text(text)
+        program = api['source_module'](source)
+        return api['collect_requirements'](source, program, 'Probe', 'ProbeAst')
+
+    for marker in ('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)', 'EquivReturn(f)'):
+        text = f'def f(n: int):\n    """\n    @formalsw: {marker}\n    """\n    return 2 ** -1\n'
+        obligations = requirements('negative_' + str(len(list(directory.iterdir()))), text)
+        coverage = [r for r in obligations if r.marker == 'execution model coverage']
+        assert len(coverage) == 1
+        assert '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+
+    # A partial predicate must not silently remove inputs from the domain.
+    obligations = requirements('predicate', 'def f(n: int):\n    """\n'
+        '    @formalsw: Requires(2 ** -1 > 0)\n    @formalsw: Returns\n    """\n    return n\n')
+    coverage = next(r for r in obligations if r.marker == 'precondition model coverage')
+    assert '.evaluate ' in coverage.property_type and 'Condition' not in coverage.property_type
+
+    # Equivalence checks both implementations, including a partial counterpart
+    # whose parameter spelling differs from the caller's spelling.
+    obligations = requirements('counterpart', 'def f(n: int):\n    """\n'
+        '    @formalsw: Equiv(g)\n    """\n    return n\n'
+        'def g(x: int):\n    return x ** -1\n')
+    coverage = next(r for r in obligations if r.marker == 'execution model coverage')
+    assert '"f" [.int «n»]' in coverage.property_type
+    assert '"g" [.int «n»]' in coverage.property_type
+    assert '«x»' not in coverage.property_type
+
+    obligations = requirements('raw_dependency', 'def f(n: int):\n    """\n'
+        '    @formalsw: theorem referenced : Not (Calls.function ProbeAst.module "g" [.int 0]).Halts\n'
+        '    """\n    return n\n'
+        'def g(n: int):\n    return 2 ** -1\n')
+    assert any(r.theorem_name == 'Probe.g.«Supported»' for r in obligations)
+
+    # A reflexive equivalence theorem really is provable for unsupported runs,
+    # but it must not pass the CLI without the independent coverage obligation.
+    source = directory / 'vacuous.py'
+    source.write_text('def f(n: int):\n    """\n'
+        '    @formalsw: Equiv(f)\n    """\n    return 2 ** -1\n')
+    stub = subprocess.run([str(REPO / 'formalsw'), '--stub', str(source)],
+                          cwd=REPO, text=True, capture_output=True, check=True).stdout
+    before_coverage = stub.split('theorem f.«Supported»')[0]
+    namespace = next(line for line in stub.splitlines() if line.startswith('namespace ')).split(' ', 1)[1]
+    source.with_suffix('.py.lean').write_text(before_coverage.replace('  sorry', '  intro n outcome\n  rfl')
+                                            + f'end {namespace}\n')
+    rejected = subprocess.run([str(REPO / 'formalsw'), str(source)], cwd=REPO, text=True, capture_output=True)
+    assert rejected.returncode != 0 and 'Supported' in rejected.stdout + rejected.stderr
+    assert 'Unknown identifier' in rejected.stdout + rejected.stderr, rejected.stdout + rejected.stderr
+
+subprocess.run([sys.executable, str(REPO / 'tests/py/powers.py')], check=True)
+print(f'Integer powers: {len(equations) - 5} Python comparisons and coverage obligations passed')

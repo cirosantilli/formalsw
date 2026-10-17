@@ -605,6 +605,10 @@ class SupportChecker:
                 reject(stmt, f'{type(stmt).__name__} statements are unsupported by scalar execution')
         return env
 
+    @staticmethod
+    def execution_targets(marker: str):
+        return re.findall(r'\b(Calls\.function|Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
+
     def requirement(self, name: str | None, marker: str) -> tuple[UnsupportedConstruct, ...]:
         """Check the enclosing function and any explicitly named proof dependencies."""
         mutable = False
@@ -670,7 +674,7 @@ class SupportChecker:
                 issues.append(UnsupportedConstruct(name, function.lineno, 'list execution currently supports only the exact merge-sort body'))
         targets = re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)', marker)
         # Explicit low-level calls in raw requirements are checked too.
-        executions = re.findall(r'\b(Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
+        executions = self.execution_targets(marker)
         parallel_targets = {target for model, target in executions if model == 'parallelFunction'}
         targets += [target for _, target in executions]
         for target in dict.fromkeys(targets):
