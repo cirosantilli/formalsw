@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from .concurrent_spec import ScenarioError
+from .trial import ScenarioError
 
 
 _parser = None

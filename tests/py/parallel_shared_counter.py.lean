@@ -49,8 +49,8 @@ private def trial (name : String) (values : List Int) (count : Int) : PyTrial :=
       (parallelFunction ParallelSharedCounterAst.module name [.ref 0, .lock 0])
     initial := { objects := [.array (values.map .int)] }
     check := fun final => do
-      Concurrent.check ((← Concurrent.readIntItem final 0 0) == ((← PyTrial.intItem values 0) + count))
-      Concurrent.check (((← PyTrial.readInts final 0).drop 1) == values.drop 1)
+      PyTrial.assertTrue ((← PyTrial.readIntItem final 0 0) == ((← PyTrial.intItem values 0) + count))
+      PyTrial.assertTrue (((← PyTrial.readInts final 0).drop 1) == values.drop 1)
       pure () }
 
 private theorem safe_source :
@@ -84,8 +84,8 @@ private theorem all_updates (head : Int) (tail : List Int) (count : Int) (nonneg
   subst final
   simp only [Int.toNat_of_nonneg nonnegative]
   change (do
-    Concurrent.check ((← Concurrent.readIntItem (heap (head + count) tail) 0 0) == ((← PyTrial.intItem (head :: tail) 0) + count))
-    Concurrent.check (((← PyTrial.readInts (heap (head + count) tail) 0).drop 1) == (head :: tail).drop 1)
+    PyTrial.assertTrue ((← PyTrial.readIntItem (heap (head + count) tail) 0 0) == ((← PyTrial.intItem (head :: tail) 0) + count))
+    PyTrial.assertTrue (((← PyTrial.readInts (heap (head + count) tail) 0).drop 1) == (head :: tail).drop 1)
     pure ()) = some ()
   have read : PyTrial.readInts (heap (head + count) tail) 0 = some ((head + count) :: tail) := by
     unfold PyTrial.readInts heap
@@ -98,8 +98,8 @@ private theorem all_updates (head : Int) (tail : List Int) (count : Int) (nonneg
       | cons n xs ih => simp only [List.map_cons, List.mapM_cons]; simp [ih]
     simpa using conversion ((head + count) :: tail)
   rw [read]
-  change (do Concurrent.check ((head + count) == (head + count)); Concurrent.check (tail == tail); pure ()) = some ()
-  simp [Concurrent.check]
+  change (do PyTrial.assertTrue ((head + count) == (head + count)); PyTrial.assertTrue (tail == tail); pure ()) = some ()
+  simp [PyTrial.assertTrue]
 
 private def valid (counter worker_count : PyValue) : Prop :=
   python_context "tests/py/parallel_shared_counter.py" "increment_safe" ParallelSharedCounterAst.module in

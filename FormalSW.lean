@@ -8,7 +8,6 @@ import lang.py.FormalSW.Linking
 import lang.py.FormalSW.GraphEquivalence
 import lang.py.FormalSW.Syntax
 import lang.py.FormalSW.Parallel
-import lang.py.FormalSW.Concurrent
 import lang.py.FormalSW.PyValue
 import lang.py.FormalSW.Quotation
 import lang.py.builtin.type.bool

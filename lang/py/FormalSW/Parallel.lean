@@ -358,4 +358,13 @@ macro "Parallel(" calls:term "," initial:term ")" : term => `(parallelRun $calls
 macro "Ensures(" run:term "," post:term ")" : term => `(ParallelRun.Ensures $run $post)
 macro "CanReturn(" run:term "," value:term ")" : term => `(ParallelRun.CanReturn $run $value)
 
+/-- Follow a reference path. A missing field or dereferencing None fails, so a
+scenario assertion cannot pass merely because its expression raised. -/
+def SharedState.readPath (state : SharedState) : SharedValue → List String → Option SharedValue
+  | value, [] => some value
+  | .ref address, field :: rest => do
+      let value ← state.field address field
+      state.readPath value rest
+  | _, _ :: _ => none
+
 end FormalSW.PyAst

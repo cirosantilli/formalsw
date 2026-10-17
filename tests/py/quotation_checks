@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='quotation_checks_', dir=REPO / 'tests' 
         ('filtered generator', SOURCE.replace('for item in counter)', 'for item in counter if item)'), 'unsupported Python quotation'),
         ('rebound type', SOURCE + '\ntype = lambda value: int\n', 'unshadowed type'),
         ('unsupported trial code', SOURCE.replace('    before = counter.copy()', '    print(counter)\n    before = counter.copy()'), 'unsupported trial setup'),
-        ('insufficient pool capacity', SOURCE.replace('max_workers=max(1, worker_count)', 'max_workers=1'), 'counterexample trials need'),
+        ('insufficient pool capacity', SOURCE.replace('max_workers=max(1, worker_count)', 'max_workers=1'), 'quoted trials need'),
         ('missing future wait', SOURCE.replace('future.result()', 'pass'), 'future.result()'),
         ('missing input assertion', SOURCE.replace('    assert valid_trial_input(counter, worker_count), "invalid trial input"\n', ''), 'initial assert'),
     ]:

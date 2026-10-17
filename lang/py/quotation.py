@@ -9,7 +9,7 @@ from pathlib import Path
 import symtable
 import sys
 
-from .concurrent_spec import Trial, Value, ScenarioError, ScenarioUnsupported, body_of, quoted, identifier, integer_literal
+from .trial import TrialCompiler, Value, ScenarioError, ScenarioUnsupported, body_of, quoted, identifier, integer_literal
 
 
 class Quotations:
@@ -231,13 +231,13 @@ class Quotations:
         return f'({{ condition := {condition}, body := {trial.execution()} }} : PyTrial.Call)'
 
 
-class QuotedTrial(Trial):
+class QuotedTrial(TrialCompiler):
     def __init__(self, *args, arguments, captured_names, **kwargs):
         self.arguments = arguments
         # Lean can negate any quoted proposition. Require a realizable pool for
         # both universal claims and existential witnesses, and use the general
         # worker interpreter even when the helper allocates no integer arrays.
-        super().__init__(*args, full_pool=True, general=True, **kwargs)
+        super().__init__(*args, **kwargs)
         self.setup = self.setup[1:]  # The leading assert is compiled by Quotations.trial.
         self.used_names.update(captured_names)
         self.job_name = self.unique('_job')
@@ -245,8 +245,6 @@ class QuotedTrial(Trial):
         for primitive in ('int', 'list'):
             if self.global_bindings(primitive):
                 self.reject(self.helper, f'quoted trial annotations require an unshadowed {primitive}')
-        if self.objects or self.collections:
-            self.reject(self.helper, 'quoted trials currently support integer-list inputs and integer inputs; reference-object trials use Concurrent')
 
     def check_header(self):
         args = self.helper.args
@@ -319,7 +317,7 @@ class QuotedTrial(Trial):
         env[self.worker_arg] = Value('_worker', 'callable')
         initial = f'({{ objects := [{", ".join(objects)}] }} : SharedState)'
         initial = self.compile_setup(self.setup, env, initial, allocated)
-        jobs, _, _, _, arguments = self.worker(env)
+        jobs, arguments = self.worker(env)
         call = f'parallelFunction {self.namespace} {quoted(self.function.name)} [{", ".join(arguments)}]'
         if not any(self.job_name in value for value in arguments):
             calls = f'List.replicate ({jobs}).length ({call})'

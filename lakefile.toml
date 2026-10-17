@@ -28,7 +28,6 @@ roots = [
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",
   "lang.py.FormalSW.ParallelLiveness",
-  "lang.py.FormalSW.Concurrent",
   "lang.py.FormalSW.PyValue",
   "lang.py.FormalSW.Quotation",
   "lang.py.builtin.type.bool",

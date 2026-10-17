@@ -1,4 +1,4 @@
-import lang.py.FormalSW.Concurrent
+import lang.py.FormalSW.Parallel
 import lang.py.FormalSW.ParallelLiveness
 
 namespace FormalSW.PyAst
@@ -200,12 +200,23 @@ structure PyTrial where
 
 namespace PyTrial
 
+/-- Evaluate a final Python assertion. -/
+def assertTrue (condition : Bool) : Option Unit := if condition then some () else none
+
+/-- Ordinary integer-list indexing, including Python's negative indices.
+Out-of-bounds access fails the trial instead of inventing a value. -/
+def readIntItem (heap : SharedState) (object : Nat) (index : Int) : Option Int :=
+  match sharedRead heap [("object", .ref object)]
+      (.item (.name "object") (.constant (.int index))) with
+  | .ok (.int value) => some value
+  | _ => none
+
 def readInts (heap : SharedState) (address : Nat) : Option (List Int) := do
   let .array values ← heap.objects[address]? | none
   values.mapM (fun | .int n => some n | _ => none)
 
 def intItem (values : List Int) (index : Int) : Option Int :=
-  Concurrent.readIntItem { objects := [.array (values.map .int)] } 0 index
+  readIntItem { objects := [.array (values.map .int)] } 0 index
 
 def MutexReturns (trial : Option PyTrial) : Prop :=
   ∃ run, trial = some run ∧ ∃ mutex workers,

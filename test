@@ -106,8 +106,6 @@ def main() -> int:
                  ("supported state is int, str, bool, or homogeneous scalar lists", "1 proof failed because it depends on unsupported Python constructs")),
         TestCase("legacy equivalence cannot discard globals", Path("tests/py/fail/global_legacy.py"), 1,
                  "legacy Function properties omit globals"),
-        TestCase("doubly linked list synchronization and corrupted links", Path("tests/py/parallel_doubly_linked_list.py"), 0),
-        TestCase("ordinary Python trial without linked-list operations", Path("tests/py/parallel_trial.py"), 0),
         TestCase("parallel calls with different signatures and arguments", Path("tests/py/parallel_calls.py"), 0),
         TestCase("shared counter synchronization and lost update", Path("tests/py/parallel_shared_counter.py"), 0),
         TestCase(
@@ -353,21 +351,16 @@ def main() -> int:
         cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         timeout=30,
     )
-    concurrent_specs = subprocess.run(
-        [sys.executable, "tests/py/concurrent_spec_checks"],
-        cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        timeout=120,
-    )
     quotations = subprocess.run(
         [sys.executable, "tests/py/quotation_checks"],
         cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         timeout=120,
     )
     parallel_passed = (parallel_semantics.returncode == 0 and parallel_liveness.returncode == 0 and parallel_runtime.returncode == 0
-                       and concurrent_specs.returncode == 0 and quotations.returncode == 0)
+                       and quotations.returncode == 0)
     print(f"{'PASS' if parallel_passed else 'FAIL'} parallel semantics and real-thread data structures", flush=True)
     if not parallel_passed:
-        for completed in (parallel_semantics, parallel_liveness, parallel_runtime, concurrent_specs, quotations):
+        for completed in (parallel_semantics, parallel_liveness, parallel_runtime, quotations):
             print(textwrap.indent((completed.stdout + completed.stderr).rstrip(), "  "))
     call_checks = subprocess.run(
         [sys.executable, "tests/py/call_checks"],

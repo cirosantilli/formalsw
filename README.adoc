@@ -75,12 +75,11 @@ but you can never cover all possible input values like that.
 
 This is exactly what formal verification allows you to do.
 
-To specify that we want both function to be proven to be the same, we can add a magic docstrings property to one of them:
+To specify that we want both function to be proven to be the same, we can add some magic docstrings property them:
 
 ----
 def sum(n: int) -> int:
     """
-    @formalsw: Not Throws
     @formalsw: Equiv(sum_naive)
     """
     if n <= 0:
@@ -89,7 +88,7 @@ def sum(n: int) -> int:
 
 def sum_naive(n: int) -> int:
     """
-    @formalsw: Not Throws
+    @formalsw: Returns
     """
     total = 0
     for i in range(n):
@@ -106,7 +105,7 @@ formalsw tmp.py
 it blows up with:
 
 ----
-error: tmp.py:4: missing proof file tmp.py.lean for `@formalsw: Not Throws`
+error: tmp.py:3: missing proof file tmp.py.lean for `@formalsw: Equiv(sum_naive)`
 ----
 
 which is good because haven't proven what we said we wanted to prove yet!
@@ -114,7 +113,7 @@ which is good because haven't proven what we said we wanted to prove yet!
 To create the required proofs, we must create a tmp.py.lean file containing the required theorems. The stubs can be generated automatically with:
 
 ----
-./formalsw --stub tmp.py > tmp.py.lean
+formalsw --stub tmp.py > tmp.py.lean
 ----
 
 which produces:
@@ -278,51 +277,6 @@ The executable runs 20 trials of each version. It prints actual failed assertion
 
 The model uses one initially unlocked shared mutex and a list shared by all workers. Primitive reads, writes, acquire, and release are atomic steps under sequentially consistent interleaving. The worker count and initial list contents in the synchronized theorem are unbounded. Signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside this model.
 
-=== Doubly linked list: corrupted links
-
-link:tests/py/parallel_doubly_linked_list.py[] inserts fresh nodes after a shared head sentinel. Each worker's comment refers to an ordinary Python helper:
-
-[source,python]
-----
-def insert_safe(head: Node, node: Node, mutex: Lock):
-    """@formalsw: Concurrent(run_trial)"""
-    # Acquire mutex, insert the node, release mutex.
-
-def insert_unsafe(head: Node, node: Node, mutex: Lock):
-    """@formalsw: Not Concurrent(run_trial)"""
-    # The same insertion without locking.
-----
-
-`run_trial(insert, existing_count=0, insertion_count=2)` constructs the list, submits the workers, waits for them, and checks ordinary Python assertions. `main` calls this same helper. For example, part of its final traversal is:
-
-[source,python]
-----
-current = head
-for _ in inserted:
-    following = current.next
-    assert following in inserted, "an inserted node was lost"
-    assert following.prev is current, "corrupted link: next.prev is not current"
-    current = following
-for node in [*existing, tail]:
-    assert current.next is node, "the original chain changed"
-    assert node.prev is current, "corrupted link: prev is not current"
-    current = node
-----
-
-The synchronized proof covers *any finite initial list and any finite number of insertions*, including zero. The helper's default arguments are only runtime defaults; they do not restrict the proof. Every modeled scheduling order must finish successfully and pass the helper's assertions. The unsafe marker requires an actual counterexample: some input and completed interleaving fail those same checks. It does not claim every run fails.
-
-The proof in link:tests/py/parallel_doubly_linked_list.py.lean[] verifies the actual worker body, establishes that one insertion preserves an arbitrary chain, and applies an inductive mutex rule to arbitrarily many workers. Each read and write remains an individual execution step. There is no fixed node count, worker count, or exploration limit in the positive theorem. Mathematical chain lemmas belong to this example's proof; the compiler has no linked-list operations. It translates the helper's Python assignments, loops, submissions, and assertions. Changing that source changes the proof obligation.
-
-See <<dsl-concurrent>> for the supported Python subset. link:tests/py/parallel_trial.py[] uses the same mechanism for cells that refer to themselves, with a different worker signature and no list links.
-
-[source,sh]
-----
-python3 tests/py/parallel_doubly_linked_list.py
-./formalsw tests/py/parallel_doubly_linked_list.py
-----
-
-The executable prints actual assertion failures and corruption rates for the unsafe version, then runs the locked version. A regression test also forces a corrupting schedule against the real Python worker by pausing at statement boundaries, so testing does not depend on a lucky thread switch.
-
 == Further usage
 
 Directories are also accepted; every `.py` file under the directory is checked:
@@ -363,68 +317,6 @@ The DSL specification is a magic custom and very simple language that allows spe
 The DSL gets converted to corresponding Lean code behind the scenes.
 
 Each construct below includes a raw Lean equivalent. `Returns`, `Halts`, `Equiv`, `EquivReturn`, and `ReturnType` quantify over every modeled argument value. `Throws` uses an existential input, while `Not` negates the whole proposition. The examples show explicit quantifiers; `./formalsw --stub file.py` prints the exact elaborated statement for a particular function, including its globals.
-
-[[dsl-concurrent]]
-==== Concurrent
-
-For new integer-list specifications, prefer the general <<raw-lean-py,Python quotation>> with `Returns` or `Throws`; the shared-counter example uses it. `Concurrent` remains supported for existing reference-object specifications.
-
-`@formalsw: Concurrent(helper)` requires every modeled execution of `helper(enclosing_function, ...)` to finish successfully and pass its assertions. The helper is an ordinary Python function in the same module, usable by tests and `main`. Its first argument receives the worker; its remaining integer arguments are universally quantified. Defaults do not bound the proof.
-
-[source,python]
-----
-def mark(item: Cell, mutex: Lock):
-    """@formalsw: Concurrent(check_marks)"""
-    mutex.acquire()
-    item.value = item
-    mutex.release()
-
-def check_marks(worker, count: int = 3):
-    items = [Cell() for _ in range(count)]
-    mutex = Lock()
-    with ThreadPoolExecutor(max_workers=max(1, len(items))) as pool:
-        futures = [pool.submit(worker, item, mutex) for item in items]
-        for future in futures:
-            future.result()
-    for item in items:
-        assert item.value is item
-----
-
-Here `Cell.__init__` sets `self.value = None`. The theorem is named `mark.«Concurrent(check_marks)»`. `./formalsw --stub file.py` shows its generated Lean statement. The proof must establish the property for the actual parsed worker, helper setup, and final assertions. No names inside the Python helper resolve to definitions in the proof file.
-
-An equivalent raw Lean specification for this example, with the helper's final assertions written as a predicate on the final heap, is:
-
-[source,lean]
-----
-∀ (count : Int) (items : List Nat),
-  items.Nodup → items.length = count.toNat →
-  Concurrent.Ensures ParallelTrialAst.module "mark"
-    ["item"] "mutex" (fun item => [some item])
-    items (fun _ _ => none)
-    (fun final => ∀ item ∈ items, final item "value" = some item)
-----
-
-`count` ranges over all integers despite the Python default of `3`; `items` ranges over every fresh allocation satisfying the length constraint. `Concurrent.Ensures` covers the worker interleavings. The compiler expresses the postcondition through the helper's interpreted reads and assertion checks; the predicate above is their equivalent mathematical form.
-
-===== Counterexamples
-
-`@formalsw: Not Concurrent(helper)` requires a concrete counterexample: integer inputs and a completed worker interleaving after which the helper's assertion checks fail. A missing lock or an unsuccessful proof is not a counterexample. The finite witness executes the actual compiled worker using <<raw-lean-parallel>>. A failed reference lookup in the checks also fails the trial, as it does in Python.
-
-Counterexample helpers need `max_workers=max(1, len(jobs))`, where `jobs` is the submitted collection, or a positive literal pool size large enough for a literal `range` of jobs (for example, two workers for `range(2)`). This ensures the real pool can run the witnessed interleaving. Positive proofs also allow a positive literal pool size or the default pool size, since covering additional scheduling choices is safe for a universal claim.
-
-===== Supported Python
-
-The helper consists of setup statements, one `ThreadPoolExecutor` block, and final assertions. Setup supports fresh objects, `[Class() for _ in range(count)]`, nonempty integer-list literals such as `[0]` or `[3, -1]`, mutexes, list construction and unpacking, nonnegative slices, `zip`, `for` loops, and reference-field assignments. The executor submits a list comprehension of positional worker calls and waits for every `future.result()`. Submissions can iterate over an object collection or `range(count)`. Assertions support field reads, integer-list indexing (including negative indices), identity, membership, equality, `len`, and loops, including up to two reference locals carried between iterations. Messages may be literal strings or f-strings with plain integer or Boolean interpolations; arbitrary calls and formatting operations remain unsupported.
-
-The reference-object model supports one plain class per helper. Its no-argument constructor initializes its fields to `None`. Object identities are fresh and distinct; collection lengths are arbitrary, with negative `range` bounds giving empty collections as in Python. Class, field, helper, and argument names are unrestricted except for shadowing supported primitives. Worker arity and argument order are taken from the source.
-
-Trials containing integer lists use <<raw-lean-parallel>> and its supported scalar arithmetic and list operations. Calls may pass scalar arguments and multiple mutexes, or omit mutexes entirely. Their proof covers the batch described by the helper; the counter example explicitly uses two workers. The compiler generates both positive guarantees and counterexamples from the same helper.
-
-For the unbounded reference-object guarantee, the worker must acquire the common mutex before its body and release it at the end. The body supports separate reference-field reads and writes, `pass`, and `sleep(0)`. Unsupported Python causes a coverage error for each dependent proof. Missing or misplaced synchronization prevents the positive guarantee from being proved.
-
-===== Execution model
-
-The mutex model permits only its owner to execute body operations; every other worker is blocked at acquire. An inductive proof covers all choices of the next owner and every individual body step. It uses an unbounded reference heap. The scope is these workers and their shared objects, with no outside mutation. As with <<raw-lean-parallel>>, steps are sequentially consistent; signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside the execution model.
 
 ==== Py
 
@@ -786,7 +678,7 @@ The raw Lean equivalent is:
 ¬ (∃ n : Int, (scalarFunction MyNotExampleAst.module "sum" [.int n]).Throws)
 ----
 
-Equivalently, `∀ n : Int, ¬ (scalarFunction MyNotExampleAst.module "sum" [.int n]).Throws`. In contrast, `Not Returns` expands to `¬ (∀ n : Int, (scalarFunction module "sum" [.int n]).Returns)`: it does not claim that every input fails to return. The specialized `Not Concurrent(helper)` form additionally requires the concrete counterexample described in that section.
+Equivalently, `∀ n : Int, ¬ (scalarFunction MyNotExampleAst.module "sum" [.int n]).Throws`. In contrast, `Not Returns` expands to `¬ (∀ n : Int, (scalarFunction module "sum" [.int n]).Returns)`: it does not claim that every input fails to return.
 
 ==== ReturnType
 
@@ -999,59 +891,9 @@ Livelock is an infinite execution without the desired application progress. The 
 [[raw-lean-can-return]]
 ==== CanReturn
 
-`CanReturn(run, state)` states that some modeled schedule finishes with exactly that shared state. For the counter, a final array containing one proves a lost update. For the doubly linked list, a final heap with inconsistent forward/backward links proves structural corruption. The state is the result of the concurrent run, not a worker's Python return value.
+`CanReturn(run, state)` states that some modeled schedule finishes with exactly that shared state. For the counter, a final array containing one proves a lost update. The state is the result of the concurrent run, not a worker's Python return value.
 
 It does not say every schedule fails or assign a probability to failure. `ParallelRun.Ensures.of_canReturn` says that any reachable state must satisfy an established guarantee; a reachable corrupt state can therefore disprove a proposed invariant.
-
-[[raw-lean-concurrent-check]]
-==== Concurrent.check
-
-`Concurrent.check condition` evaluates one Python assertion condition. It returns `some ()` for true and `none` for false. The trial compiler combines it with field reads and loops to execute the helper's final checks.
-
-[[raw-lean-concurrent-ensures]]
-==== Concurrent.Ensures
-
-`Concurrent.Ensures module function parameters mutex arguments jobs heap post` ties an unbounded mutex proof to the actual function AST. It extracts a complete acquire/body/release region, compiles every body statement into reference operations, and requires `Concurrent.LockedEnsures` for that program. The parameter names and argument list come from the helper's submitted worker call. Extraction failure cannot satisfy this positive guarantee.
-
-[[raw-lean-concurrent-heap]]
-==== Concurrent.Heap
-
-An unbounded reference heap maps object identities and field names to either another identity or `none`. The trial compiler quantifies fresh distinct identities and translates constructor initialization and setup assignments. Source validation restricts accesses to the declared reference fields. This model has no fixed bound on object count.
-
-[[raw-lean-concurrent-invariant]]
-==== Concurrent.invariant
-
-The reusable mutex theorem lifts a one-worker preservation proof to all finite job lists and every possible acquisition order. Its invariant relates the pending jobs to the heap. The body obligation verifies a selected worker for every split of that list and leaves the invariant true for the remaining jobs. Induction on pending-job count proves the whole batch; induction on body operations accounts for each separate step.
-
-[[raw-lean-concurrent-locked-ensures]]
-==== Concurrent.LockedEnsures
-
-An inductive successful-execution predicate for a batch sharing one mutex. Its constructors model acquire, each body step, release, and completion. Acquire must cover every pending worker choice. A body step must succeed, and completion must satisfy the postcondition. With an active owner, other workers remain blocked. An inductive proof rules out faults and infinite enabled executions; it does not merely describe completed runs.
-
-[[raw-lean-concurrent-put]]
-==== Concurrent.put
-
-`Concurrent.put heap object field value` updates one reference field in an unbounded heap. Other fields and objects retain their previous values.
-
-[[raw-lean-concurrent-put-concrete]]
-==== Concurrent.putConcrete
-
-`Concurrent.putConcrete heap object field value` performs the corresponding setup assignment in a finite `SharedState`. The trial compiler restricts targets to allocated objects and declared fields. This representation supports checking concrete counterexamples.
-
-[[raw-lean-concurrent-read]]
-==== Concurrent.read
-
-`Concurrent.read heap object field` evaluates a reference-field read. Dereferencing Python `None` returns outer `none`; a successful read returns `some value`, where the field value may itself represent Python `None`.
-
-[[raw-lean-concurrent-read-concrete]]
-==== Concurrent.readConcrete
-
-`Concurrent.readConcrete heap object field` reads a reference field from a finite `SharedState`. Missing fields, invalid addresses, scalar fields, and dereferencing Python `None` fail. Counterexample checks use this function with the same assertion translation as positive proofs.
-
-[[raw-lean-concurrent-read-int-item]]
-==== Concurrent.readIntItem
-
-`Concurrent.readIntItem heap object index` reads an integer from a mutable list in a finite `SharedState`, using Python's positive or negative indexing. Invalid addresses, out-of-range indices, and non-integer elements fail the trial check.
 
 [[raw-lean-data]]
 ==== Data
@@ -1355,6 +1197,11 @@ Custom same-class comparisons execute the supported method AST, including loops,
 
 The generated trial description contains calls to actual compiled workers, their initial shared heap, and checks translated from the Python assertions. No fixed limit on list length or worker count is part of this description.
 
+[[raw-lean-pytrial-assert-true]]
+==== PyTrial.assertTrue
+
+`PyTrial.assertTrue condition` evaluates one Python assertion condition, returning `some ()` for true and `none` for false.
+
 [[raw-lean-pytrial-call]]
 ==== PyTrial.Call
 
@@ -1419,6 +1266,11 @@ The optimized successful-completion certificate for a complete common-mutex regi
 ==== PyTrial.ObservedThrows
 
 A completed exceptional trial observed by the finite explorer, including failed final assertions. Incomplete observations never establish this predicate. `PyTrial.Throws` additionally accepts finite reachability witnesses that require more steps than the default observation budget.
+
+[[raw-lean-pytrial-read-int-item]]
+==== PyTrial.readIntItem
+
+`PyTrial.readIntItem heap object index` reads an integer from a mutable list using Python's positive or negative indexing. Missing objects, out-of-range indices, and non-integer elements fail the trial check.
 
 [[raw-lean-pytrial-returns]]
 ==== PyTrial.Returns

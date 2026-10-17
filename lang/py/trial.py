@@ -1,4 +1,4 @@
-"""Compile ordinary Python trial helpers, without data-structure primitives.
+"""Compile setup, worker submissions, and assertions for quoted Python trials.
 
 A trial allocates objects, submits calls to a ThreadPoolExecutor, waits for their
 results, and checks Python assertions. The compiler translates statements, not
@@ -53,16 +53,14 @@ class Value:
     kind: object
 
 
-class Trial:
-    def __init__(self, helper: str, module: ast.Module, function: ast.FunctionDef, namespace: str, negative=False, *, full_pool=False, general=False):
-        self.module, self.function, self.namespace, self.negative = module, function, namespace, negative
-        self.full_pool = full_pool or negative
+class TrialCompiler:
+    def __init__(self, helper: str, module: ast.Module, function: ast.FunctionDef, namespace: str):
+        self.module, self.function, self.namespace = module, function, namespace
         self.helper = next((n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == helper), None)
         if self.helper is None:
             raise ScenarioError(f'unknown Python trial helper {helper!r}')
-        self.objects, self.collections, self.locks = [], [], []
+        self.locks = []
         self.arrays = {}
-        self.fields, self.class_name = None, None
         self.allocations = {}
         self.serial = 0
         self.used_names = {n.id for n in ast.walk(self.helper) if isinstance(n, ast.Name)}
@@ -78,24 +76,18 @@ class Trial:
         self.setup, self.post = statements[:position], statements[position + 1:]
         for statement in self.setup:
             self.allocation(statement)
-        # Integer arrays use the general finite interleaving interpreter. The
-        # reference-only backend additionally supports inductive batch proofs.
-        self.concrete = general or self.negative or bool(self.arrays)
         self.call, self.loop = self.executor(statements[position])
         # Python resolves these names at runtime. Do not silently interpret a
         # rebound builtin, class, or helper as the original definition.
         reserved = {'range', 'zip', 'len', 'max', 'Lock', 'ThreadPoolExecutor',
-                    helper, function.name, self.class_name}
+                    helper, function.name}
         for node in ast.walk(self.helper):
             if ((isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in reserved)
                     or isinstance(node, ast.arg) and node.arg in reserved):
                 self.reject(node, 'trial locals must not shadow constructors, helpers, or supported builtins')
-        for name in {'range', 'zip', 'len', 'max', helper, function.name, self.class_name}:
-            if name is None:
-                continue
+        for name in {'range', 'zip', 'len', 'max', helper, function.name}:
             expected = [] if name in {'range', 'zip', 'len', 'max'} else [
-                self.helper if name == helper else function if name == function.name else
-                next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == name)]
+                self.helper if name == helper else function]
             if self.global_bindings(name) != expected:
                 self.reject(self.helper, f'trial requires an unshadowed {name}')
         primitives = [('ThreadPoolExecutor', 'concurrent.futures')]
@@ -148,48 +140,6 @@ class Trial:
         self.serial += 1
         return self.unique(f'_{prefix}{self.serial}')
 
-    def check_header(self):
-        args = self.helper.args
-        if (self.helper.decorator_list or args.posonlyargs or args.kwonlyargs or args.kwarg or args.vararg
-                or not args.args or len(args.defaults) > len(args.args) - 1):
-            self.reject(self.helper, 'trial needs a worker argument followed by ordinary integer arguments')
-        self.worker_arg = args.args[0].arg
-        self.inputs = []
-        for arg in args.args[1:]:
-            if not isinstance(arg.annotation, ast.Name) or arg.annotation.id != 'int':
-                self.reject(arg, 'trial size arguments currently need int annotations')
-            self.inputs.append(arg.arg)
-        if any(not isinstance(n, ast.Constant) or type(n.value) is not int for n in args.defaults):
-            self.reject(self.helper, 'trial defaults must be integer constants; proofs still quantify all inputs')
-
-    def constructor(self, name: str):
-        cls = next((n for n in self.module.body if isinstance(n, ast.ClassDef) and n.name == name), None)
-        if cls is None or cls.bases or cls.decorator_list or cls.keywords:
-            self.reject(cls, 'trial objects need a plain class with a no-argument constructor')
-        members = body_of(cls)
-        if len(members) != 1 or not isinstance(members[0], ast.FunctionDef) or members[0].name != '__init__':
-            self.reject(cls, 'trial classes currently support only an __init__ method')
-        init = members[0]
-        if (init.decorator_list or init.args.posonlyargs or len(init.args.args) != 1
-                or init.args.args[0].arg != 'self' or init.args.defaults or init.args.kw_defaults
-                or init.args.kwonlyargs or init.args.vararg or init.args.kwarg):
-            self.reject(init, 'trial constructors must take only self')
-        fields = []
-        for statement in body_of(init):
-            if (not isinstance(statement, ast.Assign) or len(statement.targets) != 1
-                    or not isinstance(statement.targets[0], ast.Attribute)
-                    or not isinstance(statement.targets[0].value, ast.Name)
-                    or statement.targets[0].value.id != 'self'
-                    or not isinstance(statement.value, ast.Constant) or statement.value.value is not None):
-                self.reject(statement, 'trial constructors currently support self.field = None only')
-            field = statement.targets[0].attr
-            if field.startswith('__') or field in fields:
-                self.reject(statement, 'trial constructors need distinct plain fields')
-            fields.append(field)
-        if self.class_name is not None and name != self.class_name:
-            self.reject(cls, 'a trial currently uses one reference-object class')
-        self.class_name, self.fields = name, fields
-
     def allocation(self, statement):
         if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
             return
@@ -207,21 +157,7 @@ class Trial:
                     self.locks.append(target.id)
                     allocations.append((target.id, 'lock'))
                 else:
-                    self.constructor(value.func.id)
-                    self.objects.append(target.id)
-                    allocations.append((target.id, 'object'))
-            elif (isinstance(value, ast.ListComp) and len(value.generators) == 1
-                  and isinstance(value.elt, ast.Call) and isinstance(value.elt.func, ast.Name)
-                  and not value.elt.args and not value.elt.keywords):
-                loop = value.generators[0]
-                if (loop.ifs or loop.is_async or not isinstance(loop.target, ast.Name)
-                        or not isinstance(loop.iter, ast.Call) or not isinstance(loop.iter.func, ast.Name)
-                        or loop.iter.func.id != 'range' or len(loop.iter.args) != 1 or loop.iter.keywords
-                        or not isinstance(loop.iter.args[0], ast.Name) or loop.iter.args[0].id not in self.inputs):
-                    self.reject(value, 'fresh object collections use [Class() for _ in range(size)]')
-                self.constructor(value.elt.func.id)
-                self.collections.append((target.id, loop.iter.args[0].id))
-                allocations.append((target.id, 'collection'))
+                    self.reject(value, 'quoted trials support list allocations and locks, not reference-object constructors')
             elif (isinstance(value, ast.List) and value.elts
                   and all(integer_literal(element) is not None for element in value.elts)):
                 self.arrays[target.id] = [integer_literal(element) for element in value.elts]
@@ -240,8 +176,8 @@ class Trial:
         if (not isinstance(ctor, ast.Call) or not isinstance(ctor.func, ast.Name) or ctor.func.id != 'ThreadPoolExecutor'
                 or ctor.args or not isinstance(item.optional_vars, ast.Name)):
             self.reject(statement, 'use with ThreadPoolExecutor(...) as executor')
-        # The model permits every worker to run. The optional pool size must be
-        # positive; this overapproximates a smaller real executor's schedules.
+        # The model permits every worker to run; validate a positive pool
+        # size here and sufficient capacity after parsing the submitted jobs.
         for keyword in ctor.keywords:
             if keyword.arg != 'max_workers' or not (
                 isinstance(keyword.value, ast.Constant) and type(keyword.value.value) is int and keyword.value.value > 0
@@ -253,7 +189,7 @@ class Trial:
                      or isinstance(keyword.value.args[1], ast.Call) and isinstance(keyword.value.args[1].func, ast.Name)
                      and keyword.value.args[1].func.id == 'len' and not keyword.value.args[1].keywords
                      and len(keyword.value.args[1].args) == 1 and isinstance(keyword.value.args[1].args[0], ast.Name)
-                     and keyword.value.args[1].args[0].id in dict(self.collections))
+                     and keyword.value.args[1].args[0].id in self.arrays)
             ):
                 self.reject(ctor, 'executor max_workers must be a positive literal or max(1, len(collection))')
         if len(ctor.keywords) > 1 or len(statement.body) != 2:
@@ -268,23 +204,21 @@ class Trial:
                 or not call.args or not isinstance(call.args[0], ast.Name) or call.args[0].id != self.worker_arg or call.keywords
                 or loop.ifs or loop.is_async or not isinstance(loop.target, ast.Name)):
             self.reject(submit, 'submit must call the trial worker with positional arguments')
-        if self.full_pool:
-            # An existential counterexample must be realizable by the real pool.
-            # Universal proofs may overapproximate a smaller pool, witnesses may not.
-            capacity = ast.parse(f'max(1, len({ast.unparse(loop.iter)}))', mode='eval').body
-            enough = len(ctor.keywords) == 1 and ast.dump(ctor.keywords[0].value) == ast.dump(capacity)
-            if (len(ctor.keywords) == 1 and isinstance(loop.iter, ast.Call)
-                    and isinstance(loop.iter.func, ast.Name) and loop.iter.func.id == 'range'
-                    and len(loop.iter.args) == 1 and not loop.iter.keywords):
-                # len(range(n)) = max(0, n), so max(1, n) admits every job.
-                range_capacity = ast.Call(func=ast.Name(id='max', ctx=ast.Load()),
-                                          args=[ast.Constant(value=1), loop.iter.args[0]], keywords=[])
-                enough |= ast.dump(ctor.keywords[0].value) == ast.dump(range_capacity)
-                count = integer_literal(loop.iter.args[0])
-                pool = integer_literal(ctor.keywords[0].value)
-                enough |= count is not None and pool is not None and pool >= max(0, count)
-            if not enough:
-                self.reject(ctor, 'quoted and counterexample trials need max_workers=max(1, len(jobs)) or a literal pool large enough for a literal range')
+        # Every quoted claim needs a pool that can run all submitted workers.
+        capacity = ast.parse(f'max(1, len({ast.unparse(loop.iter)}))', mode='eval').body
+        enough = len(ctor.keywords) == 1 and ast.dump(ctor.keywords[0].value) == ast.dump(capacity)
+        if (len(ctor.keywords) == 1 and isinstance(loop.iter, ast.Call)
+                and isinstance(loop.iter.func, ast.Name) and loop.iter.func.id == 'range'
+                and len(loop.iter.args) == 1 and not loop.iter.keywords):
+            # len(range(n)) = max(0, n), so max(1, n) admits every job.
+            range_capacity = ast.Call(func=ast.Name(id='max', ctx=ast.Load()),
+                                      args=[ast.Constant(value=1), loop.iter.args[0]], keywords=[])
+            enough |= ast.dump(ctor.keywords[0].value) == ast.dump(range_capacity)
+            count = integer_literal(loop.iter.args[0])
+            pool = integer_literal(ctor.keywords[0].value)
+            enough |= count is not None and pool is not None and pool >= max(0, count)
+        if not enough:
+            self.reject(ctor, 'quoted trials need max_workers=max(1, len(jobs)) or a literal pool large enough for a literal range')
         if (not isinstance(wait, ast.For) or wait.orelse or not isinstance(wait.target, ast.Name)
                 or not isinstance(wait.iter, ast.Name) or wait.iter.id != submit.targets[0].id or len(wait.body) != 1):
             self.reject(wait, 'wait for every submitted future')
@@ -292,8 +226,7 @@ class Trial:
         if ast.dump(wait.body[0], include_attributes=False) != ast.dump(expected, include_attributes=False):
             self.reject(wait, 'wait with future.result() so worker exceptions propagate')
         local_names = [item.optional_vars.id, submit.targets[0].id, wait.target.id]
-        if (len(local_names) != len(set(local_names)) or any(n in self.objects + self.locks + self.inputs + list(self.arrays)
-                + [name for name, _ in self.collections] + [self.worker_arg] for n in local_names)):
+        if (len(local_names) != len(set(local_names)) or any(n in self.locks + self.inputs + list(self.arrays) + [self.worker_arg] for n in local_names)):
             self.reject(statement, 'executor locals must not shadow trial inputs or allocations')
         return call, loop
 
@@ -304,22 +237,14 @@ class Trial:
         if integer is not None:
             return Value(f'({integer} : Int)', 'int')
         if isinstance(expression, ast.Constant):
-            if expression.value is None:
-                return Value('none', 'ref')
             if type(expression.value) is bool:
                 return Value(str(expression.value).lower(), 'bool')
-        if isinstance(expression, ast.Attribute) and heap is not None:
-            if expression.attr not in (self.fields or []):
-                self.reject(expression, f'undeclared reference field {expression.attr!r}')
-            base = self.reference(self.expression(expression.value, env, heap))
-            read = 'Concurrent.readConcrete' if self.concrete else 'Concurrent.read'
-            return Value(f'(← {read} {heap} ({base}) {quoted(expression.attr)})', 'ref')
         if isinstance(expression, ast.Subscript) and not isinstance(expression.slice, ast.Slice) and heap is not None:
             array = self.expression(expression.value, env, heap)
             index = self.expression(expression.slice, env, heap)
             if array.kind != ('array', 'int') or index.kind != 'int':
                 self.reject(expression, 'trial indexing currently needs an integer list and integer index')
-            return Value(f'(← Concurrent.readIntItem {heap} ({array.code}) ({index.code}))', 'int')
+            return Value(f'(← PyTrial.readIntItem {heap} ({array.code}) ({index.code}))', 'int')
         if isinstance(expression, ast.List):
             parts, kind = [], None
             for element in expression.elts:
@@ -334,7 +259,7 @@ class Trial:
                     self.reject(element, 'heterogeneous trial lists are currently unsupported')
                 kind = element_kind
                 parts.append(code)
-            return Value('(' + (' ++ '.join(parts) or '([] : List Nat)') + ')', ('list', kind or 'object'))
+            return Value('(' + (' ++ '.join(parts) or '([] : List Int)') + ')', ('list', kind or 'int'))
         if isinstance(expression, ast.Subscript) and isinstance(expression.slice, ast.Slice):
             value = self.expression(expression.value, env, heap)
             if not isinstance(value.kind, tuple) or value.kind[0] != 'list':
@@ -360,28 +285,12 @@ class Trial:
             left = self.expression(expression.left, env, heap)
             right = self.expression(expression.comparators[0], env, heap)
             op = expression.ops[0]
-            if isinstance(op, (ast.Is, ast.IsNot)) and left.kind in ('ref', 'object') and right.kind in ('ref', 'object'):
-                operator = '!=' if isinstance(op, ast.IsNot) else '=='
-                return Value(f'({self.reference(left)}) {operator} ({self.reference(right)})', 'bool')
-            if isinstance(op, (ast.In, ast.NotIn)) and right.kind == ('list', 'object') and left.kind in ('ref', 'object'):
-                code = f'(({right.code}).map some).contains ({self.reference(left)})'
-                return Value(f'!({code})' if isinstance(op, ast.NotIn) else code, 'bool')
             if isinstance(op, (ast.Eq, ast.NotEq)) and left.kind == right.kind:
                 return Value(f'({left.code}) {"!=" if isinstance(op, ast.NotEq) else "=="} ({right.code})', 'bool')
         self.reject(expression, f'unsupported trial expression: {ast.unparse(expression)}')
 
-    def reference(self, value):
-        if value.kind == 'object':
-            return f'some ({value.code})'
-        if value.kind == 'ref':
-            return value.code
-        self.reject(self.helper, 'expected an object reference')
 
     def lean_type(self, kind):
-        if kind == 'object':
-            return 'Nat'
-        if kind == 'ref':
-            return 'Option Nat'
         if isinstance(kind, tuple) and kind[0] == 'pair':
             return f'({self.lean_type(kind[1])} × {self.lean_type(kind[2])})'
         if isinstance(kind, tuple) and kind[0] == 'list':
@@ -403,23 +312,14 @@ class Trial:
         for statement in statements:
             if id(statement) in self.allocations:
                 if nested:
-                    self.reject(statement, 'allocate objects before setup loops')
+                    self.reject(statement, 'allocate lists and locks before setup loops')
                 for name, _ in self.allocations[id(statement)]:
                     if name in env:
                         self.reject(statement, f'reassigned allocation name {name!r}')
                     env[name] = allocated[name]
             elif isinstance(statement, ast.Assign) and len(statement.targets) == 1:
                 target = statement.targets[0]
-                if isinstance(target, ast.Attribute):
-                    if target.attr not in (self.fields or []):
-                        self.reject(target, 'setup writes must use declared fields')
-                    base = self.expression(target.value, env)
-                    if base.kind != 'object':
-                        self.reject(target, 'setup writes require an allocated object')
-                    value = self.reference(self.expression(statement.value, env))
-                    put = 'Concurrent.putConcrete' if self.concrete else 'Concurrent.put'
-                    heap = f'{put} ({heap}) ({base.code}) {quoted(target.attr)} ({value})'
-                elif not nested:
+                if not nested:
                     if any(isinstance(n, ast.Name) and n.id in self.inputs + [self.worker_arg] for n in ast.walk(target)):
                         self.reject(target, 'trial inputs cannot be rebound during setup')
                     self.bind(target, self.expression(statement.value, env), env)
@@ -447,9 +347,6 @@ class Trial:
                 name = statement.targets[0].id
                 value = self.expression(statement.value, env, heap)
                 local = self.fresh('local')
-                # Object locals may subsequently receive nullable field values.
-                if value.kind == 'object':
-                    value = Value(self.reference(value), 'ref')
                 lines.append(f'let {local} := {value.code};')
                 env[name] = Value(local, value.kind)
             elif isinstance(statement, ast.Assert):
@@ -457,7 +354,7 @@ class Trial:
                 value = self.expression(statement.test, env, heap)
                 if value.kind != 'bool':
                     self.reject(statement, 'assert needs a supported Boolean expression')
-                lines.append(f'Concurrent.check ({value.code});')
+                lines.append(f'PyTrial.assertTrue ({value.code});')
             elif isinstance(statement, ast.For) and not statement.orelse:
                 iterable = self.expression(statement.iter, env, heap)
                 if not isinstance(iterable.kind, tuple) or iterable.kind[0] != 'list':
@@ -465,27 +362,14 @@ class Trial:
                 assigned = {n.targets[0].id for s in statement.body for n in ast.walk(s)
                             if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
                 carried = sorted(assigned.intersection(env))
-                if len(carried) > 2:
-                    self.reject(statement, 'trial loops currently carry at most two reference locals')
-                if any(env[n].kind not in ('ref', 'object') for n in carried):
-                    self.reject(statement, 'loop-carried trial locals currently support object references')
+                if carried:
+                    self.reject(statement, 'loop-carried trial locals are unsupported')
                 state, item = self.fresh('state'), self.fresh('item')
                 inner = env.copy()
-                for index, name in enumerate(carried):
-                    code = state if len(carried) == 1 else f'{state}.{index + 1}'
-                    inner[name] = Value(code, 'ref')
                 self.bind(statement.target, Value(item, iterable.kind[1]), inner, new=True)
-                # Compile the body first, then return its updated loop-carried locals.
-                body = self.compile_post(statement.body, inner, result=None, heap=heap)
-                final_values = [inner[n].code for n in carried]
-                final_state = final_values[0] if len(final_values) == 1 else '(' + ', '.join(final_values) + ')'
-                body += f' pure {final_state}'
-                initial_values = [self.reference(env[n]) for n in carried]
-                initial_state = initial_values[0] if len(initial_values) == 1 else '(' + ', '.join(initial_values) + ')'
+                body = self.compile_post(statement.body, inner, heap=heap)
                 loop_result = self.fresh('result')
-                lines.append(f'let {loop_result} ← ({iterable.code}).foldlM (fun {state} ({item} : {self.lean_type(iterable.kind[1])}) => do {body}) ({initial_state});')
-                for index, name in enumerate(carried):
-                    env[name] = Value(loop_result if len(carried) == 1 else f'{loop_result}.{index + 1}', 'ref')
+                lines.append(f'let {loop_result} ← ({iterable.code}).foldlM (fun {state} ({item} : {self.lean_type(iterable.kind[1])}) => do {body}) ();')
             else:
                 self.reject(statement, f'unsupported trial assertion statement: {ast.unparse(statement)}')
         if result is not None:
@@ -509,111 +393,38 @@ class Trial:
 
     def worker(self, env):
         iterable = self.expression(self.loop.iter, env)
-        if iterable.kind not in (('list', 'object'), ('list', 'int')):
-            self.reject(self.loop, 'workers currently iterate over an object collection or integer range')
+        if iterable.kind != ('list', 'int'):
+            self.reject(self.loop, 'workers currently iterate over an integer range or list')
         inner = env.copy()
         self.bind(self.loop.target, Value(self.job_name, iterable.kind[1]), inner, new=True)
         args = self.function.args.args
         if len(args) != len(self.call.args) - 1:
             self.reject(self.call, 'submitted argument count does not match the worker')
-        params, values, concrete, mutex = [], [], [], None
+        arguments = []
         for parameter, expression in zip(args, self.call.args[1:]):
             value = self.expression(expression, inner)
             if value.kind == 'lock':
-                if (mutex is not None and not self.concrete
-                        or not isinstance(parameter.annotation, ast.Name) or parameter.annotation.id != 'Lock'):
-                    self.reject(expression, 'Lock arguments must match annotations; the unbounded model uses one common mutex')
-                mutex = parameter.arg
-                concrete.append(f'.lock {value.code}')
-            elif value.kind == 'object' and isinstance(parameter.annotation, ast.Name) and parameter.annotation.id == self.class_name:
-                params.append(parameter.arg)
-                values.append(f'some ({value.code})')
-                concrete.append(f'.ref ({value.code})')
+                if not isinstance(parameter.annotation, ast.Name) or parameter.annotation.id != 'Lock':
+                    self.reject(expression, 'Lock arguments must match annotations')
+                arguments.append(f'.lock {value.code}')
             elif (value.kind == ('array', 'int') and isinstance(parameter.annotation, ast.Subscript)
                     and isinstance(parameter.annotation.value, ast.Name) and parameter.annotation.value.id == 'list'
                     and isinstance(parameter.annotation.slice, ast.Name) and parameter.annotation.slice.id == 'int'):
-                concrete.append(f'.ref ({value.code})')
-            elif self.concrete and value.kind in ('int', 'bool') and isinstance(parameter.annotation, ast.Name) and parameter.annotation.id == value.kind:
-                concrete.append(f'.{value.kind} ({value.code})')
+                arguments.append(f'.ref ({value.code})')
+            elif value.kind in ('int', 'bool') and isinstance(parameter.annotation, ast.Name) and parameter.annotation.id == value.kind:
+                arguments.append(f'.{value.kind} ({value.code})')
             else:
-                self.reject(expression, 'submitted objects must match worker parameter annotations')
-        if mutex is None and not self.concrete:
-            self.reject(self.call, 'the current unbounded worker model needs one common mutex')
-        return iterable.code, params, mutex, values, concrete
+                self.reject(expression, 'submitted arguments must match worker parameter annotations')
+        return iterable.code, arguments
 
     def unsupported(self):
         issues = []
         for statement in body_of(self.function):
-            if not self.concrete and isinstance(statement, ast.Assign):
-                target = statement.targets[0]
-                if len(statement.targets) != 1 or not (
-                    isinstance(target, ast.Name) and isinstance(statement.value, ast.Attribute)
-                    and isinstance(statement.value.value, ast.Name)
-                    or isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
-                    and isinstance(statement.value, ast.Name)
-                ):
-                    issues.append((statement.lineno, 'Concurrent currently supports separate reference-field reads and writes only'))
             # Lock operations may occur inside supported branches and loops.
             lock_calls = {id(node.func) for node in ast.walk(statement)
                           if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                           and node.func.attr in {'acquire', 'release'} and not node.args and not node.keywords}
             for node in ast.walk(statement):
-                if (isinstance(node, ast.Attribute) and node.attr not in (self.fields or [])
-                        and id(node) not in lock_calls):
-                    issues.append((node.lineno, f'Concurrent cannot handle undeclared reference field {node.attr!r}'))
+                if (isinstance(node, ast.Attribute) and id(node) not in lock_calls):
+                    issues.append((node.lineno, f'quoted workers cannot access reference field {node.attr!r}'))
         return issues
-
-    def proposition(self):
-        allocated, bindings, assumptions = {}, [], []
-        fields = ', '.join(f'({quoted(f)}, .none)' for f in self.fields or [])
-        object_parts = []
-        for name in self.inputs:
-            bindings.append(f'({identifier(name)} : Int)')
-        offset = '0'
-        for statement in self.setup:
-            for name, kind in self.allocations.get(id(statement), []):
-                if kind == 'lock':
-                    allocated[name] = Value(str(self.locks.index(name)), 'lock')
-                elif kind == 'array':
-                    allocated[name] = Value(f'({offset})', ('array', 'int'))
-                    elements = ', '.join(f'.int ({value})' for value in self.arrays[name])
-                    object_parts.append(f'[.array [{elements}]]')
-                    offset = f'({offset} + 1)'
-                elif kind == 'object':
-                    allocated[name] = Value(f'({offset})' if self.concrete else identifier(name), 'object')
-                    object_parts.append(f'[.object [{fields}]]')
-                    if not self.concrete:
-                        bindings.append(f'({identifier(name)} : Nat)')
-                    offset = f'({offset} + 1)'
-                else:
-                    count = identifier(dict(self.collections)[name])
-                    allocated[name] = Value(f'(List.range {count}.toNat).map (· + {offset})' if self.concrete else identifier(name), ('list', 'object'))
-                    object_parts.append(f'List.replicate {count}.toNat (.object [{fields}])')
-                    if not self.concrete:
-                        bindings.append(f'({identifier(name)} : List Nat)')
-                        assumptions.append(f'{identifier(name)}.length = {count}.toNat')
-                    offset = f'({offset} + {count}.toNat)'
-        if self.concrete:
-            objects = (' ++ '.join(f'({part})' for part in object_parts) or '[]') if self.arrays else f'List.replicate {offset} (.object [{fields}])'
-            initial = f'({{ objects := {objects} }} : SharedState)'
-        else:
-            initial = '(fun (_ : Nat) (_ : String) => (none : Option Nat))'
-            allocated_list = '(' + ' ++ '.join([f'([{", ".join(map(identifier, self.objects))}] : List Nat)', *(identifier(name) for name, _ in self.collections)]) + ')'
-            assumptions.insert(0, f'{allocated_list}.Nodup')
-        env = {name: Value(identifier(name), 'int') for name in self.inputs}
-        env[self.worker_arg] = Value('_worker', 'callable')
-        initial = self.compile_setup(self.setup, env, initial, allocated)
-        jobs, params, mutex, values, concrete = self.worker(env)
-        post = f'((do {self.compile_post(self.post, env.copy())}) : Option Unit)'
-        if self.concrete:
-            calls = f'({jobs}).map (fun {self.job_name} => parallelFunction {self.namespace}.module {quoted(self.function.name)} [{", ".join(concrete)}])'
-            if self.negative:
-                return ('∃ ' + ' '.join(bindings) + f' ({self.final_name} : SharedState),\n'
-                        f'ParallelRun.CanReturn (parallelRun ({calls}) ({initial})) {self.final_name} ∧\n{post} = none')
-            body = f'ParallelRun.Ensures (parallelRun ({calls}) ({initial})) (fun {self.final_name} => {post} = some ())'
-        else:
-            body = (f'Concurrent.Ensures {self.namespace}.module {quoted(self.function.name)}\n'
-                    f'[{", ".join(map(quoted, params))}] {quoted(mutex)} (fun {self.job_name} => [{", ".join(values)}])\n'
-                    f'({jobs}) ({initial}) (fun {self.final_name} => {post} = some ())')
-        quantifier = '∀ ' + ' '.join(bindings) + ',\n' if bindings else ''
-        return quantifier + ' →\n'.join([*assumptions, body])
