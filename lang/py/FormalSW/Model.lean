@@ -109,6 +109,8 @@ inductive Expr where
   | ifExp : Expr -> Expr -> Expr -> Expr
   /-- A Python comparison chain. -/
   | compare : Expr -> List (CmpOp × Expr) -> Expr
+  /-- A standalone Python `in` or `not in` test, with left-to-right operand evaluation. -/
+  | membership (element container : Expr) (negated : Bool)
   /-- A Python call expression with positional arguments. -/
   | call : Expr -> List Expr -> Expr
   /-- A resolved builtin call; local functions retain the ordinary call node. -/
@@ -375,6 +377,9 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       return .compare
         (← Expr.fromJson? (← jsonField json "left"))
         (operators.zip comparators)
+  | "Membership" =>
+      return .membership (← Expr.fromJson? (← jsonField json "element"))
+        (← Expr.fromJson? (← jsonField json "container")) (← (← jsonField json "negated").getBool?)
   | "Call" =>
       return .call
         (← Expr.fromJson? (← jsonField json "func"))
@@ -937,6 +942,7 @@ mutual
         1 + condition.operationCount + yes.operationCount + no.operationCount
     | .compare left comparisons =>
         1 + left.operationCount + (comparisons.map (Expr.operationCount ∘ Prod.snd)).sum
+    | .membership element container _ => 1 + element.operationCount + container.operationCount
     | .call function args =>
         1 + function.operationCount + (args.map Expr.operationCount).sum
     | .builtinCall _ args => 2 + (args.map Expr.operationCount).sum
@@ -1446,7 +1452,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
       | BinOp.pow => if rightValue < 0 then none else some (leftValue ^ rightValue.toNat)
       | BinOp.floorDiv => none
       | BinOp.mod => if rightValue = 0 then none else some (leftValue % rightValue)
-  | Expr.compare _ _ => none
+  | Expr.compare _ _ | Expr.membership _ _ _ => none
   | Expr.call _ _ => none
   | Expr.list _ => none
   | Expr.subscript _ _ => none

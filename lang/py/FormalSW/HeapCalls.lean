@@ -179,6 +179,27 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
       | _, none => Mutable.unsupported
       | _, _ => compareDifferent op
 
+/-- Sequence membership stops at the first identical or equal element. Unsupported
+equality is retained rather than silently treated as inequality. -/
+def sequenceContains (needle : Value) : List Value → Eval Bool
+  | [] => pure false
+  | item :: rest => do
+      if item = needle then return true
+      let equal ← compare .eq item needle
+      if ← Mutable.truth equal then return true
+      sequenceContains needle rest
+
+/-- Membership currently covers shared lists and tuples. Other iterable protocols
+remain partial; a known non-iterable scalar raises Python's TypeError. -/
+def membership (needle container : Value) (negated : Bool) : Eval Value := do
+  let found ← match container with
+    | .ref address => match (← get)[address]? with
+        | some (.list items) | some (.tuple items) => sequenceContains needle items
+        | _ => Mutable.unsupported
+    | .scalar (.int _) | .scalar (.bool _) | .scalar .none => Mutable.error "TypeError"
+    | _ => Mutable.unsupported
+  return .scalar (.bool (if negated then !found else found))
+
 theorem compare_int_lists (left right : List Int)
     (foundLeft : heap[a]? = some (.list (left.map fun n => .scalar (.int n))))
     (foundRight : heap[b]? = some (.list (right.map fun n => .scalar (.int n)))) :
@@ -287,6 +308,7 @@ inductive Operation where
   | builtin (name : Builtin)
   | reversedList
   | sumSequence
+  | membership (negated : Bool)
   | sumGenerator (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env) (start : Expr)
   | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
   | comprehensionTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
@@ -587,6 +609,7 @@ def enumerateStart : Value → Eval Int
   | _ => Mutable.error "TypeError"
 
 def primitive : Operation → List Value → Eval Value
+  | .membership negated, [needle, container] => membership needle container negated
   | .notCallable, _ => Mutable.error "TypeError"
   | .setField name value, [receiver] => Mutable.writeField receiver name value
   | .raiseException typeName, values => do
@@ -828,6 +851,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       | .dict entries => .next ⟨.dictionary entries [] env, stack, heap⟩
       | .list expressions => .next (argumentsState .list env [] expressions stack heap)
       | .tuple expressions => .next (argumentsState .tuple env [] expressions stack heap)
+      | .membership element container negated =>
+          .next (argumentsState (.membership negated) env [] [element, container] stack heap)
       | .sumSequence iterable start =>
           .next (argumentsState .sumSequence env [] [iterable, start] stack heap)
       | .sumRange name element bounds filters =>
@@ -1290,7 +1315,7 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>
@@ -1508,6 +1533,15 @@ theorem list (arguments : Arguments (globals := globals) module env expressions 
   apply Reaches.next rfl
   apply (arguments_reach arguments .list [] anchors stack).trans
   exact .next (by simp [step, result, run, primitive, Mutable.allocate, Except.map]) .refl
+
+theorem membership
+    (arguments : Arguments (globals := globals) module env [element, container] heap [needle, source] middle)
+    (tested : HeapCalls.membership needle source negated middle = some (.ok value, finalHeap)) :
+    Evaluates (globals := globals) module env (.membership element container negated) heap value finalHeap := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (arguments_reach arguments (.membership negated) [] anchors stack).trans
+  exact .next (by simp [step, result, run, primitive, tested]) .refl
 
 /-- Nonempty runtime tuple displays allocate after all their elements evaluate. -/
 theorem tuple (arguments : Arguments (globals := globals) module env expressions heap values finalHeap)

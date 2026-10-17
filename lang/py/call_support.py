@@ -250,6 +250,9 @@ def uses_heap_calls(module, function):
     """Find list allocation or use in the transitive local call graph."""
     if needs_heap_globals(module, function):
         return True
+    if _uses_syntax(module, function, lambda node: isinstance(node, ast.Compare)
+                    and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)):
+        return True
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     classes = {node.name for node in module.body if isinstance(node, ast.ClassDef)}
     pending, visited = [function], set()
@@ -512,6 +515,12 @@ def check_calls(module, function, reject, *, heap=False):
                 recurse(node.right)
             elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):
                 recurse(node.operand)
+            elif heap and isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)):
+                # An immediately consumed literal never exposes its pooled tuple identity.
+                if isinstance(node.comparators[0], ast.Tuple):
+                    hidden_tuples.add(node.comparators[0])
+                recurse(node.left)
+                recurse(node.comparators[0])
             elif isinstance(node, ast.Compare) and all(isinstance(
                     op, (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in node.ops):
                 recurse(node.left)

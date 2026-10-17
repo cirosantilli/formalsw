@@ -29,6 +29,7 @@ roots = [
   "lang.py.FormalSW.HeapCalls",
   "lang.py.FormalSW.DictionaryCalls",
   "lang.py.FormalSW.SumCalls",
+  "lang.py.FormalSW.MembershipCalls",
   "lang.py.FormalSW.ComprehensionCalls",
   "lang.py.FormalSW.ZipCalls",
   "lang.py.FormalSW.ClassCalls",

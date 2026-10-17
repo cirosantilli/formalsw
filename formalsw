@@ -1521,6 +1521,9 @@ class AstJsonEmitter:
                 return {"type": "IfExp", "test": self.expr(test),
                         "body": self.expr(body), "orelse": self.expr(orelse)}
             case ast.Compare(left=left, ops=ops, comparators=comparators):
+                if len(ops) == 1 and isinstance(ops[0], (ast.In, ast.NotIn)):
+                    return {"type": "Membership", "element": self.expr(left),
+                            "container": self.expr(comparators[0]), "negated": isinstance(ops[0], ast.NotIn)}
                 return {
                     "type": "Compare",
                     "left": self.expr(left),

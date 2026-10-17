@@ -7,6 +7,7 @@ import lang.py.FormalSW.Instances
 import lang.py.FormalSW.HeapCalls
 import lang.py.FormalSW.DictionaryCalls
 import lang.py.FormalSW.SumCalls
+import lang.py.FormalSW.MembershipCalls
 import lang.py.FormalSW.ComprehensionCalls
 import lang.py.FormalSW.ZipCalls
 import lang.py.FormalSW.IntegerParsing
