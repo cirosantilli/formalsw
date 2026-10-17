@@ -351,6 +351,15 @@ def getItem (value subscript : Value) : Eval Value := do
       | none => unsupported
   | _, _ => error "TypeError"
 
+/-- Reading a valid buffer index preserves the shared heap. -/
+theorem getItem_buffer (heap : Heap) (address position : Nat) (bytes : List UInt8)
+    (found : heap[address]? = some (.bytearray bytes)) (valid : position < bytes.length) :
+    getItem (.ref address) (.scalar (.int position)) heap =
+      some (.ok (.scalar (.int bytes[position].toNat)), heap) := by
+  have nonnegative : ¬ (position : Int) < 0 := by omega
+  have inside : ¬ bytes.length ≤ position := by omega
+  simp [getItem, found, index, nonnegative, inside, Except.map, List.getElem?_eq_getElem valid]
+
 /-- Index type is checked before the byte, but its range is checked after it. -/
 def setItem (value subscript replacement : Value) : Eval Value := do
   match value with

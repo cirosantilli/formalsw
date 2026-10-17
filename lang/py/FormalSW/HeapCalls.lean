@@ -619,6 +619,24 @@ theorem list (arguments : Arguments module env expressions heap values finalHeap
   apply (arguments_reach arguments .list [] anchors stack).trans
   exact .next (by simp [step, result, run, primitive, Mutable.allocate, Except.map]) .refl
 
+/-- Subscription evaluates its receiver and index before reading the shared heap. -/
+theorem subscript
+    (ordinary : ∀ a b c, index ≠ .slice a b c)
+    (receiver : Evaluates module env base heap value middle)
+    (subscript : Evaluates module env index middle position afterIndex)
+    (operation : Mutable.getItem value position afterIndex = some (.ok answer, finalHeap)) :
+    Evaluates module env (.subscript base index) heap answer finalHeap := by
+  intro anchors stack
+  have start : step module anchors ⟨.expr (.subscript base index) env, stack, heap⟩ =
+      .next ⟨.expr base env, .arguments .subscript [] [index] env :: stack, heap⟩ := by
+    cases index <;> simp_all [step, argumentsState]
+  apply Reaches.next start
+  apply (receiver anchors _).trans
+  apply Reaches.next rfl
+  apply (subscript anchors _).trans
+  apply Reaches.next rfl
+  exact .next (by simp [argumentsState, step, primitive, result, run, operation]) .refl
+
 theorem reversed_list (evaluated : Evaluates module env expression heap (.ref address) middle)
     (found : middle[address]? = some (.list items)) :
     Evaluates module env (.reversedList expression) heap (.ref middle.length)

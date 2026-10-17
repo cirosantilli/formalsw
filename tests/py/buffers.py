@@ -13,3 +13,11 @@ def first_zero(n: int) -> bytearray:
     values = flags(n)
     values[0] = 0
     return values
+
+
+def first_flag(n: int) -> int:
+    """
+    @formalsw: Requires(n >= 1)
+    @formalsw: Returns
+    """
+    return flags(n)[0]

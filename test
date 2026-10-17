@@ -96,7 +96,7 @@ def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
         TestCase("shared heap helper calls", Path("tests/py/heap_calls.py"), 0, "All 4 checks passed"),
-        TestCase("mutable buffers and in-place initialization", Path("tests/py/buffers.py"), 0, "All 4 checks passed"),
+        TestCase("mutable buffers, initialization, and helper reads", Path("tests/py/buffers.py"), 0, "All 6 checks passed"),
         TestCase("shared heap range loops", Path("tests/py/heap_ranges.py"), 0, "All 2 checks passed"),
         TestCase("positional scalar maximum", Path("tests/py/maximum.py"), 0, "All 1 checks passed"),
         TestCase("immutable scalar default arguments", Path("tests/py/defaults.py"), 0, "All 3 checks passed"),
