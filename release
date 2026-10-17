@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -11,13 +12,14 @@ import tomllib
 REPO = Path(__file__).resolve().parent
 
 
-def run(*command):
-    print('+ ' + ' '.join(command), flush=True)
-    subprocess.run(command, cwd=REPO, check=True)
+def run(*command, capture_stdout=False):
+    print('+ ' + shlex.join(command), flush=True)
+    return subprocess.run(command, cwd=REPO, check=True, text=True,
+                          stdout=subprocess.PIPE if capture_stdout else None).stdout
 
 
 def git_output(*arguments):
-    return subprocess.check_output(['git', *arguments], cwd=REPO, text=True).strip()
+    return run('git', *arguments, capture_stdout=True).strip()
 
 
 def main():
