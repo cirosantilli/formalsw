@@ -1,4 +1,5 @@
 import lang.py.CleanXY.Sorting
+import lang.py.CleanXY.Globals
 
 /-! Outcome predicates over deterministic executions. `_this_module` is supplied
 by generated raw specifications; handwritten proofs bind it to their Python AST.
@@ -38,12 +39,12 @@ syntax (name := haltsCall) "Halts(" ident "(" term,* ")" ")" : term
 syntax (name := divergesCall) "diverges(" ident "(" term,* ")" ")" : term
 
 macro_rules (kind := throwsCall)
-  | `(Throws($function:ident ($arguments,*))) => `(Execution.Throws ($function $arguments*))
+  | `(Throws($function:ident ($arguments,*))) => `(($function $arguments*).Throws)
 macro_rules (kind := returnsCall)
-  | `(Returns($function:ident ($arguments,*))) => `(Execution.Returns ($function $arguments*))
+  | `(Returns($function:ident ($arguments,*))) => `(($function $arguments*).Returns)
 macro_rules (kind := haltsCall)
-  | `(Halts($function:ident ($arguments,*))) => `(Execution.Halts ($function $arguments*))
+  | `(Halts($function:ident ($arguments,*))) => `(($function $arguments*).Halts)
 macro_rules (kind := divergesCall)
-  | `(diverges($function:ident ($arguments,*))) => `(Execution.Diverges ($function $arguments*))
+  | `(diverges($function:ident ($arguments,*))) => `(($function $arguments*).Diverges)
 
 end CleanXY.PyAst

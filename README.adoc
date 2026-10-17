@@ -362,6 +362,8 @@ The DSL specification is a magic custom and very simple language that allows spe
 
 The DSL gets converted to corresponding Lean code behind the scenes.
 
+Each construct below includes a raw Lean equivalent. `Returns`, `Halts`, `Equiv`, `EquivReturn`, and `ReturnType` quantify over every modeled argument value. `Throws` uses an existential input, while `Not` negates the whole proposition. The examples show explicit quantifiers; `./cleanxy --stub file.py` prints the exact elaborated statement for a particular function, including its globals.
+
 [[dsl-concurrent]]
 ==== Concurrent
 
@@ -389,6 +391,20 @@ def check_marks(worker, count: int = 3):
 ----
 
 Here `Cell.__init__` sets `self.value = None`. The theorem is named `mark.«Concurrent(check_marks)»`. `./cleanxy --stub file.py` shows its generated Lean statement. The proof must establish the property for the actual parsed worker, helper setup, and final assertions. No names inside the Python helper resolve to definitions in the proof file.
+
+An equivalent raw Lean specification for this example, with the helper's final assertions written as a predicate on the final heap, is:
+
+[source,lean]
+----
+∀ (count : Int) (items : List Nat),
+  items.Nodup → items.length = count.toNat →
+  Concurrent.Ensures ParallelTrialAst.module "mark"
+    ["item"] "mutex" (fun item => [some item])
+    items (fun _ _ => none)
+    (fun final => ∀ item ∈ items, final item "value" = some item)
+----
+
+`count` ranges over all integers despite the Python default of `3`; `items` ranges over every fresh allocation satisfying the length constraint. `Concurrent.Ensures` covers the worker interleavings. The compiler expresses the postcondition through the helper's interpreted reads and assertion checks; the predicate above is their equivalent mathematical form.
 
 ===== Counterexamples
 
@@ -426,6 +442,16 @@ def sum_naive(n: int) -> int:
 
 The generated obligation is named `sum_naive.«Returns»`. `Returns` implies <<halts,Halts>> and <<not,Not>> <<throws,Throws>>. `Not Throws` alone permits nontermination.
 
+Its raw Lean equivalent is:
+
+[source,lean]
+----
+∀ n : Int,
+  (scalarFunction RangeSumAst.module "sum_naive" [.int n]).Returns
+----
+
+For several arguments, quantify each one: a function `f(x: int, flag: bool)` uses `∀ (x : Int) (flag : Bool), (scalarFunction module "f" [.int x, .bool flag]).Returns`. A function with no arguments needs no argument quantifier.
+
 Successful completion includes falling off the end, bare `return`, and `return None`; all three return Python `None`, represented by `Constant.none` in Lean.
 
 This marker supports scalar `int`, `str`, and `bool` positional arguments (including multiple or no arguments), and bare-list calls to the exact supported merge-sort implementation. Requirements involving unsupported Python constructs are rejected before proof checking; see <<unsupported-python-constructs>>.
@@ -433,6 +459,14 @@ This marker supports scalar `int`, `str`, and `bool` positional arguments (inclu
 ==== Halts
 
 `Halts` means that every modeled input finishes, either normally or by raising an exception. For example, link:tests/py/throws.py[`reject_odd`] has both `Halts` and `Throws`: all inputs terminate, and some inputs raise.
+
+For that function, the raw Lean equivalent is:
+
+[source,lean]
+----
+∀ n : Int,
+  (scalarFunction ThrowsAst.module "reject_odd" [.int n]).Halts
+----
 
 The generated obligation is named `function.«Halts»`. It supports the same argument domains as <<returns,Returns>>. `Not` negates the whole obligation: for a function with arguments, `Not Halts` says that not all inputs halt. Use a raw universally quantified theorem to say that every input fails to halt.
 
@@ -491,6 +525,20 @@ CleanXY.Property.Function.BigO
     (CleanXY.PyAst.InputSize.listLength "values")
     (fun n : Nat => n * (Nat.log2 n + 1))
 ----
+
+Expanding that property gives the following raw Lean equivalent:
+
+[source,lean]
+----
+∃ analysis,
+  SortAst.module.analyzeFunction "merge_sort" = some analysis ∧
+  analysis.inputSize = InputSize.listLength "values" ∧
+  ∃ (c n₀ : Nat), ∀ n : Nat, n₀ ≤ n →
+    analysis.operations * analysis.growth.bound n ≤
+      c * (n * (Nat.log2 n + 1))
+----
+
+Here the universal variable is the input size used by the cost abstraction. The existential constants permit a multiplicative factor and a finite prefix of small inputs.
 
 The analyzer checks that `values` is the actual `list` argument; changing the binding to another name does not produce a provable obligation. Integer arguments use their natural-number projection automatically. Because the current cost relation is one-dimensional, omitting the binding requires exactly one `int` argument.
 
@@ -551,6 +599,51 @@ An equivalence proof by itself does not establish termination: two infinite comp
 
 The existing list `Equiv` and `EquivReturn` demos still use the older abstract sorting model. Their canonical-result proofs do not establish termination of arbitrary Python comparison methods and do not transfer the new execution contracts. The raw merge-sort termination theorem below uses the execution model directly. List `ReturnType` also retains its older abstract evaluator.
 
+===== Comparing object state
+
+Python's `==` can run a user-defined `__eq__`; it need not compare stored attributes, and it can raise or loop forever. Stored-state equivalence has a separate executable Python definition in link:lang/py/graph_equivalence.py[]: `same_snapshot`. Lean parses that actual source and executes its AST using link:lang/py/CleanXY/DataRuntime.lean[]. There is no separate Lean implementation of the graph comparison algorithm, source fingerprint, or recognition of a particular function body. Changes to the Python definition change the interpreted computation; unsupported syntax anywhere in it produces a build error, including in unreachable branches.
+
+The Python interface is link:lang/py/object_snapshot.py[]:
+
+[source,python]
+----
+from lang.py.object_snapshot import equivalent, equivalent_roots
+
+class Node:
+    pass
+
+left, right = Node(), Node()
+left.next, right.next = left, right
+assert equivalent(left, right)  # Same cyclic structure, different allocations.
+
+shared = []
+assert not equivalent([shared, shared], [[], []])
+assert not equivalent(1, True)  # Exact scalar types matter.
+----
+
+The comparator matches runtime types, scalar values, stored fields, container order, cycles, and sharing through a one-to-one mapping of reachable references. Unreachable objects are ignored. Lists and tuples preserve position; dictionaries preserve insertion order, including their key/value edges. Instance dictionaries preserve field order as well as names and values. Class identity matters even when two classes have the same name. User equality and getters are never invoked. Scalar identity and numeric `id()` values are outside this observation: freshly allocated containers and instances may be renamed consistently.
+
+Compare all observable roots together when specifying function equivalence: the result, caller-owned inputs, and relevant supported global state. Comparing only results would miss whether a function returned its input or a copy:
+
+[source,python]
+----
+input_left, input_right, copied_result = [1], [1], [1]
+assert equivalent(input_left, copied_result)
+assert not equivalent_roots(
+    [input_left, input_left], [copied_result, input_right]
+)
+----
+
+Root positions establish the correspondence between input objects and preserve aliases between inputs and outputs. State snapshots must be taken while the observed objects are stable; this adapter does not synchronize with concurrent mutations. Class identifiers are process-local stable tokens, with classes retained to prevent identity reuse. Snapshots from separate processes need an explicitly shared type-identity table before comparison.
+
+The current adapter supports exact `int`, `bool`, `str`, and `None`, exact `list`, `tuple`, and `dict`, and ordinary instances with a standard instance dictionary and no inherited user class. It rejects slots, custom attribute access, properties and other non-method descriptors, and unsupported builtin objects with a clear `TypeError`. Classes and their behavior are assumed fixed. This is equivalence of the captured stored state, not a promise about every Python observation: I/O, external resources, changing class attributes, weak references, allocation addresses, and finalizers are not captured.
+
+The snapshot adapter is an explicit boundary, not a formally verified interpretation of CPython's heap. Lean consumes the corresponding finite graph encoding; the cross-language tests exercise the adapter and interpreter together. `Graph.Equivalent` requires the interpreted Python comparator to return `True`; `Graph.Equiv` uses this relation for successful execution results and still matches exceptions and termination. Both are available in raw Lean specifications. This does not silently widen the existing short-form `Equiv` frontend: its scalar and sorting backends still have the restrictions described above, and arbitrary object-manipulating Python functions are not yet executable by them. Exception matching still uses the existing modeled exception class and positional arguments.
+
+Integers remain cheap. The Python definition checks scalar types and immediately compares scalar values, without constructing a graph. The kernel-checked theorem `Graph.equivalent_int` proves, for arbitrary integers, that this interpreted branch is equivalent to `a = b`, and is registered with `simp`. Thus proofs can use integer equality without repeatedly interpreting the comparator. The more general `Graph.equivalent_scalar` covers every modeled scalar, and `Graph.scalar_equiv_iff` proves that the existing scalar `Execution.Equiv` check is exactly the same as using the Python-defined relation. This avoids graph overhead; integer equality still has its usual cost with respect to integer size. The first graph implementation uses simple lists for its work queue and correspondence table, so large graphs can take quadratic work; a faster implementation would need to preserve the same relation.
+
+See link:tests/py/object_equivalence.py[] for executable examples, link:tests/py/object_equivalence.lean[] for proofs of allocation renaming and detection of changed attributes and aliases, and link:tests/py/graph_equivalence_checks[] for Python/Lean comparisons and source-mutation tests. The examples do not yet prove graph isomorphism correctness or comparator termination for every well-formed heap.
+
 ==== EquivReturn
 
 `EquivReturn(other)` states that whenever both functions return successfully
@@ -566,13 +659,25 @@ def merge_sort_untyped(values: list) -> list:
     # ...
 ----
 
-For list functions, the generated proposition is equivalent to:
+For unary integer functions, a raw Lean equivalent of `EquivReturn(sum_naive)` on `sum` is:
 
 [source,lean]
 ----
-∀ values leftResult rightResult,
-  eval left values = some (.ok leftResult) →
-  eval right values = some (.ok rightResult) →
+∀ (n : Int) (leftResult rightResult : Constant),
+  let left := scalarFunction RangeSumAst.module "sum" [.int n]
+  let right := scalarFunction RangeSumAst.module "sum_naive" [.int n]
+  Finishes left.step left.initial (.ok leftResult) →
+  Finishes right.step right.initial (.ok rightResult) →
+  leftResult = rightResult
+----
+
+For the bare-list example above, the raw Lean equivalent uses its older abstract evaluator:
+
+[source,lean]
+----
+∀ (values : List Value) leftResult rightResult,
+  evalUnaryListFunctionOutcome SortAst.module "merge_sort_untyped" values = some (.ok leftResult) →
+  evalUnaryListFunctionOutcome SortAst.module "quick_sort" values = some (.ok rightResult) →
   leftResult = rightResult
 ----
 
@@ -596,6 +701,15 @@ def sum(n: int) -> int:
 ----
 
 The marker above requires `sum.«Not Throws»`. `Not` can prefix any other DSL property recursively; for example, `Not Not Throws` has the usual double negation meaning.
+
+The raw Lean equivalent is:
+
+[source,lean]
+----
+¬ (∃ n : Int, (scalarFunction MyNotExampleAst.module "sum" [.int n]).Throws)
+----
+
+Equivalently, `∀ n : Int, ¬ (scalarFunction MyNotExampleAst.module "sum" [.int n]).Throws`. In contrast, `Not Returns` expands to `¬ (∀ n : Int, (scalarFunction module "sum" [.int n]).Returns)`: it does not claim that every input fails to return. The specialized `Not Concurrent(helper)` form additionally requires the concrete counterexample described in that section.
 
 ==== ReturnType
 
@@ -671,6 +785,45 @@ Not (CleanXY.Property.Function.Throws TmpAst.module "sum")
 ----
 
 For a bare-list function, `Throws` instead provides a modeled runtime-value-list input and an exception produced by the list evaluator. The mixed input `[0, ""]` in link:tests/py/sort.py[] is one example.
+
+=== Global state
+
+Scalar module globals are supported as additional function inputs. Python's symbol table determines the global names, so a local assignment anywhere in a function shadows the module binding unless Python declares it `global`. This supports reads without a `global` statement and assignments with one:
+
+[source,python]
+----
+offset: int = 10
+total: int = 0
+
+def add_offset(n: int) -> int:
+    """@cleanxy: Returns"""
+    return n + offset
+
+def advance(n: int) -> int:
+    """@cleanxy: Returns"""
+    global total
+    total += n
+    return total
+----
+
+`add_offset` has this raw Lean obligation:
+
+[source,lean]
+----
+∀ (n offset : Int),
+  (scalarFunctionWithGlobals GlobalsAst.module "add_offset"
+    [.int n] [("offset", .int offset)]).Returns
+----
+
+The theorem covers every integer `offset`, not just its initial value of `10`. The domain comes from a module-level scalar declaration: `int`, `str`, and `bool` annotations are supported, or the type can be inferred from a scalar literal such as `offset = 10`. Each required global must have a matching scalar literal initializer. Module initialization is not executed by this call model; the theorem describes calls entered with values in those domains. An explicit raw hypothesis can restrict the entry state when that is intended.
+
+In raw function-level specifications, `this_function` captures the quantified globals while retaining the Python parameter list. For example, `@cleanxy: theorem returns_with_offset (n offset : Int) : Returns(this_function(n))` in `add_offset` expands to the same stateful call. Unbound globals needed by `this_function` are quantified automatically, even if their names are absent from the theorem body.
+
+`advance` returns a completion containing both its Python result and the final `total`. If it raises after assigning `total`, the exception completion still contains that update. `Equiv` compares both outcomes and final global state; equal return values or equal exceptions alone are insufficient. Both functions receive the same initial state covering the union of their global dependencies, and untouched globals are preserved. `EquivReturn` compares the returned value and final state whenever both calls return successfully. `Returns`, `Halts`, and `ReturnType` quantify universally over argument and global values; `Throws` uses an existential assignment to both.
+
+See link:tests/py/globals.py[] and link:tests/py/globals.py.lean[] for proofs over arbitrary integers, including a counterexample where omitting a global update changes equivalence and another where throwing before versus after an update differs. The examples also cover string and Boolean globals and local shadowing.
+
+Mutable container/object globals, imported module attributes, closures (`nonlocal`), deletion of globals, and globals in the parallel or quotation backends remain unsupported. The scalar global model does not execute ordinary function calls either. These dependencies produce unsupported-construct diagnostics rather than being silently omitted. `BigO` currently rejects functions depending on globals because its single input-size abstraction does not account for additional state inputs. Explicit legacy `Property.Function`/`scalarFunction` specifications cannot discard a function's globals; use the short DSL or `scalarFunctionWithGlobals`.
 
 === Raw Lean specification
 
@@ -770,6 +923,16 @@ An inductive successful-execution predicate for a batch sharing one mutex. Its c
 
 `Concurrent.readIntItem heap object index` reads an integer from a mutable list in a finite `SharedState`, using Python's positive or negative indexing. Invalid addresses, out-of-range indices, and non-integer elements fail the trial check.
 
+[[raw-lean-data]]
+==== Data
+
+`Data` is the read-only interpreter's value domain: Python scalars (`Constant`), nested lists, and supported builtin type objects. Lists in this interpreter cannot be mutated; programs build new lists with `+`. Cycles in observed Python objects are represented by explicit graph references, not by cyclic `Data` trees.
+
+[[raw-lean-data-function]]
+==== dataFunction
+
+`dataFunction module name arguments` executes a function's actual AST on `Data` arguments. It supports local assignments, conditionals, while loops, scalar operations, list construction and indexing, and `len`/`type`. Other constructs are rejected by `python_data%`; operations on values outside the interpreter's supported domain yield an unsupported execution. Termination uses `Execution.Finishes` with no fuel limit.
+
 [[raw-lean-diverges]]
 ==== diverges
 
@@ -787,6 +950,51 @@ Ensures(Parallel(List.replicate 2 (this_function [.ref 0, .lock 0]),
 ----
 
 This checks the value at index 0 of shared array 0 after both workers finish. A linked-list specification can instead check relationships between fields throughout the heap. Deadlocks, exceptions, incomplete exploration, and empty outcome sets cannot satisfy this guarantee.
+
+[[raw-lean-execution-equiv-by]]
+==== Execution.EquivBy
+
+`Execution.EquivBy relation left right` requires every finite outcome on either side to have a matching outcome on the other. Successful results must satisfy `relation`; exceptions must have the same modeled class and arguments. Its `returns_iff` and `halts_iff` lemmas transfer termination guarantees. `Execution.equivBy_eq_iff` proves that using ordinary equality recovers `Execution.Equiv`.
+
+[[raw-lean-graph-compare]]
+==== Graph.compare
+
+`Graph.compare left right` executes `same_snapshot(left, right)` from link:lang/py/graph_equivalence.py[]. Its arguments are encoded snapshots (`Data`), and its result is an `Execution Data`. It does not call overridable Python object equality.
+
+[[raw-lean-graph-edge]]
+==== Graph.Edge
+
+An edge is a typed scalar value (`.scalar`) or a reference to a node index (`.ref`). Node indices are local to each heap; comparison permits consistent renaming.
+
+[[raw-lean-graph-equiv]]
+==== Graph.Equiv
+
+`Graph.Equiv left right` abbreviates `Execution.EquivBy Graph.Equivalent left right`. The executions must return snapshots containing all observable roots. It compares captured state while preserving the existing exception and termination requirements; it does not supply a heap interpreter for unsupported Python functions.
+
+[[raw-lean-graph-equivalent]]
+==== Graph.Equivalent
+
+`Graph.Equivalent left right` states that the interpreted Python snapshot comparator terminates and returns `True`. It does not mean Python `left == right`. `Graph.equivalent_int` reduces this relation on integer snapshots to ordinary integer equality; `simp` uses the theorem automatically.
+
+[[raw-lean-graph-heap]]
+==== Graph.Heap
+
+A finite observation consists of an ordered `roots` list and a `nodes` list. Include the result and externally observable input/global roots together to preserve their sharing. `heap.encode` produces the same nested-list format as the Python snapshot adapter. References must identify existing nodes, and node labels/edges must follow the adapter's layout; constructing this record alone does not prove those conditions. Unreachable nodes do not affect comparison.
+
+[[raw-lean-graph-kind]]
+==== Graph.Kind
+
+A node's kind distinguishes lists, tuples, dictionaries, and instances with a runtime type identity. Both observations must use the same type-identity scheme. Object addresses may be renamed; type identities must agree.
+
+[[raw-lean-graph-node]]
+==== Graph.Node
+
+Each node stores its `kind`, ordered field `labels`, and outgoing `edges`. Instances use one label per field; list/tuple positions and alternating dictionary key/value positions are implicit and use an empty labels list.
+
+[[raw-lean-graph-observed-bool]]
+==== Graph.observedBool
+
+`Graph.observedBool (execution.observe fuel)` returns `some true` or `some false` only after a Boolean return. It returns `none` for unfinished execution, unsupported operations, exceptions, or other return values. `Graph.equivalent_of_observe` turns a `True` observation into a proof of equivalence; `Graph.not_equivalent_of_observe` uses an actual `False` return to disprove it. Exhausting fuel proves neither result.
 
 [[raw-lean-halts]]
 ==== Halts
@@ -870,6 +1078,11 @@ Custom same-class comparisons execute the supported method AST, including loops,
 
 `python_context "source.py" "worker" SourceAst.module in proposition` supplies the Python source, enclosing function, and imported semantic AST for quotations. CleanXY inserts it around a function's quoted specification. Generated proof stubs preserve the quoted theorem and include this context explicitly, so the same syntax works directly in Lean. Names used inside a quotation refer to the Lean scope at that quotation, including nested binders and `let` values.
 
+[[raw-lean-python-data]]
+==== python_data%
+
+`python_data% (include_str "path/to/definition.py")` parses Python source through the existing AST bridge and validates the reusable read-only data subset. It imports the resulting AST as a Lean `Module`; it does not run the Python definition during elaboration. `include_str` makes source edits a Lake build dependency. Validation covers the whole source, including dead branches, and rejects mutation, arbitrary calls, imports, defaults, builtin shadowing, and other unsupported syntax. The graph comparator uses this entry point; it is separate from the contextual `py("...")` specification syntax.
+
 [[raw-lean-pytrial]]
 ==== PyTrial
 
@@ -922,6 +1135,46 @@ Returns(f(x)) ↔ Halts(f(x)) ∧ Not Throws(f(x))
 ----
 
 The merge-sort theorem above assumes successful termination of the `<=` operations the algorithm actually uses. Absence of `<` exceptions is insufficient: comparison methods may differ or loop forever. The execution model requires an exact match with the supported merge-sort AST template and produces the actual merged list. Changing the body outside that template causes a validation error for requirements needing this model.
+
+[[raw-lean-scalar-call]]
+==== ScalarCall
+
+A call with scalar global state. Its `Returns`, `Throws`, `Halts`, and `Diverges` predicates describe the Python outcome, while its internal `execution` records a `ScalarCompletion`. `Returns(this_function(...))` and the other call predicates select the appropriate model automatically. `ScalarCall.returns_iff_halts_not_throws` proves the same contract as for stateless execution.
+
+[[raw-lean-scalar-call-equiv]]
+==== ScalarCall.Equiv
+
+`left.Equiv right` requires identical finite Python outcomes and final global state in both directions. `ScalarCall.equiv_of_finishes` proves equivalence from matching completions. Its `returns_iff` and `halts_iff` lemmas transfer execution contracts.
+
+[[raw-lean-scalar-call-equiv-return]]
+==== ScalarCall.EquivReturn
+
+`left.EquivReturn right` requires equal results and equal final globals whenever both calls return successfully. It imposes no agreement on exceptional completions. An `Equiv` proof implies this property through `ScalarCall.Equiv.equivReturn`.
+
+[[raw-lean-scalar-call-finishes]]
+==== ScalarCall.Finishes
+
+`call.Finishes outcome globals` means that the Python call terminates with that normal or exceptional outcome and that final global state. `ScalarCall.finishes_of_observe` turns a completed finite observation into this unbounded semantic proposition; running out of observation fuel supplies no such proof.
+
+[[raw-lean-scalar-call-return-type]]
+==== ScalarCall.ReturnType
+
+`call.ReturnType "int"` requires exceptional completion or successful completion with an integer result. The other supported annotations are `"str"`, `"bool"`, and `"None"`. The DSL universally quantifies the arguments and initial globals around this per-call property.
+
+[[raw-lean-scalar-completion]]
+==== ScalarCompletion
+
+A completion pairs `outcome : Except ExceptionObject Constant` with `globals : ScalarGlobals`. Final globals are present after exceptions as well as successful returns; Python does not roll back completed assignments when it raises.
+
+[[raw-lean-scalar-function-with-globals]]
+==== scalarFunctionWithGlobals
+
+`scalarFunctionWithGlobals module "name" arguments globals` executes the actual function AST with explicit initial scalar global bindings. Ordinary locals shadow globals according to the whole function's scope. A `global` declaration changes the assignment target to module state. All declared global names must be supplied, duplicate bindings are rejected, and extra supplied globals are preserved so two functions can share an initial comparison state.
+
+[[raw-lean-scalar-globals]]
+==== ScalarGlobals
+
+A list of named scalar values, such as `[("offset", .int offset), ("enabled", .bool enabled)]`. The DSL supplies the required names and types automatically. Low-level calls supply unique names explicitly; the generated specifications use a stable sorted order for state comparison.
 
 [[raw-lean-shared-object]]
 ==== SharedObject

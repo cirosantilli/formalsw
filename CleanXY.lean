@@ -1,5 +1,6 @@
 import Lean
 import lang.py.CleanXY.Model
+import lang.py.CleanXY.GraphEquivalence
 import lang.py.CleanXY.Syntax
 import lang.py.CleanXY.Parallel
 import lang.py.CleanXY.Concurrent

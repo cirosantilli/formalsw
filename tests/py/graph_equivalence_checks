@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Cross-check Python snapshots against execution of the same AST in Lean."""
+
+import json
+from pathlib import Path
+import random
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from lang.py.data_ast import module_json
+from lang.py.graph_equivalence import same_snapshot
+from lang.py.object_snapshot import equivalent, equivalent_roots, snapshot, snapshot_roots
+
+
+def lean_data(value):
+    if type(value) is list:
+        return ".list [" + ", ".join(lean_data(item) for item in value) + "]"
+    if type(value) is bool:
+        return f".scalar (.bool {str(value).lower()})"
+    if type(value) is int:
+        return f".scalar (.int ({value}))"
+    if type(value) is str:
+        return f".scalar (.string {json.dumps(value, ensure_ascii=False)})"
+    assert value is None
+    return ".scalar .none"
+
+
+def main():
+    pairs = []
+
+    def check(left, right, expected):
+        assert equivalent(left, right) is expected
+        pairs.append((snapshot(left), snapshot(right), expected))
+
+    for left, right, expected in [
+        (1, 1, True), (10**100, 10**100, True), (1, 2, False),
+        (True, 1, False), (None, None, True), (None, False, False),
+        ("λ😀", "λ😀", True), ("a", "b", False),
+        ([], [], True), ([True], [1], False), ([1, 2], [1], False),
+        ((1, 2), [1, 2], False), ((1, 2), (1, 2), True),
+        ({"a": 1, "b": 2}, {"b": 2, "a": 1}, False),
+    ]:
+        check(left, right, expected)
+
+    shared = []
+    check([shared, shared], [[], []], False)
+    check([[], []], [shared, shared], False)  # Both directions of the bijection.
+    a, b, c, d = [], [], [], []
+    a.append(a)
+    b.append(b)
+    c.append(d)
+    d.append(c)
+    check(a, b, True)
+    check(a, c, False)
+
+    class Record:
+        def __eq__(self, other):
+            raise AssertionError("user __eq__ ran")
+
+    a, b = Record(), Record()
+    a.value = b.value = 3
+    a.next, b.next = a, b
+    check(a, b, True)
+    b.value = 4
+    check(a, b, False)
+    del b.value
+    check(a, b, False)
+    # Two classes with exactly the same name and fields still differ.
+    check(type("SameName", (), {})(), type("SameName", (), {})(), False)
+
+    x, y, copied = [1], [1], [1]
+    assert not equivalent_roots([x, x], [copied, y])
+    pairs.append((snapshot_roots([x, x]), snapshot_roots([copied, y]), False))
+
+    class WithProperty:
+        @property
+        def value(self):
+            raise AssertionError("getter ran")
+
+    class WithSlots:
+        __slots__ = ("value",)
+
+    class CustomAccess:
+        def __getattribute__(self, name):
+            raise AssertionError("custom attribute access ran")
+
+    class Meta(type):
+        def __eq__(self, other):
+            raise AssertionError("metaclass equality ran")
+
+        @property
+        def __dict__(self):
+            raise AssertionError("metaclass descriptor ran")
+
+        @property
+        def __mro__(self):
+            raise AssertionError("metaclass descriptor ran")
+
+    class CustomType(metaclass=Meta):
+        pass
+
+    check(CustomType(), CustomType(), True)
+    for value in (WithProperty(), WithSlots(), CustomAccess(), set(), 1.5, object()):
+        try:
+            snapshot(value)
+        except TypeError as error:
+            assert "unsupported snapshot" in str(error)
+        else:
+            raise AssertionError(f"unsupported snapshot accepted: {type(value)}")
+
+    # Small arbitrary cyclic heaps, not just list-specific examples. Permute
+    # addresses, leave garbage unreachable, and then change a reachable scalar.
+    rng = random.Random(713)
+    for count in range(1, 9):
+        nodes = [
+            ["list", [], [["int", i]] + [["ref", rng.randrange(count)] for _ in range(2)]]
+            for i in range(count)
+        ]
+        order = list(range(count))
+        rng.shuffle(order)
+        renamed = [None] * count
+        for index, node in enumerate(nodes):
+            renamed[order[index]] = [node[0], node[1], [
+                [tag, order[value] if tag == "ref" else value] for tag, value in node[2]
+            ]]
+        left = [[["ref", 0]], nodes]
+        right = [[["ref", order[0]]], renamed + [["list", [], []]]]
+        assert same_snapshot(left, right)
+        pairs.append((left, right, True))
+        changed = json.loads(json.dumps(right))
+        changed[1][order[0]][2][0][1] += 1
+        assert not same_snapshot(left, changed)
+        pairs.append((left, changed, False))
+
+    lines = ["import CleanXY", "open CleanXY.PyAst", "set_option maxRecDepth 4096"]
+    for left, right, expected in pairs:
+        lines += [
+            "example : Graph.observedBool ((Graph.compare",
+            f"  ({lean_data(left)}) ({lean_data(right)})).observe 20000)",
+            f"  = some {str(expected).lower()} := by native_decide",
+        ]
+    source = (ROOT / "lang/py/graph_equivalence.py").read_text()
+    # A supported semantic edit changes the Lean result; no shadow Lean copy.
+    mutation = source.replace("return left == right", "return False")
+    lines += [
+        "def edited : Module := python_data% " + json.dumps(mutation),
+        'example : Graph.observedBool ((dataFunction edited "same_snapshot"',
+        '  [.scalar (.int 3), .scalar (.int 3)]).observe 4) = some false := by native_decide',
+        'example : Graph.observedBool ((Graph.compare (.scalar (.int 3))',
+        '  (.scalar (.int 3))).observe 0) = none := by native_decide',
+    ]
+    with tempfile.TemporaryDirectory(prefix="cleanxy-graph-") as directory:
+        path = Path(directory) / "Check.lean"
+        path.write_text("\n".join(lines))
+        subprocess.run(["lake", "env", "lean", "-DwarningAsError=true", str(path)], cwd=ROOT, check=True)
+        # The Lean import must reject unsupported code even in a dead branch.
+        unsupported = source.replace("    # Scalars", "    if False:\n        print(left)\n    # Scalars")
+        path.write_text("import CleanXY\ndef broken : CleanXY.PyAst.Module := python_data% " + json.dumps(unsupported))
+        failed = subprocess.run(["lake", "env", "lean", str(path)], cwd=ROOT, text=True, capture_output=True)
+        assert failed.returncode != 0 and "unsupported Python constructs" in failed.stdout
+
+    for invalid in (
+        "def f(x):\n    if False:\n        print(x)\n    return x\n",
+        "def f(x):\n    x[0] = 1\n    return x\n",
+        "def f(x):\n    return unknown\n",
+        "def f(type):\n    return type\n",
+        "def f(x):\n    return len\n",
+        "def f(x=[]):\n    return x\n",
+    ):
+        try:
+            module_json(invalid)
+        except ValueError as error:
+            assert "unsupported Python constructs" in str(error)
+        else:
+            raise AssertionError("unsupported Python accepted")
+    print(f"{len(pairs)} Python/Lean graph comparisons, source mutation, and unsupported-code checks passed")
+
+
+if __name__ == "__main__":
+    main()

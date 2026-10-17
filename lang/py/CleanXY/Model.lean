@@ -116,6 +116,10 @@ inductive Stmt where
   | return : Expr -> Stmt
   /-- A Python assignment statement. -/
   | assign : List Expr -> Expr -> Stmt
+  /-- A simple annotated assignment; module annotations describe input domains. -/
+  | annAssign : Expr → Expr → Option Expr → Stmt
+  /-- Python's scope declaration, not a runtime assignment. -/
+  | globalDecl : List String → Stmt
   /-- A Python augmented assignment statement. -/
   | augAssign : Expr -> BinOp -> Expr -> Stmt
   /-- A Python `for target in iter` statement. -/
@@ -296,6 +300,10 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
       return .assign
         (← jsonArray json "targets" Expr.fromJson?)
         (← Expr.fromJson? (← jsonField json "value"))
+  | "AnnAssign" =>
+      return .annAssign (← Expr.fromJson? (← jsonField json "target"))
+        (← Expr.fromJson? (← jsonField json "annotation")) (← optionalExpr json "value")
+  | "Global" => return .globalDecl (← jsonArray json "names" fun name => name.getStr?)
   | "AugAssign" =>
       return .augAssign
         (← Expr.fromJson? (← jsonField json "target"))
@@ -732,6 +740,9 @@ mutual
     | .return value => 1 + value.operationCount
     | .assign targets value =>
         1 + (targets.map Expr.operationCount).sum + value.operationCount
+    | .annAssign target annotation value =>
+        1 + target.operationCount + annotation.operationCount + (value.map Expr.operationCount).getD 0
+    | .globalDecl _ => 0
     | .augAssign target _ value => 1 + target.operationCount + value.operationCount
     | .forIn target iter body orelse =>
         1 + target.operationCount + iter.operationCount +

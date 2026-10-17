@@ -10,6 +10,7 @@ import ast
 import builtins
 import re
 from dataclasses import dataclass
+from lang.py.global_inputs import function_globals, GlobalInputError
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,8 @@ class SupportChecker:
             reject(function, 'async functions are unsupported')
         if function.decorator_list:
             reject(function, 'decorated functions are unsupported')
+        if getattr(function, 'type_params', []):
+            reject(function, 'generic function scopes are unsupported')
         if not self.annotation_supported(function.returns):
             reject(function.returns, 'this return annotation is unsupported by the AST model')
         args = function.args
@@ -178,6 +181,10 @@ class SupportChecker:
                 reject(function, 'list programs must match a supported merge-sort or quick-sort body, or a unary delegation to one; this body does not match')
         else:
             env: dict[str, frozenset[str]] = {}
+            try:
+                env.update((item.name, frozenset([item.kind])) for item in function_globals(self.module, function))
+            except GlobalInputError as error:
+                issues.append(UnsupportedConstruct(name, error.line, str(error), stack))
             # The binary-comparison abstraction explicitly supports untyped operands.
             body = body_of(function)
             binary = binary_comparison(function)
@@ -487,7 +494,7 @@ class SupportChecker:
     def block(self, body: list[ast.stmt], env: dict[str, frozenset[str]], name: str, reject, stack: tuple[str, ...]):
         env = env.copy()
         for stmt in body:
-            if isinstance(stmt, ast.Pass):
+            if isinstance(stmt, (ast.Pass, ast.Global)):
                 continue
             if isinstance(stmt, (ast.Return, ast.Expr)):
                 self.expression(stmt.value, env, reject)
@@ -563,23 +570,42 @@ class SupportChecker:
             while short.startswith('Not '):
                 short = short[4:]
             property_name = short.split('(', 1)[0].strip()
-            if property_name in ('Equiv', 'EquivReturn', 'ReturnType') and not (unary_int or unary_list):
+            try:
+                global_targets = re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', marker)
+                stateful = bool(function_globals(self.module, function)) or any(
+                    function_globals(self.module, self.functions[target])
+                    for target in global_targets if target in self.functions)
+            except GlobalInputError:
+                stateful = False  # check() reports the precise declaration error.
+            scalar_arguments = all(isinstance(arg.annotation, ast.Name) and
+                arg.annotation.id in ('int', 'str', 'bool') for arg in args)
+            if stateful and property_name == 'BigO':
+                issues.append(UnsupportedConstruct(name, function.lineno,
+                    'BigO does not yet model global-state inputs; use an explicit cost specification'))
+            if property_name in ('Equiv', 'EquivReturn', 'ReturnType') and not (
+                    unary_int or unary_list or stateful and scalar_arguments):
                 issues.append(UnsupportedConstruct(name, function.lineno, f'{property_name} currently supports unary int or list functions only'))
             binary_throws = binary_comparison(function) and all(
                 arg.annotation is None or isinstance(arg.annotation, ast.Name) and arg.annotation.id in ('int', 'str')
                 for arg in args)
-            if property_name == 'Throws' and not (unary_int or unary_list or binary_throws):
+            if property_name == 'Throws' and not (unary_int or unary_list or binary_throws or stateful and scalar_arguments):
                 issues.append(UnsupportedConstruct(name, function.lineno, 'Throws has no function model for this argument signature'))
-            if property_name == 'ReturnType' and (unary_int or unary_list) and (
+            if property_name == 'ReturnType' and not stateful and (unary_int or unary_list) and (
                 function.returns is None or ast.dump(args[0].annotation) != ast.dump(function.returns)
             ):
                 issues.append(UnsupportedConstruct(name, function.lineno, 'ReturnType currently requires matching supported argument and return annotations'))
+            if property_name == 'ReturnType' and stateful and not (
+                isinstance(function.returns, ast.Name) and function.returns.id in ('int', 'str', 'bool')
+                or isinstance(function.returns, ast.Constant) and function.returns.value is None
+            ):
+                issues.append(UnsupportedConstruct(name, function.lineno,
+                    'ReturnType with globals requires an int, str, bool, or None return annotation'))
             wants_execution = property_name in ('Returns', 'Halts') or bool(re.search(r'\b(?:Returns|Halts|Throws|diverges)\(', marker))
             if unary_list and (wants_execution or property_name == 'Throws') and not matches_sort(function, MERGE_SORT):
                 issues.append(UnsupportedConstruct(name, function.lineno, 'list execution currently supports only the exact merge-sort body'))
         targets = re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)', marker)
         # Explicit low-level calls in raw requirements are checked too.
-        executions = re.findall(r'\b(scalarFunction|listFunction|parallelFunction)\s+\S+\.module\s+"([^"]+)"', marker)
+        executions = re.findall(r'\b(scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
         parallel_targets = {target for model, target in executions if model == 'parallelFunction'}
         targets += [target for _, target in executions]
         for target in dict.fromkeys(targets):
@@ -587,10 +613,9 @@ class SupportChecker:
                 issues.extend(self.check(target, (name,) if name else (), parallel=target in parallel_targets))
                 if name and target in self.functions and property_name in ('Equiv', 'EquivReturn'):
                     target_args = self.functions[target].args.args
-                    if len(args) != 1 or len(target_args) != 1 or (
-                        ast.dump(args[0].annotation or ast.Constant(None)) !=
-                        ast.dump(target_args[0].annotation or ast.Constant(None))
-                    ):
+                    if len(args) != len(target_args) or any(
+                        ast.dump(a.annotation or ast.Constant(None)) != ast.dump(b.annotation or ast.Constant(None))
+                        for a, b in zip(args, target_args)):
                         issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
                             f'{property_name} requires matching supported argument domains', (name,)))
         for model, target in executions:
@@ -603,16 +628,30 @@ class SupportChecker:
             if model == 'listFunction' and not matches_sort(function, MERGE_SORT):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'list execution currently supports only the exact merge-sort body'))
-            if model == 'scalarFunction' and any(not (
+            if model in ('scalarFunction', 'scalarFunctionWithGlobals') and any(not (
                 isinstance(arg.annotation, ast.Name) and arg.annotation.id in ('int', 'str', 'bool')
             ) for arg in function.args.args):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'scalar execution requires scalar int, str, or bool arguments'))
+            if model == 'scalarFunction':
+                try:
+                    if function_globals(self.module, function):
+                        issues.append(UnsupportedConstruct(target, function.lineno,
+                            'globals require scalarFunctionWithGlobals with explicit initial state'))
+                except GlobalInputError:
+                    pass
         properties = re.findall(
-            r'\b(EquivReturn|Equiv|ReturnType|Throws)\s+\S+\.module\s+"([^"]+)"(?:\s+"([^"]+)")?', marker)
+            r'\b(EquivReturn|Equiv|ReturnType|Throws|BigO)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"(?:\s+"([^"]+)")?', marker)
         for prop, target, other in properties:
             if target in self.functions:
                 issues.extend(self.requirement(target, f'{prop}({other})' if other else prop))
+                try:
+                    if any(function_globals(self.module, self.functions[f])
+                           for f in (target, other) if f in self.functions):
+                        issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
+                            'legacy Function properties omit globals; use scalarFunctionWithGlobals or a short DSL marker'))
+                except GlobalInputError:
+                    pass
             else:
                 issues.extend(self.check(target))
         for class_name in re.findall(r'\.object\s+"([^"]+)"', marker):
