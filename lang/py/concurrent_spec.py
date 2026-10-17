@@ -54,8 +54,9 @@ class Value:
 
 
 class Trial:
-    def __init__(self, helper: str, module: ast.Module, function: ast.FunctionDef, namespace: str, negative=False):
+    def __init__(self, helper: str, module: ast.Module, function: ast.FunctionDef, namespace: str, negative=False, *, full_pool=False, general=False):
         self.module, self.function, self.namespace, self.negative = module, function, namespace, negative
+        self.full_pool = full_pool or negative
         self.helper = next((n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == helper), None)
         if self.helper is None:
             raise ScenarioError(f'unknown Python trial helper {helper!r}')
@@ -75,13 +76,11 @@ class Trial:
             self.reject(self.helper, 'a concurrent trial needs one ThreadPoolExecutor block')
         position = regions[0]
         self.setup, self.post = statements[:position], statements[position + 1:]
-        if not any(isinstance(n, ast.Assert) for s in self.post for n in ast.walk(s)):
-            self.reject(self.helper, 'a trial must assert its result after waiting for its workers')
         for statement in self.setup:
             self.allocation(statement)
         # Integer arrays use the general finite interleaving interpreter. The
         # reference-only backend additionally supports inductive batch proofs.
-        self.concrete = self.negative or bool(self.arrays)
+        self.concrete = general or self.negative or bool(self.arrays)
         self.call, self.loop = self.executor(statements[position])
         # Python resolves these names at runtime. Do not silently interpret a
         # rebound builtin, class, or helper as the original definition.
@@ -269,7 +268,7 @@ class Trial:
                 or not call.args or not isinstance(call.args[0], ast.Name) or call.args[0].id != self.worker_arg or call.keywords
                 or loop.ifs or loop.is_async or not isinstance(loop.target, ast.Name)):
             self.reject(submit, 'submit must call the trial worker with positional arguments')
-        if self.negative:
+        if self.full_pool:
             # An existential counterexample must be realizable by the real pool.
             # Universal proofs may overapproximate a smaller pool, witnesses may not.
             capacity = ast.parse(f'max(1, len({ast.unparse(loop.iter)}))', mode='eval').body
@@ -277,11 +276,15 @@ class Trial:
             if (len(ctor.keywords) == 1 and isinstance(loop.iter, ast.Call)
                     and isinstance(loop.iter.func, ast.Name) and loop.iter.func.id == 'range'
                     and len(loop.iter.args) == 1 and not loop.iter.keywords):
+                # len(range(n)) = max(0, n), so max(1, n) admits every job.
+                range_capacity = ast.Call(func=ast.Name(id='max', ctx=ast.Load()),
+                                          args=[ast.Constant(value=1), loop.iter.args[0]], keywords=[])
+                enough |= ast.dump(ctor.keywords[0].value) == ast.dump(range_capacity)
                 count = integer_literal(loop.iter.args[0])
                 pool = integer_literal(ctor.keywords[0].value)
                 enough |= count is not None and pool is not None and pool >= max(0, count)
             if not enough:
-                self.reject(ctor, 'counterexample trials need max_workers=max(1, len(jobs)) or a literal pool large enough for a literal range')
+                self.reject(ctor, 'quoted and counterexample trials need max_workers=max(1, len(jobs)) or a literal pool large enough for a literal range')
         if (not isinstance(wait, ast.For) or wait.orelse or not isinstance(wait.target, ast.Name)
                 or not isinstance(wait.iter, ast.Name) or wait.iter.id != submit.targets[0].id or len(wait.body) != 1):
             self.reject(wait, 'wait for every submitted future')
@@ -550,10 +553,13 @@ class Trial:
                     and isinstance(statement.value, ast.Name)
                 ):
                     issues.append((statement.lineno, 'Concurrent currently supports separate reference-field reads and writes only'))
-            lock_call = statement.value.func if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call) else None
+            # Lock operations may occur inside supported branches and loops.
+            lock_calls = {id(node.func) for node in ast.walk(statement)
+                          if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                          and node.func.attr in {'acquire', 'release'} and not node.args and not node.keywords}
             for node in ast.walk(statement):
                 if (isinstance(node, ast.Attribute) and node.attr not in (self.fields or [])
-                        and not (node is lock_call and node.attr in {'acquire', 'release'})):
+                        and id(node) not in lock_calls):
                     issues.append((node.lineno, f'Concurrent cannot handle undeclared reference field {node.attr!r}'))
         return issues
 

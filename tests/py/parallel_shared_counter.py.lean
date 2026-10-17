@@ -53,16 +53,23 @@ private def trial (name : String) (values : List Int) (count : Int) : PyTrial :=
       Concurrent.check (((← PyTrial.readInts final 0).drop 1) == values.drop 1)
       pure () }
 
+private theorem safe_source :
+    parallelFunction ParallelSharedCounterAst.module "increment_safe" [.ref 0, .lock 0] =
+      some ⟨[ParallelOp.acquire (.name "mutex")] ++ worker.todo ++ [ParallelOp.release (.name "mutex")], worker.locals⟩ := by
+  simp [parallelFunction, ParallelSharedCounterAst.module, findFunctionIn, executableBody, parallelOp, sharedLocation, worker]
+  decide
+
 private theorem extracted (count : Nat) :
     (List.replicate count (parallelFunction ParallelSharedCounterAst.module "increment_safe" [.ref 0, .lock 0])).mapM
       (fun call => do
         let (identity, worker) ← Mutex.extract (← call)
         if identity = 0 then some worker else none) = some (List.replicate count worker) := by
+  simp only [safe_source]
   induction count with
   | zero => rfl
   | succ count ih =>
       simp only [List.replicate_succ, List.mapM_cons]
-      change ((List.replicate count (parallelFunction ParallelSharedCounterAst.module "increment_safe" [.ref 0, .lock 0])).mapM
+      change ((List.replicate count (some (⟨[ParallelOp.acquire (.name "mutex")] ++ worker.todo ++ [ParallelOp.release (.name "mutex")], worker.locals⟩ : ParallelWorker))).mapM
         (fun call => do let (identity, worker) ← Mutex.extract (← call); if identity = 0 then some worker else none)).bind
         (fun rest => some (worker :: rest)) = some (worker :: List.replicate count worker)
       rw [ih]
@@ -70,6 +77,7 @@ private theorem extracted (count : Nat) :
 
 private theorem all_updates (head : Int) (tail : List Int) (count : Int) (nonnegative : 0 ≤ count) :
     PyTrial.Returns (some (trial "increment_safe" (head :: tail) count)) := by
+  apply Or.inl
   refine ⟨_, rfl, 0, List.replicate count.toNat worker, rfl, extracted count.toNat, ?_⟩
   apply (repeated count.toNat head tail).mono
   intro final equal
@@ -124,7 +132,7 @@ theorem increment_unsafe.loses_an_update :
   refine ⟨.list [.int 0], .int 2, ?_, ?_⟩
   · rfl
   · apply Or.inr
-    refine ⟨rfl, _, rfl, Or.inr ⟨{ objects := [.array [.int 1]] }, ?_, ?_⟩⟩
+    refine ⟨rfl, Or.inl ⟨_, rfl, Or.inr ⟨{ objects := [.array [.int 1]] }, ?_, ?_⟩⟩⟩
     · native_decide
     · decide
 

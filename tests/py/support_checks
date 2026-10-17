@@ -15,6 +15,31 @@ def stub(path):
 
 
 CASES = [
+    ('unsupported code inside a parallel loop', '''
+        from threading import Lock
+        def f(mutex: Lock):
+            """@cleanxy: theorem bad : True"""
+            while True:
+                if False:
+                    print("still unsupported")
+                mutex.acquire()
+                mutex.release()
+    ''', 'parallel execution supports'),
+    ('parallel chained comparison', '''
+        from threading import Lock
+        def f(n: int, mutex: Lock):
+            """@cleanxy: theorem bad : True"""
+            while 0 < n < 10:
+                n = n - 1
+    ''', 'parallel comparisons currently support one operator'),
+    ('rebound primitive inside a parallel loop', '''
+        from threading import Lock
+        sleep = lambda n: None
+        def f(mutex: Lock):
+            """@cleanxy: theorem bad : True"""
+            while True:
+                sleep(0)
+    ''', 'unshadowed from time import sleep'),
     ('special exception constructor', '''
         items = [1]
         def f(n: int):

@@ -907,6 +907,18 @@ The constructs below are available through `import CleanXY`. Lean parses the cus
 
 CleanXY supplies `_this_module` as the enclosing Python module's AST. Comparison syntax uses it to look up Python comparison methods, including in nested parenthesized expressions. The binding appears in generated stubs alongside `this_function`.
 
+[[raw-lean-candeadlock]]
+==== CanDeadlock
+
+`CanDeadlock(py("run_retries(this_function, 1)"))` states that some finite schedule reaches a global deadlock: unfinished workers remain, and none can take a step. `CanDeadlock(Parallel(calls, heap))` is its explicit-call form. The `acquire_twice` example exhibits a non-reentrant self-deadlock; `lock_pair` exhibits the classic opposite-order two-lock deadlock in link:tests/py/parallel_liveness.py[]. A witness includes actual transitions, not a timeout.
+
+[[raw-lean-candiverge]]
+==== CanDiverge
+
+`CanDiverge(py("run_retries(this_function, 2)"))` states that some schedule executes infinitely many steps. `CanDiverge(Parallel(calls, heap))` is its explicit-call form. A proof supplies a set of configurations that contains the initial configuration and always admits a next configuration within the set. The set may be infinite: the tests include a worker whose integer keeps increasing.
+
+Livelock is an infinite execution without the desired application progress. The `retry_forever` example repeatedly acquires and releases a mutex without completing any work. Its proof repeats a schedule that advances both workers. `CanDiverge` establishes infinite execution; specifying a separate application progress property would be necessary to classify arbitrary useful infinite computations as livelock.
+
 [[raw-lean-can-return]]
 ==== CanReturn
 
@@ -973,6 +985,13 @@ An inductive successful-execution predicate for a batch sharing one mutex. Its c
 ==== dataFunction
 
 `dataFunction module name arguments` executes a function's actual AST on `Data` arguments. It supports local assignments, conditionals, while loops, scalar operations, list construction and indexing, and `len`/`type`. Other constructs are rejected by `python_data%`; operations on values outside the interpreter's supported domain yield an unsupported execution. Termination uses `Execution.Finishes` with no fuel limit.
+
+[[raw-lean-deadlockfree]]
+==== DeadlockFree
+
+`DeadlockFree(py("run_retries(this_function, 2)"))` rules out reachable global deadlock. `DeadlockFree(Parallel(calls, heap))` uses explicit worker calls. This is weaker than `Halts`: an execution can always have another enabled step and still run forever. The semantic tests prove both `DeadlockFree` and `CanDiverge` for one such worker.
+
+Global deadlock means every unfinished worker is blocked. A subset of workers can remain blocked while another runs forever; `DeadlockFree` alone does not exclude this, but `Halts` does. No fairness assumption is hidden in these predicates.
 
 [[raw-lean-diverges]]
 ==== diverges
@@ -1044,7 +1063,9 @@ Each node stores its `kind`, ordered field `labels`, and outgoing `edges`. Insta
 
 The model in link:lang/py/CleanXY/Execution.lean[] and link:lang/py/CleanXY/Runtime.lean[] uses a deterministic transition system. Termination requires a finite derivation ending in a normal or exceptional outcome. Observation fuel only limits how long an observer runs; exhausting it produces `pending`, never a fabricated return.
 
-`Not Halts(this_function(values))` states that a call does not terminate. link:tests/py/sort.py[`Looping.__le__`] and its checked proof show that sorting two such objects does not halt. Unsupported source constructs cause validation errors and cannot be used to satisfy this requirement.
+For concurrent trials, `Halts(py("run_retries(this_function, 2)"))` requires every enabled schedule to finish the whole helper. It excludes both deadlock and infinite execution, including livelock. It permits assertions or workers to raise, provided the joined batch finishes. `Returns` adds successful execution and successful final assertions. `Halts` implies `DeadlockFree` and excludes `CanDiverge` in the general parallel model. Negating concurrent `Halts` disproves universal termination; it does not say that every schedule fails to finish.
+
+`Not Halts(this_function(values))` states that a deterministic call does not terminate. link:tests/py/sort.py[`Looping.__le__`] and its checked proof show that sorting two such objects does not halt. Unsupported source constructs cause validation errors and cannot be used to satisfy this requirement.
 
 [[raw-lean-mutable-call]]
 ==== Mutable.Call
@@ -1133,9 +1154,45 @@ The generic induction rule for `Mutex.Ensures`. Prove that the invariant holds i
 
 A call such as `this_function [.ref 0, .ref 2, .lock 0]` passes two object references and a mutex reference. Repeating an address shares the same object; repeating a lock identity shares the same mutex. Different mutex identities are independent: locking two different mutexes does not protect their shared data.
 
-The interpreter supports straight-line assignments of local scalar values and references, separate reads/writes of list items and plain object fields, integer arithmetic, mutex acquire/release, `sleep(0)`, and `pass`. Worker parameters use scalar, typed scalar-list, plain-class, or `Lock` annotations. Plain classes may initialize data fields in `__init__`; inheritance, descriptors, general method calls, allocation during a worker, branches, and loops need further model support. Split compound shared expressions into individual reads and writes so scheduling points are explicit. Primitive imports are checked only when needed.
+The interpreter supports assignments of local scalar values and references, separate reads/writes of list items and plain object fields, integer arithmetic, scalar comparisons, `not`, `if`, `while` (including `else`), mutex acquire/release, `sleep(0)`, and `pass`. Each loop guard is a scheduling step. Worker parameters use scalar, typed scalar-list, plain-class, or `Lock` annotations. Plain classes may initialize data fields in `__init__`; inheritance, descriptors, general method calls, allocation during a worker, `break`, and `continue` need further model support. Split compound shared expressions and guards into individual reads and writes so scheduling points are explicit. Primitive imports and all source branches are validated, including unreachable code.
 
-The explorer chooses every enabled worker at every step. Each step consumes one operation, so the initial total operation count bounds this finite exploration. Deadlocks, exceptions, unsupported operations, and budget exhaustion remain failing outcomes. The model uses sequentially consistent atomic field/item accesses and mutex operations, with progress through enabled steps. It does not model signals, resource exhaustion, or operating-system starvation.
+The transition system chooses any enabled worker at each step. A blocked acquire has no transition; a finished worker has none either. A batch finishes only after every worker finishes, including when another worker has already raised: Python's executor context manager still waits during shutdown. Mutexes are non-reentrant, and releasing an unlocked mutex raises `RuntimeError`. As with Python's `Lock`, release does not require ownership.
+
+`Halts(Parallel(calls, initialState))` requires completion on every enabled schedule. `Returns` also excludes exceptions. `Throws` exhibits one completed exceptional schedule. `ParallelRun.returns_iff_halts_not_throws` proves `Returns ↔ Halts ∧ Not Throws` for these batches; existential `Throws` does not imply universal `Halts`.
+
+The model uses sequentially consistent atomic field/item accesses and mutex operations. There are no idle scheduler steps or fairness assumptions: an infinite schedule that continually runs some workers while neglecting another enabled worker counts against `Halts`. Total suspension by the operating system, signals, resource exhaustion, and external processes changing the modeled heap are outside the model. The livelock witness in link:tests/py/parallel_liveness.py[] repeatedly schedules both workers, so its infinite execution does not depend on starvation.
+
+The finite explorer is an observation tool. Its default budget is the initial total operation count, sufficient for straight-line workers but potentially insufficient for branches and loops. An exhausted budget means incomplete exploration, never a proof of deadlock or divergence. Unbounded predicates use the transition system itself. The tests prove termination of a countdown even though its default observation is incomplete.
+
+[[raw-lean-parallelconfig]]
+==== ParallelConfig
+
+A concurrent configuration contains the shared heap, each worker's remaining operations and locals, and accumulated failures. Python exceptions stop their worker while the remaining workers continue. Internal model failures cannot be hidden behind an earlier Python exception. The low-level observer reports the first encountered Python exception when several workers fail; quoted `Throws` claims exceptional completion without specifying which exception is re-raised.
+
+[[raw-lean-parallelconfig-candiverge]]
+==== ParallelConfig.CanDiverge
+
+The infinite-execution witness underlying `CanDiverge`. Its invariant contains the starting configuration and supplies at least one enabled successor from every member. `CanDiverge.before` and `CanDiverge.of_reaches` prepend a step or a finite path.
+
+[[raw-lean-parallelconfig-deadlocked]]
+==== ParallelConfig.Deadlocked
+
+An unfinished configuration with no enabled successor. Successfully completed configurations are not deadlocked.
+
+[[raw-lean-parallelconfig-follow]]
+==== ParallelConfig.follow
+
+`ParallelConfig.follow initial schedule` executes a finite list of worker indices and returns the resulting configuration, even if unfinished. It rejects blocked or completed worker selections. `reaches_of_follow` turns a successful replay into a reachability proof. `canDiverge_of_follow` requires a nonempty schedule that returns to exactly its initial configuration, proving that this cycle can repeat forever.
+
+[[raw-lean-parallelconfig-mustfinish]]
+==== ParallelConfig.MustFinish
+
+An inductive proof that every enabled schedule finishes with an accepted outcome. A completed configuration must satisfy the acceptance predicate; an unfinished one must have a successor, and every successor must itself have a termination proof. This rules out both stuck configurations and infinite executions. `mustFinish_of_explore` converts a completely explored finite tree into such a proof when the acceptance predicate rejects deadlock and incomplete exploration.
+
+[[raw-lean-parallelconfig-reaches]]
+==== ParallelConfig.Reaches
+
+Finite reachability using zero or more enabled transitions. `Reaches.invariant` transports an invariant along such a path. Deadlock and exceptional-completion proofs use finite reachability witnesses.
 
 [[raw-lean-parallel-replay]]
 ==== parallelReplay
@@ -1143,6 +1200,26 @@ The explorer chooses every enabled worker at every step. Each step consumes one 
 `parallelReplay initialState schedule` executes a concrete schedule, where the initial configuration contains the shared heap and initialized workers. Worker indices start at zero. Each index selects that worker's next operation. Selecting a blocked worker makes the schedule invalid; stopping before all workers finish is incomplete.
 
 The counter's schedule `[0, 1, 0, 1, 0, 1]` makes both workers read zero, both yield, and both write one. The doubly linked list's proof gives a longer schedule where different workers win the forward and backward pointer writes.
+
+[[raw-lean-parallelrun]]
+==== ParallelRun
+
+An explicit list of optional compiled workers together with the initial shared heap. It retains the program, rather than only a finite list of observations. `config` initializes its transition system; a missing compiled worker prevents successful liveness claims. Its `Returns`, `Halts`, `Throws`, `CanDeadlock`, `CanDiverge`, and `DeadlockFree` properties are exposed by the corresponding specification constructs.
+
+[[raw-lean-parallelrun-ensures-returns]]
+==== ParallelRun.Ensures.returns
+
+Converts an established finite `Ensures` guarantee into unbounded `Returns`. Any deadlock, exception, unsupported operation, or incomplete branch prevents the premise from holding.
+
+[[raw-lean-parallelrun-eventually]]
+==== ParallelRun.Eventually
+
+`run.Eventually accept` requires successful initialization and a `ParallelConfig.MustFinish accept` proof. It expresses total correctness for a general concurrent batch. `Eventually.of_explore` accepts an explicit observation budget when a complete finite exploration suffices; the resulting proposition has no fuel bound.
+
+[[raw-lean-parallelrun-outcomes]]
+==== ParallelRun.outcomes
+
+A bounded observation of the run. Straight-line workers need at most their initial total operation count; the same default budget may be insufficient for branching or looping workers. `.error .incomplete` is an observation limit, not a Python exception and not divergence. Increasing fuel can discover completion; an unbounded theorem can also prove it independently of this observer.
 
 [[raw-lean-py]]
 ==== py
@@ -1169,7 +1246,9 @@ Predicates support exact `type` checks, short-circuiting Boolean `and`, guarded 
 
 Trial helpers currently accept Python `int` and `list[int]` parameters after the worker parameter. Their first statement must be an executable `assert` establishing those types, usually by calling the same predicate used in the theorem. The compiler checks that assertion's Python AST, independently of the surrounding Lean logic. Invalid inputs raise `AssertionError`, so even negated outcome claims have a meaningful modeled input domain. Annotations guide translation but never act as assumptions. Execution assumes Python assertions are enabled.
 
-Setup supports integer-list snapshots with `copy()`, integer-list literals, and mutex allocation. Execution uses a `ThreadPoolExecutor`, a submission comprehension, and `future.result()` for every worker. Checks support indexing, slices, integer arithmetic, and ordinary assertions. The supported worker body consists of the scalar and list operations described under <<raw-lean-parallel>>; a universal quoted `Returns` proof currently requires a complete common-mutex region. Quoted `Halts` remains unsupported and produces a coverage error.
+Setup supports integer-list snapshots with `copy()`, integer-list literals, and mutex allocation. Execution uses a `ThreadPoolExecutor`, a submission comprehension, and `future.result()` for every worker. Checks support indexing, slices, integer arithmetic, and ordinary assertions; a helper may omit final assertions when only its execution matters. Worker bodies use the operations described under <<raw-lean-parallel>>.
+
+Quoted outcomes support `Returns`, `Halts`, `Throws`, `CanDeadlock`, `DeadlockFree`, and `CanDiverge`. General proofs use the unbounded concurrent transition system. `Returns` also accepts the existing common-mutex certificate, which supports inductive proofs for arbitrary worker counts. Quoted helpers must provide enough pool threads for every submitted job: use `max_workers=max(1, worker_count)` with `range(worker_count)`, `max_workers=max(1, len(jobs))`, or a positive literal large enough for a literal range. This makes both positive and negated scheduling claims meaningful; a counterexample cannot rely on nonexistent pool capacity.
 
 A precondition in the Lean theorem is an assumption. An `assert` in the trial is executable code whose success or failure is modeled. Unsupported Python constructs in either helper are reported for every dependent proof while other supported obligations continue to be checked.
 
@@ -1204,6 +1283,26 @@ The generated trial description contains calls to actual compiled workers, their
 
 The generated description of a trial call: its initial Python assertion and the concurrent body reached when that assertion succeeds.
 
+[[raw-lean-pytrial-call-candeadlock]]
+==== PyTrial.Call.CanDeadlock
+
+The meaning of quoted `CanDeadlock`: the initial Python assertion succeeds and the body has a finite deadlock witness. A failed input assertion terminates exceptionally, so it cannot witness deadlock.
+
+[[raw-lean-pytrial-call-candiverge]]
+==== PyTrial.Call.CanDiverge
+
+The meaning of quoted `CanDiverge`: the initial Python assertion succeeds and the concurrent body admits infinite execution.
+
+[[raw-lean-pytrial-call-deadlockfree]]
+==== PyTrial.Call.DeadlockFree
+
+The meaning of quoted `DeadlockFree`: the input assertion fails immediately, or it succeeds and the body has a deadlock-freedom certificate. `Call.halts_deadlockFree` derives this from a quoted termination proof.
+
+[[raw-lean-pytrial-call-halts]]
+==== PyTrial.Call.Halts
+
+The meaning of quoted `Halts`: the input assertion fails immediately, or it succeeds and the whole concurrent body terminates. `Call.returns_halts` derives this from quoted `Returns`.
+
 [[raw-lean-pytrial-call-returns]]
 ==== PyTrial.Call.Returns
 
@@ -1214,15 +1313,45 @@ The meaning of `Returns(py("trial(...)"))`: the input assertion succeeds, and `P
 
 The meaning of `Throws(py("trial(...)"))`: the input assertion fails, or it succeeds and some actual modeled body execution raises a worker exception or fails a final assertion. A rejected input is an exception, not unsupported execution.
 
+[[raw-lean-pytrial-candeadlock]]
+==== PyTrial.CanDeadlock
+
+A successfully constructed trial whose explicit worker batch satisfies `ParallelRun.CanDeadlock`. Final assertions are reached only after workers finish, so they cannot introduce a worker deadlock.
+
+[[raw-lean-pytrial-candiverge]]
+==== PyTrial.CanDiverge
+
+A successfully constructed trial whose explicit worker batch satisfies `ParallelRun.CanDiverge`. The trial's supported final assertion checks are finite.
+
+[[raw-lean-pytrial-deadlockfree]]
+==== PyTrial.DeadlockFree
+
+Deadlock freedom of a constructed trial, established either by a termination certificate or by the general worker batch's `DeadlockFree` proof.
+
+[[raw-lean-pytrial-halts]]
+==== PyTrial.Halts
+
+Termination of the concurrent body, established either by an existing `Returns` certificate or by the general worker batch's `Halts` proof. Both successful and exceptional completion count; deadlock and infinite execution do not.
+
+[[raw-lean-pytrial-mutexreturns]]
+==== PyTrial.MutexReturns
+
+The optimized successful-completion certificate for a complete common-mutex region. `Mutex.Ensures` covers all orders of the worker bodies and proves their final assertions. Extraction rejects additional locks and control flow inside that region; use the general transition proof for those programs. This preserves the arbitrary-worker-count shared-counter proof.
+
+[[raw-lean-pytrial-observedthrows]]
+==== PyTrial.ObservedThrows
+
+A completed exceptional trial observed by the finite explorer, including failed final assertions. Incomplete observations never establish this predicate. `PyTrial.Throws` additionally accepts finite reachability witnesses that require more steps than the default observation budget.
+
 [[raw-lean-pytrial-returns]]
 ==== PyTrial.Returns
 
-Successful execution of a concurrent body: the inputs convert to the modeled Python argument domain, the actual workers have a validated common-mutex region, and `Mutex.Ensures` proves successful completion and all final checks for every enabled scheduling choice. An arbitrary worker count is proved inductively.
+Successful execution of a concurrent body, including all final assertion checks, on every enabled schedule. Proofs can supply either `PyTrial.MutexReturns` or a general `ParallelRun.Eventually` derivation whose accepted outcomes are successful heaps satisfying the checks. The general route allows branches, loops, and multiple locks. The optimized mutex route retains inductive proofs for arbitrary worker counts.
 
 [[raw-lean-pytrial-throws]]
 ==== PyTrial.Throws
 
-Exceptional execution of a concurrent body: some actual modeled schedule raises a worker exception or finishes its workers and fails the trial's checks. Concrete witnesses are checked with the general parallel interpreter. Deadlock and unsupported execution do not count as exceptions. Unlike a deterministic call, the existence of one exceptional schedule does not imply termination of every schedule.
+Exceptional execution of a concurrent body: some actual modeled schedule finishes all workers and exposes a worker exception or fails the trial's checks. A bounded complete observation or an unbounded finite reachability derivation supplies the witness. A worker exception followed by another worker's deadlock or infinite loop does not complete the joined batch. Deadlock, divergence, and unsupported execution do not count as exceptions. Unlike a deterministic call, the existence of one exceptional schedule does not imply termination of every schedule.
 
 [[raw-lean-pyvalue]]
 ==== PyValue
@@ -1330,7 +1459,9 @@ The binding appears in generated stubs; `dsimp only` exposes the proposition for
 Throws(f(x)) → Halts(f(x))
 ----
 
-`Not Throws(...)` permits an infinite execution. Use <<raw-lean-returns,Returns>> when successful termination is required.
+That implication applies to deterministic calls. For a concurrent batch, `Throws` means that *some* schedule completes exceptionally, whereas `Halts` covers *every* enabled schedule; one throwing schedule does not prove universal termination.
+
+`Not Throws(...)` permits deadlock and infinite execution. Use <<raw-lean-returns,Returns>> when successful termination is required.
 
 == How it works
 

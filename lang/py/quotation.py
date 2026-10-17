@@ -234,7 +234,10 @@ class Quotations:
 class QuotedTrial(Trial):
     def __init__(self, *args, arguments, captured_names, **kwargs):
         self.arguments = arguments
-        super().__init__(*args, **kwargs)
+        # Lean can negate any quoted proposition. Require a realizable pool for
+        # both universal claims and existential witnesses, and use the general
+        # worker interpreter even when the helper allocates no integer arrays.
+        super().__init__(*args, full_pool=True, general=True, **kwargs)
         self.setup = self.setup[1:]  # The leading assert is compiled by Quotations.trial.
         self.used_names.update(captured_names)
         self.job_name = self.unique('_job')
@@ -360,10 +363,10 @@ def compile_quotation(module, function, expression, mode):
         if compiler.kind(node, env) != 'bool':
             compiler.reject(node, 'a proposition quotation requires a supported Boolean expression')
         term = f'PyValue.IsTrue ({compiler.expression(node, env)})'
-    elif mode in ('Returns', 'Throws'):
+    elif mode in ('Returns', 'Throws', 'Halts', 'CanDeadlock', 'DeadlockFree', 'CanDiverge'):
         term = f'PyTrial.Call.{mode} ({compiler.trial(node)})'
     else:
-        compiler.reject(function, 'Halts for quoted concurrent trials is not yet supported; use Returns for successful termination')
+        compiler.reject(function, f'unknown quoted outcome predicate {mode!r}')
     binders = ' '.join(f'({code} : PyValue)' for code in aliases.values())
     return {'captures': captures, 'term': f'fun ({identifier(module_name)} : Module) {binders} => {term}'}
 

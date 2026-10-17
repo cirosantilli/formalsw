@@ -51,8 +51,8 @@ with tempfile.TemporaryDirectory(prefix='quotation_checks_', dir=REPO / 'tests' 
         ('filtered generator', SOURCE.replace('for item in counter)', 'for item in counter if item)'), 'unsupported Python quotation'),
         ('rebound type', SOURCE + '\ntype = lambda value: int\n', 'unshadowed type'),
         ('unsupported trial code', SOURCE.replace('    before = counter.copy()', '    print(counter)\n    before = counter.copy()'), 'unsupported trial setup'),
+        ('insufficient pool capacity', SOURCE.replace('max_workers=max(1, worker_count)', 'max_workers=1'), 'counterexample trials need'),
         ('missing future wait', SOURCE.replace('future.result()', 'pass'), 'future.result()'),
-        ('unsupported outcome', SOURCE.replace('Returns(py(', 'Halts(py('), 'Halts for quoted'),
         ('missing input assertion', SOURCE.replace('    assert valid_trial_input(counter, worker_count), "invalid trial input"\n', ''), 'initial assert'),
     ]:
         assert source != SOURCE, description
@@ -131,6 +131,14 @@ example : ctx ("py(not a quotation)" = "py(not a quotation)") ∧
 
 -- Invalid inputs fail the actual Python assertion, including under negation.
 example : ctx Throws(py("run_trial(this_function, [], 0)")) := Or.inl rfl
+example : ctx Halts(py("run_trial(this_function, [], 0)")) := Or.inl rfl
+example : ctx DeadlockFree(py("run_trial(this_function, [], 0)")) := Or.inl rfl
+example : ctx Not CanDeadlock(py("run_trial(this_function, [], 0)")) := by
+  intro h
+  cases h.1
+example : ctx Not CanDiverge(py("run_trial(this_function, [], 0)")) := by
+  intro h
+  cases h.1
 example : ctx Throws(py("run_trial(this_function, [True], 0)")) := Or.inl rfl
 example : ctx Not Returns(py("run_trial(this_function, [], 0)")) := by
   intro h

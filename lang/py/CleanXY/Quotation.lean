@@ -15,6 +15,9 @@ syntax (name := pythonQuote) "py(" str ")" : term
 syntax (name := pythonReturns) "Returns(" "py(" str ")" ")" : term
 syntax (name := pythonThrows) "Throws(" "py(" str ")" ")" : term
 syntax (name := pythonHalts) "Halts(" "py(" str ")" ")" : term
+syntax (name := pythonCanDeadlock) "CanDeadlock(" "py(" str ")" ")" : term
+syntax (name := pythonDeadlockFree) "DeadlockFree(" "py(" str ")" ")" : term
+syntax (name := pythonCanDiverge) "CanDiverge(" "py(" str ")" ")" : term
 
 /-- Bind the source module and enclosing function for Python quotations. -/
 syntax (name := pythonContext) "python_context " str str term " in " term : term
@@ -68,6 +71,15 @@ elab_rules (kind := pythonThrows) : term
 
 elab_rules (kind := pythonHalts) : term
   | `(Halts(py($source:str))) => compileQuote source "Halts"
+
+elab_rules (kind := pythonCanDeadlock) : term
+  | `(CanDeadlock(py($source:str))) => compileQuote source "CanDeadlock"
+
+elab_rules (kind := pythonDeadlockFree) : term
+  | `(DeadlockFree(py($source:str))) => compileQuote source "DeadlockFree"
+
+elab_rules (kind := pythonCanDiverge) : term
+  | `(CanDiverge(py($source:str))) => compileQuote source "CanDiverge"
 
 elab_rules (kind := pythonContext) : term
   | `(python_context $source:str $function:str $module:term in $body:term) => do

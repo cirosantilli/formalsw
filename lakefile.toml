@@ -21,6 +21,7 @@ roots = [
   "lang.py.CleanXY.Sorting",
   "lang.py.CleanXY.Syntax",
   "lang.py.CleanXY.Parallel",
+  "lang.py.CleanXY.ParallelLiveness",
   "lang.py.CleanXY.Concurrent",
   "lang.py.CleanXY.PyValue",
   "lang.py.CleanXY.Quotation",

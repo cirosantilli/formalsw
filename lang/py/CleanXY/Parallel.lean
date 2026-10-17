@@ -53,6 +53,8 @@ inductive ParallelOp where
   | acquire (mutex : Expr)
   | release (mutex : Expr)
   | yield
+  | branch (test : Expr) (yes no : List ParallelOp)
+  | loop (test : Expr) (body otherwise : List ParallelOp)
   deriving Repr
 
 def sharedLocation : Expr → Option SharedLocation
@@ -71,6 +73,8 @@ def parallelOp : Stmt → Option ParallelOp
   | .expr (.call (.attribute mutex "release") []) => some (.release mutex)
   | .expr (.call (.name "sleep") [.constant (.int 0)]) => some .yield
   | .expr (.constant .none) => some .yield
+  | .ifThen test yes no => do return .branch test (← yes.mapM parallelOp) (← no.mapM parallelOp)
+  | .whileDo test body otherwise => do return .loop test (← body.mapM parallelOp) (← otherwise.mapM parallelOp)
   | _ => none
 
 private def importsPrimitive (module : Module) (source name : String) : Bool :=
@@ -83,6 +87,28 @@ abbrev SharedEnv := List (String × SharedValue)
 structure ParallelWorker where
   todo : List ParallelOp
   locals : SharedEnv := []
+  deriving Repr
+
+mutual
+  def ParallelOp.needs (primitive : String) : ParallelOp → Bool
+    | .acquire _ | .release _ => primitive == "Lock"
+    | .yield => primitive == "sleep"
+    | .branch _ a b | .loop _ a b => needsList primitive a || needsList primitive b
+    | _ => false
+  def needsList (primitive : String) : List ParallelOp → Bool
+    | [] => false
+    | op :: rest => op.needs primitive || needsList primitive rest
+end
+
+mutual
+  private def usesSleep : Stmt → Bool
+    | .expr (.call (.name "sleep") _) => true
+    | .ifThen _ a b | .whileDo _ a b => blockUsesSleep a || blockUsesSleep b
+    | _ => false
+  private def blockUsesSleep : List Stmt → Bool
+    | [] => false
+    | stmt :: rest => usesSleep stmt || blockUsesSleep rest
+end
 
 /-- Explicit arguments remove any required worker signature. The CLI checks the
 supported source subset, plain data classes, annotations, and primitive bindings. -/
@@ -92,9 +118,9 @@ def parallelFunction (module : Module) (name : String) (values : List SharedValu
   else
     let body := executableBody body
     let program ← body.mapM parallelOp
-    if program.any (fun | .acquire _ | .release _ => true | _ => false) &&
+    if program.any (ParallelOp.needs "Lock") &&
         !importsPrimitive module "threading" "Lock" then none
-    else if body.any (fun | .expr (.call (.name "sleep") _) => true | _ => false) &&
+    else if body.any usesSleep &&
         !importsPrimitive module "time" "sleep" then none
     else some ⟨program, (args.map Arg.name).zip values⟩
 
@@ -130,6 +156,17 @@ def sharedExpr (env : SharedEnv) : Expr → SharedResult SharedValue
   | .unaryOp .uSub operand => do
       let .int n ← sharedExpr env operand | .error .unsupported
       return .int (-n)
+  | .unaryOp .not operand => do
+      let value ← sharedExpr env operand
+      let some scalar := value.toConstant | .error .unsupported
+      return .bool (!scalarTruth scalar)
+  | .compare left [(op, right)] => do
+      let left ← sharedExpr env left
+      let right ← sharedExpr env right
+      let some left := left.toConstant | .error .unsupported
+      let some right := right.toConstant | .error .unsupported
+      let some result := scalarCompare op left right | .error (pythonError "TypeError")
+      return .bool result
   | _ => .error .unsupported
 
 private def objectAt (state : SharedState) (value : SharedValue) : SharedResult (Nat × SharedObject) :=
@@ -183,6 +220,7 @@ def sharedWrite (state : SharedState) (env : SharedEnv) (location : SharedLocati
 structure ParallelState where
   shared : SharedState
   workers : List ParallelWorker
+  deriving Repr
 
 /-- A blocked acquire has no transition. Locks have independent identities, so
 sharing the data but using different mutexes gives no mutual exclusion. -/
@@ -202,7 +240,7 @@ def parallelStep (state : SharedState) (worker : ParallelWorker) :
       let .lock id ← sharedExpr worker.locals mutex | .error (pythonError "AttributeError")
       if state.locked.contains id then
         return ({ state with locked := state.locked.filter (· != id) }, next)
-      else .error .releaseUnlocked
+      else .error (pythonError "RuntimeError")
   | .read name location => some do
       let value ← sharedRead state worker.locals location
       return (state, { next with locals := (name, value) :: worker.locals })
@@ -214,40 +252,78 @@ def parallelStep (state : SharedState) (worker : ParallelWorker) :
       let state ← sharedWrite state worker.locals location value
       return (state, next)
   | .yield => some (.ok (state, next))
+  | .branch test yes no => some do
+      let value ← sharedExpr worker.locals test
+      let some value := value.toConstant | .error .unsupported
+      return (state, { next with todo := (if scalarTruth value then yes else no) ++ rest })
+  | .loop test body otherwise => some do
+      let value ← sharedExpr worker.locals test
+      let some value := value.toConstant | .error .unsupported
+      return (state, { next with todo := if scalarTruth value then
+        body ++ [.loop test body otherwise] ++ rest else otherwise ++ rest })
 
-/-- All enabled worker choices, with other workers' locals unchanged. -/
-def parallelNext (state : SharedState) : List ParallelWorker → List (SharedResult ParallelState)
-  | [] => []
-  | worker :: rest =>
-      let here := match parallelStep state worker with
-        | none => []
-        | some (.error error) => [.error error]
-        | some (.ok (state, worker)) => [.ok ⟨state, worker :: rest⟩]
-      here ++ (parallelNext state rest).map (fun
-        | .error error => .error error
-        | .ok state => .ok { state with workers := worker :: state.workers })
+/-- A joined batch retains worker failures while remaining workers finish.
+An exception in one worker cannot conceal another worker's deadlock or loop. -/
+structure ParallelConfig where
+  state : ParallelState
+  failures : List ParallelFailure := []
+  deriving Repr
 
-/-- Every step consumes one operation; exhausting the operation budget fails. -/
-def parallelExplore : Nat → ParallelState → List ParallelOutcome
-  | fuel, state =>
-      if state.workers.all (fun worker => worker.todo.isEmpty) then [.ok state.shared]
+def ParallelConfig.finished (config : ParallelConfig) : Bool :=
+  config.state.workers.all (fun w => w.todo.isEmpty)
+
+/-- Coverage/model failures cannot be concealed by an earlier Python exception. -/
+def ParallelConfig.outcome (config : ParallelConfig) : ParallelOutcome :=
+  match config.failures.find? (fun | .exception _ => false | _ => true) with
+  | some error => .error error
+  | none => match config.failures with
+    | [] => .ok config.state.shared
+    | error :: _ => .error error
+
+/-- Selecting a blocked or completed worker is not an execution step. -/
+def parallelChoose (config : ParallelConfig) (index : Nat) : Option ParallelConfig := do
+  let worker ← config.state.workers[index]?
+  let result ← parallelStep config.state.shared worker
+  match result with
+  | .ok (shared, next) => return { config with state :=
+      ⟨shared, config.state.workers.set index next⟩ }
+  | .error error => return {
+      state := ⟨config.state.shared, config.state.workers.set index { worker with todo := [] }⟩
+      failures := config.failures ++ [error] }
+
+def ParallelConfig.next (config : ParallelConfig) : List ParallelConfig :=
+  (List.range config.state.workers.length).filterMap (parallelChoose config)
+
+/-- Fuel bounds observation only. Incomplete exploration is never divergence. -/
+def exploreParallel : Nat → ParallelConfig → List ParallelOutcome
+  | fuel, config =>
+      if config.finished then [config.outcome]
       else match fuel with
         | 0 => [.error .incomplete]
         | fuel + 1 =>
-            let following := parallelNext state.shared state.workers
+            let following := config.next
             if following.isEmpty then [.error .deadlock]
-            else following.flatMap fun
-              | .error error => [.error error]
-              | .ok next => parallelExplore fuel next
+            else following.flatMap (exploreParallel fuel)
 
+def parallelExplore (fuel : Nat) (state : ParallelState) : List ParallelOutcome :=
+  exploreParallel fuel ⟨state, []⟩
+
+/-- Keep the program, not just a bounded list of observed outcomes. -/
 structure ParallelRun where
-  outcomes : List ParallelOutcome
-  deriving Repr, DecidableEq
+  calls : List (Option ParallelWorker)
+  initial : SharedState
+  deriving Repr
 
 def parallelRun (calls : List (Option ParallelWorker)) (initial : SharedState) : ParallelRun :=
-  match calls.mapM id with
-  | none => ⟨[.error .unsupported]⟩
-  | some workers => ⟨parallelExplore ((workers.map (fun worker => worker.todo.length)).sum) ⟨initial, workers⟩⟩
+  ⟨calls, initial⟩
+
+def ParallelRun.config (run : ParallelRun) : Option ParallelConfig := do
+  return ⟨⟨run.initial, ← run.calls.mapM id⟩, []⟩
+
+def ParallelRun.outcomes (run : ParallelRun) : List ParallelOutcome :=
+  match run.config with
+  | none => [.error .unsupported]
+  | some config => exploreParallel ((config.state.workers.map (fun w => w.todo.length)).sum) config
 
 def ParallelRun.Ensures (run : ParallelRun) (post : SharedState → Prop) : Prop :=
   run.outcomes ≠ [] ∧ ∀ outcome ∈ run.outcomes, match outcome with
@@ -269,16 +345,14 @@ theorem ParallelRun.Ensures.of_canReturn {run : ParallelRun} {post : SharedState
     (guarantee : run.Ensures post) {value : SharedState} (reachable : run.CanReturn value) : post value :=
   guarantee.2 (.ok value) reachable
 
-def parallelReplay (state : ParallelState) : List Nat → ParallelOutcome
-  | [] => if state.workers.all (fun worker => worker.todo.isEmpty) then .ok state.shared
-      else .error .incomplete
-  | index :: rest => match state.workers[index]? with
+def replayParallel (config : ParallelConfig) : List Nat → ParallelOutcome
+  | [] => if config.finished then config.outcome else .error .incomplete
+  | index :: rest => match parallelChoose config index with
       | none => .error .invalidSchedule
-      | some worker => match parallelStep state.shared worker with
-          | none => .error .invalidSchedule
-          | some (.error error) => .error error
-          | some (.ok (shared, worker)) =>
-              parallelReplay ⟨shared, state.workers.set index worker⟩ rest
+      | some next => replayParallel next rest
+
+def parallelReplay (state : ParallelState) (schedule : List Nat) : ParallelOutcome :=
+  replayParallel ⟨state, []⟩ schedule
 
 macro "Parallel(" calls:term "," initial:term ")" : term => `(parallelRun $calls $initial)
 macro "Ensures(" run:term "," post:term ")" : term => `(ParallelRun.Ensures $run $post)

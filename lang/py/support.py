@@ -286,6 +286,19 @@ class SupportChecker:
                     return env[expr.id]
                 reject(expr, f'unbound local {expr.id!r} in parallel execution')
                 return frozenset()
+            if isinstance(expr, ast.Compare):
+                if len(expr.ops) != 1:
+                    reject(expr, 'parallel comparisons currently support one operator at a time')
+                kinds = pure(expr.left)
+                for operand in expr.comparators:
+                    kinds |= pure(operand)
+                if not kinds <= {'int', 'str', 'bool', 'none'}:
+                    reject(expr, 'parallel comparisons require local scalars')
+                return self.expression(expr, env, reject)
+            if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+                if not pure(expr.operand) <= {'int', 'str', 'bool', 'none'}:
+                    reject(expr, 'parallel truth tests require local scalars')
+                return frozenset(['bool'])
             if isinstance(expr, (ast.BinOp, ast.UnaryOp)):
                 # Reuse the conservative scalar arithmetic validator, with no heap reads.
                 if any(isinstance(node, (ast.Attribute, ast.Subscript, ast.Call, ast.Compare)) for node in ast.walk(expr)):
@@ -328,38 +341,66 @@ class SupportChecker:
             reject(expr, 'parallel assignments require a local, list item, or plain object field')
             return frozenset()
 
-        for statement in body_of(function):
-            if isinstance(statement, ast.Pass):
-                continue
-            if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
-                target = statement.targets[0]
-                if isinstance(target, ast.Name):
-                    if target.id in ('Lock', 'sleep'):
-                        reject(statement, 'parallel locals must not shadow Lock or sleep')
-                    env[target.id] = location(statement.value) if isinstance(statement.value, (ast.Attribute, ast.Subscript)) else pure(statement.value)
+        def block(body, initial):
+            nonlocal env
+            env = initial.copy()
+            for statement in body:
+                if isinstance(statement, ast.If):
+                    if not pure(statement.test) <= {'int', 'str', 'bool', 'none'}:
+                        reject(statement.test, 'parallel truth tests require local scalars')
+                    before = env.copy()
+                    yes = block(statement.body, before)
+                    no = block(statement.orelse, before)
+                    env = self.join(yes, no)
                     continue
-                target_kind = location(target)
-                value_kind = pure(statement.value)
-                if isinstance(target, ast.Subscript) and not value_kind <= target_kind:
-                    reject(statement, 'parallel list writes must preserve the annotated element type')
-                if isinstance(target, ast.Attribute):
-                    normalized = frozenset('reference' if kind.startswith(('object:', 'array:')) else kind for kind in value_kind)
-                    if not normalized <= target_kind:
-                        reject(statement, 'parallel field writes must preserve the declared scalar or reference layout')
-                continue
-            if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
-                call = statement.value
-                if not call.keywords:
-                    if isinstance(call.func, ast.Attribute) and call.func.attr in ('acquire', 'release') and not call.args:
-                        if pure(call.func.value) != frozenset(['lock']):
-                            reject(call, 'acquire/release requires a mutex reference')
-                        required_primitives.add(('Lock', 'threading'))
+                if isinstance(statement, ast.While):
+                    before = env.copy()
+                    while True:
+                        if not pure(statement.test) <= {'int', 'str', 'bool', 'none'}:
+                            reject(statement.test, 'parallel truth tests require local scalars')
+                        current = env.copy()
+                        after = block(statement.body, current)
+                        joined = self.join(before, self.join(current, after))
+                        env = joined
+                        if joined == current:
+                            break
+                    env = block(statement.orelse, env)
+                    continue
+                if isinstance(statement, ast.Pass):
+                    continue
+                if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+                    target = statement.targets[0]
+                    if isinstance(target, ast.Name):
+                        if target.id in ('Lock', 'sleep'):
+                            reject(statement, 'parallel locals must not shadow Lock or sleep')
+                        env[target.id] = location(statement.value) if isinstance(statement.value, (ast.Attribute, ast.Subscript)) else pure(statement.value)
                         continue
-                    if (isinstance(call.func, ast.Name) and call.func.id == 'sleep' and len(call.args) == 1
-                            and isinstance(call.args[0], ast.Constant) and type(call.args[0].value) is int and call.args[0].value == 0):
-                        required_primitives.add(('sleep', 'time'))
-                        continue
-            reject(statement, 'parallel execution supports local assignments, separate heap reads/writes, acquire/release, sleep(0), and pass only')
+                    target_kind = location(target)
+                    value_kind = pure(statement.value)
+                    if isinstance(target, ast.Subscript) and not value_kind <= target_kind:
+                        reject(statement, 'parallel list writes must preserve the annotated element type')
+                    if isinstance(target, ast.Attribute):
+                        normalized = frozenset('reference' if kind.startswith(('object:', 'array:')) else kind for kind in value_kind)
+                        if not normalized <= target_kind:
+                            reject(statement, 'parallel field writes must preserve the declared scalar or reference layout')
+                    continue
+                if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                    call = statement.value
+                    if not call.keywords:
+                        if isinstance(call.func, ast.Attribute) and call.func.attr in ('acquire', 'release') and not call.args:
+                            if pure(call.func.value) != frozenset(['lock']):
+                                reject(call, 'acquire/release requires a mutex reference')
+                            required_primitives.add(('Lock', 'threading'))
+                            continue
+                        if (isinstance(call.func, ast.Name) and call.func.id == 'sleep' and len(call.args) == 1
+                                and isinstance(call.args[0], ast.Constant) and type(call.args[0].value) is int and call.args[0].value == 0):
+                            required_primitives.add(('sleep', 'time'))
+                            continue
+                reject(statement, 'parallel execution supports local assignments, separate heap reads/writes, acquire/release, sleep(0), scalar if/while, and pass only')
+
+            return env.copy()
+
+        block(body_of(function), env)
 
         for primitive, module in sorted(required_primitives):
             definitions = []
@@ -573,10 +614,10 @@ class SupportChecker:
         if name:
             function = self.functions[name]
             if uses_parallel_model(function) and (
-                not marker.startswith('theorem ') or re.search(r'\b(?:Returns|Halts|Throws|diverges)\(', marker)
+                not marker.startswith('theorem ') or (re.search(r'\b(?:Returns|Halts|Throws|diverges)\(', marker) and not re.search(r'\bParallel\(', marker))
             ):
                 issues.append(UnsupportedConstruct(name, function.lineno,
-                    'concurrent workers require a raw Parallel specification with Ensures or CanReturn'))
+                    'concurrent workers require a raw Parallel specification or a quoted Python trial'))
             args = function.args.args
             unary_int = len(args) == 1 and isinstance(args[0].annotation, ast.Name) and args[0].annotation.id == 'int'
             unary_list = len(args) == 1 and (

@@ -1,4 +1,5 @@
 import lang.py.CleanXY.Concurrent
+import lang.py.CleanXY.ParallelLiveness
 
 namespace CleanXY.PyAst
 
@@ -185,7 +186,7 @@ def extract (worker : ParallelWorker) : Option (Nat × ParallelWorker) := do
     let .lock identity ← worker.locals.lookup mutex | none
     let body := reversed.reverse
     if body.any (fun
-      | .acquire _ | .release _ => true
+      | .acquire _ | .release _ | .branch .. | .loop .. => true
       | .read name _ | .assign name _ => name == mutex
       | _ => false) then none
     else some (identity, { worker with todo := body })
@@ -206,7 +207,7 @@ def readInts (heap : SharedState) (address : Nat) : Option (List Int) := do
 def intItem (values : List Int) (index : Int) : Option Int :=
   Concurrent.readIntItem { objects := [.array (values.map .int)] } 0 index
 
-def Returns (trial : Option PyTrial) : Prop :=
+def MutexReturns (trial : Option PyTrial) : Prop :=
   ∃ run, trial = some run ∧ ∃ mutex workers,
     run.initial.locked = [] ∧
     run.calls.mapM (fun call => do
@@ -216,10 +217,37 @@ def Returns (trial : Option PyTrial) : Prop :=
 
 /-- An actual worker exception or a failed post-execution assertion check.
 Deadlock, unsupported execution and incomplete exploration are not exceptions. -/
-def Throws (trial : Option PyTrial) : Prop :=
+def ObservedThrows (trial : Option PyTrial) : Prop :=
   ∃ run, trial = some run ∧
     ((∃ error, .error (.exception error) ∈ (parallelRun run.calls run.initial).outcomes) ∨
      ∃ final, ParallelRun.CanReturn (parallelRun run.calls run.initial) final ∧ run.check final = none)
+
+/-- Two sound proof routes: the existing unbounded common-mutex certificate,
+or total correctness of the general interleaving semantics. -/
+def Returns (trial : Option PyTrial) : Prop :=
+  MutexReturns trial ∨ ∃ run, trial = some run ∧
+    (parallelRun run.calls run.initial).Eventually (fun
+      | .ok state => run.check state = some ()
+      | _ => False)
+
+def Halts (trial : Option PyTrial) : Prop :=
+  Returns trial ∨ ∃ run, trial = some run ∧ (parallelRun run.calls run.initial).Halts
+
+def Throws (trial : Option PyTrial) : Prop :=
+  ObservedThrows trial ∨ ∃ run initial final, trial = some run ∧
+    (parallelRun run.calls run.initial).config = some initial ∧ initial.Reaches final ∧
+    final.finished = true ∧
+    ((∃ e, final.outcome = .error (.exception e)) ∨
+      ∃ state, final.outcome = .ok state ∧ run.check state = none)
+
+def CanDeadlock (trial : Option PyTrial) : Prop :=
+  ∃ run, trial = some run ∧ (parallelRun run.calls run.initial).CanDeadlock
+
+def CanDiverge (trial : Option PyTrial) : Prop :=
+  ∃ run, trial = some run ∧ (parallelRun run.calls run.initial).CanDiverge
+
+def DeadlockFree (trial : Option PyTrial) : Prop :=
+  Halts trial ∨ ∃ run, trial = some run ∧ (parallelRun run.calls run.initial).DeadlockFree
 
 /-- An executable input assertion followed, on success, by a concurrent trial.
 The assertion is compiled from the helper, independently of the Lean theorem. -/
@@ -235,6 +263,28 @@ def Returns (call : Call) : Prop :=
 def Throws (call : Call) : Prop :=
   call.condition = some (.bool false) ∨
     (PyValue.IsTrue call.condition ∧ PyTrial.Throws call.body)
+
+def Halts (call : Call) : Prop :=
+  call.condition = some (.bool false) ∨
+    (PyValue.IsTrue call.condition ∧ PyTrial.Halts call.body)
+
+def CanDeadlock (call : Call) : Prop :=
+  PyValue.IsTrue call.condition ∧ PyTrial.CanDeadlock call.body
+
+def CanDiverge (call : Call) : Prop :=
+  PyValue.IsTrue call.condition ∧ PyTrial.CanDiverge call.body
+
+def DeadlockFree (call : Call) : Prop :=
+  call.condition = some (.bool false) ∨
+    (PyValue.IsTrue call.condition ∧ PyTrial.DeadlockFree call.body)
+
+theorem returns_halts {call : Call} (h : call.Returns) : call.Halts :=
+  Or.inr ⟨h.1, Or.inl h.2⟩
+
+theorem halts_deadlockFree {call : Call} (h : call.Halts) : call.DeadlockFree := by
+  rcases h with failed | ⟨valid, halted⟩
+  · exact Or.inl failed
+  · exact Or.inr ⟨valid, Or.inl halted⟩
 
 end Call
 
