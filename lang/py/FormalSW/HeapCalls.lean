@@ -856,6 +856,20 @@ theorem assign (evaluated : Evaluates module env expression heap value finalHeap
       (setLocal env name value) finalHeap :=
   fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
 
+/-- Augmented assignment exposes its updated local and heap to following statements. -/
+theorem augAssign (lookup : env name = some left)
+    (evaluated : Evaluates module env expression heap right middle)
+    (operation : inplace op left right middle = some (.ok value, finalHeap)) :
+    BlockContinues module env [.augAssign (.name name) op expression] heap
+      (setLocal env name value) finalHeap := by
+  intro following anchors stack
+  apply Reaches.next rfl
+  apply (Evaluates.lookup (module := module) (heap := heap) lookup anchors _).trans
+  apply Reaches.next rfl
+  apply (evaluated anchors _).trans
+  exact .next (following := ⟨.value value, .assign name following env :: stack, finalHeap⟩)
+    (by simp [step, result, run, operation]) (.next rfl .refl)
+
 /-- Subscription assignment evaluates the RHS before the receiver and index. -/
 theorem setItem
     (ordinary : ∀ a b c, index ≠ .slice a b c)
