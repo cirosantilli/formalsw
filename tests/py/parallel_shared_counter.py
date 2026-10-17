@@ -4,7 +4,8 @@
 Run: python3 tests/py/parallel_shared_counter.py
 Prove: ./cleanxy tests/py/parallel_shared_counter.py
 
-The counter is a one-element list so both workers share the same mutable integer.
+The counter is the first element of a nonempty integer list. The proof covers
+any initial contents and any nonnegative worker count; main demonstrates two workers.
 Both workers also receive the SAME mutex. sleep(0) gives the other worker a
 chance to run, making the unsafe version's lost update easy to see.
 """
@@ -16,7 +17,10 @@ from time import sleep
 def increment_unsafe(counter: list[int], mutex: Lock) -> None:
     """Increment using an unprotected read-modify-write operation.
 
-    @cleanxy: Not Concurrent(run_trial)
+    @cleanxy: theorem loses_an_update :
+      ∃ (counter worker_count : PyValue),
+        py("valid_trial_input(counter, worker_count)") ∧
+        Throws(py("run_trial(this_function, counter, worker_count)"))
     """
     snapshot = counter[0]
     sleep(0)
@@ -26,7 +30,10 @@ def increment_unsafe(counter: list[int], mutex: Lock) -> None:
 def increment_safe(counter: list[int], mutex: Lock) -> None:
     """Hold the shared mutex for the whole read-modify-write operation.
 
-    @cleanxy: Concurrent(run_trial)
+    @cleanxy: theorem preserves_updates :
+      ∀ (counter worker_count : PyValue),
+        py("valid_trial_input(counter, worker_count)") →
+        Returns(py("run_trial(this_function, counter, worker_count)"))
     """
     mutex.acquire()
     snapshot = counter[0]
@@ -35,15 +42,27 @@ def increment_safe(counter: list[int], mutex: Lock) -> None:
     mutex.release()
 
 
-def run_trial(increment):
-    counter = [0]
+def valid_trial_input(counter, worker_count):
+    return (
+        type(counter) == list
+        and len(counter) > 0
+        and all(type(item) == int for item in counter)
+        and type(worker_count) == int
+        and worker_count >= 0
+    )
+
+
+def run_trial(increment, counter: list[int], worker_count: int):
+    assert valid_trial_input(counter, worker_count), "invalid trial input"
+    before = counter.copy()
     mutex = Lock()
-    with ThreadPoolExecutor(max_workers=2) as workers:
-        futures = [workers.submit(increment, counter, mutex) for _ in range(2)]
+    with ThreadPoolExecutor(max_workers=max(1, worker_count)) as workers:
+        futures = [workers.submit(increment, counter, mutex) for _ in range(worker_count)]
         # Propagate worker exceptions; joining alone would hide them.
         for future in futures:
             future.result()
-    assert counter[0] == 2, f"expected counter == 2 after two increments; got {counter[0]}"
+    assert counter[0] == before[0] + worker_count, "an increment was lost"
+    assert counter[1:] == before[1:], "another counter element changed"
 
 
 def main():
@@ -54,7 +73,7 @@ def main():
         print(f"{increment.__name__}: {trials} real-thread trials")
         for trial in range(1, trials + 1):
             try:
-                run_trial(increment)
+                run_trial(increment, [0], 2)
             except AssertionError as error:
                 failures += 1
                 if increment is increment_safe:

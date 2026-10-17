@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Check the Python/Lean boundary and binding to actual predicate/trial source."""
+from pathlib import Path
+import json
+import os
+import subprocess
+import tempfile
+
+REPO = Path(__file__).resolve().parents[2]
+SOURCE = (REPO / 'tests/py/parallel_shared_counter.py').read_text()
+PROOF = (REPO / 'tests/py/parallel_shared_counter.py.lean').read_text()
+
+
+def run(path, stub=False):
+    return subprocess.run([str(REPO / 'cleanxy'), *(['--stub'] if stub else []), str(path)],
+                          cwd=REPO, text=True, capture_output=True, timeout=60)
+
+
+with tempfile.TemporaryDirectory(prefix='quotation_checks_', dir=REPO / 'tests' / 'py') as directory:
+    path = Path(directory) / 'probe.py'
+    path.write_text(SOURCE)
+    stub = run(path, True)
+    assert stub.returncode == 0, stub.stderr
+    namespace = next(line.split(' ', 1)[1] for line in stub.stdout.splitlines() if line.startswith('namespace '))
+    proof = PROOF.replace(PROOF.splitlines()[0], stub.stdout.splitlines()[0]).replace(
+        'tests.py.parallel_shared_counter', namespace).replace('ParallelSharedCounterAst', 'ProbeAst').replace(
+        '"tests/py/parallel_shared_counter.py"', json.dumps(str(path)))
+    path.with_suffix('.py.lean').write_text(proof)
+    result = run(path)
+    assert result.returncode == 0 and 'All 2 checks passed' in result.stdout, result.stdout + result.stderr
+
+    # None of the setup, precondition, worker, or postcondition is a trusted hint.
+    for description, source in [
+        ('empty list admitted', SOURCE.replace('len(counter) > 0', 'len(counter) >= 0')),
+        ('negative worker count admitted', SOURCE.replace('worker_count >= 0', 'worker_count >= -1')),
+        ('fixed worker count', SOURCE.replace('range(worker_count)', 'range(2)')),
+        ('wrong assertion', SOURCE.replace('before[0] + worker_count', 'before[0] + 2')),
+        ('wrong increment', SOURCE.replace('snapshot + 1', 'snapshot + 2')),
+        ('missing acquire', SOURCE.replace('    mutex.acquire()\n', '')),
+    ]:
+        assert source != SOURCE, description
+        path.write_text(source)
+        result = run(path)
+        assert result.returncode != 0 and 'failed' in result.stdout + result.stderr, (description, result.stdout, result.stderr)
+
+    for description, source, diagnostic in [
+        ('unsupported predicate operation', SOURCE.replace('len(counter) > 0', 'print(counter)'), 'Boolean conditions'),
+        ('unguarded length', SOURCE.replace('type(counter) == list\n        and len(counter) > 0', 'len(counter) > 0\n        and type(counter) == list'), 'preceding Python list'),
+        ('missing element guard', SOURCE.replace('and all(type(item) == int for item in counter)', ''), 'initial Python assertion must establish list[int]'),
+        ('missing integer guard', SOURCE.replace('and type(worker_count) == int', ''), 'preceding Python type'),
+        ('filtered generator', SOURCE.replace('for item in counter)', 'for item in counter if item)'), 'unsupported Python quotation'),
+        ('rebound type', SOURCE + '\ntype = lambda value: int\n', 'unshadowed type'),
+        ('unsupported trial code', SOURCE.replace('    before = counter.copy()', '    print(counter)\n    before = counter.copy()'), 'unsupported trial setup'),
+        ('missing future wait', SOURCE.replace('future.result()', 'pass'), 'future.result()'),
+        ('unsupported outcome', SOURCE.replace('Returns(py(', 'Halts(py('), 'Halts for quoted'),
+        ('missing input assertion', SOURCE.replace('    assert valid_trial_input(counter, worker_count), "invalid trial input"\n', ''), 'initial assert'),
+    ]:
+        assert source != SOURCE, description
+        path.write_text(source)
+        result = run(path, True)
+        assert result.returncode != 0 and diagnostic in result.stderr, (description, result.stdout, result.stderr)
+        assert 'unsupported Python constructs' in result.stderr, result.stderr
+
+    # Bound Lean variables can resemble compiler temporaries. Only declarations
+    # and quotation occurrences change; Python helper locals remain independent.
+    renamed = SOURCE.replace('(counter worker_count : PyValue)', '(_argument3 _value2 : PyValue)')
+    renamed = renamed.replace('py("valid_trial_input(counter, worker_count)")', 'py("valid_trial_input(_argument3, _value2)")')
+    renamed = renamed.replace('py("run_trial(this_function, counter, worker_count)")', 'py("run_trial(this_function, _argument3, _value2)")')
+    path.write_text(renamed)
+    result = run(path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    # The statement accepts multiline Python quotations and direct predicates.
+    inline = '''py(r#"
+          type(counter) == list and len(counter) > 0
+          and all(type(item) == int for item in counter)
+          and type(worker_count) == int and worker_count >= 0
+        "#)'''
+    path.write_text(SOURCE.replace('py("valid_trial_input(counter, worker_count)")', inline))
+    result = run(path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    # Native Lean owns scopes and theorem structure, not a recognized template.
+    nested = SOURCE.replace('∀ (counter worker_count : PyValue),',
+                            '∀ counter : PyValue,\n      ∀ worker_count : PyValue,')
+    nested = nested.replace('py("valid_trial_input(counter, worker_count)") →',
+                            '(/- py("not a quotation") /- nested -/ -/\n'
+                            '         py("valid_trial_input(counter, worker_count)")) →')
+    path.write_text(nested)
+    result = run(path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    path.write_text(SOURCE.replace('py("valid_trial_input(counter, worker_count)")',
+                                   'py(valid_trial_input(counter, worker_count))'))
+    result = run(path, True)
+    assert result.returncode != 0 and 'expected string literal' in result.stderr, result.stderr
+
+    path.write_text(SOURCE)
+    native = Path(directory) / 'native.lean'
+    prefix = (stub.stdout.splitlines()[0] + '\nimport CleanXY\nopen CleanXY.PyAst\n'
+              'local macro "ctx " body:term : term =>\n'
+              '  `(python_context ' + json.dumps(str(path)) +
+              ' "increment_safe" ProbeAst.module in $body)\n')
+    native.write_text(prefix + r'''
+abbrev PythonInput := PyValue
+
+example : ctx ∀ value : PythonInput, py("type(value) == int") →
+    let value : PyValue := .string "py(()"
+    Not py("type(value) == int") := by
+  intro value _h
+  change (some (.bool false) : Option PyValue) ≠ some (.bool true)
+  intro impossible
+  cases impossible
+
+example : ctx (fun δ : PyValue => py("type(δ) == int")) (.int 3) := rfl
+
+-- Neither the Lean namespace nor local binders can capture compiler names.
+namespace Shadow
+def PyValue := Nat
+example : ctx ∀ (Module PyValue : CleanXY.PyAst.PyValue),
+    py("type(Module) == int and type(PyValue) == int") →
+    py("type(Module) == int and type(PyValue) == int") := by
+  intro _ _ h
+  exact h
+end Shadow
+
+example : ctx py(r##"type('py("unterminated(') == str"##) := rfl
+example : ctx py("type(\"a\\nb\") == str") := rfl
+example : ctx ("py(not a quotation)" = "py(not a quotation)") ∧
+    (/- py("also ignored") -/ py("type([1, 2]) == list")) := ⟨rfl, rfl⟩
+
+-- Invalid inputs fail the actual Python assertion, including under negation.
+example : ctx Throws(py("run_trial(this_function, [], 0)")) := Or.inl rfl
+example : ctx Throws(py("run_trial(this_function, [True], 0)")) := Or.inl rfl
+example : ctx Not Returns(py("run_trial(this_function, [], 0)")) := by
+  intro h
+  cases h.1
+example : ctx Not (Not Throws(py("run_trial(this_function, [], 0)"))) := by
+  intro h
+  exact h (Or.inl rfl)
+''')
+    env = dict(os.environ, LEAN_PATH=str(REPO / '.cleanxy/olean'))
+    def check_native():
+        return subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(native)],
+                              cwd=REPO, env=env, text=True, capture_output=True, timeout=30)
+    result = check_native()
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    for statement, diagnostic in [
+        ('example : ctx py("type(missing) == int") := by rfl', 'Unknown identifier'),
+        ('example : ctx ∀ value : Nat, py("type(value) == int") := by intros; rfl', 'Type mismatch'),
+    ]:
+        native.write_text(prefix + statement + '\n')
+        result = check_native()
+        assert result.returncode != 0 and diagnostic in result.stdout, result.stdout + result.stderr
+
+print('Python quotations: native Lean syntax and scope, source binding, domain checks, and unbounded proofs passed')

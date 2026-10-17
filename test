@@ -316,11 +316,16 @@ def main() -> int:
         cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         timeout=120,
     )
+    quotations = subprocess.run(
+        [sys.executable, "tests/py/quotation_checks"],
+        cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        timeout=120,
+    )
     parallel_passed = (parallel_semantics.returncode == 0 and parallel_runtime.returncode == 0
-                       and concurrent_specs.returncode == 0)
+                       and concurrent_specs.returncode == 0 and quotations.returncode == 0)
     print(f"{'PASS' if parallel_passed else 'FAIL'} parallel semantics and real-thread data structures", flush=True)
     if not parallel_passed:
-        for completed in (parallel_semantics, parallel_runtime, concurrent_specs):
+        for completed in (parallel_semantics, parallel_runtime, concurrent_specs, quotations):
             print(textwrap.indent((completed.stdout + completed.stderr).rstrip(), "  "))
     raw_docs = (REPO / "README.adoc").read_text().split("=== Raw Lean specification\n", 1)[1].split("\n== How it works", 1)[0]
     raw_headers = re.findall(r"^==== (.+)$", raw_docs, re.MULTILINE)

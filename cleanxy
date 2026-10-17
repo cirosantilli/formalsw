@@ -16,6 +16,8 @@ from pathlib import Path
 
 from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_model
 from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
+from lang.py.quotation import compile_quotation
+from lang.py.lean_frontend import parse_theorem
 
 
 class UnsupportedSyntax(Exception):
@@ -66,6 +68,7 @@ class RawTheoremRequirement:
     theorem_name: str
     params: str
     property_type: str
+    quotations: tuple[dict, ...] = ()
 
 
 def lean_string(value: str) -> str:
@@ -255,27 +258,13 @@ def strip_marker_prefix(line: str) -> str | None:
 def parse_raw_theorem(marker: str) -> RawTheoremRequirement | None:
     """Parse a raw Lean theorem header into a typed proof obligation."""
     theorem = marker.strip().removesuffix(".").strip()
-    match = re.match(r"theorem\s+([A-Za-z_][A-Za-z0-9_'.]*)\s*(.*)", theorem, re.DOTALL)
-    if match is None:
+    if theorem.split(maxsplit=1)[0:1] != ["theorem"]:
         return None
-    rest = match.group(2)
-    depth = 0
-    split_at = None
-    for index, char in enumerate(rest):
-        if char in "([{":
-            depth += 1
-        elif char in ")]}":
-            depth -= 1
-        elif char == ":" and depth == 0:
-            split_at = index
-            break
-    if split_at is None:
-        return None
-    return RawTheoremRequirement(
-        theorem_name=match.group(1),
-        params=rest[:split_at].strip(),
-        property_type=rest[split_at + 1:].strip(),
-    )
+    try:
+        parsed = parse_theorem(theorem)
+    except ScenarioError as error:
+        raise InvalidRequirement(str(error)) from error
+    return RawTheoremRequirement(parsed['name'], parsed['params'], parsed['type'], tuple(parsed['quotes']))
 
 
 def raw_theorem_type(requirement: RawTheoremRequirement) -> str:
@@ -474,8 +463,29 @@ def collect_requirements(
                     property_type, source_path, marker.line, marker.text, unsupported,
                 ))
                 continue
-            unsupported = support.requirement(stmt.name, marker.text)
             raw_theorem = parse_raw_theorem(marker.text)
+            if raw_theorem is not None and raw_theorem.quotations:
+                unsupported = support.requirement(stmt.name, "theorem quotation : True")
+                property_type = "False"
+                if not unsupported:
+                    try:
+                        for quotation in raw_theorem.quotations:
+                            compile_quotation(module, stmt, quotation['expression'], quotation['mode'])
+                        property_type = (
+                            f'python_context {lean_string(str(source_path))} {lean_string(stmt.name)} '
+                            f'{ast_namespace}.module in\n{raw_theorem_type(raw_theorem)}'
+                        )
+                    except ScenarioUnsupported as error:
+                        unsupported = (UnsupportedConstruct(stmt.name, error.line, str(error)),)
+                    except ScenarioError as error:
+                        raise InvalidRequirement(str(error)) from error
+                theorem_name = raw_theorem.theorem_name
+                if "." not in theorem_name:
+                    theorem_name = f"{proof_namespace}.{lean_import_component(stmt.name)}.{theorem_name}"
+                requirements.append(Requirement(theorem_name, property_type, source_path,
+                    marker.line, marker.text, unsupported))
+                continue
+            unsupported = support.requirement(stmt.name, marker.text)
             if raw_theorem is not None:
                 theorem_name = raw_theorem.theorem_name
                 if "." not in theorem_name:

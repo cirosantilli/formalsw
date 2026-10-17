@@ -250,10 +250,11 @@ class Trial:
                 and keyword.value.func.id == 'max' and not keyword.value.keywords and len(keyword.value.args) == 2
                 and isinstance(keyword.value.args[0], ast.Constant) and type(keyword.value.args[0].value) is int
                 and keyword.value.args[0].value == 1
-                and isinstance(keyword.value.args[1], ast.Call) and isinstance(keyword.value.args[1].func, ast.Name)
-                and keyword.value.args[1].func.id == 'len' and not keyword.value.args[1].keywords
-                and len(keyword.value.args[1].args) == 1 and isinstance(keyword.value.args[1].args[0], ast.Name)
-                and keyword.value.args[1].args[0].id in dict(self.collections)
+                and (isinstance(keyword.value.args[1], ast.Name) and keyword.value.args[1].id in self.inputs
+                     or isinstance(keyword.value.args[1], ast.Call) and isinstance(keyword.value.args[1].func, ast.Name)
+                     and keyword.value.args[1].func.id == 'len' and not keyword.value.args[1].keywords
+                     and len(keyword.value.args[1].args) == 1 and isinstance(keyword.value.args[1].args[0], ast.Name)
+                     and keyword.value.args[1].args[0].id in dict(self.collections))
             ):
                 self.reject(ctor, 'executor max_workers must be a positive literal or max(1, len(collection))')
         if len(ctor.keywords) > 1 or len(statement.body) != 2:

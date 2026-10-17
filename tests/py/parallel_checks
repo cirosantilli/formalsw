@@ -32,14 +32,18 @@ def force_lost_update(counter, mutex):
 
 
 try:
-    ns['run_trial'](force_lost_update)
+    ns['run_trial'](force_lost_update, [0], 2)
 except AssertionError as error:
-    assert str(error) == 'expected counter == 2 after two increments; got 1', error
+    assert str(error) == 'an increment was lost', error
 else:
     raise AssertionError('the forced lost-update schedule did not trigger the assertion')
 
-for _ in range(10):
-    ns['run_trial'](ns['increment_safe'])
+for initial in ([0], [-17], [8, -3, 19], [10 ** 50, 0]):
+    for count in (0, 1, 2, 8):
+        assert ns['valid_trial_input'](initial, count)
+        ns['run_trial'](ns['increment_safe'], initial.copy(), count)
+for values, count in [([], 2), ([True], 2), ([1, 'x'], 2), ([1], -1), ([1], True), ('x', 2)]:
+    assert not ns['valid_trial_input'](values, count)
 
 # The public demo runs both versions, prints rates, and catches only the expected
 # unsafe assertions. Do not make the test depend on a random failure percentage.

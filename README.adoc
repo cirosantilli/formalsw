@@ -207,34 +207,64 @@ An increment reads the counter, computes the next value, then writes it back. Wi
 
 `increment_safe` holds the same shared `threading.Lock` from before the read until after the write. While one worker holds the mutex, the other cannot acquire it. Its read therefore sees the first worker's completed update. Python spells these operations `mutex.acquire()` and `mutex.release()`; see the https://docs.python.org/3/library/threading.html#lock-objects[Python Lock documentation].
 
-Both workers refer to the ordinary Python helper that `main` runs:
+The synchronized worker quantifies over generic Python values, with all input restrictions expressed in Python:
 
 [source,python]
 ----
-# In increment_safe's docstring:
-@cleanxy: Concurrent(run_trial)
+def increment_safe(counter: list[int], mutex: Lock):
+    """Hold the mutex for the whole increment.
 
-# In increment_unsafe's docstring:
-@cleanxy: Not Concurrent(run_trial)
+    @cleanxy: theorem preserves_updates :
+      ∀ (counter worker_count : PyValue),
+        py("valid_trial_input(counter, worker_count)") →
+        Returns(py("run_trial(this_function, counter, worker_count)"))
+    """
+    # acquire, read, increment, write, release
 ----
 
-The helper contains the setup, worker calls, and assertion being proved:
+The precondition is an ordinary executable helper in the same file:
 
 [source,python]
 ----
-def run_trial(increment):
-    counter = [0]
+def valid_trial_input(counter, worker_count):
+    return (
+        type(counter) == list
+        and len(counter) > 0
+        and all(type(item) == int for item in counter)
+        and type(worker_count) == int
+        and worker_count >= 0
+    )
+----
+
+The trial contains the actual setup, submissions, and assertions being proved:
+
+[source,python]
+----
+def run_trial(increment, counter: list[int], worker_count: int):
+    assert valid_trial_input(counter, worker_count), "invalid trial input"
+    before = counter.copy()
     mutex = Lock()
-    with ThreadPoolExecutor(max_workers=2) as workers:
-        futures = [workers.submit(increment, counter, mutex) for _ in range(2)]
+    with ThreadPoolExecutor(max_workers=max(1, worker_count)) as workers:
+        futures = [workers.submit(increment, counter, mutex) for _ in range(worker_count)]
         for future in futures:
             future.result()
-    assert counter[0] == 2, f"expected counter == 2 after two increments; got {counter[0]}"
+    assert counter[0] == before[0] + worker_count, "an increment was lost"
+    assert counter[1:] == before[1:], "another counter element changed"
 ----
 
-`Concurrent(run_trial)` proves that every modeled interleaving finishes successfully and passes this assertion. `Not Concurrent(run_trial)` proves that a completed interleaving fails it; the witness ends with the counter at one. The setup and checks come from this Python source, so changing them changes the proof obligation. See <<dsl-concurrent>>.
+The proof covers *every nonempty integer list and every nonnegative worker count*, including zero, arbitrary initial integers, and lists longer than one element. It proves that the other elements remain unchanged. `main` runs this same helper with `[0]` and two workers to demonstrate the race.
 
-Integer-list trials use the general finite interleaving interpreter. The synchronized proof checks every enabled interleaving of the actual compiled worker body, including deadlocks and exceptions as failures. The proof file also checks the concrete losing schedule from the table.
+The unsynchronized worker asks for a concrete counterexample using the same precondition and trial:
+
+[source,lean]
+----
+@cleanxy: theorem loses_an_update :
+  ∃ (counter worker_count : PyValue),
+    py("valid_trial_input(counter, worker_count)") ∧
+    Throws(py("run_trial(this_function, counter, worker_count)"))
+----
+
+Its witness is `[0]` and two workers, ending at one. The synchronized proof uses induction on the pending worker list, rather than enumerating bounded thread counts. Every body operation is checked against the actual Python worker. Changing the precondition, trial, or worker changes the proof obligation. See <<raw-lean-py>> for the quotation boundary.
 
 Run the real threads, or check the proofs:
 
@@ -246,7 +276,7 @@ python3 tests/py/parallel_shared_counter.py
 
 The executable runs 20 trials of each version. It prints actual failed assertions and the lost-update percentage for the unsafe version, then runs the synchronized version. Expected unsafe assertions are caught so both versions are visible; a synchronized failure is re-raised. Both versions call `sleep(0)` between reading and writing to make a thread switch easy to observe. The safe version holds the mutex during that yield. Failure percentages vary with scheduling; the proofs do not depend on observing a race in a particular run.
 
-The modeled setup is explicit: two workers, one integer cell, and one initially unlocked shared mutex. Primitive reads, writes, acquire, and release are atomic steps under sequentially consistent interleaving. This proves the stated two-worker property, not a claim about arbitrary worker counts or Python programs. Signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside this model.
+The model uses one initially unlocked shared mutex and a list shared by all workers. Primitive reads, writes, acquire, and release are atomic steps under sequentially consistent interleaving. The worker count and initial list contents in the synchronized theorem are unbounded. Signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside this model.
 
 === Doubly linked list: corrupted links
 
@@ -334,6 +364,8 @@ The DSL gets converted to corresponding Lean code behind the scenes.
 
 [[dsl-concurrent]]
 ==== Concurrent
+
+For new integer-list specifications, prefer the general <<raw-lean-py,Python quotation>> with `Returns` or `Throws`; the shared-counter example uses it. `Concurrent` remains supported for existing reference-object specifications.
 
 `@cleanxy: Concurrent(helper)` requires every modeled execution of `helper(enclosing_function, ...)` to finish successfully and pass its assertions. The helper is an ordinary Python function in the same module, usable by tests and `main`. Its first argument receives the worker; its remaining integer arguments are universally quantified. Defaults do not bound the proof.
 
@@ -765,6 +797,16 @@ The model in link:lang/py/CleanXY/Execution.lean[] and link:lang/py/CleanXY/Runt
 
 `Not Halts(this_function(values))` states that a call does not terminate. link:tests/py/sort.py[`Looping.__le__`] and its checked proof show that sorting two such objects does not halt. Unsupported source constructs cause validation errors and cannot be used to satisfy this requirement.
 
+[[raw-lean-mutex-ensures]]
+==== Mutex.Ensures
+
+An inductive successful-execution predicate for arbitrary finite batches protected by a common mutex. It accounts for every next lock owner and advances each body operation through the ordinary parallel interpreter. Workers waiting at acquire cannot execute while another worker owns the mutex. Source extraction checks the complete acquire/body/release region and prevents reassignment of the mutex local.
+
+[[raw-lean-mutex-invariant]]
+==== Mutex.invariant
+
+The generic induction rule for `Mutex.Ensures`. Prove that the invariant holds initially, is preserved by any selected worker, and implies the postcondition when no workers remain. The counter proof relates the current value plus the number of pending increments to the required final value, preserving the remaining list contents throughout.
+
 [[raw-lean-parallel]]
 ==== Parallel
 
@@ -783,6 +825,35 @@ The explorer chooses every enabled worker at every step. Each step consumes one 
 
 The counter's schedule `[0, 1, 0, 1, 0, 1]` makes both workers read zero, both yield, and both write one. The doubly linked list's proof gives a longer schedule where different workers win the forward and backward pointer writes.
 
+[[raw-lean-py]]
+==== py
+
+`py("...")` embeds a Python expression as a *Lean string literal*. Lean's real parser handles the theorem, comments, binders, parentheses, and string escapes. Its quotation elaborator passes the decoded string to Python's parser and translates the Python AST into modeled Lean semantics. It resolves captured variables in Lean's local context and checks that they have type `PyValue`. Generated code is a closed function applied to those captures, so its temporary names cannot capture theorem variables. Python source functions are not executed to decide whether a theorem is true.
+
+In a proposition, `py("condition")` means that the condition evaluates successfully to Boolean `True`. `Returns(py("run_trial(this_function, counter, worker_count)"))` and `Throws(py("run_trial(this_function, counter, worker_count)"))` refer to the executable Python helper. Helper names resolve to definitions in the same source module; `this_function` denotes the enclosing worker.
+
+These are native Lean term constructs, usable in both source docstrings and `.lean` proofs. Lean handles the surrounding logic normally: nested quantifiers, named hypotheses, conjunctions, implications, negation, and `let` bindings need no quotation-specific theorem patterns. There is no regular-expression extraction of binders or rewriting of theorem text. Unknown captures and captures of the wrong Lean type are elaboration errors.
+
+Lean raw strings are useful for multiline Python and embedded quotes:
+
+[source,lean]
+----
+py(r#"
+  type(counter) == list and len(counter) > 0
+  and all(type(item) == int for item in counter)
+"#)
+----
+
+A quotation inside a Python docstring crosses two string-literal boundaries. Use a raw Python docstring (`r"""..."""`) if you need backslashes to reach Lean unchanged. Lean comments and ordinary strings containing the text `py(...)` are not quotations.
+
+Predicates support exact `type` checks, short-circuiting Boolean `and`, guarded `len`, integer comparisons, and `all` with an unfiltered generator of Boolean predicates. Separate predicate helpers have ordinary positional arguments and one return expression. A list type guard must precede its length check and iteration; an integer guard must precede numeric comparison of an arbitrary value. Exact integer checks exclude Python booleans.
+
+Trial helpers currently accept Python `int` and `list[int]` parameters after the worker parameter. Their first statement must be an executable `assert` establishing those types, usually by calling the same predicate used in the theorem. The compiler checks that assertion's Python AST, independently of the surrounding Lean logic. Invalid inputs raise `AssertionError`, so even negated outcome claims have a meaningful modeled input domain. Annotations guide translation but never act as assumptions. Execution assumes Python assertions are enabled.
+
+Setup supports integer-list snapshots with `copy()`, integer-list literals, and mutex allocation. Execution uses a `ThreadPoolExecutor`, a submission comprehension, and `future.result()` for every worker. Checks support indexing, slices, integer arithmetic, and ordinary assertions. The supported worker body consists of the scalar and list operations described under <<raw-lean-parallel>>; a universal quoted `Returns` proof currently requires a complete common-mutex region. Quoted `Halts` remains unsupported and produces a coverage error.
+
+A precondition in the Lean theorem is an assumption. An `assert` in the trial is executable code whose success or failure is modeled. Unsupported Python constructs in either helper are reported for every dependent proof while other supported obligations continue to be checked.
+
 [[raw-lean-python-comparison]]
 ==== python_comparison
 
@@ -793,6 +864,48 @@ Supported operators are `<`, `<=`, `>`, `>=`, `==`, and `!=`, with operands of t
 For example, `python_comparison(left <= right)` expands to `comparison _this_module .ltE left right`. `.ltE` and `.lt` are Lean's shorthand for comparison-operation constructors, selected using the expected type.
 
 Custom same-class comparisons execute the supported method AST, including loops, on empty objects or objects with an integer `value` field. `.object "Looping"` represents an empty object; `.object "DummyInt" (some 2)` represents one with `value = 2`. These Lean constructors describe object state; they do not execute Python `__init__`. Reflected comparison, `NotImplemented`, general method calls, and arbitrary object layouts remain unsupported.
+
+[[raw-lean-python-context]]
+==== python_context
+
+`python_context "source.py" "worker" SourceAst.module in proposition` supplies the Python source, enclosing function, and imported semantic AST for quotations. CleanXY inserts it around a function's quoted specification. Generated proof stubs preserve the quoted theorem and include this context explicitly, so the same syntax works directly in Lean. Names used inside a quotation refer to the Lean scope at that quotation, including nested binders and `let` values.
+
+[[raw-lean-pytrial]]
+==== PyTrial
+
+The generated trial description contains calls to actual compiled workers, their initial shared heap, and checks translated from the Python assertions. No fixed limit on list length or worker count is part of this description.
+
+[[raw-lean-pytrial-call]]
+==== PyTrial.Call
+
+The generated description of a trial call: its initial Python assertion and the concurrent body reached when that assertion succeeds.
+
+[[raw-lean-pytrial-call-returns]]
+==== PyTrial.Call.Returns
+
+The meaning of `Returns(py("trial(...)"))`: the input assertion succeeds, and `PyTrial.Returns` proves successful completion and all final checks of the body.
+
+[[raw-lean-pytrial-call-throws]]
+==== PyTrial.Call.Throws
+
+The meaning of `Throws(py("trial(...)"))`: the input assertion fails, or it succeeds and some actual modeled body execution raises a worker exception or fails a final assertion. A rejected input is an exception, not unsupported execution.
+
+[[raw-lean-pytrial-returns]]
+==== PyTrial.Returns
+
+Successful execution of a concurrent body: the inputs convert to the modeled Python argument domain, the actual workers have a validated common-mutex region, and `Mutex.Ensures` proves successful completion and all final checks for every enabled scheduling choice. An arbitrary worker count is proved inductively.
+
+[[raw-lean-pytrial-throws]]
+==== PyTrial.Throws
+
+Exceptional execution of a concurrent body: some actual modeled schedule raises a worker exception or finishes its workers and fails the trial's checks. Concrete witnesses are checked with the general parallel interpreter. Deadlock and unsupported execution do not count as exceptions. Unlike a deterministic call, the existence of one exceptional schedule does not imply termination of every schedule.
+
+[[raw-lean-pyvalue]]
+==== PyValue
+
+The common type used by Lean quantifiers over modeled Python inputs. Its values include integers, booleans, strings, `None`, finite lists, and opaque objects. Python preconditions state the intended types; the user does not need to translate `list[int]` into a Lean list type.
+
+Each integer-list argument is materialized as a fresh mutable array for the trial. Passing it to several workers shares that array; `copy()` creates a snapshot of its initial contents. Aliasing between separate list inputs, cyclic containers, custom descriptors, and general object execution are outside the current quotation model. The shared-counter property uses one flat integer list, so its entire stated input domain is covered.
 
 [[raw-lean-returns]]
 ==== Returns

@@ -18,6 +18,8 @@ roots = [
   "lang.py.CleanXY.Syntax",
   "lang.py.CleanXY.Parallel",
   "lang.py.CleanXY.Concurrent",
+  "lang.py.CleanXY.PyValue",
+  "lang.py.CleanXY.Quotation",
   "lang.py.builtin.type.bool",
   "lang.py.builtin.type.bytearray",
   "lang.py.builtin.type.bytes",
