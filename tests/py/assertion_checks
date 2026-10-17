@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""
+Check assertion truth tests, lazy messages, helper effects and exceptions.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return f'.bytes {list(value)}'
+    return '.string ' + json.dumps(value)
+
+
+def outcome(function, *args):
+    try:
+        return f'.ok ({constant(function(*args))})'
+    except (AssertionError, ZeroDivisionError) as error:
+        # Other builtin exceptions use the existing class-only observation model.
+        arguments = error.args if type(error) is AssertionError else ()
+        return '.error { typeName := ' + json.dumps(type(error).__name__) + ', args := [' + ', '.join('(' + constant(value) + ')' for value in arguments) + '] }'
+
+
+source = '''def plain(n: int) -> int:
+    assert n
+    return n
+
+def message(n: int) -> int:
+    assert n, n + 7
+    return n
+
+def lazy(n: int) -> int:
+    assert n, 1 // 0
+    return n
+
+def condition_error(n: int) -> int:
+    assert 1 // n, "message"
+    return n
+
+def helper(n: int) -> int:
+    assert n, "inner"
+    return n
+
+def outer(n: int) -> int:
+    assert helper(n), "outer"
+    return n
+
+def touch(values: list[int], n: int) -> int:
+    values.append(n)
+    return n
+
+def shared(values: list[int], n: int) -> int:
+    assert touch(values, n), touch(values, 9)
+    return values[0]
+
+def array_truth(values: list[int], n: int) -> int:
+    assert values, "empty"
+    return n
+'''
+module = ast.parse(source)
+namespace = {}
+exec(source, namespace)
+equations = []
+for name in ('plain', 'message', 'lazy', 'condition_error', 'helper', 'outer'):
+    assert not SupportChecker(module).check(name), name
+    for n in (-2, -1, 0, 1, 2):
+        expected = outcome(namespace[name], n)
+        for backend in ('Calls.function', 'HeapCalls.scalarFunction'):
+            equations.append(f'example : ({backend} Probe.module "{name}" [.int ({n})]).observe 100 = .done ({expected}) := by native_decide')
+for value in (None, False, True, 0, 3, '', 'text', b'', b'\x00'):
+    for message in (None, False, 19, '', 'reason', b'\xff'):
+        # A generated one-statement module keeps the same source-to-AST path.
+        text = f'def f(n: int):\n    assert {value!r}, {message!r}\n    return n\n'
+        parsed = ast.parse(text)
+        scope = {}
+        exec(text, scope)
+        encoded = api['AstJsonEmitter'](parsed).emit()
+        expected = outcome(scope['f'], 1)
+        program = 'pyast_from_json% ' + json.dumps(encoded)
+        for backend in ('Calls.function', 'HeapCalls.scalarFunction'):
+            equations.append(f'example : ({backend} ({program}) "f" [.int 1]).observe 30 = .done ({expected}) := by native_decide')
+for name in ('shared', 'array_truth'):
+    assert not SupportChecker(module).check(name, heap_calls=True), name
+    for original in ([], [4]):
+        for n in (-1, 0, 1):
+            values = original.copy()
+            expected = outcome(namespace[name], values, n)
+            # Lift the scalar result into the completion while preserving the heap.
+            lifted = expected.replace('.ok (', '.ok (.scalar (', 1) + (')' if expected.startswith('.ok') else '')
+            heap = '[' + ', '.join(f'.scalar (.int ({value}))' for value in original) + ']'
+            final = '[' + ', '.join(f'.scalar (.int ({value}))' for value in values) + ']'
+            equations.append(f'example : (HeapCalls.call Probe.module "{name}" [.ref 0, .scalar (.int ({n}))] [{heap}]).execution.observe 100 = .done (.ok ⟨{lifted}, [], [{final}], 1⟩) := by native_decide')
+
+# A mutable assertion message cannot be represented as scalar exception arguments.
+# It remains explicitly unsupported, and the short DSL demands a coverage proof.
+container_message = ast.parse('def f(n: int) -> int:\n    """\n    @formalsw: Equiv(f)\n    """\n    assert False, [n]\n    return n\n')
+encoded = api['AstJsonEmitter'](container_message).emit()
+equations.append('example : (HeapCalls.scalarFunction (pyast_from_json% ' + json.dumps(encoded)
+                 + ') "f" [.int 0]).observe 30 = .unsupported := by native_decide')
+
+with project_temporary_directory(prefix='assertion-check-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+                     + 'open FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+    path = directory / 'container_message.py'
+    path.write_text(ast.unparse(container_message))
+    loaded = api['source_module'](path)
+    obligations = api['collect_requirements'](path, loaded, 'Probe', 'ProbeAst')
+    assert any(item.marker == 'execution model coverage' and '.Supported' in item.property_type
+               for item in obligations)
+
+
+# Helpers used only in assertion messages must still pass source validation.
+assert SupportChecker(ast.parse('def f(n: int):\n    assert n, missing(n)\n    return n\n')).check('f')
+for name in ('plain', 'outer'):
+    assert SupportChecker(module).requirement(name, f'theorem bad : (scalarFunction Probe.module "{name}" [.int 0]).Throws')
+    assert SupportChecker(module).requirement(name, f'theorem bad : FormalSW.Property.Function.Throws Probe.module "{name}"')
+print(f'Assertions: {len(equations)} Python comparisons, lazy messages and shared heap effects passed')

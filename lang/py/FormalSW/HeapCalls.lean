@@ -165,6 +165,8 @@ inductive Frame where
   | assign (name : String) (rest : List Stmt) (env : Env)
   | branch (yes no rest : List Stmt) (env : Env)
   | discard (rest : List Stmt) (env : Env)
+  | assertion (message : Option Expr) (rest : List Stmt) (env : Env)
+  | assertionMessage
   | rangeArguments (name : String) (done : List Value) (rest : List Expr)
       (body otherwise following : List Stmt) (env : Env)
 
@@ -299,6 +301,8 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .assign [.name name] expression :: rest => .next ⟨.expr expression env, .assign name rest env :: stack, heap⟩
       | .augAssign (.name name) op expression :: rest =>
           .next ⟨.expr (.name name) env, .binaryLeft op expression env true :: .assign name rest env :: stack, heap⟩
+      | .assert condition message :: rest =>
+          .next ⟨.expr condition env, .assertion message rest env :: stack, heap⟩
       | .ifThen condition yes no :: rest => .next ⟨.expr condition env, .branch yes no rest env :: stack, heap⟩
       | .whileDo condition body otherwise :: rest =>
           .next ⟨.expr condition env,
@@ -345,6 +349,15 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | .assign name rest env => .next ⟨.block rest (setLocal env name value), stack, heap⟩
           | .branch yes no rest env => run anchors heap (Mutable.truth value) fun truth heap =>
               .next ⟨.block ((if truth then yes else no) ++ rest) env, stack, heap⟩
+          | .assertion message rest env => run anchors heap (Mutable.truth value) fun truth heap =>
+              if truth then .next ⟨.block rest env, stack, heap⟩
+              else match message with
+                | none => done anchors heap (.error { typeName := "AssertionError", args := [] })
+                | some expression => .next ⟨.expr expression env, .assertionMessage :: stack, heap⟩
+          | .assertionMessage => match value with
+              | .scalar value => done anchors heap (.error { typeName := "AssertionError", args := [value] })
+              -- Exception arguments currently have a scalar observation boundary.
+              | .ref _ => .unsupported
           | .discard rest env => .next ⟨.block rest env, stack, heap⟩
           | .rangeArguments name done rest body otherwise following env =>
               .next (rangeState name env (done ++ [value]) rest body otherwise following stack heap)
@@ -613,6 +626,15 @@ theorem discard (evaluated : Evaluates module env expression heap value middle)
     (rest : BlockReturns module env body middle answer finalHeap) :
     BlockReturns module env (.expr expression :: body) heap answer finalHeap :=
   fun anchors stack => .next rfl ((evaluated anchors _).trans (.next rfl (rest anchors stack)))
+
+/-- Successful assertions retain condition effects and skip the message. -/
+theorem assertion (evaluated : Evaluates module env condition heap value middle)
+    (truth : Mutable.truth value middle = some (.ok true, middle))
+    (rest : BlockReturns module env body middle answer finalHeap) :
+    BlockReturns module env (.assert condition message :: body) heap answer finalHeap := by
+  intro anchors stack
+  exact .next rfl ((evaluated anchors _).trans
+    (.next (by simp [step, run, truth]) (rest anchors stack)))
 
 theorem branch (evaluated : Evaluates module env condition heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle))

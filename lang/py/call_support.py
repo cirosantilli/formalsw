@@ -132,8 +132,8 @@ def uses_method(module, function, name):
     return False
 
 
-def uses_bytes(module, function):
-    """Byte literals in a function or one of its local callees."""
+def _uses_syntax(module, function, predicate):
+    """Search function bodies and their local callees without following cycles."""
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     pending, visited = [function], set()
     while pending:
@@ -143,11 +143,20 @@ def uses_bytes(module, function):
         visited.add(current.name)
         for statement in current.body:
             for node in ast.walk(statement):
-                if isinstance(node, ast.Constant) and type(node.value) is bytes:
+                if predicate(node):
                     return True
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
                     pending.append(functions[node.func.id])
     return False
+
+
+def uses_bytes(module, function):
+    return _uses_syntax(module, function,
+                        lambda node: isinstance(node, ast.Constant) and type(node.value) is bytes)
+
+
+def uses_assertions(module, function):
+    return _uses_syntax(module, function, lambda node: isinstance(node, ast.Assert))
 
 
 def general_division(node):
@@ -219,7 +228,7 @@ def uses_calls_model(module, function):
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
     names.update(library_functions(module))
     return bool(function.args.defaults) or uses_heap_calls(module, function) or uses_method(module, function, "bit_length") or any(
-        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript))
+        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript, ast.Assert))
         or isinstance(node, ast.Constant) and type(node.value) is bytes
         or range_sum(node) is not None
         or general_division(node)
@@ -427,6 +436,10 @@ def check_calls(module, function, reject, *, heap=False):
                         expr(value)
                 elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
                     expr(ast.BinOp(node.target, node.op, node.value))
+                elif isinstance(node, ast.Assert):
+                    expr(node.test)
+                    if node.msg is not None:
+                        expr(node.msg)
                 elif isinstance(node, (ast.If, ast.While)):
                     expr(node.test)
                     block(node.body, loop_depth + isinstance(node, ast.While))

@@ -60,6 +60,8 @@ inductive Frame where
   | assign (name : String) (rest : List Stmt) (env : ScalarEnv)
   | branch (yes no rest : List Stmt) (env : ScalarEnv)
   | discard (rest : List Stmt) (env : ScalarEnv)
+  | assertion (message : Option Expr) (rest : List Stmt) (env : ScalarEnv)
+  | assertionMessage
   | unpack (names : List String) (done : List Constant) (rest : List Expr)
       (body : List Stmt) (env : ScalarEnv)
   | rangeArguments (name : String) (done : List Constant) (rest : List Expr)
@@ -260,6 +262,8 @@ def step (module : Module) (state : State) : Step State Constant :=
               else .unsupported
       | .augAssign (.name name) op expr :: rest =>
           .next ⟨.expr (.binOp (.name name) op expr) env, .assign name rest env :: stack⟩
+      | .assert condition message :: rest =>
+          .next ⟨.expr condition env, .assertion message rest env :: stack⟩
       | .ifThen condition yes no :: rest =>
           .next ⟨.expr condition env, .branch yes no rest env :: stack⟩
       | .whileDo condition body otherwise :: rest =>
@@ -322,6 +326,12 @@ def step (module : Module) (state : State) : Step State Constant :=
           | .assign name rest env => .next ⟨.block rest (env.set name value), stack⟩
           | .branch yes no rest env =>
               .next ⟨.block ((if scalarTruth value then yes else no) ++ rest) env, stack⟩
+          | .assertion message rest env =>
+              if scalarTruth value then .next ⟨.block rest env, stack⟩
+              else match message with
+                | none => .done (.error { typeName := "AssertionError", args := [] })
+                | some expression => .next ⟨.expr expression env, .assertionMessage :: stack⟩
+          | .assertionMessage => .done (.error { typeName := "AssertionError", args := [value] })
           | .discard rest env => .next ⟨.block rest env, stack⟩
           | .unpack names done rest body env =>
               match rest with
@@ -640,6 +650,14 @@ theorem augAssign (h : Evaluates module env (.binOp (.name name) op expression) 
     BlockReturns module env (.augAssign (.name name) op expression :: body) result := by
   intro stack
   exact .next rfl ((h _).trans (.next rfl (rest stack)))
+
+/-- A successful assertion continues without evaluating its optional message. -/
+theorem assertion (h : Evaluates module env condition value)
+    (truth : scalarTruth value = true)
+    (rest : BlockReturns module env body result) :
+    BlockReturns module env (.assert condition message :: body) result := by
+  intro stack
+  exact .next rfl ((h _).trans (.next (by simp [step, truth]) (rest stack)))
 
 theorem branch (h : Evaluates module env condition value)
     (rest : BlockReturns module env ((if scalarTruth value then yes else no) ++ body) result) :
