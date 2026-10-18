@@ -60,6 +60,19 @@ def equalElements : List Value → List Value → Option Bool
 def equalLists (left right : List Value) : Option Bool :=
   if left.length = right.length then equalElements left right else some false
 
+/-- Dictionary equality ignores insertion order and compares the stored values. -/
+def equalEntries (left right : List (Constant × Value)) : Option Bool :=
+  match left with
+  | [] => some true
+  | (key, value) :: rest => do
+      match ScalarDict.lookup right key with
+      | none => return false
+      | some other =>
+          if ← equalElements [value] [other] then equalEntries rest right else return false
+
+def equalDictionaries (left right : List (Constant × Value)) : Option Bool :=
+  if left.length = right.length then equalEntries left right else some false
+
 theorem equalElements_ints (left right : List Int) :
     equalElements (left.map fun n => .scalar (.int n)) (right.map fun n => .scalar (.int n)) =
       some (decide (left = right)) := by
@@ -104,6 +117,12 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
           match op with
           | .eq => return .scalar (.bool (a == b))
           | .notEq => return .scalar (.bool (a != b))
+          | _ => Mutable.error "TypeError"
+      | some (.dict xs), some (.dict ys) =>
+          match op with
+          | .eq | .notEq =>
+              let some equal := if a = b then some true else equalDictionaries xs ys | Mutable.unsupported
+              return .scalar (.bool (if op == .eq then equal else !equal))
           | _ => Mutable.error "TypeError"
       | some (.tuple xs), some (.tuple ys) =>
           match op with
@@ -191,7 +210,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
       match (← get)[address]? with
       | none => Mutable.unsupported
       | some (.list _) => listInplace op left right
-      | some (.set _) | some (.tuple _) | some (.instance _ _ _) => Mutable.binary op left right
+      | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) => Mutable.binary op left right
       | some (.bytearray bytes) =>
           match op with
           | .mult =>
@@ -206,7 +225,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
                     | some (.bytearray more) =>
                         if other = address ∧ !more.isEmpty then Mutable.error "BufferError"
                         else pure more
-                    | some (.list _) | some (.set _) | some (.tuple _) | some (.instance _ _ _) => Mutable.error "TypeError"
+                    | some (.list _) | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) => Mutable.error "TypeError"
                     | none => Mutable.unsupported
                 | _ => Mutable.error "TypeError"
               modify fun heap => heap.set address (.bytearray (bytes ++ more))
@@ -236,6 +255,7 @@ inductive Operation where
   | setSlice (replacement : Value)
   | append (address : Nat)
   | add (address : Nat)
+  | dictionaryGet (address : Nat)
   | builtin (name : Builtin)
   | reversedList
   | sumSequence
@@ -243,6 +263,8 @@ inductive Operation where
   | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
 
 inductive Frame where
+  | dictionaryKey (value : Expr) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
+  | dictionaryValue (key : Constant) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | sumStart (loop : Stmt) (env : Env)
   | initialized (address : Nat)
   | attribute (name : String)
@@ -281,6 +303,7 @@ inductive Frame where
       (body otherwise following : List Stmt) (env : Env)
 
 inductive Work where
+  | dictionary (remaining : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | expr (expression : Expr) (env : Env)
   | block (body : List Stmt) (env : Env)
   | value (value : Value)
@@ -451,6 +474,9 @@ def primitive : Operation → List Value → Eval Value
   | .slice, [base, lower, upper, stride] => Mutable.getSlice base lower upper stride
   | .setItem replacement, [base, index] => Mutable.setItem base index replacement
   | .setSlice replacement, [base, lower, upper, stride] => Mutable.setSlice base lower upper stride replacement
+  | .dictionaryGet address, [key] => Mutable.dictionaryGet address key (.scalar .none)
+  | .dictionaryGet address, [key, defaultValue] => Mutable.dictionaryGet address key defaultValue
+  | .dictionaryGet _, _ => Mutable.error "TypeError"
   | .append address, [value] => Mutable.appendItem address value
   | .add address, [value] => Mutable.addItem address value
   | .append _, _ | .add _, _ => Mutable.error "TypeError"
@@ -475,7 +501,7 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .int, [.ref address] => do
       match (← get)[address]? with
       | some (.bytearray bytes) => scalarResult (Calls.integerConversion [.bytes bytes])
-      | some (.list _) | some (.set _) | some (.tuple _) | some (.instance _ _ _) => Mutable.error "TypeError"
+      | some (.list _) | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) => Mutable.error "TypeError"
       | _ => Mutable.unsupported
   | .builtin .int, values => do
       let values ← values.mapM fun value => match value with
@@ -567,15 +593,19 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
               | some (args, body) => pure (.method receiver args body)
               | none => if name.startsWith "__" then Mutable.unsupported else Mutable.error "AttributeError"
       | some (.list _) | some (.bytearray _) =>
-          if name = "append" then pure (.append address) else Mutable.unsupported
+          if name = "append" then pure (.append address)
+          else if name = "get" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.set _) =>
           if name = "add" then pure (.add address)
-          else if name = "append" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "append" ∨ name = "get" then Mutable.error "AttributeError" else Mutable.unsupported
+      | some (.dict _) =>
+          if name = "get" then pure (.dictionaryGet address)
+          else if name = "append" ∨ name = "add" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.tuple _) =>
-          if name = "append" ∨ name = "add" then Mutable.error "AttributeError" else Mutable.unsupported
+          if name = "append" ∨ name = "add" ∨ name = "get" then Mutable.error "AttributeError" else Mutable.unsupported
       | none => Mutable.unsupported
   | .scalar _ =>
-      if name = "append" ∨ name = "add" then Mutable.error "AttributeError" else Mutable.unsupported
+      if name = "append" ∨ name = "add" ∨ name = "get" then Mutable.error "AttributeError" else Mutable.unsupported
 
 /-- Stored fields are values; first-class bound methods are outside this model. -/
 def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
@@ -614,6 +644,9 @@ def construct (module : Module) (anchors : Nat) (name : String) (values : List V
 def step (module : Module) (anchors : Nat) (state : State) : Step State Completion :=
   let ⟨work, stack, heap⟩ := state
   match work with
+  | .dictionary [] entries _ => result anchors heap (Mutable.allocateDict entries) stack
+  | .dictionary ((key, value) :: rest) entries env =>
+      .next ⟨.expr key env, .dictionaryKey value rest entries env :: stack, heap⟩
   | .startRange name values body otherwise following env =>
       match rangeBounds values with
       | .ok (start, stop, stride) =>
@@ -649,6 +682,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .compare a ((op, b) :: rest) => .next ⟨.expr a env, .chainLeft op b rest env :: stack, heap⟩
       | .boolOp op (first :: rest) => .next ⟨.expr first env, .boolean op rest env :: stack, heap⟩
       | .ifExp test yes no => .next ⟨.expr test env, .conditional yes no env :: stack, heap⟩
+      | .dict entries => .next ⟨.dictionary entries [] env, stack, heap⟩
       | .list expressions => .next (argumentsState .list env [] expressions stack heap)
       | .tuple expressions => .next (argumentsState .tuple env [] expressions stack heap)
       | .sumSequence iterable start =>
@@ -780,6 +814,13 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       match stack with
       | [] => done anchors heap (.ok value)
       | frame :: stack => match frame with
+          | .dictionaryKey expression rest entries env => match value with
+              | .scalar key => .next ⟨.expr expression env, .dictionaryValue key rest entries env :: stack, heap⟩
+              -- Hashing can interleave with later expressions differently for
+              -- large displays. Stop before these expressions for non-scalar keys.
+              | .ref _ => .unsupported
+          | .dictionaryValue key rest entries env =>
+              .next ⟨.dictionary rest (ScalarDict.insert entries key value) env, stack, heap⟩
           | .sumStart loop env => sumEnter anchors loop env value stack heap
           | .initialized address => match value with
               | .scalar .none => .next ⟨.value (.ref address), stack, heap⟩
@@ -1017,7 +1058,7 @@ private theorem bindMethod_extend (extension : Extends target source)
       | none => simp [bindMethod, found]
       | some object =>
           cases object with
-          | list items | tuple items | bytearray items | set items => simp [bindMethod, found]
+          | list items | tuple items | bytearray items | set items | dict items => simp [bindMethod, found]
           | «instance» origin className fields =>
               cases defined : source.findClass className with
               | none => simp [bindMethod, found, instanceClass, defined, Mutable.unsupported] at supported
@@ -1036,7 +1077,7 @@ private theorem attribute_extend (extension : Extends target source)
       | none => simp [getAttribute, found]
       | some object =>
           cases object with
-          | list items | tuple items | bytearray items | set items =>
+          | list items | tuple items | bytearray items | set items | dict items =>
               simp [getAttribute, found]
           | «instance» origin className fields =>
               cases defined : source.findClass className with
@@ -1080,7 +1121,8 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList | sumSequence | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+  | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>
       cases stack with
@@ -1101,7 +1143,7 @@ theorem step_extend (extension : Extends target source) (state : State)
                   | none => simp [step, found]
                   | some object =>
                       cases object with
-                      | list items | tuple items | bytearray items | set items => simp [step, found]
+                      | list items | tuple items | bytearray items | set items | dict items => simp [step, found]
                       | «instance» origin className fields =>
                           simp only [step, found] at supported ⊢
                           exact run_extend _ _ (bindMethod_extend extension) supported

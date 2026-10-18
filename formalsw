@@ -1360,6 +1360,12 @@ class AstJsonEmitter:
                     "value": self.expr(value),
                     "attr": attr,
                 }
+            case ast.Dict(keys=keys, values=values):
+                if any(key is None for key in keys):
+                    raise UnsupportedSyntax("dictionary unpacking is not modeled")
+                return {"type": "Dict", "entries": [
+                    {"key": self.expr(key), "value": self.expr(value)}
+                    for key, value in zip(keys, values)]}
             case ast.List(elts=elts):
                 return {"type": "List", "elts": [self.expr(elt) for elt in elts]}
             case ast.ListComp(elt=elt, generators=generators):

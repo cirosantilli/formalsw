@@ -1,9 +1,11 @@
 import lang.py.FormalSW.ParallelLiveness
 import lang.py.FormalSW.ScalarSets
+import lang.py.FormalSW.ScalarDicts
 import lang.py.FormalSW.ScalarSort
 import lang.py.FormalSW.MutableGlobals
 import lang.py.FormalSW.Instances
 import lang.py.FormalSW.HeapCalls
+import lang.py.FormalSW.DictionaryCalls
 import lang.py.FormalSW.SumCalls
 import lang.py.FormalSW.IntegerParsing
 import lang.py.FormalSW.ClassCalls

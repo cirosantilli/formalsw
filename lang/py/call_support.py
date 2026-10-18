@@ -265,7 +265,7 @@ def uses_heap_calls(module, function):
                            and len(node.targets[0].elts) == len(node.value.elts)
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
-            if (isinstance(node, (ast.List, ast.ListComp)) or reversed_list(node) is not None
+            if (isinstance(node, (ast.List, ast.ListComp, ast.Dict)) or reversed_list(node) is not None
                     or sequence_sum(node) is not None and not bindings(module, "sum")
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
@@ -273,7 +273,7 @@ def uses_heap_calls(module, function):
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "set", "sorted"}
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "divmod" and not bindings(module, "divmod")
-                    or isinstance(node, ast.Attribute) and node.attr in ('append', 'add')):
+                    or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get')):
                 return True
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
                 pending.append(functions[node.func.id])
@@ -456,6 +456,14 @@ def check_calls(module, function, reject, *, heap=False):
                 for part in node.values:
                     if isinstance(part, ast.FormattedValue):
                         recurse(part.value)
+                return
+            if heap and isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if key is None:
+                        reject(node, 'dictionary unpacking is not modeled')
+                    else:
+                        recurse(key)
+                    recurse(value)
                 return
             if heap and isinstance(node, (ast.List, ast.Tuple)):
                 if (isinstance(node, ast.Tuple) and node.elts and node not in hidden_tuples

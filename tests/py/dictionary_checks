@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""
+Compare scalar-key dictionaries, aliasing, and expression effects with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n
+
+def fail(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n // 0
+
+class Box:
+    def __init__(self, n: int):
+        self.table = {n: 1}
+    def change(self, n: int) -> int:
+        self.table[n] = 9
+        return 2
+    def replace(self, n: int) -> int:
+        self.table = {n: 20}
+        return 2
+    def get(self, n: int) -> int:
+        return n + 10
+'''
+bodies = {
+    'empty': 'return {}',
+    'display': 'return {n: xs, "text": n, b"bytes": True, None: False}',
+    'duplicate': 'return {True: 2, 1: n, False: 7, 0: xs}',
+    'order': 'return {touch(xs, n): touch(xs, n+1), touch(xs, n): touch(xs, n+2)}',
+    'key_failure': 'return {fail(xs, n): touch(xs, n+1), 9: touch(xs, n+2)}',
+    'value_failure': 'return {touch(xs, n): fail(xs, n+1), 9: touch(xs, n+2)}',
+    'lookup': 'return {1: xs, 2: n}.get(n)',
+    'default': 'return {1: xs, 2: n}.get(n, 88)',
+    'default_effect': 'return {1: xs, 2: n}.get(n, touch(xs, 88))',
+    'default_failure': 'return {n: xs}.get(n, fail(xs, 88))',
+    'key_effect': 'return {n: xs}.get(touch(xs, n), 88)',
+    'getitem': 'return {1: xs, 2: n}[n]',
+    'getitem_effect': 'return {1: xs, 2: n}[touch(xs, n)]',
+    'setitem': 'd = {1: xs, 2: n}\na = d\nd[n] = 88\nreturn [a, d]',
+    'setitem_order': 'd = {}\nd[touch(xs, n)] = touch(xs, n+1)\nreturn d',
+    'overwrite_order': 'd = {True: 5, 2: 8}\nd[1] = n\nreturn d',
+    'cycle': 'd = {}\nd[n] = d\nreturn d',
+    'shared': 'd = {1: xs, 2: xs}\nd[1].append(n)\nreturn [d, xs]',
+    'length': 'return len({True: n, 1: xs, n: 2})',
+    'truth': 'return n if {n: xs} else 9',
+    'empty_truth': 'return n if {} else 9',
+    'equal': 'return {1: n, 2: xs} == {2: xs, True: n}',
+    'not_equal': 'return {1: n} != {1: n+1}',
+    'equal_identity': 'd = {}\nd[0] = d\nreturn d == d',
+    'different_length': 'return {1: n, 2: xs} == {1: n}',
+    'different_keys': 'return {1: n} == {2: n}',
+    'different_type': 'return {1: n} == [n]',
+    'compare_order': 'return {1: n} < {1: n}',
+    'unhashable_list_get': 'return {n: 1}.get(xs, touch(xs, 5))',
+    'unhashable_dict_get': 'return {n: 1}.get({}, touch(xs, 5))',
+    'unhashable_set_get': 'return {n: 1}.get(set(), touch(xs, 5))',
+    'unhashable_buffer_get': 'return {n: 1}.get(bytearray(), touch(xs, 5))',
+    'unhashable_item': 'return {n: 1}[xs]',
+    'unhashable_write': 'd = {}\nd[xs] = touch(xs, n)\nreturn d',
+    'missing_method': 'd = {}\nd.append(fail(xs, n))\nreturn d',
+    'list_get': 'return xs.get(fail(xs, n))',
+    'scalar_get': 'return n.get(fail(xs, n))',
+    'get_arity': 'return {}.get(touch(xs, n), touch(xs, 2), touch(xs, 3))',
+    'get_no_args': 'return {}.get()',
+    'int_dict': 'return int({n: xs})',
+    'custom_get': 'return Box(n).get(n)',
+    'changed_default': 'box = Box(n)\nreturn box.table.get(n, box.change(n))',
+    'captured_receiver': 'box = Box(n)\nreturn box.table.get(n, box.replace(n))',
+}
+unsupported = {
+    'display_key': 'return {xs: 1}',
+    'tuple_key': 'return {(n,): 1}',
+    'get_tuple': 'return {}.get((n,), 1)',
+    'custom_key': 'return {}.get(Box(n), 1)',
+    'slice_key': 'return {}[:]',
+    'slice_write': 'd = {}\nd[:] = n\nreturn d',
+    'iteration': 'for key in {n: 1}:\n    xs.append(key)\nreturn xs',
+    'nested_equality': 'return {n: []} == {n: []}',
+}
+for name, body in (bodies | unsupported).items():
+    source += f'\ndef {name}(n: int, xs: list[int]):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies | unsupported:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, n in itertools.product(bodies, ([], [4]), (-1, 0, 1, 2)):
+    anchors = [initial.copy()]
+    try:
+        result = world[name](n, anchors[0])
+        error, args = None, []
+    except (ValueError, TypeError, AttributeError, ZeroDivisionError, KeyError) as exception:
+        result, error = None, type(exception).__name__
+        args = list(exception.args) if error == 'KeyError' else []
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    call = f'HeapCalls.call source "{name}" [.scalar (.int ({n})), .ref 0] {heap}'
+    encoded_args = '[' + ', '.join('(' + constant(x) + ')' for x in args) + ']'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", {encoded_args}⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, n={n}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+for name in unsupported:
+    lines.append(f'example : (HeapCalls.call source "{name}" [.scalar (.int 2), .ref 0] [.list []]).execution.observe 300 = .unsupported := by native_decide')
+
+# All scalar key types, including equal-but-differently-typed bool/int keys.
+keys = [None, False, True, -1, 0, 1, 2, 10**100, '', 'λ😀', b'', b'bytes']
+for key, query in itertools.product(keys, repeat=2):
+    values = {key: 17}
+    expected = values.get(query, 23)
+    lines.append(f'example : Mutable.dictionaryGet 0 (.scalar ({constant(query)})) (.scalar (.int 23)) '
+                 f'[.dict [(({constant(key)}), .scalar (.int 17))]] = '
+                 f'some (.ok (.scalar (.int {expected})), [.dict [(({constant(key)}), .scalar (.int 17))]]) := by native_decide')
+    count += 1
+
+with project_temporary_directory(prefix='dictionary-checks-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(n: int) -> int:\n    """\n    @formalsw: ' + marker
+                        + '\n    """\n    return {n: 1}.get((n,), 0)\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    simple = ast.parse('def f(n: int) -> int:\n    return {1: n}.get(1)\n')
+    assert uses_heap_calls(simple, simple.body[0])
+    for expression in ('{**n}', '{}.get(key=n)'):
+        assert SupportChecker(ast.parse(f'def f(n: int): return {expression}\n')).check('f')
+    for model in ('scalarFunction', 'Calls.function'):
+        assert SupportChecker(simple).requirement('f', f'theorem bad : ({model} Probe.module "f" [.int n]).Throws')
+    source_path = directory / 'source.py'
+    source_path.write_text(source)
+    loaded = api['source_module'](source_path)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](loaded).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} dictionary Python comparisons passed, including aliases, errors, and evaluation order')

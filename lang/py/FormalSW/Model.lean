@@ -97,6 +97,8 @@ inductive Expr where
   | list : List Expr -> Expr
   /-- A Python tuple display, also used as an unpacking target. -/
   | tuple : List Expr -> Expr
+  /-- Insertion-ordered dictionary display without unpacking. -/
+  | dict : List (Expr × Expr) → Expr
   /-- A Python binary operation. -/
   | binOp : Expr -> BinOp -> Expr -> Expr
   /-- A Python unary operation. -/
@@ -318,6 +320,9 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
             ← Expr.fromJson? (← jsonField generator "iter"),
             ← jsonArray generator "ifs" Expr.fromJson?))
   | "Tuple" => return .tuple (← jsonArray json "elts" Expr.fromJson?)
+  | "Dict" => return .dict (← jsonArray json "entries" fun entry => do
+      return (← Expr.fromJson? (← jsonField entry "key"),
+        ← Expr.fromJson? (← jsonField entry "value")))
   | "BinOp" =>
       return .binOp
         (← Expr.fromJson? (← jsonField json "left"))
@@ -890,6 +895,7 @@ mutual
   partial def Expr.operationCount : Expr → Nat
     | .constant _ | .name _ => 1
     | .attribute value _ => 1 + value.operationCount
+    | .dict entries => 1 + (entries.map fun (key, value) => key.operationCount + value.operationCount).sum
     | .list elements | .tuple elements => 1 + (elements.map Expr.operationCount).sum
     | .binOp left _ right => 1 + left.operationCount + right.operationCount
     | .unaryOp _ operand => 1 + operand.operationCount
@@ -1362,7 +1368,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.builtinCall _ _ => none
   | Expr.reversedList _ => none
   | Expr.listComp _ _ => none
-  | Expr.tuple _ => none
+  | Expr.tuple _ | Expr.dict _ => none
   | Expr.binOp
       (Expr.binOp
         (Expr.name name)
