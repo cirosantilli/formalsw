@@ -62,7 +62,13 @@ def sum_naive(n: int) -> int:
     return total
 ----
 
-and then suppose that your goal is to formally prove that for every possible input both functions return the same output, i.e. that the functions are equivalent.
+and then suppose that your goal is to formally prove that:
+
+* for every possible input both functions return the same output, i.e. that the functions are equivalent
+* both functions always return an integer value. In particular they:
+** don't throw exceptions
+** don't loop forever, i.e. they halt in the sense of the https://en.wikipedia.org/wiki/Halting_problem[halting problem]
+** don't have multithreading deadlocks or livelocks
 
 Traditionally, the only way to test this would be to add some tests and hope to catch all the edge cases:
 
@@ -75,7 +81,7 @@ but you can never cover all possible input values like that.
 
 This is exactly what formal verification allows you to do.
 
-To specify that we want both function to be proven to be the same, we can add some magic docstrings property them:
+To specify that we all the above properties to hold, we can add some magic docstring lines with the magic `@formalsw` marker:
 
 ----
 def sum(n: int) -> int:
@@ -89,12 +95,21 @@ def sum(n: int) -> int:
 def sum_naive(n: int) -> int:
     """
     @formalsw: Returns
+    @formalsw: ReturnType
     """
     total = 0
     for i in range(n):
         total += i
     return total
 ----
+
+Here we are specifying:
+
+* for `sum_naive`
+** `@formalsw: Returns`: the function always halts, no deadlocks, does not throw
+** `@formalsw: ReturnType`: it returns an `int` as specified in its docstring `-> int`
+* for `sum`:
+** `@formalsw: @formalsw: Equiv(sum_naive)`: this function is equivalent to `sum_naive`, i.e. it has the same outcome for every input. Same outcome means that if one return an `int` the other also returns an `int`
 
 After this is specified, if you run:
 
@@ -116,26 +131,38 @@ To create the required proofs, we must create a tmp.py.lean file containing the 
 formalsw --stub tmp.py > tmp.py.lean
 ----
 
-which produces:
+it generates a file like this:
 
 ----
 import «.formalsw».«tmp.py.ast»
 import FormalSW
 
-namespace tmp
+open FormalSW.PyAst
 
-theorem sum.«Not Throws» :
-    Not (FormalSW.Property.Function.Throws TmpAst.module "sum")
-  := by
-  sorry
+namespace tmp
 
 theorem sum.«Equiv(sum_naive)» :
     FormalSW.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
   := by
   sorry
 
+theorem sum_naive.«Returns» :
+    let _this_module := TmpAst.module;
+    let this_function := fun (input_0 : Int) => FormalSW.PyAst.scalarFunction TmpAst.module "sum_naive" [.int input_0];
+    ∀ (n : Int),
+    Returns(this_function(n))
+  := by
+  sorry
+
+theorem sum_naive.«ReturnType» :
+    FormalSW.Property.Function.ReturnType TmpAst.module "sum_naive"
+  := by
+  sorry
+
 end tmp
 ----
+
+Don't worry about understand it all. The important thing to note is how this file contains precise mathematical Lean statements of the things that we need to be proven: `Equiv`, and `Returns` and `ReturnType`.
 
 And now if we try again:
 
@@ -143,25 +170,33 @@ And now if we try again:
 formalsw tmp.py
 ----
 
-but this time it fails with:
+this time it fails with:
 
 ----
 proof check failed for tmp.py
 Complete tmp.py.lean; remove any `sorry`; and make sure it compiles before checking requested proof obligations.
 Expected proof obligations:
-  tmp.sum.«Not Throws» :
-    Not (FormalSW.Property.Function.Throws TmpAst.module "sum")
   tmp.sum.«Equiv(sum_naive)» :
     FormalSW.Property.Function.Equiv TmpAst.module "sum" "sum_naive"
+  tmp.sum_naive.«Returns» :
+    let _this_module := TmpAst.module;
+    let this_function := fun (input_0 : Int) => FormalSW.PyAst.scalarFunction TmpAst.module "sum_naive" [.int input_0];
+    ∀ (n : Int),
+    Returns(this_function(n))
+  tmp.sum_naive.«ReturnType» :
+    FormalSW.Property.Function.ReturnType TmpAst.module "sum_naive"
 Lean diagnostic:
-  tmp.py.lean:4:8: error: declaration uses `sorry`
-  tmp.py.lean:9:8: error: declaration uses `sorry`
-error: tmp.py.lean:7: proof uses `sorry`
+  tmp.py.lean:8:8: error: declaration uses `sorry`
+  tmp.py.lean:13:8: error: declaration uses `sorry`
+  tmp.py.lean:21:8: error: declaration uses `sorry`
+error: tmp.py.lean:11: proof uses `sorry`
 ----
 
-because we cheated with `sorry` which tells Lean to skip a proof.
+because we cheated with `sorry` in our proof stubs which, tells Lean to skip a proof.
 
-The final passing proof is an ungodly long file.
+So now the only thing left to do is to actually do those proofs proof!
+
+Now, the final passing proof is an ungodly long file.
 
 But I don't expect you to read and understand and even less write it.
 
@@ -169,7 +204,7 @@ The beauty of is is, and the entire reason for this project existing, of course,
 
 You only need to understand the definition of properties that you care about in the comments of the source code.
 
-Then you let the LLM loose, and so long as the LLM does not touch your .py source files during the proof step, only the .lean ones, the our scripts and the Lean formal system ensures that the property is true.
+Then you let the LLM loose, and so long as the LLM does not touch your .py source files during the proof step, only the .lean ones, then our scripts and the Lean formal system ensures that the property is true.
 
 Once the proof is complete, when you run:
 
@@ -277,24 +312,6 @@ The executable runs 20 trials of each version. It prints actual failed assertion
 
 The model uses one initially unlocked shared mutex and a list shared by all workers. Primitive reads, writes, acquire, and release are atomic steps under sequentially consistent interleaving. The worker count and initial list contents in the synchronized theorem are unbounded. Signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside this model.
 
-== Further usage
-
-Directories are also accepted; every `.py` file under the directory is checked:
-
-[source,sh]
-----
-./formalsw tests
-----
-
-Generate a complete Lean proof-file stub on standard output with `-S` or `--stub`:
-
-[source,sh]
-----
-./formalsw --stub myfile.py > myfile.py.lean
-----
-
-The stub imports the generated AST module and declares every requested theorem with `by sorry`. Replace each `sorry` with a proof before running the normal check.
-
 == Specification language
 
 The specification language is how you specify the properties of the program which must be proven.
@@ -308,7 +325,7 @@ Specifications are written as markers inside Python docstrings in lines starting
 There are two types of ways to write the specification:
 
 * <<dsl>>: what most people will use. Easy to learn and obvious. Gets translated to an equivalent Lean long form behind the scenes.
-* <<raw-lean-specification>>. Hard to learn but more general than the DSL.
+* <<raw-lean-specification>>. Harder to learn but more general than the DSL.
 
 === DSL
 
@@ -1471,7 +1488,7 @@ Integer `//`, `%`, `//=`, and `%=` accept variable and negative divisors in the 
 
 Scalar entry points that allocate or use lists, directly or through local helpers, use `HeapCalls`. Each invocation gets fresh locals while all continuations share one heap. List allocation, `append`, scalar indexing, concatenation, repetition, in-place name assignment, conditional expressions, short-circuit Boolean expressions, `if`, `while`, and integer `for ... in range(...)` loops execute with ordinary helper calls and recursion. The eager builtin composition `list(reversed(value))` makes a fresh shallow copy of a list or a reversed list of string characters; standalone reverse iterators remain unsupported. Positional `max(a, b, ...)` supports scalar values, preserves the first value on ties, and evaluates all arguments before comparison. Returned references preserve aliasing. Method lookup happens before argument evaluation, and exceptions preserve mutations already performed. Range bounds evaluate once, left to right, with mutations retained on errors; signed strides, `else`, `break`, and `continue` preserve Python loop scope. Helpers can accept lists and immutable scalar defaults; frontend entry arguments currently need scalar annotations and an explicit supported return annotation. Globals, indexed assignment, slices, generator sums, iteration outside `range`, standard-library calls, and explicit `raise` statements remain unsupported in this backend. Equality and inequality support flat scalar lists, identical references, and unequal lengths; ordering and comparisons between distinct nested lists, and conversion of lists to strings, still need further modeling; every heap-call contract therefore requires a separate `Supported` proof that execution never reaches an unsupported operation. This coverage obligation is independent of `Not`.
 
-`HeapCalls.call` returns the alias-preserving completion used by the existing heap model. For scalar return annotations, `HeapCalls.scalarFunction` exposes scalar results and exceptions for comparison with the scalar interpreters; it rejects a returned reference instead of silently erasing it. The proof rules `HeapCalls.Evaluates`, `BlockReturns`, and `ReturnsValue` track both the initial and final heap. `Evaluates.reversed_list` proves the copied contents, and `compare_int_lists` relates Python list equality to Lean list equality for arbitrary integer lists. `ReturnsValue.with_defaults` reuses a proof for an omitted-argument call, and `ReturnsValue.extend` transports a helper proof into a linked module using `Calls.Extends`. See link:tests/py/heap_calls.py[] for a proof with shared references, link:tests/py/heap_ranges.py[] for an exact list-building loop proof, and link:tests/py/heap_call_checks[] for Python comparisons covering mutation, returned aliases, recursion, error order, and execution coverage.
+`HeapCalls.call` returns the alias-preserving completion used by the existing heap model. For scalar return annotations, `HeapCalls.scalarFunction` exposes scalar results and exceptions for comparison with the scalar interpreters; it rejects a returned reference instead of silently erasing it. The proof rules `HeapCalls.Evaluates`, `BlockReturns`, and `ReturnsValue` track both the initial and final heap. `BlockContinues` describes normal completion with updated locals and heap, preserving arbitrary following statements and caller continuations. Its assignment, branch, and range-loop rules compose with `append`; `returns` connects a completed block to a later return proof. `Evaluates.conditional` tracks the heap through the condition and selected expression branch. `Evaluates.reversed_list` proves the copied contents, and `compare_int_lists` relates Python list equality to Lean list equality for arbitrary integer lists. `ReturnsValue.with_defaults` reuses a proof for an omitted-argument call, and `ReturnsValue.extend` transports a helper proof into a linked module using `Calls.Extends`. See link:tests/py/heap_calls.py[] for a proof with shared references, link:tests/py/heap_ranges.py[] for an exact list-building loop proof, and link:tests/py/heap_call_checks[] for Python comparisons covering mutation, returned aliases, recursion, error order, and execution coverage.
 
 Scalar call execution supports trailing default arguments that are immutable scalar literals: integers (including signed literals), booleans, strings, and `None`. Defaults are recorded in the imported AST and fill omitted positional arguments before the function body runs. Explicit arguments override them. Function-level contracts still quantify every declared parameter; a caller proof covers omitted arguments through `Calls.BlockReturns.function_defaults`. Mutable or computed defaults, keyword arguments, and defaults in other execution backends remain unsupported. Python setup verifies both the value and type of imported defaults against the source. See link:tests/py/defaults.py[] and link:tests/py/default_checks[].
 
