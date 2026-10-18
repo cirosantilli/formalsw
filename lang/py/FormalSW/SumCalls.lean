@@ -82,17 +82,20 @@ theorem Evaluates.sum_range
     Evaluates module env (.sumRange name element bounds filters) heap answer finalHeap :=
   fun anchors stack => .next rfl (evaluated anchors stack)
 
-/-- Sum a suffix of an unchanged integer sequence, without a fuel bound. -/
-theorem sum_integer_loop {values : List Int} (remaining : List Int)
+/-- Sum a pure integer-valued expression over an unchanged sequence, without a fuel bound. -/
+theorem sum_map_loop {α : Type} {values : List α} {encode : α → Value} {number : α → Int}
+    (remaining : List α)
     (privateName : name ≠ sumAccumulator)
     (sequence : Mutable.sequence (sequenceValue source) heap =
-      some (.ok (values.map (fun n => .scalar (.int n))), heap))
+      some (.ok (values.map encode), heap))
+    (evaluated : ∀ env item, env name = some (encode item) →
+      Evaluates module env element heap (.scalar (.int (number item))) heap)
     (suffix : values.drop position = remaining)
     (accumulator : env sumAccumulator = some (.scalar (.int initial))) :
     BlockReturns module env
-      [.sequenceStepLoop name source position (sumBody (.name name) []) [],
+      [.sequenceStepLoop name source position (sumBody element []) [],
         .return (.name sumAccumulator)] heap
-      (.scalar (.int (remaining.foldl Int.add initial))) heap := by
+      (.scalar (.int (remaining.foldl (fun total item => total + number item) initial))) heap := by
   induction remaining generalizing position env initial with
   | nil =>
       apply BlockReturns.sequence_done sequence
@@ -103,18 +106,32 @@ theorem sum_integer_loop {values : List Int} (remaining : List Int)
   | cons head tail ih =>
       have item : values[position]? = some head := by
         simpa [suffix] using (List.head?_drop (l := values) (i := position)).symm
-      apply BlockReturns.sequence_step (value := .scalar (.int head)) sequence (by simp [item])
-      apply BlockReturns.assign (value := .scalar (.int (initial + head))) (middle := heap)
-      · apply Evaluates.binary (bv := .scalar (.int head))
+      apply BlockReturns.sequence_step (value := encode head) sequence (by simp [item])
+      apply BlockReturns.assign (value := .scalar (.int (initial + number head))) (middle := heap)
+      · apply Evaluates.binary (bv := .scalar (.int (number head)))
           (Evaluates.lookup (by simpa [setLocal, Ne.symm privateName] using accumulator))
-          (Evaluates.lookup (by simp [setLocal]))
+          (evaluated _ head (by simp [setLocal]))
         rfl
       · change BlockReturns module _
-          [.sequenceStepLoop name source (position + 1) (sumBody (.name name) []) [],
+          [.sequenceStepLoop name source (position + 1) (sumBody element []) [],
             .return (.name sumAccumulator)] heap _ heap
         apply ih
         · simp [List.drop_add_one_eq_tail_drop, suffix]
         · simp [setLocal]
+
+/-- Integer summation is the identity instance of mapped summation. -/
+theorem sum_integer_loop {values : List Int} (remaining : List Int)
+    (privateName : name ≠ sumAccumulator)
+    (sequence : Mutable.sequence (sequenceValue source) heap =
+      some (.ok (values.map (fun n => .scalar (.int n))), heap))
+    (suffix : values.drop position = remaining)
+    (accumulator : env sumAccumulator = some (.scalar (.int initial))) :
+    BlockReturns module env
+      [.sequenceStepLoop name source position (sumBody (.name name) []) [],
+        .return (.name sumAccumulator)] heap
+      (.scalar (.int (remaining.foldl Int.add initial))) heap :=
+  sum_map_loop (number := id) remaining privateName sequence
+    (fun _ _ lookup => Evaluates.lookup lookup) suffix accumulator
 
 /-- Integer summation reads the existing list or tuple and leaves the heap unchanged. -/
 theorem Evaluates.sum_integers {values : List Int}
