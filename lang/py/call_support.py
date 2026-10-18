@@ -40,7 +40,7 @@ def library_functions(module):
     return {alias.asname or alias.name: (node.module, alias.name, node)
             for node in module.body if isinstance(node, ast.ImportFrom)
             and node.level == 0 and node.module == 'math'
-            for alias in node.names if alias.name == 'isqrt'}
+            for alias in node.names if alias.name in ('isqrt', 'gcd')}
 
 
 def uses_builtin(module, function, name):
@@ -274,8 +274,11 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, "standard-library calls are not yet supported by heap call execution")
                 if target in scope or bindings(module, target) != [libraries[target][2]]:
                     reject(node, 'standard-library call targets must not be rebound or shadowed')
-                if node.keywords or len(node.args) != 1:
+                primitive = libraries[target][1]
+                if primitive == 'isqrt' and (node.keywords or len(node.args) != 1):
                     reject(node, 'math.isqrt requires exactly one positional argument')
+                elif node.keywords:
+                    reject(node, f'math.{primitive} accepts only positional arguments')
                 source = getattr(module, 'formalsw_source', None)
                 if source is not None and any((root / 'math.py').exists() or (root / 'math').is_dir()
                                               for root in (source.parent, Path.cwd())):

@@ -101,4 +101,5 @@ subprocess.run([sys.executable, str(Path(__file__).with_name('string_checks'))],
 subprocess.run([sys.executable, str(Path(__file__).with_name('power_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("default_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("heap_call_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("math_gcd_checks"))], check=True)
 print("Recursive call and loop-control coverage passed")

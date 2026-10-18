@@ -49,6 +49,20 @@ def isqrtCall : List Constant → Except ExceptionObject Constant
   | [.bool value] => .ok (.int (if value then 1 else 0))
   | _ => .error { typeName := "TypeError", args := [] }
 
+/-- Python's variadic gcd accepts integer indices, including Booleans, and
+returns a nonnegative integer. Every argument is checked even after reaching 1. -/
+def gcdCall (values : List Constant) : Except ExceptionObject Constant := do
+  let integers ← values.mapM fun value =>
+    match scalarNumber value with
+    | some n => .ok n.natAbs
+    | none => .error { typeName := "TypeError", args := [] }
+  return .int ((integers.foldl Nat.gcd 0 : Nat) : Int)
+
+theorem gcdCall_pair (a b : Int) :
+    gcdCall [.int a, .int b] = .ok (.int (Nat.gcd a.natAbs b.natAbs)) := by
+  change Except.ok (Constant.int ((Nat.gcd (Nat.gcd 0 a.natAbs) b.natAbs : Nat) : Int)) = _
+  simp
+
 end FormalSW.PyAst.Math
 
 namespace FormalSW.PyAst
@@ -67,6 +81,7 @@ def libraryCall (module : Module) (name : String) (values : List Constant) :
     Option (Except ExceptionObject Constant) :=
   match importedFunction module.body name with
   | some ("math", "isqrt") => some (Math.isqrtCall values)
+  | some ("math", "gcd") => some (Math.gcdCall values)
   | _ => none
 
 end FormalSW.PyAst

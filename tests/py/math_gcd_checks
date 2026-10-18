@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Compare variadic gcd with Python and check its source import bindings."""
+import ast
+from itertools import product
+import json
+import math
+from pathlib import Path
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    return f'(.string {json.dumps(value)})'
+
+
+values = [*range(-6, 7), True, False, None, 'invalid']
+cases = [(), *((value,) for value in values), *product(values, repeat=2),
+         (0, 0, 0), (24, -36, 60), (1, None), (1, 0, 'invalid'),
+         (-10**100, 15 * 10**98), (10**100 + 1, 10**100 - 1)]
+equations = []
+for args in cases:
+    try:
+        expected = f'.ok {constant(math.gcd(*args))}'
+    except TypeError:
+        expected = '.error { typeName := "TypeError", args := [] }'
+    equations.append(f'example : Math.gcdCall [{", ".join(map(constant, args))}] = ({expected}) := by decide')
+
+with project_temporary_directory(prefix='gcd-check-') as directory:
+    proof = Path(directory) / 'Checks.lean'
+    proof.write_text('import FormalSW\nopen FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+    source = 'from math import gcd as divisor\ndef f(n: int) -> int:\n    return divisor(n, 12)\n'
+    def issues(text):
+        program = ast.parse(text)
+        program.formalsw_source = Path(directory) / 'probe.py'
+        return SupportChecker(program).check('f')
+
+    assert not issues(source)
+    for call in ('divisor()', 'divisor(n)', 'divisor(n, -12, 18)', 'divisor(True, n)'):
+        assert not issues(source.replace('divisor(n, 12)', call)), call
+    for call in ('divisor(n=n)', 'divisor(*n)', 'divisor(**n)'):
+        assert issues(source.replace('divisor(n, 12)', call)), call
+    for suffix in ('divisor = f\n', 'del divisor\n', 'from other import divisor\n'):
+        assert issues(source + suffix), suffix
+    assert issues(source.replace('f(n: int)', 'f(n: int, divisor: int)'))
+    assert issues(source.replace('return divisor', 'divisor = n\n    return divisor'))
+    assert issues(source.replace('from math ', 'from other '))
+    (Path(directory) / 'math.py').write_text('def gcd(*args): return 1\n')
+    assert any('shadows the modeled standard library' in issue.reason for issue in issues(source))
+
+print(f'Integer gcd: {len(cases)} Python comparisons and import binding checks passed')
