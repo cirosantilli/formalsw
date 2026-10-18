@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""
+Compare tuple displays, aliases, and unpacking with Python execution.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n
+def fail(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n // 0
+def sliced(n: int):
+    pair = (n, n + 1)
+    return pair[:]
+def hashed(n: int):
+    values = set()
+    values.add((n,))
+    return values
+def ordered(n: int):
+    return (n,) < (n + 1, n)
+def formatted(n: int):
+    return "%s" % (n,)
+'''
+bodies = {
+    'tuple': 'return (n, xs)',
+    'empty': 'return [(), ()]',
+    'new_identity': 'a = (n,)\nb = (n,)\nreturn [a, b]',
+    'alias': 'a = (xs, xs)\nxs.append(n)\nreturn a',
+    'order': 'return (touch(xs, n), touch(xs, n + 1))',
+    'failure': 'return (touch(xs, n), fail(xs, n + 1))',
+    'item': 'return (n, xs)[-1]',
+    'bad_index': 'return (n, xs)[3]',
+    'index_effect': 'return (n, xs)[touch(xs, n)]',
+    'length': 'return len((n, xs))',
+    'truth': 'return n if (n,) else 9',
+    'empty_truth': 'return n if () else 9',
+    'unpack': 'a, b = (touch(xs, n), touch(xs, n + 1))\nreturn [a, b]',
+    'swap': 'a, b = (n, n + 1)\na, b = b, a\nreturn [a, b]',
+    'repeated_target': 'a, a = (n, n + 1)\nreturn a',
+    'list_target': '[a, b] = (n, xs)\nreturn [a, b]',
+    'from_list': 'a, b = [n, xs]\nreturn [a, b]',
+    'from_text': 'a, b = "λ😀"\nreturn [a, b]',
+    'from_buffer': 'a, b = bytearray([3, 9])\nreturn [a, b]',
+    'too_short': 'a, b = (touch(xs, n),)\nreturn a',
+    'too_long': 'a, b = (touch(xs, n), 1, 2)\nreturn a',
+    'not_iterable': 'a, b = touch(xs, n)\nreturn a',
+    'unpack_empty': '() = ()\nreturn xs',
+    'unpack_literals': 'a, b = (3, 4)\nxs.append(a)\nreturn b',
+    'concat': 'a = (n, xs)\nb = (xs, n)\nreturn [a, b, a + b]',
+    'concat_left_empty': 'a = (n, xs)\nreturn [a, () + a]',
+    'concat_right_empty': 'a = (n, xs)\nreturn [a, a + ()]',
+    'repeat': 'a = (n, xs)\nreturn [a, a * n]',
+    'repeat_bool': 'a = (n, xs)\nreturn [a, a * True, False * a]',
+    'empty_repeat': 'a = ()\nreturn [a, a * n]',
+    'inplace': 'a = (n, xs)\nb = a\na += (xs,)\nreturn [a, b]',
+    'inplace_once': 'a = (n, xs)\nb = a\na *= 1\nreturn [a, b]',
+    'read_only': 'a = (n, xs)\na[0] = touch(xs, n)\nreturn a',
+    'no_append': 'a = (n, xs)\na.append(fail(xs, n))\nreturn a',
+    'no_add': 'a = (n, xs)\na.add(fail(xs, n))\nreturn a',
+    'equal': 'return (n, True) == (n, 1)',
+    'unequal_types': 'return (n, xs) == [n, xs]',
+    'equal_aliases': 'return (xs, n) == (xs, n)',
+    'maximum': 'return max((n, 7, -2))',
+    'buffer': 'return bytearray((n, 3))',
+    'loop': 'for value in (n, n + 1):\n    xs.append(value)\nreturn xs',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int, xs: list[int]):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name, heap_calls=True), (name, checker.check(name, heap_calls=True))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, n in itertools.product(bodies, ([], [4]), (-1, 0, 1, 2)):
+    anchors = [initial.copy()]
+    try:
+        result = world[name](n, anchors[0])
+        error = None
+    except (ValueError, TypeError, AttributeError, ZeroDivisionError, IndexError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    call = f'HeapCalls.call source "{name}" [.scalar (.int ({n})), .ref 0] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, n={n}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+for name in ('sliced', 'hashed', 'ordered', 'formatted'):
+    lines.append(f'example : (HeapCalls.call source "{name}" [.scalar (.int 2)] []).execution.observe 100 = .unsupported := by decide')
+
+# Preserve existing scalar tuple swaps, and require heap execution for tuples
+# that are passed around as values. Constant pooling is outside this model.
+scalar_swap = ast.parse('def f(n: int) -> int:\n    a, b = n, 1\n    a, b = b, a\n    return a\n')
+assert not uses_heap_calls(scalar_swap, scalar_swap.body[0])
+assert not SupportChecker(scalar_swap).check('f')
+for expression in ('(1, 2)', '(1 + 2, 3)', '(1 if True else n, 2)'):
+    module = ast.parse(f'def f(n: int) -> int:\n    pair = {expression}\n    return pair[0]\n')
+    assert SupportChecker(module).check('f'), expression
+for target in ('a, (b, c)', 'a, *rest', 'a, xs[0]'):
+    module = ast.parse(f'def f(n: int, xs: list[int]) -> int:\n    {target} = (n, xs)\n    return a\n')
+    assert SupportChecker(module).check('f'), target
+
+with project_temporary_directory(prefix='tuple-checks-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(n: int) -> int:\n    """\n    @formalsw: ' + marker
+                        + '\n    """\n    pair = (n,)\n    pair = pair[:]\n    return n\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} tuple Python comparisons passed, including identity, effects, and unpacking')

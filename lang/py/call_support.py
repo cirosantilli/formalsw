@@ -212,8 +212,17 @@ def uses_heap_calls(module, function):
             return True
         # Defaults are evaluated at definition time, outside the modeled body.
         # Their validation must not select a different execution backend.
-        for node in (part for statement in current.body for part in ast.walk(statement)):
+        parts = [part for statement in current.body for part in ast.walk(statement)]
+        # Existing scalar tuple swaps do not allocate a first-class tuple in that
+        # backend. Other tuple expressions need shared-reference execution.
+        scalar_displays = {id(node.value) for node in parts
+                           if isinstance(node, ast.Assign) and len(node.targets) == 1
+                           and isinstance(node.targets[0], ast.Tuple) and isinstance(node.value, ast.Tuple)
+                           and len(node.targets[0].elts) == len(node.value.elts)
+                           and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
+        for node in parts:
             if (isinstance(node, ast.List) or reversed_list(node) is not None
+                    or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("bytearray", "set")
@@ -340,7 +349,11 @@ def check_calls(module, function, reject, *, heap=False):
                 return
             if isinstance(node, ast.Name) and node.id in scope:
                 return
-            if heap and isinstance(node, ast.List):
+            if heap and isinstance(node, (ast.List, ast.Tuple)):
+                if (isinstance(node, ast.Tuple) and node.elts
+                        and not any(isinstance(item, (ast.Name, ast.Call, ast.Subscript, ast.List))
+                                    for item in node.elts)):
+                    reject(node, 'nonempty tuple displays need a runtime element; constant-tuple pooling is not modeled')
                 for item in node.elts:
                     recurse(item)
                 return
@@ -467,12 +480,20 @@ def check_calls(module, function, reject, *, heap=False):
                         expr(node.value)
                 elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                     expr(node.value)
+                elif (heap and isinstance(node, ast.Assign) and len(node.targets) == 1
+                      and isinstance(node.targets[0], (ast.Tuple, ast.List))
+                      and all(isinstance(target, ast.Name) for target in node.targets[0].elts)):
+                    if isinstance(node.value, ast.Tuple):
+                        # The container cannot escape immediate unpacking; its
+                        # children still need ordinary expression coverage.
+                        for value in node.value.elts:
+                            expr(value)
+                    else:
+                        expr(node.value)
                 elif (isinstance(node, ast.Assign) and len(node.targets) == 1
                       and isinstance(node.targets[0], ast.Tuple) and isinstance(node.value, ast.Tuple)
                       and all(isinstance(target, ast.Name) for target in node.targets[0].elts)
                       and len(node.targets[0].elts) == len(node.value.elts)):
-                    if heap:
-                        reject(node, "tuple unpacking is not yet supported by heap call execution")
                     for value in node.value.elts:
                         expr(value)
                 elif heap and isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript):

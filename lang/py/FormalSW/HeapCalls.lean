@@ -14,6 +14,10 @@ abbrev Completion := Mutable.Completion
 def setLocal (env : Env) (name : String) (value : Value) : Env :=
   fun query => if query = name then some value else env query
 
+/-- Flat unpacking assigns names left to right after validating the whole sequence. -/
+def assignNames (env : Env) (names : List String) (values : List Value) : Env :=
+  (names.zip values).foldl (fun env (name, value) => setLocal env name value) env
+
 def argumentEnv (args : List Arg) (values : List Value) : Env :=
   fun name => ((args.map Arg.name).zip values).lookup name
 
@@ -95,6 +99,12 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
       match (← get)[a]?, (← get)[b]? with
       | some (.bytearray xs), some (.bytearray ys) => compareScalars op (.bytes xs) (.bytes ys)
       | some (.set xs), some (.set ys) => return .scalar (.bool (ScalarSet.compare op xs ys))
+      | some (.tuple xs), some (.tuple ys) =>
+          match op with
+          | .eq | .notEq =>
+              let some equal := if a = b then some true else equalLists xs ys | Mutable.unsupported
+              return .scalar (.bool (if op == .eq then equal else !equal))
+          | _ => Mutable.unsupported
       | some (.list _), some (.list _) =>
           let (_, xs) ← Mutable.array left
           let (_, ys) ← Mutable.array right
@@ -175,7 +185,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
       match (← get)[address]? with
       | none => Mutable.unsupported
       | some (.list _) => listInplace op left right
-      | some (.set _) => Mutable.binary op left right
+      | some (.set _) | some (.tuple _) => Mutable.binary op left right
       | some (.bytearray bytes) =>
           match op with
           | .mult =>
@@ -190,7 +200,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
                     | some (.bytearray more) =>
                         if other = address ∧ !more.isEmpty then Mutable.error "BufferError"
                         else pure more
-                    | some (.list _) | some (.set _) => Mutable.error "TypeError"
+                    | some (.list _) | some (.set _) | some (.tuple _) => Mutable.error "TypeError"
                     | none => Mutable.unsupported
                 | _ => Mutable.error "TypeError"
               modify fun heap => heap.set address (.bytearray (bytes ++ more))
@@ -200,6 +210,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
 inductive Operation where
   | call (name : String)
   | list
+  | tuple
   | subscript
   | slice
   | setItem (replacement : Value)
@@ -225,6 +236,7 @@ inductive Frame where
   | appendReceiver (item : Expr) (env : Env)
   | addReceiver (item : Expr) (env : Env)
   | assign (name : String) (rest : List Stmt) (env : Env)
+  | unpack (names : List String) (rest : List Stmt) (env : Env)
   | branch (yes no rest : List Stmt) (env : Env)
   | discard (rest : List Stmt) (env : Env)
   | assertion (message : Option Expr) (rest : List Stmt) (env : Env)
@@ -296,6 +308,7 @@ def sequenceValue : SequenceSource → Value
 
 def primitive : Operation → List Value → Eval Value
   | .list, values => Mutable.allocate values
+  | .tuple, values => Mutable.allocateTuple values
   | .reversedList, [value] => do
       Mutable.allocate (← Mutable.sequence value).reverse
   | .subscript, [base, index] => Mutable.getItem base index
@@ -311,7 +324,7 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
   | .builtin .int, [.ref address] => do
       match (← get)[address]? with
-      | some (.list _) | some (.set _) => Mutable.error "TypeError"
+      | some (.list _) | some (.set _) | some (.tuple _) => Mutable.error "TypeError"
       | _ => Mutable.unsupported
   | .builtin .int, values => do
       let values ← values.mapM fun value => match value with
@@ -376,6 +389,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .boolOp op (first :: rest) => .next ⟨.expr first env, .boolean op rest env :: stack, heap⟩
       | .ifExp test yes no => .next ⟨.expr test env, .conditional yes no env :: stack, heap⟩
       | .list expressions => .next (argumentsState .list env [] expressions stack heap)
+      | .tuple expressions => .next (argumentsState .tuple env [] expressions stack heap)
       | .reversedList expression => .next (argumentsState .reversedList env [] [expression] stack heap)
       | .subscript base (.slice lower upper stride) =>
           .next (argumentsState .slice env [] [base, lower.getD (.constant .none),
@@ -398,6 +412,10 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .assign [.subscript base index] expression :: rest =>
           .next ⟨.expr expression env, .assignItem base index rest env :: stack, heap⟩
       | .assign [.name name] expression :: rest => .next ⟨.expr expression env, .assign name rest env :: stack, heap⟩
+      | .assign [.tuple targets] expression :: rest | .assign [.list targets] expression :: rest =>
+          match Calls.targetNames targets with
+          | some names => .next ⟨.expr expression env, .unpack names rest env :: stack, heap⟩
+          | none => .unsupported
       | .augAssign (.name name) op expression :: rest =>
           .next ⟨.expr (.name name) env, .binaryLeft op expression env true :: .assign name rest env :: stack, heap⟩
       | .assert condition message :: rest =>
@@ -472,6 +490,11 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
               .next (argumentsState (.setSlice value) env [] [base, lower, upper, stride]
                 (.discard rest env :: stack) heap)
           | .assign name rest env => .next ⟨.block rest (setLocal env name value), stack, heap⟩
+          | .unpack names rest env =>
+              run anchors heap (Mutable.sequence value) fun items heap =>
+                if names.length = items.length then
+                  .next ⟨.block rest (assignNames env names items), stack, heap⟩
+                else done anchors heap (.error { typeName := "ValueError", args := [] })
           | .branch yes no rest env => run anchors heap (Mutable.truth value) fun truth heap =>
               .next ⟨.block ((if truth then yes else no) ++ rest) env, stack, heap⟩
           | .assertion message rest env => run anchors heap (Mutable.truth value) fun truth heap =>
@@ -617,7 +640,7 @@ theorem step_extend (extension : Calls.Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList => rfl
   | expr _ _ | block _ _ | value _ | startRange _ _ _ _ _ _ => rfl
 
 theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Calls.Extends target source) :
@@ -806,6 +829,16 @@ theorem list (arguments : Arguments module env expressions heap values finalHeap
   apply (arguments_reach arguments .list [] anchors stack).trans
   exact .next (by simp [step, result, run, primitive, Mutable.allocate, Except.map]) .refl
 
+/-- Nonempty runtime tuple displays allocate after all their elements evaluate. -/
+theorem tuple (arguments : Arguments module env expressions heap values finalHeap)
+    (nonempty : values ≠ []) :
+    Evaluates module env (.tuple expressions) heap (.ref finalHeap.length)
+      (finalHeap ++ [.tuple values]) := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (arguments_reach arguments .tuple [] anchors stack).trans
+  exact .next (by simp [step, result, run, primitive, Mutable.allocateTuple, nonempty, Except.map]) .refl
+
 /-- Subscription evaluates its receiver and index before reading the shared heap. -/
 theorem subscript
     (ordinary : ∀ a b c, index ≠ .slice a b c)
@@ -900,6 +933,17 @@ theorem assign (evaluated : Evaluates module env expression heap value middle)
     (rest : BlockReturns module (setLocal env name value) body middle answer finalHeap) :
     BlockReturns module env (.assign [.name name] expression :: body) heap answer finalHeap :=
   fun anchors stack => .next rfl ((evaluated anchors _).trans (.next rfl (rest anchors stack)))
+
+theorem unpack (targets : Calls.targetNames expressions = some names)
+    (evaluated : Evaluates module env expression heap value middle)
+    (sequence : Mutable.sequence value middle = some (.ok items, afterUnpack))
+    (arity : names.length = items.length)
+    (rest : BlockReturns module (assignNames env names items) body afterUnpack answer finalHeap) :
+    BlockReturns module env (.assign [.tuple expressions] expression :: body) heap answer finalHeap := by
+  intro anchors stack
+  exact .next (following := ⟨.expr expression env, .unpack names body env :: stack, heap⟩)
+    (by simp [step, targets]) ((evaluated anchors _).trans
+    (.next (by simp [step, run, sequence, arity]) (rest anchors stack)))
 
 /-- Subscription assignment evaluates the RHS before the receiver and index. -/
 theorem setItem
@@ -1103,6 +1147,17 @@ theorem assign (evaluated : Evaluates module env expression heap value finalHeap
     BlockContinues module env [.assign [.name name] expression] heap
       (setLocal env name value) finalHeap :=
   fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
+
+theorem unpack (targets : Calls.targetNames expressions = some names)
+    (evaluated : Evaluates module env expression heap value middle)
+    (sequence : Mutable.sequence value middle = some (.ok items, finalHeap))
+    (arity : names.length = items.length) :
+    BlockContinues module env [.assign [.tuple expressions] expression] heap
+      (assignNames env names items) finalHeap := by
+  intro following anchors stack
+  exact .next (following := ⟨.expr expression env, .unpack names following env :: stack, heap⟩)
+    (by simp [step, targets]) ((evaluated anchors _).trans
+    (.next (by simp [step, run, sequence, arity]) .refl))
 
 /-- Augmented assignment exposes its updated local and heap to following statements. -/
 theorem augAssign (lookup : env name = some left)
