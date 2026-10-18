@@ -4,7 +4,8 @@ import ast
 from pathlib import Path
 import runpy
 import sys
-import tempfile
+
+from test_support import project_temporary_directory
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
@@ -12,7 +13,7 @@ api = runpy.run_path(str(REPO / 'formalsw'))
 from lang import spec_setup
 
 
-with tempfile.TemporaryDirectory(prefix='.setup-check-', dir=REPO) as temporary:
+with project_temporary_directory(prefix='setup-check-') as temporary:
     directory = Path(temporary)
     reference = directory / 'setup_reference.py'
     reference.write_text('def first(n: int) -> int: return n\n'

@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 
+from test_support import project_temporary_directory
+
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from lang.py.support import SupportChecker
@@ -83,7 +85,7 @@ bridge = api['AstLeanBridgeEmitter'](Path('source.json'), 'Source', local, {'req
 assert 'BuiltinCall' not in bridge
 
 # Flattening helpers must not capture either module's unshadowed builtin calls.
-with tempfile.TemporaryDirectory(prefix='formalsw-string-link-', dir=REPO) as directory:
+with project_temporary_directory(prefix='string-link-') as directory:
     source = Path(directory) / 'source.py'
     helper = Path(directory) / 'helper.py'
     for main, dependency in (

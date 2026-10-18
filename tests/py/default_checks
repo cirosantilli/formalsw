@@ -6,7 +6,8 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
-import tempfile
+
+from test_support import project_temporary_directory
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
@@ -58,7 +59,7 @@ equations.extend([
     'reprStr ({ name := "n", annotation := none, defaultValue := some (.int 2) } : Arg) := by native_decide',
 ])
 
-with tempfile.TemporaryDirectory(prefix='.default-check-', dir=REPO) as temporary:
+with project_temporary_directory(prefix='default-check-') as temporary:
     directory = Path(temporary)
     path = directory / 'defaults.py'
     path.write_text(source)

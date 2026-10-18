@@ -6,7 +6,8 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
-import tempfile
+
+from test_support import project_temporary_directory
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
@@ -39,7 +40,7 @@ equations.extend([
     'example : spin.Supported := Execution.Diverges.supported ⟨fun _ => True, trivial, fun _ _ => ⟨(), rfl, trivial⟩⟩',
 ])
 
-with tempfile.TemporaryDirectory(prefix='.power-check-', dir=REPO) as directory:
+with project_temporary_directory(prefix='power-check-') as directory:
     directory = Path(directory)
     proof = directory / 'PrimitiveChecks.lean'
     proof.write_text('import FormalSW\nopen FormalSW.PyAst\n' + '\n'.join(equations) + '\n')

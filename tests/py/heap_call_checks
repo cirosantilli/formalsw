@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 
+from test_support import project_temporary_directory
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from lang.py.object_snapshot import snapshot_roots
@@ -182,7 +184,7 @@ with tempfile.TemporaryDirectory(prefix='formalsw-heap-calls-') as directory:
 
 # Partial heap operations must not turn an unsupported computation into a proof
 # of divergence or equivalence. Coverage is independent of Not and Requires.
-with tempfile.TemporaryDirectory(prefix='.heap-coverage-', dir=ROOT) as directory:
+with project_temporary_directory(prefix='heap-coverage-') as directory:
     directory = Path(directory)
     for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
         path = directory / f'probe{index}.py'

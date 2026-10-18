@@ -2,8 +2,9 @@
 """Exercise unsupported-source rejection through the public CLI."""
 from pathlib import Path
 import subprocess
-import tempfile
 import textwrap
+
+from test_support import project_temporary_directory
 
 REPO = Path(__file__).resolve().parents[2]
 FORMALSW = REPO / 'formalsw'
@@ -276,7 +277,7 @@ CASES = [
     ''', 'list execution currently supports only the exact merge-sort body'),
 ]
 
-with tempfile.TemporaryDirectory(prefix='.support-check-', dir=REPO) as directory:
+with project_temporary_directory(prefix='support-check-') as directory:
     path = Path(directory) / 'probe.py'
     for name, source, reason in CASES:
         path.write_text(textwrap.dedent(source))

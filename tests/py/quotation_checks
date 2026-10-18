@@ -4,7 +4,8 @@ from pathlib import Path
 import json
 import os
 import subprocess
-import tempfile
+
+from test_support import project_temporary_directory
 
 REPO = Path(__file__).resolve().parents[2]
 SOURCE = (REPO / 'tests/py/parallel_shared_counter.py').read_text()
@@ -16,7 +17,7 @@ def run(path, stub=False):
                           cwd=REPO, text=True, capture_output=True, timeout=60)
 
 
-with tempfile.TemporaryDirectory(prefix='quotation_checks_', dir=REPO / 'tests' / 'py') as directory:
+with project_temporary_directory(prefix='quotation_checks_') as directory:
     path = Path(directory) / 'probe.py'
     path.write_text(SOURCE)
     stub = run(path, True)
@@ -41,7 +42,10 @@ with tempfile.TemporaryDirectory(prefix='quotation_checks_', dir=REPO / 'tests' 
         assert source != SOURCE, description
         path.write_text(source)
         result = run(path)
-        assert result.returncode != 0 and 'failed' in result.stdout + result.stderr, (description, result.stdout, result.stderr)
+        diagnostic = result.stdout + result.stderr
+        assert result.returncode != 0 and (
+            'proof check failed' in diagnostic or 'unsupported Python constructs' in diagnostic
+        ), (description, result.stdout, result.stderr)
 
     for description, source, diagnostic in [
         ('unsupported predicate operation', SOURCE.replace('len(counter) > 0', 'print(counter)'), 'Boolean conditions'),
