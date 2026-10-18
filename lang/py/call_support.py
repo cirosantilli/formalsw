@@ -3,7 +3,7 @@ import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from lang.py.global_inputs import GlobalInputError, function_globals, annotation_kind
+from lang.py.global_inputs import GlobalInputError, function_globals, annotation_kind, needs_heap_globals
 from lang.py.imports import bindings
 from lang.py.defaults import literal_default
 from lang.py.sorting_support import uses_sort_model
@@ -242,6 +242,8 @@ def has_partial_primitives(module, function):
 
 def uses_heap_calls(module, function):
     """Find list allocation or use in the transitive local call graph."""
+    if needs_heap_globals(module, function):
+        return True
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     classes = {node.name for node in module.body if isinstance(node, ast.ClassDef)}
     pending, visited = [function], set()
@@ -291,6 +293,8 @@ def uses_calls_model(module, function):
     if (uses_parallel_model(function) or uses_sort_model(module, function)
             or any(annotation_kind(arg.annotation) is None for arg in function.args.args)):
         return False
+    if needs_heap_globals(module, function):
+        return True
     try:
         if function_globals(module, function):
             return False
@@ -369,6 +373,14 @@ def check_calls(module, function, reject, *, heap=False):
                 return {node.id}
             return set().union(*(stored_names(child) for child in ast.iter_child_nodes(node)))
         locals_.update(stored_names(function))
+        globals_ = set()
+        try:
+            global_inputs = function_globals(module, function, heap_calls=heap)
+            if global_inputs and not heap:
+                reject(function, 'global inputs require heap call execution')
+            globals_.update(item.name for item in global_inputs)
+        except GlobalInputError as error:
+            reject(function, str(error))
         hidden_tuples = unpacked_tuple_displays(function) if heap else set()
         if locals_ & (functions.keys() | classes.keys()):
             reject(function, 'local bindings must not shadow module-level call targets')
@@ -444,7 +456,7 @@ def check_calls(module, function, reject, *, heap=False):
                 return
             if isinstance(node, ast.Constant) and type(node.value) in (int, str, bytes, bool, type(None)):
                 return
-            if isinstance(node, ast.Name) and node.id in scope:
+            if isinstance(node, ast.Name) and node.id in scope | globals_:
                 return
             if heap and isinstance(node, ast.Attribute):
                 ordinary_attribute(node, reject)

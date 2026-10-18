@@ -35,7 +35,7 @@ def annotation_kind(annotation):
     return None
 
 
-def function_globals(module, function):
+def function_globals(module, function, *, heap_calls=False):
     """Use Python's scope analysis; infer domains without fixing entry values.
 
     List declarations establish an element domain, not distinct object identities.
@@ -48,8 +48,13 @@ def function_globals(module, function):
         raise GlobalInputError(function, f'invalid Python scope: {error.msg}') from None
     except StopIteration:
         raise GlobalInputError(function, 'generic function scopes are unsupported') from None
-    referenced = {symbol.get_name() for symbol in table.get_symbols()
-                  if symbol.is_global() and (symbol.is_referenced() or symbol.is_assigned())}
+    def references(scope):
+        names = {symbol.get_name() for symbol in scope.get_symbols()
+                 if symbol.is_global() and (symbol.is_referenced() or symbol.is_assigned())}
+        for child in scope.get_children():
+            names.update(references(child))
+        return names
+    referenced = references(table)
     declared = {symbol.get_name() for symbol in table.get_symbols() if symbol.is_declared_global()}
     definitions = {}
     for stmt in module.body:
@@ -74,7 +79,7 @@ def function_globals(module, function):
                 raise GlobalInputError(stmt, 'nested list globals are not yet supported; pass the list as an argument')
             if expected and expected.startswith('set['):
                 raise GlobalInputError(stmt, 'set globals are not yet supported; pass the set as an argument')
-            if expected and expected.startswith('dict['):
+            if expected and expected.startswith('dict[') and not heap_calls:
                 raise GlobalInputError(stmt, 'dictionary globals are not yet supported; pass the dictionary as an argument')
             if isinstance(value, ast.Name):
                 kind = domain(value.id, (*visiting, name))
@@ -86,13 +91,23 @@ def function_globals(module, function):
                 except (ValueError, TypeError, SyntaxError):
                     raise GlobalInputError(stmt, f'global {name!r} needs a literal initializer or declared alias') from None
                 scalar = {int: 'int', bool: 'bool', str: 'str'}
+                if heap_calls:
+                    scalar[bytes] = 'bytes'
                 kind = scalar.get(type(literal))
                 if type(literal) is list:
-                    elements = {scalar.get(type(item)) for item in literal}
+                    elements = {{int: 'int', bool: 'bool', str: 'str'}.get(type(item)) for item in literal}
                     if not elements and expected and expected.startswith('list['):
                         kind = expected
                     elif len(elements) == 1 and None not in elements:
                         kind = f'list[{elements.pop()}]'
+                if heap_calls and type(literal) is dict:
+                    dictionary_scalar = {**scalar, type(None): 'None'}
+                    keys = {dictionary_scalar.get(type(key)) for key in literal}
+                    values = {dictionary_scalar.get(type(item)) for item in literal.values()}
+                    if not literal and expected and expected.startswith('dict['):
+                        kind = expected
+                    elif len(keys) == len(values) == 1 and None not in keys | values:
+                        kind = f'dict[{keys.pop()},{values.pop()}]'
                 if kind is None:
                     raise GlobalInputError(stmt, f'global {name!r}: supported state is int, str, bool, or homogeneous scalar lists; empty lists need list[int], list[str], or list[bool] annotations')
             if annotation is not None and expected != kind:
@@ -108,3 +123,67 @@ def function_globals(module, function):
 
 def merge_globals(*groups):
     return tuple(sorted({item for group in groups for item in group}, key=lambda item: item.name))
+
+
+def call_globals(module, function):
+    """
+    Collect state used by the entire local call graph, including class methods.
+    Function bodies remain responsible for their own lexical local bindings.
+    """
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    classes = {node.name: node for node in module.body if isinstance(node, ast.ClassDef)}
+    pending, visited, groups = [function], set(), []
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, ast.ClassDef):
+            pending.extend(node for node in current.body if isinstance(node, ast.FunctionDef))
+            continue
+        groups.append(function_globals(module, current, heap_calls=True))
+        for arg in current.args.args:
+            if isinstance(arg.annotation, ast.Name) and arg.annotation.id in classes:
+                pending.append(classes[arg.annotation.id])
+        for statement in current.body:
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    callee = functions.get(node.func.id) or classes.get(node.func.id)
+                    if callee is not None:
+                        pending.append(callee)
+    return merge_globals(*groups)
+
+
+def needs_heap_globals(module, function):
+    """Keep legacy global models for simple bodies; calls and dictionaries need a context."""
+    if getattr(function, 'formalsw_globals', ()):
+        return True
+    try:
+        inputs = call_globals(module, function)
+    except GlobalInputError:
+        return False
+    if not inputs:
+        return False
+    if any(item.kind.startswith('dict[') or item.kind == 'bytes' for item in inputs):
+        return True
+    targets = {node.name for node in module.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    return (bool(function.args.defaults)
+            or any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in targets
+                   for statement in function.body for node in ast.walk(statement)))
+
+
+def global_input_names(function, inputs):
+    """Keep module bindings distinct from identically named function arguments."""
+    taken = {'this_function', '_this_module'}
+    if function:
+        taken.update(arg.arg for arg in function.args.args)
+    names = {}
+    for item in inputs:
+        name = item.name
+        if name in taken:
+            name = 'global_' + name
+        while name in taken:
+            name += '_'
+        names[item.name] = name
+        taken.add(name)
+    return names

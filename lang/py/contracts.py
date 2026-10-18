@@ -15,6 +15,7 @@ class InputCondition:
     unsupported: tuple
     needs_coverage: bool
     heap: bool = False
+    globals: tuple = ()
 
 
 def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Module) -> InputCondition:
@@ -29,7 +30,7 @@ def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Mod
         raise ContractError(f'invalid Requires predicate: {text}') from error
     # These imports are local because call coverage itself uses import resolution.
     from lang.py.call_support import check_calls, has_partial_primitives, uses_heap_calls
-    from lang.py.global_inputs import annotation_kind
+    from lang.py.global_inputs import annotation_kind, call_globals, GlobalInputError
     from lang.py.support import UnsupportedConstruct
     names = {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
     arguments = tuple(arg for arg in function.args.args if arg.arg in names) if function else ()
@@ -52,11 +53,18 @@ def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Mod
     def reject(node, reason):
         issues.append(UnsupportedConstruct(function.name if function else '<module>',
             getattr(function, 'lineno', 1), f'Requires: {reason}'))
-    heap = uses_heap_calls(context, helper) or bool(function and any(
+    globals_ = ()
+    try:
+        globals_ = call_globals(context, helper)
+    except GlobalInputError as error:
+        reject(helper, str(error))
+    if globals_ and function is None:
+        reject(helper, 'module-level global prerequisites need an explicit function contract')
+    heap = bool(globals_ or getattr(function, 'formalsw_globals', ())) or uses_heap_calls(context, helper) or bool(function and any(
         reference_kind(annotation_kind(arg.annotation)) for arg in function.args.args))
     check_calls(context, helper, reject, heap=heap)
     return InputCondition(expression, arguments, tuple(dict.fromkeys(issues)),
-                          heap or has_partial_primitives(context, helper), heap)
+                          heap or has_partial_primitives(context, helper), heap, globals_)
 
 
 def reference_kind(kind):
@@ -65,11 +73,14 @@ def reference_kind(kind):
 
 def heap_input_name(function):
     """Use a fresh binder; argument addresses can alias in this shared entry heap."""
-    from lang.py.global_inputs import annotation_kind
-    if function is None or not any(reference_kind(annotation_kind(arg.annotation)) for arg in function.args.args):
+    from lang.py.global_inputs import annotation_kind, global_input_names
+    globals_ = getattr(function, 'formalsw_globals', ())
+    if function is None or not (any(reference_kind(annotation_kind(arg.annotation)) for arg in function.args.args)
+                               or any(reference_kind(item.kind) for item in globals_)):
         return None
     name = '_formalsw_heap'
     names = {arg.arg for arg in function.args.args}
+    names.update(global_input_names(function, globals_).values())
     while name in names:
         name += '_'
     return name

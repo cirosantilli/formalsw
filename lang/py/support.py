@@ -10,7 +10,7 @@ import ast
 import builtins
 import re
 from dataclasses import dataclass
-from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind
+from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind, needs_heap_globals, call_globals
 from lang.py.mutable_support import check_mutable
 from lang.py.sorting_support import MERGE_SORT, QUICK_SORT, body_of, matches_sort
 from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
@@ -91,13 +91,13 @@ class SupportChecker:
         if parallel or uses_parallel_model(function):
             self.check_parallel(function, reject)
             return tuple(dict.fromkeys(issues))
+        if not mutable and (heap_calls or needs_heap_globals(self.module, function)):
+            check_calls(self.module, function, reject, heap=True)
+            return tuple(dict.fromkeys(issues))
         try:
             globals = function_globals(self.module, function)
         except GlobalInputError as error:
             return (UnsupportedConstruct(name, error.line, str(error), stack),)
-        if heap_calls and globals:
-            reject(function, 'heap call execution does not support globals')
-            return tuple(issues)
         if mutable or any(item.kind.startswith('list[') for item in globals):
             check_mutable(function, globals, self.bindings, reject)
             result = tuple(dict.fromkeys(issues))
@@ -678,6 +678,13 @@ class SupportChecker:
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'list helper calls require the heap call interpreter'))
             if model in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
+                if model == 'HeapCalls.scalarFunction':
+                    try:
+                        if call_globals(self.module, function):
+                            issues.append(UnsupportedConstruct(target, function.lineno,
+                                'global inputs require HeapCalls.call with an explicit global context'))
+                    except GlobalInputError as error:
+                        issues.append(UnsupportedConstruct(target, error.line, str(error)))
                 if model == 'HeapCalls.scalarFunction' and any(annotation_kind(arg.annotation) not in ('int', 'str', 'bytes', 'bool') for arg in function.args.args):
                     issues.append(UnsupportedConstruct(target, function.lineno,
                         'heap-call specifications currently require scalar entry arguments'))
@@ -711,7 +718,7 @@ class SupportChecker:
                     pass
             if model == 'scalarFunction':
                 try:
-                    if function_globals(self.module, function):
+                    if call_globals(self.module, function):
                         issues.append(UnsupportedConstruct(target, function.lineno,
                             'globals require scalarFunctionWithGlobals with explicit initial state'))
                 except GlobalInputError:

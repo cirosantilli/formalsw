@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""
+Check transitive global contracts, prerequisite effects, and lexical boundaries.
+"""
+import ast
+from itertools import count
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.global_inputs import call_globals
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+cases = count()
+source = '''
+TABLE: dict[int, int] = {0: 100}
+LIMIT: int = 999
+
+def guard(n: int) -> bool:
+    TABLE[0] = n
+    return n >= LIMIT
+
+def read(n: int) -> int:
+    return TABLE.get(n, 0)
+
+def f(n: int) -> int:
+    """
+    @formalsw: Requires(guard(n))
+    @formalsw: MARKER
+    """
+    return read(n)
+'''
+markers = ('Returns', 'Halts', 'Throws', 'ReturnType', 'Not Returns', 'Not Halts', 'Not Throws',
+           'Not ReturnType', 'Equiv(read)', 'Not Equiv(read)', 'EquivReturn(read)', 'Not EquivReturn(read)',
+           'theorem raw : Returns(this_function(n))',
+           'theorem raw_bound (n : Int) : Returns(this_function(n))')
+
+
+def collect(path, text):
+    path = path.with_stem(f'{path.stem}_{next(cases)}')
+    path.write_text(text)
+    module = api['source_module'](path)
+    requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+    assert not any(item.unsupported for item in requirements), requirements
+    return module, requirements
+
+
+def footprint(text, name='f'):
+    module = ast.parse(text)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    return {item.name: item.kind for item in call_globals(module, function)}
+
+
+# Function bodies do not include their specification predicates until contracts collect them.
+assert footprint(source) == {'TABLE': 'dict[int,int]'}
+assert footprint('table = {0: "zero"}\ndef f(n: int): return [table.get(i, "") for i in range(n)]') == {'table': 'dict[int,str]'}
+assert footprint('table = {0: "zero"}\ndef f(n: int):\n    if False: table, n = (n, n)\n    return table') == {}
+assert footprint('table = {0: "zero"}\ndef f(n: int): return [table for table in range(n)]') == {}
+assert footprint('table = {0: "zero"}\nclass Box:\n    def read(self, n: int): return table.get(n, "")\ndef f(n: int): return Box().read(n)') == {'table': 'dict[int,str]'}
+assert footprint('table = {0: 1}\ndef f(n: int): return g(n)\ndef g(n: int): return f(n-1) if n else table[0]') == {'table': 'dict[int,int]'}
+for declaration, expected in (
+    ('table: dict[bytes, bool] = {}', 'dict[bytes,bool]'),
+    ('table = {None: b"value"}', 'dict[None,bytes]'),
+    ('other = {True: "value"}\ntable = other', 'dict[bool,str]'),
+):
+    assert footprint(declaration + '\ndef f(n: int): return table') == {'table': expected}
+for declaration in ('table = {}', 'table: dict[int,str] = {0: 1}', 'table = {0: [], 1: []}',
+                    'table = [b"unsupported"]', 'table: dict[int,str,float] = {}'):
+    assert SupportChecker(ast.parse(declaration + '\ndef f(n: int): return table')).check('f'), declaration
+for body in ('global table\n    table = {}\n    return 0', 'del table[0]\n    return 0'):
+    assert SupportChecker(ast.parse('table: dict[int,int] = {}\ndef f(n: int):\n    ' + body)).check('f')
+
+with project_temporary_directory(prefix='global-contracts-') as temporary:
+    directory = Path(temporary)
+    path = directory / 'source.py'
+    properties = []
+    for marker in markers:
+        module, requirements = collect(path, source.replace('MARKER', marker))
+        term = next(item.property_type for item in requirements if item.marker == marker)
+        assert 'HeapCalls.Condition' in term and 'HeapCalls.call' in term, term
+        assert '(«LIMIT» : Int)' in term and '(«TABLE» : Nat)' in term, term
+        assert 'Mutable.Heap.Valid' in term and '"dict[int,int]"' in term, term
+        assert '100' not in term and '999' not in term, term
+        assert '[("LIMIT", .scalar (.int «LIMIT»)), ("TABLE", .ref «TABLE»)]' in term, term
+        coverage = next(item for item in requirements if item.marker == 'execution model coverage')
+        assert 'HeapCalls.Condition' in coverage.property_type and not coverage.property_type.startswith('Not')
+        predicate = next(item for item in requirements if item.theorem_name.endswith('requires_f_0_supported'))
+        assert 'HeapCalls.evaluate' in predicate.property_type and 'HeapCalls.Condition' not in predicate.property_type
+        properties.extend(item.property_type for item in requirements)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    bridge = api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
+    lines = [bridge, 'open FormalSW.PyAst'] + [f'#check ({term})' for term in properties]
+    # The source initializer is not a hypothesis: these arbitrary entry values differ from it.
+    for n, limit, accepted in ((3, 2, True), (1, 2, False)):
+        context = f'[("LIMIT", .scalar (.int {limit})), ("TABLE", .ref 0)]'
+        env = f'(fun name => if name = "n" then some (.scalar (.int {n})) else ({context} : Mutable.Globals).lookup name)'
+        lines += [f'''example : (HeapCalls.evaluate ProbeAst.module {env} ProbeAst.requires_f_0 [.dict []] {context}).execution.observe 200 =
+  .done (.ok ⟨.ok (.scalar (.bool {str(accepted).lower()})), {context}, [.dict [(.int 0, .scalar (.int {n}))]], 1⟩) := by native_decide
+example : (HeapCalls.call ProbeAst.module "f" [.scalar (.int 0)] [.dict []] {context}).execution.observe 200 =
+  .done (.ok ⟨.ok (.scalar (.int 0)), {context}, [.dict []], 1⟩) := by native_decide''']
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    checked = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT,
+                             text=True, capture_output=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+
+    # The reference can introduce globals absent from the implementation's body.
+    text = source.replace('return read(n)', 'return n').replace('    @formalsw: Requires(guard(n))\n', '')
+    _, requirements = collect(path, text.replace('MARKER', 'Equiv(read)'))
+    term = requirements[0].property_type
+    assert term.count('[("TABLE", .ref «TABLE»)]') == 2 and 'LIMIT' not in term, term
+    # Local arguments and globals with the same spelling remain independent inputs.
+    text = text.replace('def f(n: int)', 'def f(TABLE: int)').replace('    return n\n', '    return TABLE\n')
+    _, requirements = collect(path, text.replace('MARKER', 'Equiv(read)'))
+    assert '(«TABLE» : Int)' in requirements[0].property_type and '(«global_TABLE» : Nat)' in requirements[0].property_type
+    # Predicate-only globals join the same domain even for a scalar implementation.
+    _, requirements = collect(path, source.replace('return read(n)', 'return n').replace('MARKER', 'Returns'))
+    assert '(«TABLE» : Nat)' in requirements[0].property_type
+    # All predicates share one domain, including globals first used by later predicates.
+    text = source.replace('@formalsw: Requires(guard(n))', '@formalsw: Requires(n >= 0)\n    @formalsw: Requires(guard(n))')
+    _, requirements = collect(path, text.replace('MARKER', 'Returns'))
+    for item in requirements:
+        assert '(«TABLE» : Nat)' in item.property_type and '(«LIMIT» : Int)' in item.property_type
+
+    collision = '''
+_formalsw_heap: dict[int,int] = {}
+input_0: int = 7
+def helper(n: int) -> int:
+    return input_0 + _formalsw_heap.get(n, 0)
+def f(_formalsw_heap: int, input_0: int, _arg: int) -> int:
+    """
+    @formalsw: Requires(helper(_arg) >= input_0)
+    @formalsw: theorem raw : Returns(this_function(_formalsw_heap, input_0, _arg))
+    """
+    return helper(_arg)
+'''
+    module, requirements = collect(path, collision)
+    term = requirements[0].property_type
+    for binder in ('_formalsw_heap_', 'global__formalsw_heap', 'global_input_0'):
+        assert f'«{binder}»' in term, term
+    document = directory / 'collisions.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    bridge = api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
+    proof = directory / 'Collisions.lean'
+    proof.write_text(bridge + '\n' + '\n'.join(f'#check ({item.property_type})' for item in requirements))
+    checked = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT,
+                             text=True, capture_output=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    _, requirements = collect(path, '''
+input_0: int = 7
+def f(n: int) -> int:
+    """
+    @formalsw: Requires(input_0 >= 0)
+    @formalsw: theorem raw : Returns(this_function(n))
+    """
+    return input_0 + n
+''')
+    assert 'fun (input_0_ : Int)' in requirements[0].property_type
+
+    reference = directory / 'reference.py'
+    reference.write_text('def naive(n: int) -> int: return n\n')
+    text = source.replace('@formalsw: MARKER', '@formalsw: Py from reference import naive\n    @formalsw: Equiv(naive)')
+    _, requirements = collect(path, text)
+    equivalence = next(item for item in requirements if item.marker == 'Equiv(naive)')
+    assert equivalence.dependencies == (reference.resolve(),)
+    assert equivalence.property_type.count('[("LIMIT", .scalar (.int «LIMIT»)), ("TABLE", .ref «TABLE»)]') == 4
+    (directory / 'foreign.py').write_text('other: dict[int,int] = {}\ndef naive(n: int) -> int: return other.get(n, 0)\n')
+    try:
+        collect(path, text.replace('from reference import', 'from foreign import'))
+    except api['InvalidRequirement'] as error:
+        assert 'global' in str(error)
+    else:
+        raise AssertionError('foreign module globals were silently merged')
+    try:
+        collect(path, '''
+from foreign import naive
+def f(n: int) -> int:
+    """
+    @formalsw: Returns
+    """
+    return naive(n)
+''')
+    except api['InvalidRequirement'] as error:
+        assert 'imported helper globals need separate module contexts' in str(error)
+    else:
+        raise AssertionError('foreign helper globals lost their module context')
+print('Global contracts: all properties and raw guards, transitive scopes, arbitrary state, aliases, predicate effects, and module boundaries passed')

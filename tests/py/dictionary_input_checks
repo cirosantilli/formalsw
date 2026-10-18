@@ -85,7 +85,7 @@ for kind in ('dict[int]', 'dict[int,str,bool]', 'dict[float,str]', 'dict[list[in
              'dict[str,list[int]]', 'dict[str,object]', 'list[dict[int,str]]'):
     assert annotation_kind(ast.parse(kind, mode='eval').body) is None, kind
 for declaration in ('table: dict[int, str]', 'table: dict[int, str] = {}'):
-    assert SupportChecker(ast.parse(declaration + '\ndef f() -> int: return len(table)\n')).check('f')
+    assert not SupportChecker(ast.parse(declaration + '\ndef f() -> int: return len(table)\n')).check('f')
 lines += ['''
 example : ¬ Mutable.Value.HasType [.list []] (.ref 0) "dict[int,str]" := by
   intro typed

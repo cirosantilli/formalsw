@@ -79,4 +79,67 @@ theorem update.result (heap : Mutable.Heap) (globals : Mutable.Globals) (key val
         read.result (heap.set table (.dict (ScalarDict.insert entries (.int key) (.scalar (.int value)))))
           globals key table (ScalarDict.insert entries (.int key) (.scalar (.int value))) bound (by simp [inside])
 
+private abbrev context (table : Nat) : Mutable.Globals := [("TABLE", .ref table)]
+private abbrev prerequisite (heap : Mutable.Heap) (table : Nat) :=
+  HeapCalls.Condition program (fun name => (context table).lookup name) HeapGlobalContextAst.requires_forward_0 heap (context table)
+
+theorem read.«Returns» (heap : Mutable.Heap) (key : Int) (table : Nat)
+    (_valid : heap.Valid) (typed : Mutable.Value.HasType heap (.ref table) "dict[int,int]") :
+    (HeapCalls.call program "read" [.scalar (.int key)] heap (context table)).Returns := by
+  obtain ⟨entries, found, _⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  exact (read.result heap (context table) key table entries rfl found).returns
+
+theorem read.«Supported» (heap : Mutable.Heap) (key : Int) (table : Nat)
+    (valid : heap.Valid) (typed : Mutable.Value.HasType heap (.ref table) "dict[int,int]") :
+    (HeapCalls.call program "read" [.scalar (.int key)] heap (context table)).Supported :=
+  (read.«Returns» heap key table valid typed).supported
+
+theorem forward.«Returns» (heap : Mutable.Heap) (key : Int) (table : Nat)
+    (_valid : heap.Valid) (typed : Mutable.Value.HasType heap (.ref table) "dict[int,int]")
+    (_requires : prerequisite heap table) :
+    (HeapCalls.call program "forward" [.scalar (.int key)] heap (context table)).Returns := by
+  obtain ⟨entries, found, _⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  exact (forward.result heap (context table) key table entries rfl found).returns
+
+theorem forward.«Equiv(read)» (heap : Mutable.Heap) (key : Int) (table : Nat)
+    (_valid : heap.Valid) (typed : Mutable.Value.HasType heap (.ref table) "dict[int,int]")
+    (_requires : prerequisite heap table) :
+    (HeapCalls.call program "forward" [.scalar (.int key)] heap (context table)).Equiv
+      (HeapCalls.call program "read" [.scalar (.int key)] heap (context table)) := by
+  obtain ⟨entries, found, _⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  exact Mutable.Call.equiv_of_finishes (forward.result heap (context table) key table entries rfl found).finishes
+    (read.result heap (context table) key table entries rfl found).finishes (.inl rfl)
+
+theorem forward.«Supported» :
+    (∀ heap key table, heap.Valid → Mutable.Value.HasType heap (.ref table) "dict[int,int]" →
+      prerequisite heap table → (HeapCalls.call program "forward" [.scalar (.int key)] heap (context table)).Supported) ∧
+    (∀ heap key table, heap.Valid → Mutable.Value.HasType heap (.ref table) "dict[int,int]" →
+      prerequisite heap table → (HeapCalls.call program "read" [.scalar (.int key)] heap (context table)).Supported) :=
+  ⟨fun heap key table valid typed condition => (forward.«Returns» heap key table valid typed condition).supported,
+   fun heap key table valid typed _ => (read.«Returns» heap key table valid typed).supported⟩
+
+theorem update.«Returns» (heap : Mutable.Heap) (key value : Int) (table : Nat)
+    (_valid : heap.Valid) (typed : Mutable.Value.HasType heap (.ref table) "dict[int,int]") :
+    (HeapCalls.call program "update" [.scalar (.int key), .scalar (.int value)] heap (context table)).Returns := by
+  obtain ⟨entries, found, _⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  exact (update.result heap (context table) key value table entries rfl found).returns
+
+theorem update.«Supported» (heap : Mutable.Heap) (key value : Int) (table : Nat)
+    (valid : heap.Valid) (typed : Mutable.Value.HasType heap (.ref table) "dict[int,int]") :
+    (HeapCalls.call program "update" [.scalar (.int key), .scalar (.int value)] heap (context table)).Supported :=
+  (update.«Returns» heap key value table valid typed).supported
+
+theorem requires_forward_0_supported (heap : Mutable.Heap) (_key : Int) (table : Nat)
+    (_valid : heap.Valid) (typed : Mutable.Value.HasType heap (.ref table) "dict[int,int]") :
+    (HeapCalls.evaluate program (fun name => (context table).lookup name) HeapGlobalContextAst.requires_forward_0 heap (context table)).Supported := by
+  obtain ⟨items, found, _⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  have result : HeapCalls.Evaluates program (fun name => (context table).lookup name) HeapGlobalContextAst.requires_forward_0
+      heap (.scalar (.bool true)) heap (context table) := by
+    apply HeapCalls.Evaluates.compare (av := .scalar (.int items.length)) (middle := heap) (afterRight := heap)
+    · exact HeapCalls.Evaluates.builtin (.cons (HeapCalls.Evaluates.lookup rfl) .nil)
+        (by simp [HeapCalls.primitive, Mutable.length, found])
+    · exact HeapCalls.Evaluates.constant
+    · simp [HeapCalls.compare, scalarCompare, evalCmpOp]
+  exact Execution.supported_of_finishes result.finishes
+
 end tests.py.heap_global_context

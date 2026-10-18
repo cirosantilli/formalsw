@@ -26,7 +26,7 @@ from lang.py.imports import bindings, identify_classes, resolve_function, resolv
 from lang.py.linking import link_imports
 from lang import spec_setup
 from lang.runtime import lake_command, runtime_env
-from lang.py.global_inputs import function_globals, merge_globals, annotation_kind
+from lang.py.global_inputs import function_globals, merge_globals, annotation_kind, call_globals, needs_heap_globals, global_input_names, GlobalInputError
 
 
 class UnsupportedSyntax(Exception):
@@ -429,6 +429,7 @@ def guard_raw_requirement(requirement, function, conditions):
     if not conditions:
         return requirement, bound
     inputs = [arg.arg for arg in function.args.args]
+    inputs.extend(global_input_names(function, getattr(function, "formalsw_globals", ())).values())
     if heap_input_name(function):
         inputs.append(heap_input_name(function))
     captures = [name for name in inputs if any(f"«{name}»" in condition for condition in conditions)]
@@ -440,6 +441,37 @@ def guard_raw_requirement(requirement, function, conditions):
     return replace(requirement, property_type=guarded['type']), bound | set(guarded['bound'])
 
 
+def raw_heap_global_type(requirement, function, ast_namespace, conditions):
+    """Raw properties use the same entry heap, global inputs, and guards as short DSL properties."""
+    binders, domain, heap = contract_domain(function)
+    requirement, bound = guard_raw_requirement(requirement, function, [*domain, *conditions])
+    inferred = [binder for binder in binders if re.match(r'\(«([^»]+)»', binder).group(1) not in bound]
+    if 'this_function' in bound or any(arg.arg == 'this_function' for arg in function.args.args):
+        raise InvalidRequirement(f'{function.name}: this_function is reserved for the enclosing Python function')
+    used = set(global_input_names(function, function.formalsw_globals).values())
+    used.update(arg.arg for arg in function.args.args)
+    used.add(heap_input_name(function))
+    names = []
+    for index in range(len(function.args.args)):
+        name = f'input_{index}'
+        while name in used:
+            name += '_'
+        names.append(name)
+        used.add(name)
+    kinds = [annotation_kind(arg.annotation) for arg in function.args.args]
+    params = ' '.join(f'({name} : {"Nat" if reference_kind(kind) else scalar_lean_type(kind)})'
+                      for name, kind in zip(names, kinds))
+    values = ', '.join(heap_term(name, kind) for name, kind in zip(names, kinds))
+    binding = f'FormalSW.PyAst.HeapCalls.call {ast_namespace}.module {lean_string(function.name)} [{values}] {heap} {contract_globals(function)}'
+    if names:
+        binding = f'fun {params} => {binding}'
+    body = f'let this_function := {binding};\n{requirement.property_type}'
+    params = ' '.join([*inferred, requirement.params]).strip()
+    if params:
+        body = f'∀ {params},\n{body}'
+    return f'let _this_module := {ast_namespace}.module;\n{body}'
+
+
 def raw_theorem_type_for_function(
     requirement: RawTheoremRequirement,
     function: ast.FunctionDef,
@@ -448,6 +480,8 @@ def raw_theorem_type_for_function(
     conditions=(),
 ) -> str:
     """Infer referenced, unbound Python arguments in a function-level theorem."""
+    if getattr(function, 'formalsw_globals', ()):
+        return raw_heap_global_type(requirement, function, ast_namespace, conditions)
     raw_heap = heap_input_name(function) if module is not None and uses_calls_model(module, function) else None
     if raw_heap:
         conditions = [*contract_domain(function)[1], *conditions]
@@ -765,11 +799,54 @@ def contract_domain(function):
         binders.append(f'({name} : {"Nat" if reference_kind(kind) else scalar_lean_type(kind)})')
         if reference_kind(kind):
             guards.append(f'FormalSW.PyAst.Mutable.Value.HasType {heap} (.ref {name}) {lean_string(kind)}')
+    globals_ = getattr(function, 'formalsw_globals', ())
+    global_names = global_input_names(function, globals_)
+    for item in globals_:
+        name = f'«{global_names[item.name]}»'
+        binders.append(f'({name} : {"Nat" if reference_kind(item.kind) else scalar_lean_type(item.kind)})')
+        if reference_kind(item.kind):
+            guards.append(f'FormalSW.PyAst.Mutable.Value.HasType {heap} (.ref {name}) {lean_string(item.kind)}')
     return binders, guards, heap
+
+
+def contract_globals(function):
+    inputs = getattr(function, 'formalsw_globals', ())
+    names = global_input_names(function, inputs)
+    return '[' + ', '.join(f'({lean_string(item.name)}, {heap_term("«" + names[item.name] + "»", item.kind)})'
+                           for item in inputs) + ']'
 
 
 def collect_conditions(markers, function, module, namespace, prior_conditions=()):
     conditions, properties, unsupported = [], [], []
+    predicates = {}
+    groups = []
+    context = False
+    if function is not None:
+        context = needs_heap_globals(module, function)
+        try:
+            groups.append(call_globals(module, function))
+            for marker in markers:
+                parsed = parse_short_marker(marker.text)
+                if parsed and parsed[0] in ('Equiv', 'EquivReturn') and len(parsed[1]) == 1 and marker.reference is None:
+                    target = next((node for node in module.body if isinstance(node, ast.FunctionDef)
+                                   and node.name == parsed[1][0]), None)
+                    if target is not None:
+                        groups.append(call_globals(module, target))
+                        context = context or needs_heap_globals(module, target)
+        except GlobalInputError as error:
+            unsupported.append(UnsupportedConstruct(function.name, error.line, str(error)))
+    for marker in markers:
+        parsed = parse_short_marker(marker.text)
+        if parsed and parsed[0] == 'Requires' and len(parsed[1]) == 1 and not parsed[2]:
+            try:
+                predicate = input_condition(marker.predicate or parsed[1][0], function, module)
+            except ContractError as error:
+                raise InvalidRequirement(str(error)) from error
+            predicates[id(marker)] = predicate
+            groups.append(predicate.globals)
+            context = context or bool(predicate.globals)
+    if function is not None and context:
+        function.formalsw_globals = merge_globals(*groups)
     for marker in markers:
         parsed = parse_short_marker(marker.text)
         if not parsed or parsed[0] != "Requires":
@@ -777,10 +854,9 @@ def collect_conditions(markers, function, module, namespace, prior_conditions=()
             continue
         if len(parsed[1]) != 1 or parsed[2]:
             raise InvalidRequirement("Requires takes one Python predicate and cannot be negated")
-        try:
-            predicate = input_condition(marker.predicate or parsed[1][0], function, module)
-        except ContractError as error:
-            raise InvalidRequirement(str(error)) from error
+        predicate = predicates[id(marker)]
+        if getattr(function, "formalsw_globals", ()):
+            predicate = replace(predicate, heap=True, needs_coverage=True)
         unsupported.extend(predicate.unsupported)
         name = f"requires_{function.name if function else 'module'}_{len(conditions)}"
         if predicate.unsupported:
@@ -790,8 +866,12 @@ def collect_conditions(markers, function, module, namespace, prior_conditions=()
         env = "none"
         query = "_arg"
         names = {arg.arg for arg in function.args.args} if function else set()
+        global_names = global_input_names(function, getattr(function, "formalsw_globals", ()))
+        names.update(global_names.values())
         while query in names:
             query += "_"
+        if global_names:
+            env = f'({contract_globals(function)} : FormalSW.PyAst.Mutable.Globals).lookup {query}'
         for arg in reversed(predicate.arguments):
             kind = annotation_kind(arg.annotation)
             value = (heap_term if predicate.heap else scalar_term)('«' + arg.arg + '»', kind)
@@ -801,6 +881,8 @@ def collect_conditions(markers, function, module, namespace, prior_conditions=()
         inputs = f'{namespace}.module (fun {query} => {env}) {namespace}.{name}'
         if predicate.heap:
             inputs += f' {heap}'
+            if global_names:
+                inputs += f' {contract_globals(function)}'
         if predicate.needs_coverage:
             covered = f"(FormalSW.PyAst.{runtime}.evaluate {inputs}).Supported"
             covered = guarded_type(covered, [*domain, *prior_conditions, *conditions])
@@ -825,13 +907,20 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
     def call(program, func, ns):
         if bindings(program, func.name) != [func]:
             raise InvalidRequirement(f"{func.name}: contract functions must have one definition and must not be rebound")
-        if function_globals(program, func):
-            raise InvalidRequirement(f"{func.name}: constrained or imported contracts with globals are unsupported")
+        referenced = call_globals(program, func)
+        available = getattr(inputs, 'formalsw_globals', ())
+        if referenced and not set(referenced) <= set(available):
+            raise InvalidRequirement(f"{func.name}: global inputs are missing from the contract domain")
+        if program is not module and referenced:
+            raise InvalidRequirement("cross-file Equiv references with globals need separate module contexts")
         if [annotation_kind(arg.annotation) for arg in func.args.args] != kinds:
             raise InvalidRequirement("Equiv requires matching supported argument domains")
-        if heap_inputs:
+        if heap_inputs or getattr(inputs, "formalsw_globals", ()):
             values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))
-            return f'FormalSW.PyAst.HeapCalls.call {ns}.module {lean_string(func.name)} [{values}] {heap}'
+            result = f'FormalSW.PyAst.HeapCalls.call {ns}.module {lean_string(func.name)} [{values}] {heap}'
+            if getattr(inputs, 'formalsw_globals', ()):
+                result += f' {contract_globals(inputs)}'
+            return result
         if uses_heap_calls(program, func):
             kind = annotation_kind(func.returns)
             if reference_kind(kind):
@@ -921,12 +1010,12 @@ def collect_requirements(
             scalar_property = (parsed and parsed[0] in ("Returns", "Halts", "Throws", "ReturnType", "Equiv", "EquivReturn")
                                and all(annotation_kind(arg.annotation) is not None for arg in stmt.args.args)
                                and not support.check(stmt.name)
-                               and not function_globals(module, stmt))
+                               and (getattr(stmt, "formalsw_globals", ()) or not function_globals(module, stmt)))
             if scalar_equiv or scalar_property and (conditions or uses_calls_model(module, stmt)):
                 property_name, args, negations = parsed
                 theorem_name = proof_name_for_short_requirement(
                     proof_namespace, stmt.name, property_name, args, marker.text)
-                unsupported = list(support.check(stmt.name, heap_calls=heap_input_name(stmt) is not None))
+                unsupported = list(support.check(stmt.name, heap_calls=heap_input_name(stmt) is not None or bool(getattr(stmt, "formalsw_globals", ()))))
                 target = None
                 dependencies = ()
                 if property_name in ("Equiv", "EquivReturn"):
@@ -941,10 +1030,10 @@ def collect_requirements(
                             raise InvalidRequirement(str(error)) from error
                         target_namespace = namespace_for_source(target_path)
                         dependencies = (target_path,) if target_path != source_path.resolve() else ()
-                        unsupported.extend(SupportChecker(target_module).check(target.name, heap_calls=heap_input_name(target) is not None))
+                        unsupported.extend(SupportChecker(target_module).check(target.name, heap_calls=heap_input_name(target) is not None or bool(getattr(stmt, "formalsw_globals", ()))))
                     else:
                         target_module, target_namespace = module, ast_namespace
-                        unsupported.extend(support.check(target.name, heap_calls=heap_input_name(target) is not None))
+                        unsupported.extend(support.check(target.name, heap_calls=heap_input_name(target) is not None or bool(getattr(stmt, "formalsw_globals", ()))))
                 property_type = "False" if unsupported else scalar_contract_type(
                     module, stmt, ast_namespace, property_name, conditions, negations,
                     (target_module, target, target_namespace) if target else None)
@@ -1030,7 +1119,7 @@ def collect_requirements(
                 if (namespace, function.name) in seen:
                     continue
                 seen.add((namespace, function.name))
-                function_issues = SupportChecker(program).check(function.name, heap_calls=heap_input_name(function) is not None)
+                function_issues = SupportChecker(program).check(function.name, heap_calls=heap_input_name(function) is not None or bool(getattr(stmt, "formalsw_globals", ())))
                 issues.extend(function_issues)
                 if not function_issues:
                     covered.append(scalar_contract_type(program, function, namespace,

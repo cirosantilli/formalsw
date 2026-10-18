@@ -94,6 +94,11 @@ def link_imports(source, module, load):
             issues = coverage.check(target)
             if issues:
                 raise ContractError(f'local helper {path}:{target} is unsupported: {issues[0].reason}')
+            from lang.py.global_inputs import call_globals
+            selected_function = next(node for node in dependency.body
+                                     if isinstance(node, ast.FunctionDef) and node.name == target)
+            if call_globals(dependency, selected_function):
+                raise ContractError('imported helper globals need separate module contexts')
             if alias != target:
                 if alias in occupied or alias in names or alias in free or alias in dependency_free:
                     raise ContractError(f'local helper alias conflicts with a module binding: {alias}')

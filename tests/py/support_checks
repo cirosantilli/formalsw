@@ -48,8 +48,8 @@ CASES = [
             items.append(n)
             raise OSError(2, "missing")
     ''', 'special builtin exception constructors are unsupported'),
-    ('dictionary global', '''
-        items = {"n": 1}
+    ('nested dictionary global', '''
+        items = {"n": [1]}
         def f(n: int):
             """@formalsw: Returns"""
             return items["n"]
