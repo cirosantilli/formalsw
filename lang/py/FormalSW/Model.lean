@@ -91,6 +91,9 @@ inductive Expr where
   | compare : Expr -> List (CmpOp × Expr) -> Expr
   /-- A Python call expression with positional arguments. -/
   | call : Expr -> List Expr -> Expr
+  /-- Normalized `sum(element for name in range(bounds) if conditions...)`.
+  Coverage checking verifies the builtin bindings before this node executes. -/
+  | sumRange : String → Expr → List Expr → List Expr → Expr
   /-- A Python subscription such as `values[i]`. -/
   | subscript : Expr -> Expr -> Expr
   /-- A Python slice used inside a subscription. -/
@@ -261,6 +264,11 @@ private partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       return .call
         (← Expr.fromJson? (← jsonField json "func"))
         (← jsonArray json "args" Expr.fromJson?)
+  | "SumRange" =>
+      return .sumRange (← jsonString json "name")
+        (← Expr.fromJson? (← jsonField json "element"))
+        (← jsonArray json "bounds" Expr.fromJson?)
+        (← jsonArray json "conditions" Expr.fromJson?)
   | "Subscript" =>
       return .subscript
         (← Expr.fromJson? (← jsonField json "value"))
@@ -737,6 +745,9 @@ mutual
         1 + left.operationCount + (comparisons.map (Expr.operationCount ∘ Prod.snd)).sum
     | .call function args =>
         1 + function.operationCount + (args.map Expr.operationCount).sum
+    | .sumRange _ element bounds conditions =>
+        5 + element.operationCount + (bounds.map Expr.operationCount).sum +
+          (conditions.map Expr.operationCount).sum
     | .subscript value index => 1 + value.operationCount + index.operationCount
     | .slice lower upper step =>
         1 + (lower.map Expr.operationCount).getD 0 +
@@ -1177,6 +1188,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.unaryOp _ _ => none
   | Expr.boolOp _ _ => none
   | Expr.ifExp _ _ _ => none
+  | Expr.sumRange _ _ _ _ => none
   | Expr.tuple _ => none
   | Expr.binOp
       (Expr.binOp

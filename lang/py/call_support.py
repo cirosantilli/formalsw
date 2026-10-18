@@ -5,6 +5,24 @@ from lang.py.global_inputs import GlobalInputError, function_globals
 from lang.py.imports import bindings
 
 
+def range_sum(node):
+    """Recognize sum(element for name in range(...) if ...), without executing it."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'sum' and len(node.args) == 1 and not node.keywords
+            and isinstance(node.args[0], ast.GeneratorExp)):
+        return None
+    generator = node.args[0]
+    if len(generator.generators) != 1:
+        return None
+    loop = generator.generators[0]
+    if not (isinstance(loop.target, ast.Name) and not loop.is_async
+            and isinstance(loop.iter, ast.Call) and isinstance(loop.iter.func, ast.Name)
+            and loop.iter.func.id == 'range' and 1 <= len(loop.iter.args) <= 3
+            and not loop.iter.keywords):
+        return None
+    return generator, loop
+
+
 def library_functions(module):
     """Supported standard-library functions, preserving their import bindings."""
     return {alias.asname or alias.name: (node.module, alias.name, node)
@@ -25,7 +43,7 @@ def uses_calls_model(module, function):
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
     names.update(library_functions(module))
     return any(
-        isinstance(node, ast.IfExp)
+        isinstance(node, (ast.IfExp, ast.GeneratorExp))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
@@ -62,45 +80,69 @@ def check_calls(module, function, reject):
                 function.args.kwonlyargs or function.args.vararg or function.args.kwarg:
             reject(function, 'call execution requires undecorated plain positional functions')
         locals_ = {arg.arg for arg in function.args.args}
-        locals_.update(node.id for node in ast.walk(function)
-                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
+        # Comprehension targets have their own scope and must not leak into the
+        # enclosing function's locals (including before the expression).
+        def stored_names(node):
+            if isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)):
+                return set()
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                return {node.id}
+            return set().union(*(stored_names(child) for child in ast.iter_child_nodes(node)))
+        locals_.update(stored_names(function))
         if locals_ & functions.keys():
             reject(function, 'local bindings must not shadow module-level call targets')
         for arg in function.args.args:
             if not isinstance(arg.annotation, ast.Name) or arg.annotation.id not in ('int', 'str', 'bool'):
                 reject(arg, 'call arguments require scalar int, str, or bool annotations')
 
-        def expr(node):
+        def expr(node, scope=None):
+            scope = locals_ if scope is None else scope
+            recurse = lambda child: expr(child, scope)
+            comprehension = range_sum(node)
+            if comprehension is not None:
+                generator, loop = comprehension
+                for builtin in ('sum', 'range'):
+                    if builtin in scope or bindings(module, builtin):
+                        reject(node, f'generator sums require the unshadowed builtin {builtin}')
+                for argument in loop.iter.args:
+                    recurse(argument)
+                inner_scope = scope | {loop.target.id}
+                for condition in loop.ifs:
+                    expr(condition, inner_scope)
+                expr(generator.elt, inner_scope)
+                return
             if isinstance(node, ast.Constant) and type(node.value) in (int, str, bool, type(None)):
                 return
-            if isinstance(node, ast.Name) and node.id in locals_:
+            if isinstance(node, ast.Name) and node.id in scope:
                 return
             if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod)):
-                expr(node.left)
-                expr(node.right)
+                recurse(node.left)
+                recurse(node.right)
             elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):
-                expr(node.operand)
+                recurse(node.operand)
             elif isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(
                     node.ops[0], (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
-                expr(node.left)
-                expr(node.comparators[0])
+                recurse(node.left)
+                recurse(node.comparators[0])
             elif isinstance(node, ast.BoolOp):
                 for item in node.values:
-                    expr(item)
+                    recurse(item)
             elif isinstance(node, ast.IfExp):
-                expr(node.test)
-                expr(node.body)
-                expr(node.orelse)
+                recurse(node.test)
+                recurse(node.body)
+                recurse(node.orelse)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
+                if node.func.id in scope:
+                    reject(node, 'local bindings must not shadow module-level call targets')
                 target = functions[node.func.id]
                 if node.keywords or len(node.args) != len(target.args.args):
                     reject(node, 'calls require exactly the declared positional arguments')
                 for item in node.args:
-                    expr(item)
+                    recurse(item)
                 visit(target)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in libraries:
                 target = node.func.id
-                if target in locals_ or bindings(module, target) != [libraries[target][2]]:
+                if target in scope or bindings(module, target) != [libraries[target][2]]:
                     reject(node, 'standard-library call targets must not be rebound or shadowed')
                 if node.keywords or len(node.args) != 1:
                     reject(node, 'math.isqrt requires exactly one positional argument')
@@ -109,7 +151,7 @@ def check_calls(module, function, reject):
                                               for root in (source.parent, Path.cwd())):
                     reject(node, 'a local math module shadows the modeled standard library')
                 for item in node.args:
-                    expr(item)
+                    recurse(item)
             else:
                 reject(node, f'{type(node).__name__} expression is unsupported by call execution')
 

@@ -116,6 +116,7 @@ def main() -> int:
         TestCase("recursive scalar calls and short circuiting", Path("tests/py/recursive_calls.py"), 0),
         TestCase("simultaneous tuple assignment and evaluation order", Path("tests/py/tuple_assignments.py"), 0),
         TestCase("stepped range iteration with calls and early returns", Path("tests/py/stepped_ranges.py"), 0),
+        TestCase("generator sum scoping, filters, ranges and exceptions", Path("tests/py/generator_sums.py"), 0),
         TestCase("integer square root and imported builtin aliases", Path("tests/py/math_isqrt.py"), 0),
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
         TestCase("typed, object, and return sort equivalence", Path("tests/py/sort.py"), 0),

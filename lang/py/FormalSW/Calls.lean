@@ -6,6 +6,18 @@ remains unsupported, and exceptions propagate out of callers. -/
 
 namespace FormalSW.PyAst.Calls
 
+/-- A generator's private environment is kept apart from its caller's locals. -/
+structure RangeSum where
+  name : String
+  element : Expr
+  conditions : List Expr
+  stop : Int
+  stride : Int
+  env : ScalarEnv
+
+def RangeSum.filter (sum : RangeSum) : Expr :=
+  if sum.conditions.isEmpty then .constant (.bool true) else .boolOp .and sum.conditions
+
 inductive Frame where
   | binaryLeft (op : BinOp) (right : Expr) (env : ScalarEnv)
   | binaryRight (op : BinOp) (left : Constant)
@@ -23,6 +35,11 @@ inductive Frame where
   | rangeArguments (name : String) (done : List Constant) (rest : List Expr)
       (body otherwise following : List Stmt) (env : ScalarEnv)
 
+  | sumArguments (name : String) (element : Expr) (conditions : List Expr)
+      (done : List Constant) (rest : List Expr) (env : ScalarEnv)
+  | sumFilter (sum : RangeSum) (next total : Int)
+  | sumElement (sum : RangeSum) (next total : Int)
+
 inductive Work where
   | expr (expression : Expr) (env : ScalarEnv)
   | block (body : List Stmt) (env : ScalarEnv)
@@ -30,6 +47,10 @@ inductive Work where
   | invoke (name : String) (values : List Constant)
   | startRange (name : String) (values : List Constant)
       (body otherwise following : List Stmt) (env : ScalarEnv)
+
+  | startSum (name : String) (element : Expr) (conditions : List Expr)
+      (values : List Constant) (env : ScalarEnv)
+  | sumLoop (sum : RangeSum) (next total : Int)
 
 structure State where
   work : Work
@@ -79,6 +100,19 @@ private def rangeState (name : String) (env : ScalarEnv) (done : List Constant)
   | first :: rest =>
       ⟨.expr first env, .rangeArguments name done rest body otherwise following env :: stack⟩
 
+private def sumState (name : String) (element : Expr) (conditions : List Expr)
+    (env : ScalarEnv) (done : List Constant) (expressions : List Expr) (stack : List Frame) : State :=
+  match expressions with
+  | [] => ⟨.startSum name element conditions done env, stack⟩
+  | first :: rest =>
+      ⟨.expr first env, .sumArguments name element conditions done rest env :: stack⟩
+
+/-- Sum accepts booleans as integers; strings and None cause TypeError. -/
+def sumAdd (total : Int) : Constant → Except ExceptionObject Int
+  | .int n => .ok (total + n)
+  | .bool b => .ok (total + if b then 1 else 0)
+  | _ => .error { typeName := "TypeError", args := [] }
+
 def step (module : Module) (state : State) : Step State Constant :=
   let ⟨work, stack⟩ := state
   match work with
@@ -87,6 +121,15 @@ def step (module : Module) (state : State) : Step State Constant :=
       | .ok (start, stop, stride) =>
           .next ⟨.block (.rangeStepLoop name start stop stride body otherwise :: following) env, stack⟩
       | .error exception => .done (.error exception)
+  | .startSum name element conditions values env =>
+      match rangeBounds values with
+      | .ok (start, stop, stride) =>
+          .next ⟨.sumLoop ⟨name, element, conditions, stop, stride, env⟩ start 0, stack⟩
+      | .error exception => .done (.error exception)
+  | .sumLoop sum next total =>
+      if rangeContinues next sum.stop sum.stride then
+        .next ⟨.expr sum.filter (sum.env.set sum.name (.int next)), .sumFilter sum next total :: stack⟩
+      else .next ⟨.value (.int total), stack⟩
   | .invoke name values =>
       match findFunctionIn module.body name with
       | some (args, body) =>
@@ -96,6 +139,8 @@ def step (module : Module) (state : State) : Step State Constant :=
       | none => outcome (libraryCall module name values) stack
   | .expr expression env =>
       match expression with
+      | .sumRange name element bounds conditions =>
+          .next (sumState name element conditions env [] bounds stack)
       | .constant value => .next ⟨.value value, stack⟩
       | .name name => outcome (Except.ok <$> env name) stack
       | .binOp left op right =>
@@ -176,6 +221,16 @@ def step (module : Module) (state : State) : Step State Constant :=
               | [] => .next ⟨.block body (assignNames env names (done ++ [value])), stack⟩
               | first :: tail =>
                   .next ⟨.expr first env, .unpack names (done ++ [value]) tail body env :: stack⟩
+          | .sumArguments name element conditions done rest env =>
+              .next (sumState name element conditions env (done ++ [value]) rest stack)
+          | .sumFilter sum next total =>
+              if scalarTruth value then
+                .next ⟨.expr sum.element (sum.env.set sum.name (.int next)), .sumElement sum next total :: stack⟩
+              else .next ⟨.sumLoop sum (next + sum.stride) total, stack⟩
+          | .sumElement sum next total =>
+              match sumAdd total value with
+              | .ok total => .next ⟨.sumLoop sum (next + sum.stride) total, stack⟩
+              | .error exception => .done (.error exception)
           | .rangeArguments name done rest body otherwise following env =>
               .next (rangeState name env (done ++ [value]) rest body otherwise following stack)
 
@@ -327,6 +382,60 @@ theorem library_call (arguments : Arguments module env expressions values)
   exact .next (by simp [step, absent, outcome, result]) .refl
 
 end Evaluates
+
+/-- A finite generator reduction, compositional in the consumer's continuation. -/
+def SumReturns (module : Module) (sum : RangeSum) (next total result : Int) : Prop :=
+  ∀ stack, Reaches module ⟨.sumLoop sum next total, stack⟩ ⟨.value (.int result), stack⟩
+
+namespace SumReturns
+
+theorem done (finished : rangeContinues next sum.stop sum.stride = false) :
+    SumReturns module sum next total total := by
+  intro stack
+  exact .next (by simp [step, finished]) .refl
+
+theorem skip (continues : rangeContinues next sum.stop sum.stride = true)
+    (test : Evaluates module (sum.env.set sum.name (.int next)) sum.filter value)
+    (rejected : scalarTruth value = false)
+    (rest : SumReturns module sum (next + sum.stride) total result) :
+    SumReturns module sum next total result := by
+  intro stack
+  exact .next (by simp [step, continues]) ((test (.sumFilter sum next total :: stack)).trans
+    (.next (by simp [step, rejected]) (rest stack)))
+
+theorem keep (continues : rangeContinues next sum.stop sum.stride = true)
+    (test : Evaluates module (sum.env.set sum.name (.int next)) sum.filter value)
+    (accepted : scalarTruth value = true)
+    (element : Evaluates module (sum.env.set sum.name (.int next)) sum.element item)
+    (addition : sumAdd total item = .ok updated)
+    (rest : SumReturns module sum (next + sum.stride) updated result) :
+    SumReturns module sum next total result := by
+  intro stack
+  exact .next (by simp [step, continues]) ((test (.sumFilter sum next total :: stack)).trans
+    (.next (by simp [step, accepted]) ((element (.sumElement sum next total :: stack)).trans
+      (.next (by simp [step, addition]) (rest stack)))))
+
+end SumReturns
+
+private theorem sum_reach
+    (h : Evaluates.Arguments module env expressions values) (done : List Constant)
+    (stack : List Frame) :
+    Reaches module (sumState name element conditions env done expressions stack)
+      ⟨.startSum name element conditions (done ++ values) env, stack⟩ := by
+  induction h generalizing done with
+  | nil => simp [sumState]; exact .refl
+  | @cons expression value expressions values head tail ih =>
+      apply (head _).trans
+      refine .next rfl ?_
+      simpa [List.append_assoc] using ih (done ++ [value])
+
+theorem Evaluates.sum_range (arguments : Evaluates.Arguments module env expressions values)
+    (bounds : rangeBounds values = .ok (start, stop, stride))
+    (rest : SumReturns module ⟨name, element, conditions, stop, stride, env⟩ start 0 result) :
+    Evaluates module env (.sumRange name element expressions conditions) (.int result) := by
+  intro stack
+  exact .next rfl ((sum_reach arguments [] stack).trans
+    (.next (by simp [step, bounds]) (rest stack)))
 
 def BlockReturns (module : Module) (env : ScalarEnv) (body : List Stmt) (value : Constant) : Prop :=
   ∀ stack, Reaches module ⟨.block body env, stack⟩ ⟨.value value, stack⟩

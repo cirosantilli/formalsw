@@ -68,4 +68,22 @@ with tempfile.TemporaryDirectory(prefix='formalsw-math-shadow-') as directory:
     (Path(directory) / 'math.py').write_text('def isqrt(n): return n\n')
     assert any('shadows the modeled standard library' in issue.reason
                for issue in SupportChecker(program).check('f'))
+sum_source = 'def f(n: int) -> int:\n    return sum(x for x in range(n) if x % 2 == 0)\n'
+assert not issues(sum_source)
+for suffix in ('sum = f\n', 'range = f\n', 'from other import sum\n', 'from other import *\n'):
+    assert issues(sum_source + suffix), suffix
+for expression in (
+    'sum(x for x in range(n) for y in range(n))',
+    'sum((x for x in range(n)), 1)',
+    'sum(x for x in range(n) if missing(x))',
+    'sum(x for x in range(n)) + x',
+    'x + sum(x for x in range(n))',
+    'sum(f(n) for f in range(n))',
+    'sum(x for x in range(n, stop=1))',
+):
+    source = sum_source.replace('sum(x for x in range(n) if x % 2 == 0)', expression)
+    assert issues(source), expression
+assert issues(sum_source.replace('def f(n: int)', 'def f(n: int, sum: int)'))
+assert not issues(sum_source.replace('sum(x for x in range(n) if x % 2 == 0)',
+                                   'sum(n for n in range(n)) + n'))
 print("Recursive call coverage passed")

@@ -18,7 +18,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem
-from lang.py.call_support import uses_calls_model
+from lang.py.call_support import range_sum, uses_calls_model
 from lang.py.contracts import ContractError, input_condition
 from lang.py.imports import bindings, resolve_function
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind
@@ -978,6 +978,13 @@ class AstJsonEmitter:
 
     def expr(self, expr: ast.expr) -> dict[str, object]:
         """Encode one Python expression."""
+        comprehension = range_sum(expr)
+        if comprehension is not None:
+            generator, loop = comprehension
+            return {"type": "SumRange", "name": loop.target.id,
+                    "element": self.expr(generator.elt),
+                    "bounds": [self.expr(arg) for arg in loop.iter.args],
+                    "conditions": [self.expr(condition) for condition in loop.ifs]}
         match expr:
             case ast.Constant(value=value):
                 return self.constant(value)

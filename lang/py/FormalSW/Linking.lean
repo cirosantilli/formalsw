@@ -136,6 +136,8 @@ theorem Extends.step_eq (extension : Extends target source) (state : State)
   | block _ _ => rfl
   | value _ => rfl
   | startRange _ _ _ _ _ _ => rfl
+  | startSum _ _ _ _ _ => rfl
+  | sumLoop _ _ _ => rfl
 
 theorem Reaches.extend (run : Reaches source initial final) (extension : Extends target source) :
     Reaches target initial final := by
