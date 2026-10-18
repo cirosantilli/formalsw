@@ -211,6 +211,9 @@ inductive Frame where
   | binaryRight (op : BinOp) (left : Value) (inPlace : Bool)
   | compareLeft (op : CmpOp) (right : Expr) (env : Env)
   | compareRight (op : CmpOp) (left : Value)
+  | chainLeft (op : CmpOp) (right : Expr) (rest : List (CmpOp × Expr)) (env : Env)
+  | chainRight (op : CmpOp) (left : Value) (rest : List (CmpOp × Expr)) (env : Env)
+  | chainResult (right : Value) (rest : List (CmpOp × Expr)) (env : Env)
   | unary (op : UnaryOp)
   | boolean (op : BoolOp) (rest : List Expr) (env : Env)
   | conditional (yes no : Expr) (env : Env)
@@ -353,6 +356,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .binOp a op b => .next ⟨.expr a env, .binaryLeft op b env false :: stack, heap⟩
       | .unaryOp op expression => .next ⟨.expr expression env, .unary op :: stack, heap⟩
       | .compare a [(op, b)] => .next ⟨.expr a env, .compareLeft op b env :: stack, heap⟩
+      | .compare a ((op, b) :: rest) => .next ⟨.expr a env, .chainLeft op b rest env :: stack, heap⟩
       | .boolOp op (first :: rest) => .next ⟨.expr first env, .boolean op rest env :: stack, heap⟩
       | .ifExp test yes no => .next ⟨.expr test env, .conditional yes no env :: stack, heap⟩
       | .list expressions => .next (argumentsState .list env [] expressions stack heap)
@@ -420,6 +424,15 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
               result anchors heap (if inPlace then inplace op left value else Mutable.binary op left value) stack
           | .compareLeft op right env => .next ⟨.expr right env, .compareRight op value :: stack, heap⟩
           | .compareRight op left => result anchors heap (compare op left value) stack
+          | .chainLeft op right rest env =>
+              .next ⟨.expr right env, .chainRight op value rest env :: stack, heap⟩
+          | .chainRight op left rest env =>
+              result anchors heap (compare op left value) (.chainResult value rest env :: stack)
+          | .chainResult right rest env => match rest with
+              | [] => .next ⟨.value value, stack, heap⟩
+              | (op, next) :: rest => run anchors heap (Mutable.truth value) fun truth heap =>
+                  if truth then .next ⟨.expr next env, .chainRight op right rest env :: stack, heap⟩
+                  else .next ⟨.value value, stack, heap⟩
           | .unary op => result anchors heap (unary op value) stack
           | .boolean op rest env => run anchors heap (Mutable.truth value) fun truth heap =>
               if (match op with | .and => !truth | .or => truth) then .next ⟨.value value, stack, heap⟩
@@ -631,6 +644,57 @@ theorem compare (left : Evaluates module env a heap av middle)
   intro anchors stack
   exact .next rfl ((left _ _).trans (.next rfl ((right _ _).trans
     (.next (by simp [step, result, run, operation]) .refl))))
+
+/-- Continue a comparison chain with the middle operand's value already evaluated. -/
+def Compares (module : Module) (env : Env) (left : Value) (op : CmpOp) (right : Expr)
+    (rest : List (CmpOp × Expr)) (heap : Heap) (answer : Value) (finalHeap : Heap) : Prop :=
+  ∀ anchors stack,
+    Reaches module anchors ⟨.expr right env, .chainRight op left rest env :: stack, heap⟩
+      ⟨.value answer, stack, finalHeap⟩
+
+namespace Compares
+
+theorem last (evaluated : Evaluates module env right heap value middle)
+    (operation : HeapCalls.compare op left value middle = some (.ok answer, finalHeap)) :
+    Compares module env left op right [] heap answer finalHeap := by
+  intro anchors stack
+  apply (evaluated anchors _).trans
+  apply Reaches.next (following :=
+    ⟨.value answer, .chainResult value [] env :: stack, finalHeap⟩)
+    (by simp [step, result, run, operation])
+  exact .next rfl .refl
+
+theorem stop (evaluated : Evaluates module env right heap value middle)
+    (operation : HeapCalls.compare op left value middle = some (.ok answer, finalHeap))
+    (truth : Mutable.truth answer finalHeap = some (.ok false, finalHeap)) :
+    Compares module env left op right (next :: rest) heap answer finalHeap := by
+  intro anchors stack
+  apply (evaluated anchors _).trans
+  apply Reaches.next (following :=
+    ⟨.value answer, .chainResult value (next :: rest) env :: stack, finalHeap⟩)
+    (by simp [step, result, run, operation])
+  cases next
+  exact .next (by simp [step, run, truth]) .refl
+
+theorem next (evaluated : Evaluates module env right heap value middle)
+    (operation : HeapCalls.compare op left value middle = some (.ok compared, afterComparison))
+    (truth : Mutable.truth compared afterComparison = some (.ok true, afterComparison))
+    (following : Compares module env value nextOp nextRight rest afterComparison answer finalHeap) :
+    Compares module env left op right ((nextOp, nextRight) :: rest) heap answer finalHeap := by
+  intro anchors stack
+  apply (evaluated anchors _).trans
+  apply Reaches.next (following :=
+    ⟨.value compared, .chainResult value ((nextOp, nextRight) :: rest) env :: stack,
+      afterComparison⟩) (by simp [step, result, run, operation])
+  exact .next (by simp [step, run, truth]) (following anchors stack)
+
+end Compares
+
+theorem chain (left : Evaluates module env expression heap value middle)
+    (following : Compares module env value op right (next :: rest) middle answer finalHeap) :
+    Evaluates module env (.compare expression ((op, right) :: next :: rest)) heap answer finalHeap := by
+  intro anchors stack
+  exact .next rfl ((left anchors _).trans (.next rfl (following anchors stack)))
 
 /-- Short-circuiting returns the first operand without evaluating later expressions. -/
 theorem boolean_stop (evaluated : Evaluates module env first heap value middle)

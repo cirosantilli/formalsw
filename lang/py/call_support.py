@@ -356,8 +356,6 @@ def check_calls(module, function, reject, *, heap=False):
                 recurse(node.operand)
             elif isinstance(node, ast.Compare) and all(isinstance(
                     op, (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in node.ops):
-                if heap and len(node.ops) != 1:
-                    reject(node, "chained comparisons are not yet supported by heap call execution")
                 recurse(node.left)
                 for comparator in node.comparators:
                     recurse(comparator)

@@ -123,7 +123,8 @@ range_source = 'def f(n: int) -> list[int]:\n    items = []\n    for k in range(
 assert not SupportChecker(ast.parse(range_source)).check('f')
 for suffix in ('range = f\n', 'from other import range\n', 'from other import *\n'):
     assert SupportChecker(ast.parse(range_source + suffix)).check('f')
-for iterator in ('range()', 'range(n, stop=0)', 'range(n, n, n, n)', '[n]'):
+assert not SupportChecker(ast.parse(range_source.replace('range(n)', '[n]'))).check('f')
+for iterator in ('range()', 'range(n, stop=0)', 'range(n, n, n, n)'):
     assert SupportChecker(ast.parse(range_source.replace('range(n)', iterator))).check('f')
 reverse_source = 'def f(n: int) -> list[int]: return list(reversed([n]))\n'
 assert not SupportChecker(ast.parse(reverse_source)).check('f')
