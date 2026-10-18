@@ -19,7 +19,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
-from lang.py.call_support import range_sum, reversed_list, uses_calls_model, has_partial_primitives, uses_heap_calls
+from lang.py.call_support import range_sum, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
 from lang.py.imports import bindings, resolve_function, resolve_python_function
@@ -1297,6 +1297,18 @@ class AstJsonEmitter:
                     "bounds": [self.expr(arg) for arg in comprehension.bounds],
                     "conditions": [self.expr(condition) for condition in comprehension.conditions]}
         match expr:
+            case ast.JoinedStr(values=values):
+                if not plain_fstring(expr):
+                    raise UnsupportedSyntax('f-strings require empty format specifications and optional !s')
+                # Formatting supported scalars with an empty specification is
+                # intrinsic str conversion, even if Python's str name is rebound.
+                # Convert each field before evaluating the next one.
+                result = self.constant('')
+                for part in values:
+                    value = (self.expr(part) if isinstance(part, ast.Constant) else
+                             {"type": "BuiltinCall", "name": "str", "args": [self.expr(part.value)]})
+                    result = {"type": "BinOp", "left": result, "op": "Add", "right": value}
+                return result
             case ast.Constant(value=value):
                 return self.constant(value)
             case ast.Name(id=name):

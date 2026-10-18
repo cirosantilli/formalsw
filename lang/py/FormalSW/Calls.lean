@@ -10,6 +10,7 @@ namespace FormalSW.PyAst.Calls
 /-- Operations whose bindings have already been resolved by source checking. -/
 inductive Primitive where
   | builtin (function : Builtin)
+  | raiseException (typeName : String)
   | subscript
   | slice
 
@@ -40,6 +41,7 @@ def length : Constant → Except ExceptionObject Constant
   | _ => .error { typeName := "TypeError", args := [] }
 
 def Primitive.apply : Primitive → List Constant → Option (Except ExceptionObject Constant)
+  | .raiseException typeName, args => some (.error { typeName, args })
   | .builtin .len, [value] => some (length value)
   | .builtin .int, values => integerConversion values
   | .builtin .str, values => some (Strings.str values)
@@ -264,6 +266,10 @@ def step (module : Module) (state : State) : Step State Constant :=
       match body with
       | [] => .next ⟨.value .none, stack⟩
       | .return expr :: _ => .next ⟨.expr expr env, stack⟩
+      | .raise (some (.call (.name typeName) args)) :: _ =>
+          .next (primitiveState (.raiseException typeName) env [] args stack)
+      | .raise (some (.name typeName)) :: _ =>
+          .next (primitiveState (.raiseException typeName) env [] [] stack)
       | .assign [.name name] expr :: rest =>
           .next ⟨.expr expr env, .assign name rest env :: stack⟩
       | .assign [.tuple targets] (.tuple expressions) :: rest =>

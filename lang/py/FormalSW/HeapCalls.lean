@@ -210,6 +210,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
 
 inductive Operation where
   | call (name : String)
+  | raiseException (typeName : String)
   | list
   | tuple
   | subscript
@@ -308,6 +309,11 @@ def sequenceValue : SequenceSource → Value
     sequenceValue (sequenceSource value) = value := by cases value <;> rfl
 
 def primitive : Operation → List Value → Eval Value
+  | .raiseException typeName, values => do
+      let args ← values.mapM fun value => match value with
+        | .scalar value => pure value
+        | .ref _ => Mutable.unsupported
+      throw { typeName, args }
   | .list, values => Mutable.allocate values
   | .tuple, values => Mutable.allocateTuple values
   | .reversedList, [value] => do
@@ -440,6 +446,10 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       match body with
       | [] => .next ⟨.value (.scalar .none), stack, heap⟩
       | .return expression :: _ => .next ⟨.expr expression env, stack, heap⟩
+      | .raise (some (.call (.name typeName) args)) :: _ =>
+          .next (argumentsState (.raiseException typeName) env [] args stack heap)
+      | .raise (some (.name typeName)) :: _ =>
+          .next (argumentsState (.raiseException typeName) env [] [] stack heap)
       | .assign [.subscript base (.slice lower upper stride)] expression :: rest =>
           .next ⟨.expr expression env, .assignSlice base (lower.getD (.constant .none))
             (upper.getD (.constant .none)) (stride.getD (.constant .none)) rest env :: stack, heap⟩
@@ -674,7 +684,7 @@ theorem step_extend (extension : Calls.Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList | raiseException _ => rfl
   | expr _ _ | block _ _ | value _ | startRange _ _ _ _ _ _ => rfl
 
 theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Calls.Extends target source) :

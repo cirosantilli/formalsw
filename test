@@ -101,6 +101,7 @@ def main() -> int:
         TestCase("scalar sets and shared set inputs", Path("tests/py/sets.py"), 0, "All 7 checks passed"),
         TestCase("tuple values and heap unpacking", Path("tests/py/tuple_calls.py"), 0, "All 4 checks passed"),
         TestCase("scalar sorting and fresh result lists", Path("tests/py/sorted_calls.py"), 0, "All 3 checks passed"),
+        TestCase("formatted values and explicit exceptions", Path("tests/py/formatted_raise.py"), 0, "All 4 checks passed"),
         TestCase("mutable buffers, initialization, and helper reads", Path("tests/py/buffers.py"), 0, "All 6 checks passed"),
         TestCase("shared heap range loops", Path("tests/py/heap_ranges.py"), 0, "All 2 checks passed"),
         TestCase("integer conversion and square roots", Path("tests/py/int_conversion.py"), 0, "All 6 checks passed"),

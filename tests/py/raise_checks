@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""
+Check formatted scalar fields and explicit exceptions against Python execution.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def formatted(n: int):
+    str = 19
+    return f"value {n}, bool {True}, text {'λ😀'}, bytes {b'abc'}, none {None}, escaped {{}} {n!s:}"
+def raised(n: int):
+    raise ValueError(f"value {n}", n, True)
+def bare(n: int):
+    raise RuntimeError
+def empty(n: int):
+    raise ValueError()
+def fail(n: int):
+    return n // 0
+def earlier(n: int):
+    raise ValueError(f"value {fail(n)}", n)
+def caller(n: int):
+    return raised(n)
+def touch(xs: list[int], n: int):
+    xs.append(n)
+    return n
+def effect(xs: list[int], n: int):
+    raise ValueError(f"value {touch(xs, n)}", touch(xs, n + 1))
+def effect_failure(xs: list[int], n: int):
+    raise ValueError(f"first {touch(xs, n)} then {fail(n)}", touch(xs, n + 1))
+def field_order(xs: list[int], n: int):
+    return f"first {touch(xs, n)} then {touch(xs, n + 1)}"
+def nested(xs: list[int], n: int):
+    raise ValueError(xs)
+def nested_field(xs: list[int], n: int):
+    return f"{xs}"
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+scalar_names = ('formatted', 'raised', 'bare', 'empty', 'earlier', 'caller')
+heap_names = ('effect', 'effect_failure', 'field_order')
+count = 0
+for name in scalar_names + heap_names:
+    assert not checker.check(name), (name, checker.check(name))
+    for n in (-19, 0, 8):
+        heap_mode = name in heap_names
+        xs = [4]
+        try:
+            value = world[name](*([xs, n] if heap_mode else [n]))
+            expected = f'.ok ({constant(value)})'
+            error = None
+        except (ValueError, RuntimeError, ZeroDivisionError) as exception:
+            error = type(exception).__name__
+            # Runtime-generated diagnostic messages are intentionally abstracted;
+            # explicitly constructed exception arguments are preserved exactly.
+            args = exception.args if error != 'ZeroDivisionError' else ()
+            expected = '.error ⟨' + json.dumps(error) + ', [' + ', '.join(map(constant, args)) + ']⟩'
+        if heap_mode:
+            roots = [xs] + ([value] if error is None else [])
+            snapshot = data(snapshot_roots(roots))
+            outcome = (f'c.outcome == .ok (.scalar ({constant(value)}))' if error is None else
+                       f'c.outcome == {expected}')
+            lines.extend([
+                f'example : (match (HeapCalls.call source "{name}" [.ref 0, .scalar (.int ({n}))]',
+                '    [.list [.scalar (.int 4)]]).execution.observe 500 with',
+                f'  | .done (.ok c) => ({outcome}) &&',
+                f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 1000) == some true)',
+                '  | _ => false) = true := by native_decide',
+            ])
+        else:
+            lines.append(f'example : (Calls.function source "{name}" [.int ({n})]).observe 500 = .done ({expected}) := by native_decide')
+        count += 1
+
+for name in ('nested', 'nested_field'):
+    lines.append(f'example : (HeapCalls.call source "{name}" [.ref 0, .scalar (.int 1)] [.list []]).execution.observe 100 = .unsupported := by decide')
+
+for body in ('raise OSError(2, "missing")', 'raise ValueError from None', 'raise',
+             'raise ValueError(message="x")', 'ValueError = 4\nraise ValueError',
+             'return f"{n:03d}"', 'return f"{n!r}"', 'return f"{n!a}"',
+             'return f"{n:{n}}"'):
+    module = ast.parse('def f(n: int):\n    xs = []\n' + ''.join('    ' + line + '\n' for line in body.splitlines()))
+    assert SupportChecker(module).check('f'), body
+for binding in ('ValueError = 4\n', 'from somewhere import ValueError\n'):
+    module = ast.parse(binding + 'def f(n: int):\n    xs = []\n    raise ValueError(n)\n')
+    assert SupportChecker(module).check('f'), binding
+
+with project_temporary_directory(prefix='raise-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} explicit exception and f-string Python comparisons passed')

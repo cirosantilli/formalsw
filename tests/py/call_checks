@@ -109,6 +109,7 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("heap_comparison_ch
 subprocess.run([sys.executable, str(Path(__file__).with_name("set_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("tuple_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("sorted_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("raise_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("math_gcd_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("math_module_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("range_sum_checks"))], check=True)

@@ -9,6 +9,26 @@ from lang.py.defaults import literal_default
 from lang.py.sorting_support import uses_sort_model
 
 
+# These builtin constructors preserve positional arguments without the special
+# normalization performed by OSError and the Unicode error constructors.
+PLAIN_EXCEPTIONS = frozenset({
+    'BaseException', 'Exception', 'ArithmeticError', 'AssertionError',
+    'AttributeError', 'EOFError', 'IndexError', 'KeyError', 'LookupError',
+    'NotImplementedError', 'OverflowError', 'RuntimeError', 'StopIteration',
+    'TypeError', 'ValueError', 'ZeroDivisionError',
+})
+
+
+def plain_fstring(node):
+    """Check formatting options whose scalar semantics are exactly str(value)."""
+    return isinstance(node, ast.JoinedStr) and all(
+        isinstance(part, ast.Constant) and type(part.value) is str
+        or isinstance(part, ast.FormattedValue) and part.conversion in (-1, ord('s'))
+        and (part.format_spec is None
+             or isinstance(part.format_spec, ast.JoinedStr) and not part.format_spec.values)
+        for part in node.values)
+
+
 @dataclass(frozen=True)
 class RangeSum:
     name: str
@@ -256,7 +276,7 @@ def uses_calls_model(module, function):
             or uses_method(module, function, "bit_length")):
         return True
     return any(
-        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript, ast.Assert))
+        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript, ast.Assert, ast.JoinedStr))
         or isinstance(node, ast.Constant) and type(node.value) is bytes
         or range_sum(node) is not None
         or general_division(node)
@@ -348,6 +368,13 @@ def check_calls(module, function, reject, *, heap=False):
             if isinstance(node, ast.Constant) and type(node.value) in (int, str, bytes, bool, type(None)):
                 return
             if isinstance(node, ast.Name) and node.id in scope:
+                return
+            if isinstance(node, ast.JoinedStr):
+                if not plain_fstring(node):
+                    reject(node, 'f-strings support scalar fields with empty format specifications and optional !s')
+                for part in node.values:
+                    if isinstance(part, ast.FormattedValue):
+                        recurse(part.value)
                 return
             if heap and isinstance(node, (ast.List, ast.Tuple)):
                 if (isinstance(node, ast.Tuple) and node.elts
@@ -512,6 +539,17 @@ def check_calls(module, function, reject, *, heap=False):
                     expr(node.test)
                     if node.msg is not None:
                         expr(node.msg)
+                elif isinstance(node, ast.Raise):
+                    target = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                    if (node.cause is not None or not isinstance(target, ast.Name)
+                            or target.id not in PLAIN_EXCEPTIONS
+                            or target.id in locals_ or bindings(module, target.id)):
+                        reject(node, 'raise requires an unshadowed supported builtin exception constructor')
+                    if isinstance(node.exc, ast.Call):
+                        if node.exc.keywords:
+                            reject(node, 'exception constructors require positional arguments')
+                        for argument in node.exc.args:
+                            expr(argument)
                 elif isinstance(node, (ast.If, ast.While)):
                     expr(node.test)
                     block(node.body, loop_depth + isinstance(node, ast.While))
