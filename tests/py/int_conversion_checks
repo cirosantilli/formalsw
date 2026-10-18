@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Check integer conversion, binding resolution, effects, and coverage obligations."""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is bytes:
+        return '.bytes ' + str(list(value))
+    if type(value) is str:
+        return '.string ' + json.dumps(value)
+    return f'.int ({value})'
+
+
+source = '''def identity(n: int) -> int: return int(n)
+def empty(n: int) -> int: return int()
+def heap_identity(n: int) -> int:
+    values = [n]
+    return int(values[0])
+def bad_list(n: int) -> int: return int([n])
+def bad_argument(n: int) -> int: return int(n // 0)
+def text(n: int) -> int: return int("12")
+def bytes_value(n: int) -> int: return int(b"12")
+def buffer(n: int) -> int: return int(bytearray(b"12"))
+def record(log: list[int], n: int) -> int:
+    log.append(n)
+    return n
+def effects(n: int, log: list[int]) -> int: return int(record(log, n))
+'''
+program = ast.parse(source)
+namespace = {}
+exec(source, namespace)
+values = [*range(-10, 11), True, False, None, -(2**127), 2**127, 10**100]
+equations = []
+for name in ('identity', 'empty', 'heap_identity', 'bad_list', 'bad_argument'):
+    assert not SupportChecker(program).check(name)
+    backend = 'HeapCalls.scalarFunction' if name in ('heap_identity', 'bad_list') else 'Calls.function'
+    for value in values:
+        try:
+            expected = '.ok (' + constant(namespace[name](value)) + ')'
+        except (TypeError, ZeroDivisionError) as error:
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+        equations.append(f'example : ({backend} Probe.module "{name}" [{constant(value)}]).observe 80 = .done ({expected}) := by decide')
+for name, backend in (('text', 'Calls.function'), ('bytes_value', 'Calls.function'), ('buffer', 'HeapCalls.scalarFunction')):
+    equations.append(f'example : ({backend} Probe.module "{name}" [.int 0]).observe 80 = .unsupported := by decide')
+for value in values:
+    result = f'.ok (.scalar ({constant(int(value))}))' if value is not None else '.error { typeName := "TypeError", args := [] }'
+    equations.append(f'example : (HeapCalls.call Probe.module "effects" [.scalar ({constant(value)}), .ref 0] [.list []]).execution.observe 80 = '
+                     f'.done (.ok {{outcome := {result}, globals := [], heap := [.list [.scalar ({constant(value)})]], anchors := 1}}) := by decide')
+
+with project_temporary_directory(prefix='int-conversion-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
+                     + 'open FormalSW.PyAst\nset_option maxRecDepth 4096\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)', 'EquivReturn(f)')):
+        path = directory / f'coverage_{index}.py'
+        path.write_text(f'def f(n: int) -> int:\n    """\n    @formalsw: {marker}\n    """\n    return int("12")\n')
+        module = api['source_module'](path)
+        requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [r for r in requirements if r.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+
+base = 'def f(n: int) -> int: return int(n)\n'
+for suffix in ('int = 1\n', 'from other import int\n'):
+    assert SupportChecker(ast.parse(base + suffix)).check('f')
+for call in ('int(n, 10)', 'int(x=n)', 'int(*n)'):
+    assert SupportChecker(ast.parse(base.replace('int(n)', call))).check('f')
+assert SupportChecker(ast.parse('def f(int: int) -> int: return int(0)\n')).check('f')
+custom = ast.parse(base + 'def int(n: int) -> int: return n + 1\n')
+assert not SupportChecker(custom).check('f')
+assert 'BuiltinCall' not in api['AstJsonEmitter'](custom).emit()
+print(f'Integer conversion: {len(equations)} scalar/heap cases, retained effects, bindings and coverage checks passed')

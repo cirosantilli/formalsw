@@ -25,7 +25,16 @@ def positionalMaximum : List Constant → Option (Except ExceptionObject Constan
   | first :: second :: rest => some (maximumFrom first (second :: rest))
   | _ => none
 
+/-- Integer and Boolean conversions are exact. Text parsing is explicitly unsupported. -/
+def integerConversion : List Constant → Option (Except ExceptionObject Constant)
+  | [] => some (.ok (.int 0))
+  | [.int value] => some (.ok (.int value))
+  | [.bool value] => some (.ok (.int (if value then 1 else 0)))
+  | [.none] => some (.error { typeName := "TypeError", args := [] })
+  | _ => none
+
 def Primitive.apply : Primitive → List Constant → Option (Except ExceptionObject Constant)
+  | .builtin .int, values => integerConversion values
   | .builtin .str, values => some (Strings.str values)
   | .builtin .max, values => positionalMaximum values
   | .builtin .intBitLength, [value] => some (Math.bitLengthCall value)

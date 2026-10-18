@@ -73,6 +73,7 @@ deriving Repr, DecidableEq, BEq, Lean.ToExpr
 
 /-- Builtins resolved by the frontend after rejecting shadowed bindings. -/
 inductive Builtin where
+  | int
   | str
   | max
   | intBitLength
@@ -321,6 +322,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         (← jsonArray json "conditions" Expr.fromJson?)
   | "BuiltinCall" =>
       let builtin ← match ← jsonString json "name" with
+        | "int" => pure Builtin.int
         | "str" => pure Builtin.str
         | "max" => pure Builtin.max
         | "bytearray" => pure Builtin.bytearray

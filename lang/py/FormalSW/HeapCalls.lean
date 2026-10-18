@@ -286,6 +286,15 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .bytearray, values => Mutable.bytearray values
   | .builtin .intBitLength, [.scalar value] => scalarResult (some (Math.bitLengthCall value))
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
+  | .builtin .int, [.ref address] => do
+      match (← get)[address]? with
+      | some (.list _) => Mutable.error "TypeError"
+      | _ => Mutable.unsupported
+  | .builtin .int, values => do
+      let values ← values.mapM fun value => match value with
+        | .scalar value => pure value
+        | .ref _ => Mutable.unsupported
+      scalarResult (Calls.integerConversion values)
   | .builtin .str, values => do
       let values ← values.mapM fun value => match value with
         | .scalar value => pure value

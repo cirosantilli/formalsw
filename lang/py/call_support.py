@@ -183,6 +183,9 @@ def has_partial_primitives(module, function):
             continue
         visited.add(current.name)
         for node in ast.walk(current):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == 'int' and not bindings(module, 'int')):
+                return True
             if isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow):
                 return True
             if byte_values and isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Mod):
@@ -235,7 +238,7 @@ def uses_calls_model(module, function):
         or general_division(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and library_name(node.func) in names | {'str', 'max'}
+        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'max'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -399,6 +402,13 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'buffer construction requires the unshadowed builtin bytearray')
                 if node.keywords or len(node.args) > 1:
                     reject(node, 'bytearray supports zero or one positional argument; encoding arguments are not modeled')
+                for item in node.args:
+                    recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'int':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'integer conversion requires the unshadowed builtin int')
+                if node.keywords or len(node.args) > 1:
+                    reject(node, 'int supports zero or one positional argument; explicit bases are not modeled')
                 for item in node.args:
                     recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'str':
