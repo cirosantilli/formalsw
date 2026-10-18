@@ -85,4 +85,19 @@ theorem countdown.«Returns» (n : Int) :
       simp only [empty, Int.natCast_zero]
       exact Calls.SumReturns.done (by simp [Calls.rangeContinues, Int.not_lt_of_ge (Int.le_of_lt negative)])
 
+theorem direct.«Returns» (n : Int) :
+    (Calls.function program "direct" [.int n]).Returns := by
+  refine ⟨.int (6 + n), ?_⟩
+  exact Execution.finishes_of_observe (fuel := 300) rfl
+
+theorem direct_descending.«Returns» (n : Int) :
+    (Calls.function program "direct_descending" [.int n]).Returns := by
+  refine ⟨.int (3 + n), ?_⟩
+  exact Execution.finishes_of_observe (fuel := 300) rfl
+
+theorem direct_nested.«Returns» (n : Int) :
+    (Calls.function program "direct_nested" [.int n]).Returns := by
+  refine ⟨.int (3 + n), ?_⟩
+  exact Execution.finishes_of_observe (fuel := 300) rfl
+
 end tests.py.generator_sums

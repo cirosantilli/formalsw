@@ -1236,11 +1236,10 @@ class AstJsonEmitter:
         """Encode one Python expression."""
         comprehension = range_sum(expr)
         if comprehension is not None:
-            generator, loop = comprehension
-            return {"type": "SumRange", "name": loop.target.id,
-                    "element": self.expr(generator.elt),
-                    "bounds": [self.expr(arg) for arg in loop.iter.args],
-                    "conditions": [self.expr(condition) for condition in loop.ifs]}
+            return {"type": "SumRange", "name": comprehension.name,
+                    "element": self.expr(comprehension.element),
+                    "bounds": [self.expr(arg) for arg in comprehension.bounds],
+                    "conditions": [self.expr(condition) for condition in comprehension.conditions]}
         match expr:
             case ast.Constant(value=value):
                 return self.constant(value)

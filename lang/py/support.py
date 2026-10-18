@@ -700,6 +700,9 @@ class SupportChecker:
             function = self.functions.get(target)
             if function is None:
                 continue
+            if uses_builtin(self.module, function, 'sum') and model != 'Calls.function':
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'range sums require the scalar call interpreter'))
             if uses_builtin(self.module, function, 'max') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'positional max requires a call interpreter'))
@@ -759,6 +762,10 @@ class SupportChecker:
                        for f in (target, other) if f in self.functions):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
                         'legacy Function properties omit positional max; use the short DSL or Calls'))
+                if any(uses_builtin(self.module, self.functions[f], 'sum')
+                       for f in (target, other) if f in self.functions):
+                    issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
+                        'legacy Function properties omit range sums; use the short DSL or Calls'))
                 try:
                     if any(function_globals(self.module, self.functions[f])
                            for f in (target, other) if f in self.functions):

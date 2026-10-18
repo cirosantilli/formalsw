@@ -1,27 +1,42 @@
 """Coverage checks for scalar functions with ordinary recursive calls."""
 import ast
+from dataclasses import dataclass
 from pathlib import Path
 from lang.py.global_inputs import GlobalInputError, function_globals, annotation_kind
 from lang.py.imports import bindings
 from lang.py.defaults import literal_default
 
 
+@dataclass(frozen=True)
+class RangeSum:
+    name: str
+    element: ast.expr
+    bounds: list[ast.expr]
+    conditions: list[ast.expr]
+
+
 def range_sum(node):
-    """Recognize sum(element for name in range(...) if ...), without executing it."""
+    """Normalize builtin range sums without executing or rewriting the source AST."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id == 'sum' and len(node.args) == 1 and not node.keywords
-            and isinstance(node.args[0], ast.GeneratorExp)):
+            and node.func.id == 'sum' and len(node.args) == 1 and not node.keywords):
         return None
-    generator = node.args[0]
-    if len(generator.generators) != 1:
+    iterable = node.args[0]
+    if isinstance(iterable, ast.GeneratorExp):
+        if len(iterable.generators) != 1:
+            return None
+        loop = iterable.generators[0]
+        if not isinstance(loop.target, ast.Name) or loop.is_async:
+            return None
+        name, element, conditions = loop.target.id, iterable.elt, loop.ifs
+        iterable = loop.iter
+    else:
+        # The private binder cannot collide with any Python source identifier.
+        name, element, conditions = '', ast.Name(id='', ctx=ast.Load()), []
+    if not (isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+            and iterable.func.id == 'range' and 1 <= len(iterable.args) <= 3
+            and not iterable.keywords):
         return None
-    loop = generator.generators[0]
-    if not (isinstance(loop.target, ast.Name) and not loop.is_async
-            and isinstance(loop.iter, ast.Call) and isinstance(loop.iter.func, ast.Name)
-            and loop.iter.func.id == 'range' and 1 <= len(loop.iter.args) <= 3
-            and not loop.iter.keywords):
-        return None
-    return generator, loop
+    return RangeSum(name, element, iterable.args, conditions)
 
 
 def reversed_list(node):
@@ -130,6 +145,7 @@ def uses_calls_model(module, function):
     names.update(library_functions(module))
     return bool(function.args.defaults) or uses_heap_calls(module, function) or any(
         isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript))
+        or range_sum(node) is not None
         or general_division(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
@@ -206,16 +222,15 @@ def check_calls(module, function, reject, *, heap=False):
             if comprehension is not None:
                 if heap:
                     reject(node, "generator sums are not yet supported by heap call execution")
-                generator, loop = comprehension
                 for builtin in ('sum', 'range'):
                     if builtin in scope or bindings(module, builtin):
                         reject(node, f'generator sums require the unshadowed builtin {builtin}')
-                for argument in loop.iter.args:
+                for argument in comprehension.bounds:
                     recurse(argument)
-                inner_scope = scope | {loop.target.id}
-                for condition in loop.ifs:
+                inner_scope = scope | {comprehension.name}
+                for condition in comprehension.conditions:
                     expr(condition, inner_scope)
-                expr(generator.elt, inner_scope)
+                expr(comprehension.element, inner_scope)
                 return
             if isinstance(node, ast.Constant) and type(node.value) in (int, str, bool, type(None)):
                 return

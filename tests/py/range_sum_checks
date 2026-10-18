@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Compare direct range sums with Python, including errors and builtin bindings."""
+import ast
+from itertools import product
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    return f'(.string {json.dumps(value)})'
+
+
+source = '''def stop(n: int) -> int: return sum(range(n))
+def between(a: int, b: int) -> int: return sum(range(a, b))
+def stride(a: int, b: int, c: int) -> int: return sum(range(a, b, c))
+def ordered(n: int) -> int: return sum(range("bad", 1 // 0))
+def nested(n: int) -> int: return sum(range(sum(range(n)))) + n
+def scoped(n: int) -> int: return sum(sum(range(n)) + n for n in range(4)) + n
+'''
+values = [*range(-3, 4), True, False, None, 'bad']
+cases = [('stop', (n,)) for n in values]
+cases += [('between', args) for args in product(values, repeat=2)]
+cases += [('stride', (a, b, step)) for a, b, step in product(range(-3, 4), range(-3, 4), range(-2, 3))]
+cases += [('stride', (True, 4, True)), ('stride', (0, 'bad', 0)), ('stride', (0, 4, None))]
+cases += [(name, (n,)) for name in ('ordered', 'nested', 'scoped') for n in range(-3, 5)]
+runtime = {}
+exec(source, runtime)
+program = ast.parse(source)
+assert all(not SupportChecker(program).check(name) for name in runtime if name != '__builtins__')
+equations = []
+for name, args in cases:
+    try:
+        expected = '.ok ' + constant(runtime[name](*args))
+    except (TypeError, ValueError, ZeroDivisionError) as error:
+        expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+    equations.append(f'example : (Calls.function Probe.module "{name}" [{", ".join(map(constant, args))}]).observe 1000 = .done ({expected}) := by decide')
+
+with project_temporary_directory(prefix='range-sum-check-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
+                     + 'open FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+base = 'def f(n: int) -> int:\n    return sum(range(n))\n'
+def checker(text):
+    return SupportChecker(ast.parse(text))
+assert not checker(base).check('f')
+for suffix in ('sum = f\n', 'range = f\n', 'from other import range\n', 'del sum\n'):
+    assert checker(base + suffix).check('f'), suffix
+for name in ('sum', 'range'):
+    assert checker(base.replace('f(n: int)', f'f(n: int, {name}: int)')).check('f')
+    assert checker(base.replace('    return', f'    {name} = n\n    return')).check('f')
+for expression in ('sum(range(n), 1)', 'sum(range(stop=n))', 'sum(range(*n))', 'sum(range())'):
+    assert checker(base.replace('sum(range(n))', expression)).check('f'), expression
+for expression in ('sum(range(n))', 'sum(x for x in range(n))'):
+    support = checker(base.replace('sum(range(n))', expression))
+    assert support.requirement('f', 'theorem bad : (scalarFunction Probe.module "f" [.int n]).Throws')
+    assert support.requirement('f', 'theorem bad : FormalSW.Property.Function.Throws Probe.module "f"')
+print(f'Range sums: {len(cases)} Python comparisons, scope, errors, and builtin binding checks passed')

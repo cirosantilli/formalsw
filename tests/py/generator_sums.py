@@ -71,3 +71,24 @@ def countdown(n: int) -> int:
     @formalsw: Returns
     """
     return sum(1 for x in range(n, 0, -1))
+
+
+def direct(n: int) -> int:
+    """
+    @formalsw: Returns
+    """
+    return sum(range(4)) + n
+
+
+def direct_descending(n: int) -> int:
+    """
+    @formalsw: Returns
+    """
+    return sum(range(3, -2, -2)) + n
+
+
+def direct_nested(n: int) -> int:
+    """
+    @formalsw: Returns
+    """
+    return sum(range(sum(range(3)))) + n
