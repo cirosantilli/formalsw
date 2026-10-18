@@ -73,6 +73,7 @@ deriving Repr, DecidableEq, BEq, Lean.ToExpr
 inductive ScalarBuiltin where
   | str
   | max
+  | intBitLength
 deriving Repr, BEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
@@ -312,6 +313,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       let builtin ← match ← jsonString json "name" with
         | "str" => pure ScalarBuiltin.str
         | "max" => pure ScalarBuiltin.max
+        | "int.bit_length" => pure ScalarBuiltin.intBitLength
         | builtinName => throw s!"unsupported scalar builtin: {builtinName}"
       return .builtinCall builtin (← jsonArray json "args" Expr.fromJson?)
   | "ReversedList" =>

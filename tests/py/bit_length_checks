@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Check int.bit_length execution in scalar and heap calls against Python."""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    return f'(.string {json.dumps(value)})'
+
+
+source = '''def bits(n: int) -> int: return n.bit_length()
+def heap_bits(n: int) -> int:
+    values = [n]
+    return values[0].bit_length()
+def list_receiver(n: int) -> int:
+    values = [n]
+    return values.bit_length()
+def receiver_error(n: int) -> int: return (1 // 0).bit_length()
+'''
+program = ast.parse(source)
+namespace = {}
+exec(source, namespace)
+values = [*range(-20, 21), True, False, None, 'wrong']
+values += [sign * (2**bits + delta) for bits in (31, 63, 128, 1024)
+           for delta in (-1, 0, 1) for sign in (-1, 1)]
+equations = []
+for name in ('bits', 'heap_bits', 'list_receiver', 'receiver_error'):
+    assert not SupportChecker(program).check(name)
+    backend = 'HeapCalls.scalarFunction' if name in ('heap_bits', 'list_receiver') else 'Calls.function'
+    for value in values:
+        try:
+            expected = '.ok ' + constant(namespace[name](value))
+        except (AttributeError, ZeroDivisionError) as error:
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+        equations.append(f'example : ({backend} Probe.module "{name}" [{constant(value)}]).observe 100 = .done ({expected}) := by decide')
+
+with project_temporary_directory(prefix='bit-length-check-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
+                     + 'open FormalSW.PyAst\nset_option maxRecDepth 4096\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+base = 'def f(n: int) -> int: return n.bit_length()\n'
+for call in ('n.bit_length(1)', 'n.bit_length(a=1)', 'n.bit_length(*n)', 'n.bit_length'):
+    assert SupportChecker(ast.parse(base.replace('n.bit_length()', call))).check('f')
+for suffix in ('int = 1\n', 'bit_length = 1\n'):
+    assert not SupportChecker(ast.parse(base + suffix)).check('f')
+for body in ('n.bit_length()', 'helper(n)'):
+    program = ast.parse(base.replace('n.bit_length()', body) + 'def helper(n: int) -> int: return n.bit_length()\n')
+    assert SupportChecker(program).requirement('f', 'theorem bad : (scalarFunction Probe.module "f" [.int n]).Throws')
+    assert SupportChecker(program).requirement('f', 'theorem bad : FormalSW.Property.Function.Throws Probe.module "f"')
+print(f'Integer bit length: {len(equations)} Python comparisons, receiver errors, heap calls, and coverage checks passed')

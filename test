@@ -125,6 +125,7 @@ def main() -> int:
         TestCase("nested break, continue, and loop else scopes", Path("tests/py/loop_control.py"), 0, "All 10 checks passed"),
         TestCase("scalar string conversion, indexing, and slices", Path("tests/py/strings.py"), 0, "All 12 checks passed"),
         TestCase("integer powers and partial execution coverage", Path("tests/py/powers.py"), 0, "All 14 checks passed"),
+        TestCase("integer bit lengths and receiver exceptions", Path("tests/py/int_bit_length.py"), 0),
         TestCase("generator sum scoping, filters, ranges and exceptions", Path("tests/py/generator_sums.py"), 0),
         TestCase("integer square root and imported builtin aliases", Path("tests/py/math_isqrt.py"), 0),
         TestCase("integer gcd and imported builtin aliases", Path("tests/py/math_gcd.py"), 0),

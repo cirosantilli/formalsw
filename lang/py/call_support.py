@@ -78,6 +78,24 @@ def uses_builtin(module, function, name):
     return False
 
 
+def uses_method(module, function, name):
+    """Find a method call in the reachable local function bodies."""
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    pending, visited = [function], set()
+    while pending:
+        current = pending.pop()
+        if current.name in visited:
+            continue
+        visited.add(current.name)
+        for node in (part for statement in current.body for part in ast.walk(statement)):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute) and node.func.attr == name:
+                    return True
+                if isinstance(node.func, ast.Name) and node.func.id in functions:
+                    pending.append(functions[node.func.id])
+    return False
+
+
 def general_division(node):
     """Use the call interpreter for divisors outside the legacy literal subset."""
     if isinstance(node, ast.BinOp):
@@ -143,7 +161,7 @@ def uses_calls_model(module, function):
         return False
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
     names.update(library_functions(module))
-    return bool(function.args.defaults) or uses_heap_calls(module, function) or any(
+    return bool(function.args.defaults) or uses_heap_calls(module, function) or uses_method(module, function, "bit_length") or any(
         isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript))
         or range_sum(node) is not None
         or general_division(node)
@@ -274,6 +292,10 @@ def check_calls(module, function, reject, *, heap=False):
                             recurse(bound)
                 else:
                     recurse(node.slice)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'bit_length':
+                if node.args or node.keywords:
+                    reject(node, 'int.bit_length requires no arguments')
+                recurse(node.func.value)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
                 if node.func.id in scope:
                     reject(node, 'local bindings must not shadow module-level call targets')

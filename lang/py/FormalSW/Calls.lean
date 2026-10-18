@@ -28,6 +28,7 @@ def positionalMaximum : List Constant → Option (Except ExceptionObject Constan
 def Primitive.apply : Primitive → List Constant → Option (Except ExceptionObject Constant)
   | .builtin .str, values => some (Strings.str values)
   | .builtin .max, values => positionalMaximum values
+  | .builtin .intBitLength, [value] => some (Math.bitLengthCall value)
   | .subscript, [value, index] => some (Strings.get value index)
   | .slice, [value, lower, upper, stride] => some (Strings.slice value lower upper stride)
   | _, _ => none

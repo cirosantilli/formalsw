@@ -235,6 +235,8 @@ def primitive : Operation → List Value → Eval Value
       let (_, items) ← Mutable.array (.ref address)
       modify fun heap => heap.set address (items ++ [value])
       return .scalar .none
+  | .builtin .intBitLength, [.scalar value] => scalarResult (some (Math.bitLengthCall value))
+  | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
   | .builtin .str, values => do
       let values ← values.mapM fun value => match value with
         | .scalar value => pure value

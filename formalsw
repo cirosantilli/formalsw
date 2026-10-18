@@ -1285,6 +1285,8 @@ class AstJsonEmitter:
                     "comparators": [self.expr(comparator) for comparator in comparators],
                 }
             case ast.Call(func=func, args=args, keywords=[]):
+                if isinstance(func, ast.Attribute) and func.attr == 'bit_length' and not args:
+                    return {"type": "BuiltinCall", "name": "int.bit_length", "args": [self.expr(func.value)]}
                 reversed_value = reversed_list(expr)
                 if (reversed_value is not None
                         and not any(bindings(self.bindings_module, name) for name in ('list', 'reversed'))):

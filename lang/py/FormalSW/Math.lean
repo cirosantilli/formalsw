@@ -1,6 +1,13 @@
 import lang.py.FormalSW.Runtime
+import lang.py.builtin.type.int
 
 namespace FormalSW.PyAst.Math
+
+/-- Method lookup succeeds for integers and booleans; other scalar types lack it. -/
+def bitLengthCall (value : Constant) : Except ExceptionObject Constant :=
+  match scalarNumber value with
+  | some n => .ok (.int (FormalSW.Py.Builtin.Int.bitLength n))
+  | none => .error { typeName := "AttributeError", args := [] }
 
 /-- Binary search for the integer square root. The interval, rather than a
 fixed machine word or evaluation budget, bounds the recursion. -/
