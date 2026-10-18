@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -20,7 +21,8 @@ from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
 from lang.py.call_support import range_sum, uses_calls_model
 from lang.py.contracts import ContractError, input_condition
-from lang.py.imports import bindings, resolve_function
+from lang.py.imports import bindings, resolve_function, resolve_python_function
+from lang import spec_setup
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind
 
 
@@ -64,6 +66,8 @@ class Marker:
 
     text: str
     line: int
+    reference: tuple | None = None
+    predicate: str | None = None
 
 
 @dataclass(frozen=True)
@@ -331,7 +335,7 @@ def parse_short_marker(marker: str) -> tuple[str, list[str], int] | None:
     args_text = match.group(2)
     if args_text is None:
         args = []
-    elif property_name == "Requires":
+    elif property_name in ("Requires", "Equiv", "EquivReturn"):
         args = [args_text.strip()] if args_text.strip() else []
     elif property_name == "BigO":
         big_o_match = re.fullmatch(
@@ -526,7 +530,18 @@ def docstring_markers(docstring: str | None, start_line: int | None) -> list[Mar
             index += 1
             continue
         marker_line = (start_line or 1) + index
-        if first.startswith("theorem "):
+        if first == "Py":
+            block = []
+            marker_indent = len(lines[index]) - len(lines[index].lstrip())
+            index += 1
+            while index < len(lines):
+                line = lines[index]
+                if line.strip() and len(line) - len(line.lstrip()) <= marker_indent:
+                    break
+                block.append(line)
+                index += 1
+            markers.append(Marker("Py\n" + textwrap.dedent("\n".join(block)).rstrip(), marker_line))
+        elif first.startswith("theorem "):
             block = [first]
             index += 1
             while index < len(lines):
@@ -541,6 +556,91 @@ def docstring_markers(docstring: str | None, start_line: int | None) -> list[Mar
             markers.append(Marker(first, marker_line))
             index += 1
     return markers
+
+
+def setup_predicate(text, environment, function):
+    """Capture scalar setup values without evaluating symbolic function inputs."""
+    expression = ast.parse(text, mode='eval')
+    inputs = {arg.arg for arg in function.args.args} if function else set()
+    inputs.update(node.id for node in ast.walk(expression)
+                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
+
+    class Capture(ast.NodeTransformer):
+        def visit_Name(self, node):
+            if node.id in inputs or node.id not in environment:
+                return node
+            value = environment[node.id]
+            if type(value) not in (int, bool, str, type(None)):
+                raise InvalidRequirement(f'Requires: setup binding {node.id!r} needs execution-model support; only scalar setup values can currently be captured')
+            return ast.copy_location(ast.Constant(value=value), node)
+
+    return ast.unparse(Capture().visit(expression))
+
+
+def prepare_specification(source, module):
+    """Execute ordered setup once and capture each subsequent marker's bindings."""
+    if hasattr(module, 'formalsw_markers'):
+        return
+
+    def scope(node, environment):
+        result = []
+        for marker in docstring_markers(ast.get_docstring(node, clean=False), docstring_start_line(node)):
+            if marker.text == 'Py' or marker.text.startswith(('Py ', 'Py\n')):
+                code = marker.text[2:].lstrip(' \t')
+                if not code.strip():
+                    raise InvalidRequirement(f'{source}:{marker.line}: Py needs Python statements')
+                spec_setup.execute(code, environment, source, marker.line)
+                continue
+            parsed = parse_short_marker(marker.text)
+            if parsed and len(parsed[1]) == 1:
+                expression = parsed[1][0]
+                if parsed[0] in ('Equiv', 'EquivReturn'):
+                    names = {part.id for part in ast.walk(ast.parse(expression, mode='eval')) if isinstance(part, ast.Name)}
+                    if names & environment.keys():
+                        value = spec_setup.evaluate(expression, environment, source, marker.line)
+                        marker = replace(marker, reference=resolve_python_function(value))
+                elif parsed[0] == 'Requires':
+                    marker = replace(marker, predicate=setup_predicate(expression, environment,
+                        node if isinstance(node, ast.FunctionDef) else None))
+            result.append(marker)
+        node.formalsw_markers = result
+
+    try:
+        environment = spec_setup.initial_environment(source)
+        scope(module, environment)
+        for node in module.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scope(node, environment.copy())
+    except (spec_setup.SetupError, ContractError, SyntaxError) as error:
+        raise InvalidRequirement(str(error)) from error
+
+
+_source_modules = {}
+
+
+def validate_source_snapshots(source, module):
+    snapshots = [(source, module)]
+    for node in (module, *module.body):
+        for marker in getattr(node, 'formalsw_markers', ()):
+            if marker.reference:
+                snapshots.append(marker.reference[:2])
+    for path, program in snapshots:
+        original = getattr(program, 'formalsw_source_text', None)
+        if original is not None and (not path.is_file() or path.read_text() != original):
+            raise InvalidRequirement(f'{path}: source changed after specification loading; rerun the checker')
+
+
+def source_module(source):
+    """Share preparation between dependency discovery and obligation emission."""
+    path = source.resolve()
+    if path not in _source_modules:
+        text = source.read_text()
+        module = ast.parse(text, filename=str(source))
+        module.formalsw_source_text = text
+        prepare_specification(source, module)
+        _source_modules[path] = module
+    validate_source_snapshots(source, _source_modules[path])
+    return _source_modules[path]
 
 
 def docstring_start_line(node: ast.Module | ast.FunctionDef) -> int | None:
@@ -575,7 +675,7 @@ def collect_conditions(markers, function, module, namespace):
         if len(parsed[1]) != 1 or parsed[2]:
             raise InvalidRequirement("Requires takes one Python predicate and cannot be negated")
         try:
-            predicate = input_condition(parsed[1][0], function, module)
+            predicate = input_condition(marker.predicate or parsed[1][0], function, module)
         except ContractError as error:
             raise InvalidRequirement(str(error)) from error
         unsupported.extend(predicate.unsupported)
@@ -643,10 +743,11 @@ def collect_requirements(
     """Collect proof obligations requested by source docstring markers."""
     requirements: list[Requirement] = []
     module.formalsw_source = source_path.resolve()
+    prepare_specification(source_path, module)
     support = SupportChecker(module)
     module.formalsw_conditions = {}
     module_conditions, module_markers, module_unsupported = collect_conditions(
-        docstring_markers(ast.get_docstring(module, clean=False), docstring_start_line(module)),
+        module.formalsw_markers,
         None, module, ast_namespace)
     for marker in module_markers:
         raw_theorem = parse_raw_theorem(marker.text)
@@ -666,10 +767,7 @@ def collect_requirements(
     for stmt in module.body:
         if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        markers = docstring_markers(
-            ast.get_docstring(stmt, clean=False),
-            docstring_start_line(stmt),
-        )
+        markers = stmt.formalsw_markers
         conditions, properties, condition_unsupported = collect_conditions(markers, stmt, module, ast_namespace)
         conditions = [*module_conditions, *conditions]
         condition_unsupported = (*module_unsupported, *condition_unsupported)
@@ -677,7 +775,7 @@ def collect_requirements(
         for marker in properties:
             parsed = parse_short_marker(marker.text)
             scalar_equiv = (parsed and parsed[0] in ("Equiv", "EquivReturn") and len(parsed[1]) == 1 and
-                            (uses_calls_model(module, stmt) or parsed[1][0] not in support.functions
+                            (marker.reference is not None or uses_calls_model(module, stmt) or parsed[1][0] not in support.functions
                              or uses_calls_model(module, support.functions[parsed[1][0]])))
             scalar_property = (parsed and parsed[0] in ("Returns", "Halts", "Throws", "ReturnType", "Equiv", "EquivReturn")
                                and all(annotation_kind(arg.annotation) in ("int", "str", "bool") for arg in stmt.args.args)
@@ -691,14 +789,14 @@ def collect_requirements(
                 target = None
                 dependencies = ()
                 if property_name in ("Equiv", "EquivReturn"):
-                    target = support.functions.get(args[0])
+                    target = None if marker.reference else support.functions.get(args[0])
                     if target is None:
                         try:
-                            target_path, target_module, target = resolve_function(source_path, module, args[0])
+                            target_path, target_module, target = marker.reference or resolve_function(source_path, module, args[0])
                         except ContractError as error:
                             raise InvalidRequirement(str(error)) from error
                         target_namespace = namespace_for_source(target_path)
-                        dependencies = (target_path,)
+                        dependencies = (target_path,) if target_path != source_path.resolve() else ()
                         unsupported.extend(SupportChecker(target_module).check(target.name))
                     else:
                         target_module, target_namespace = module, ast_namespace
@@ -1526,7 +1624,7 @@ def check_source(source: Path, report: CheckReport) -> int:
         failure_message=f"Python syntax check failed for {source}",
         failure_hint="Fix the Python syntax error before running Lean proofs.",
     )
-    module = ast.parse(source.read_text(), filename=str(source))
+    module = source_module(source)
     rejected_before = report.unsupported
     requirements = collect_requirements(source, module, proof_namespace, namespace)
     requirements = filter_supported_requirements(requirements, report)
@@ -1618,7 +1716,7 @@ def check_source(source: Path, report: CheckReport) -> int:
 
 def stub_source(source: Path, report: CheckReport) -> str:
     """Return a complete Lean proof stub for one Python source file."""
-    module = ast.parse(source.read_text(), filename=str(source))
+    module = source_module(source)
     AstJsonEmitter(module).emit()
     proof_namespace = proof_namespace_for_source(source)
     requirements = collect_requirements(
@@ -1653,7 +1751,7 @@ def dependency_imports(requirements: list[Requirement]) -> list[str]:
 def proof_dependencies(source: Path) -> list[Path]:
     """Find source-bound imports of adjacent Python proofs and generated ASTs."""
     proof = proof_path_for_source(source)
-    module = ast.parse(source.read_text(), filename=str(source))
+    module = source_module(source)
     functions = {stmt.name for stmt in module.body if isinstance(stmt, ast.FunctionDef)}
     dependencies = []
     # Dependency discovery needs only the imported binding. Do not compile raw
@@ -1661,14 +1759,14 @@ def proof_dependencies(source: Path) -> list[Path]:
     for function in module.body:
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        for marker in docstring_markers(ast.get_docstring(function, clean=False), docstring_start_line(function)):
+        for marker in function.formalsw_markers:
             parsed = parse_short_marker(marker.text)
-            if parsed and parsed[0] in ("Equiv", "EquivReturn") and len(parsed[1]) == 1 and parsed[1][0] not in functions:
+            if parsed and parsed[0] in ("Equiv", "EquivReturn") and len(parsed[1]) == 1 and (marker.reference is not None or parsed[1][0] not in functions):
                 try:
-                    path, _, _ = resolve_function(source, module, parsed[1][0])
+                    path, _, _ = marker.reference or resolve_function(source, module, parsed[1][0])
                 except ContractError as error:
                     raise InvalidRequirement(str(error)) from error
-                if path not in dependencies:
+                if path != source.resolve() and path not in dependencies:
                     dependencies.append(path)
     for dependency in dependencies:
         if not proof_path_for_source(dependency).is_file():

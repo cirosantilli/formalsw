@@ -426,6 +426,51 @@ For the unbounded reference-object guarantee, the worker must acquire the common
 
 The mutex model permits only its owner to execute body operations; every other worker is blocked at acquire. An inductive proof covers all choices of the next owner and every individual body step. It uses an unbounded reference heap. The scope is these workers and their shared objects, with no outside mutation. As with <<raw-lean-parallel>>, steps are sequentially consistent; signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside the execution model.
 
+==== Py
+
+`Py` executes ordinary Python to prepare the evaluation environment for subsequent annotations. The language tag describes the setup language, independently of the language of the source being specified. It is not an assertion or a proof obligation. The current source frontend is Python.
+
+[source,python]
+----
+def solve(n: int) -> int:
+    """
+    @formalsw: Py from reference import naive
+    @formalsw: Requires(n >= 0)
+    @formalsw: Equiv(naive)
+    """
+    return n
+----
+
+For several statements, put an indented Python block after `Py`:
+
+[source,python]
+----
+def solve(n: int) -> int:
+    """
+    @formalsw: Py
+        import reference
+        naive = reference.naive
+        lower = sum([0, 0])
+    @formalsw: Requires(n >= lower)
+    @formalsw: Equiv(naive)
+    """
+    return n
+----
+
+Setup runs once per source per checker invocation, including dependency discovery, and also runs with `--stub`. Statements execute in order; a later assignment does not change an earlier annotation. Module-docstring bindings are available to function docstrings, which each receive their own binding dictionary. Normal Python object sharing and import caching still apply. `__file__` is the source path and `__name__` is `"__formalsw_spec__"`. The checker does not execute the enclosing source program merely to load its annotations; explicit Python imports execute imported modules normally. Setup can run arbitrary Python, including I/O, and failures report the source marker.
+
+`Equiv` and `EquivReturn` can select a Python source function through setup bindings, including module attributes and expressions that return functions. The checker resolves the selected function to a module-level source definition, checks that its code matches the file, and rechecks that source and its adjacent proof. Setup selects the definition to model; it does not replace formal execution with CPython calls. Closures, captured defaults, dynamically generated functions without a matching source definition, and sources outside the checking project are rejected. Scalar setup values can be captured in `Requires`; function inputs remain symbolic, and input-dependent expressions still need execution-model support. Raw Lean statements retain Lean name resolution.
+
+For packages outside the source directory, configure search roots relative to the current checking project in `pyproject.toml`:
+
+[source,toml]
+----
+[tool.formalsw]
+python-path = ["data/py"]
+----
+
+These roots precede the source directory, project directory, and existing Python search path while setup executes. This allows proof-only imports without runtime imports or symlinks in the source program.
+
 ==== Requires
 
 `Requires(predicate)` supplies a precondition for every property in the same function docstring, including raw Lean specifications. A module-level precondition also applies to its function specifications. It does not insert a Python assertion or change normal execution.
@@ -572,9 +617,9 @@ The cost model assigns cost 1 to every represented statement and expression oper
 
 ==== Equiv
 
-The reference can be a function imported from another local Python source file, using `from reference import naive` (including aliases). Numeric filenames can use `from importlib import import_module` followed by `naive = import_module("reference.1").naive`. The solver then uses `@formalsw: Equiv(naive)`, optionally with a `Requires` input domain.
+For proof-only dependencies, use `@formalsw: Py from reference import naive` followed by `@formalsw: Equiv(naive)`, optionally with a `Requires` input domain. Ordinary source-level imports also remain supported: `from reference import naive` (including aliases), or `from importlib import import_module` followed by `naive = import_module("reference.1").naive` for numeric filenames.
 
-Formalsw resolves these imports statically, compares the two generated AST executions on the same arguments, and checks the reference source and adjacent proof before the solver. `--stub` includes the reference proof import. Rebinding, missing sources or proofs, packages with executable initialization, and imports outside the current project are rejected. Module lookup uses the source directory and then the current project directory; relative from-imports are also supported. This feature identifies scalar contract references with matching parameter types and no global state; imported calls inside function bodies still need separate interpreter support.
+Formalsw resolves ordinary source-level imports statically; `Py` imports execute with Python as described above. Both compare the two generated AST executions on the same arguments and check the reference source and adjacent proof before the solver. `--stub` includes the reference proof import. The static source-import resolver rejects rebinding, missing sources or proofs, packages with executable initialization, and imports outside the current project. Its module lookup uses the source directory and then the current project directory; relative from-imports are also supported. This feature identifies scalar contract references with matching parameter types and no global state; imported calls inside function bodies still need separate interpreter support.
 
 `Equiv` states that two functions have identical evaluation results for every input, i.e. that either:
 

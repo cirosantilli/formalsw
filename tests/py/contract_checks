@@ -108,6 +108,39 @@ end solver
         'naive = import_module("reference.1").f', 'from reference.named import f as naive'))
     check(message='All 2 checks passed')
     solver.write_text(original)
+    # Explicit Python setup replaces runtime imports. Its side effects must run
+    # once across dependency discovery and the actual obligation check.
+    setup = ('def solve(n: int) -> int:\n'
+        '    """\n'
+        '    @formalsw: Py\n'
+        '        from importlib import import_module\n'
+        '        from pathlib import Path\n'
+        '        naive = import_module("reference.1").f\n'
+        '        count = Path("setup-count")\n'
+        '        count.write_text(count.read_text() + "x" if count.exists() else "x")\n'
+        '        lower = sum([0, 0])\n'
+        '    @formalsw: Requires(n >= lower)\n'
+        '    @formalsw: Equiv(naive)\n'
+        '    """\n'
+        '    return n\n')
+    solver.write_text(setup)
+    check(message='All 2 checks passed')
+    assert (project / 'setup-count').read_text() == 'x'
+    check(message='import reference.«1.py»', stub=True)
+    assert (project / 'setup-count').read_text() == 'xx'
+    # Changing a captured precondition still invalidates the old proof.
+    solver.write_text(setup.replace('sum([0, 0])', '-1'))
+    check(1, 'proof check failed')
+    # Resolve from a configured package root, without a source-directory symlink.
+    (project / 'pyproject.toml').write_text('[tool.formalsw]\npython-path = ["reference"]\n')
+    solver.write_text(setup.replace('naive = import_module("reference.1").f', 'from named import f as naive'))
+    check(message='All 2 checks passed')
+    solver.write_text(setup.replace('naive = import_module("reference.1").f', 'raise ValueError("setup failed")'))
+    check(1, 'Py setup failed: ValueError: setup failed')
+    solver.write_text(setup.replace('        lower = sum([0, 0])',
+        '        naive.__code__ = (lambda n: n + 1).__code__'))
+    check(1, 'Equiv setup target')
+    solver.write_text(original)
     (project / 'reference.py').write_text('')
     check(1, 'shadowed by a Python module')
     (project / 'reference.py').unlink()

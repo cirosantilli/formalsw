@@ -5,8 +5,31 @@ function body still need interpreter support; this resolver only identifies the
 reference function in an Equiv contract.
 """
 import ast
+import types
 from pathlib import Path
 from lang.py.contracts import ContractError
+
+
+def resolve_python_function(value):
+    """Use a setup callable to select a checked, unmodified source definition."""
+    if not isinstance(value, types.FunctionType):
+        raise ContractError('Equiv setup expression must select a Python source function')
+    path = Path(value.__code__.co_filename).resolve()
+    if not path.is_file() or not path.is_relative_to(Path.cwd().resolve()):
+        raise ContractError(f'Equiv setup function needs a source file inside the current project: {path}')
+    text = path.read_text()
+    program = ast.parse(text, filename=str(path))
+    program.formalsw_source_text = text
+    definitions = bindings(program, value.__code__.co_name)
+    if len(definitions) != 1 or not isinstance(definitions[0], ast.FunctionDef) or definitions[0] not in program.body:
+        raise ContractError('Equiv setup target must be an unmodified module-level function')
+    function = definitions[0]
+    compiled = compile(text, value.__code__.co_filename, 'exec', dont_inherit=True)
+    code = next((constant for constant in compiled.co_consts
+                 if isinstance(constant, types.CodeType) and constant.co_name == function.name), None)
+    if value.__code__ != code or value.__closure__ or value.__defaults__ or value.__kwdefaults__:
+        raise ContractError('Equiv setup target differs from its source definition or captures runtime values')
+    return path, program, function
 
 
 def bindings(module, name):
