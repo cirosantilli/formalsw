@@ -113,10 +113,19 @@ mutual
     | first :: rest => declaredGlobals first ++ blockGlobals rest
 end
 
+/-- Binding targets reserve local names even when their statement never executes. -/
+def targetLocals : Expr → List String
+  | .name name => [name]
+  | .tuple targets | .list targets => targets.flatMap targetLocals
+  | _ => []
+
 mutual
   def assignedLocals : Stmt → List String
     | .assign [.name name] _ | .annAssign (.name name) _ _ | .augAssign (.name name) _ _ => [name]
     | .forIn (.name name) _ body otherwise => name :: (blockLocals body ++ blockLocals otherwise)
+    | .assign targets _ => targets.flatMap targetLocals
+    | .annAssign target _ _ | .augAssign target _ _ => targetLocals target
+    | .forIn target _ body otherwise => targetLocals target ++ blockLocals body ++ blockLocals otherwise
     | .ifThen _ yes no | .whileDo _ yes no => blockLocals yes ++ blockLocals no
     | _ => []
   def blockLocals : List Stmt → List String

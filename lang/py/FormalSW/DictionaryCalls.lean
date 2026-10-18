@@ -27,40 +27,44 @@ end Mutable
 
 namespace HeapCalls.Evaluates
 
+variable {globals : Mutable.Globals}
+
+
 /-- Each key precedes its value; effects flow through all remaining entries. -/
 inductive DictionaryEntries (module : Module) (env : Env) :
-    List (Expr × Expr) → List (Constant × Value) → Heap → List (Constant × Value) → Heap → Prop where
-  | nil : DictionaryEntries module env [] entries heap entries heap
-  | cons : Evaluates module env keyExpr heap (.scalar key) afterKey →
-      Evaluates module env valueExpr afterKey value afterValue →
-      DictionaryEntries module env rest (ScalarDict.insert entries key value) afterValue finalEntries finalHeap →
-      DictionaryEntries module env ((keyExpr, valueExpr) :: rest) entries heap finalEntries finalHeap
+    List (Expr × Expr) → List (Constant × Value) → Heap → List (Constant × Value) → Heap →
+      (globals : Mutable.Globals := []) → Prop where
+  | nil {globals : Mutable.Globals} : DictionaryEntries (globals := globals) module env [] entries heap entries heap
+  | cons {globals : Mutable.Globals} : Evaluates (globals := globals) module env keyExpr heap (.scalar key) afterKey →
+      Evaluates (globals := globals) module env valueExpr afterKey value afterValue →
+      DictionaryEntries (globals := globals) module env rest (ScalarDict.insert entries key value) afterValue finalEntries finalHeap →
+      DictionaryEntries (globals := globals) module env ((keyExpr, valueExpr) :: rest) entries heap finalEntries finalHeap
 
 theorem DictionaryEntries.reach
-    (h : DictionaryEntries module env expressions entries heap finalEntries finalHeap)
+    (h : DictionaryEntries (globals := globals) module env expressions entries heap finalEntries finalHeap)
     (anchors : Nat) (stack : List Frame) :
-    Reaches module anchors ⟨.dictionary expressions entries env, stack, heap⟩
+    Reaches (globals := globals) module anchors ⟨.dictionary expressions entries env, stack, heap⟩
       ⟨.value (.ref finalHeap.length), stack, finalHeap ++ [.dict finalEntries]⟩ := by
   induction h with
   | nil => exact .next (by simp [step, result, run, Mutable.allocateDict, Except.map]) .refl
   | cons key value rest ih =>
       exact .next rfl ((key anchors _).trans (.next rfl ((value anchors _).trans (.next rfl ih))))
 
-theorem dictionary (entries : DictionaryEntries module env expressions [] heap finalEntries finalHeap) :
-    Evaluates module env (.dict expressions) heap (.ref finalHeap.length) (finalHeap ++ [.dict finalEntries]) :=
+theorem dictionary (entries : DictionaryEntries (globals := globals) module env expressions [] heap finalEntries finalHeap) :
+    Evaluates (globals := globals) module env (.dict expressions) heap (.ref finalHeap.length) (finalHeap ++ [.dict finalEntries]) :=
   fun anchors stack => .next rfl (entries.reach anchors stack)
 
 /-- Constant tables use the same insertion semantics, including duplicate keys. -/
 theorem DictionaryEntries.constants (entries : List (Constant × Constant))
     (initial : List (Constant × Value)) :
-    DictionaryEntries module env (entries.map fun (key, value) => (.constant key, .constant value))
+    DictionaryEntries (globals := globals) module env (entries.map fun (key, value) => (.constant key, .constant value))
       initial heap (entries.foldl (fun table (key, value) => ScalarDict.insert table key (.scalar value)) initial) heap := by
   induction entries generalizing initial with
   | nil => exact .nil
   | cons entry rest ih => exact .cons constant constant (ih _)
 
 theorem dictionary_constants (entries : List (Constant × Constant)) :
-    Evaluates module env (.dict (entries.map fun (key, value) => (.constant key, .constant value)))
+    Evaluates (globals := globals) module env (.dict (entries.map fun (key, value) => (.constant key, .constant value)))
       heap (.ref heap.length)
       (heap ++ [.dict (entries.foldl (fun table (key, value) => ScalarDict.insert table key (.scalar value)) [])]) :=
   dictionary (DictionaryEntries.constants entries [])
@@ -68,11 +72,11 @@ theorem dictionary_constants (entries : List (Constant × Constant)) :
 /-- Capture the receiver before evaluating the default, then read its current contents. -/
 theorem dictionary_get
     (localName : ∀ name, base = .name name → env name ≠ none)
-    (receiver : Evaluates module env base heap (.ref address) afterReceiver)
+    (receiver : Evaluates (globals := globals) module env base heap (.ref address) afterReceiver)
     (found : afterReceiver[address]? = some (.dict entries))
-    (arguments : Arguments module env expressions afterReceiver values afterArguments)
+    (arguments : Arguments (globals := globals) module env expressions afterReceiver values afterArguments)
     (operation : primitive (.dictionaryGet address) values afterArguments = some (.ok value, finalHeap)) :
-    Evaluates module env (.call (.attribute base "get") expressions) heap value finalHeap := by
+    Evaluates (globals := globals) module env (.call (.attribute base "get") expressions) heap value finalHeap := by
   intro anchors stack
   apply Reaches.next (following := ⟨.expr base env, .methodReceiver "get" expressions env :: stack, heap⟩)
     (by cases base <;> simp_all [step, Option.isSome_iff_ne_none])

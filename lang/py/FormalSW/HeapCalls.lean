@@ -22,6 +22,19 @@ def assignNames (env : Env) (names : List String) (values : List Value) : Env :=
 def argumentEnv (args : List Arg) (values : List Value) : Env :=
   fun name => ((args.map Arg.name).zip values).lookup name
 
+/-- Each call starts with its own locals. Module bindings share their heap objects;
+whole-function locals mask globals even before the first assignment. -/
+def functionEnv (args : List Arg) (body : List Stmt) (values : List Value)
+    (globals : Mutable.Globals) : Env :=
+  match globals with
+  | [] => argumentEnv args values
+  | _ :: _ => fun name =>
+      if name ∈ args.map Arg.name then argumentEnv args values name
+      else if name ∈ blockLocals body then none else globals.lookup name
+
+@[simp] theorem functionEnv_empty (args : List Arg) (body : List Stmt) (values : List Value) :
+    functionEnv args body values [] = argumentEnv args values := rfl
+
 def completeArguments : List Arg → List Value → Option (List Value)
   | [], [] => some []
   | [], _ :: _ => none
@@ -316,18 +329,18 @@ structure State where
   stack : List Frame
   heap : Heap
 
-def done (anchors : Nat) (heap : Heap) (outcome : Except ExceptionObject Value) : Step State Completion :=
-  .done (.ok ⟨outcome, [], heap, anchors⟩)
+def done (anchors : Nat) (heap : Heap) (outcome : Except ExceptionObject Value) (globals : Mutable.Globals := []) : Step State Completion :=
+  .done (.ok ⟨outcome, globals, heap, anchors⟩)
 
 def run (anchors : Nat) (heap : Heap) (action : Eval α)
-    (next : α → Heap → Step State Completion) : Step State Completion :=
+    (next : α → Heap → Step State Completion) (globals : Mutable.Globals := []) : Step State Completion :=
   match action heap with
   | none => .unsupported
-  | some (.error error, heap) => done anchors heap (.error error)
+  | some (.error error, heap) => done (globals := globals) anchors heap (.error error)
   | some (.ok value, heap) => next value heap
 
-def result (anchors : Nat) (heap : Heap) (action : Eval Value) (stack : List Frame) : Step State Completion :=
-  run anchors heap action fun value heap => .next ⟨.value value, stack, heap⟩
+def result (anchors : Nat) (heap : Heap) (action : Eval Value) (stack : List Frame) (globals : Mutable.Globals := []) : Step State Completion :=
+  run (globals := globals) anchors heap action fun value heap => .next ⟨.value value, stack, heap⟩
 
 def argumentsState (operation : Operation) (env : Env) (done : List Value)
     (expressions : List Expr) (stack : List Frame) (heap : Heap) : State :=
@@ -381,7 +394,7 @@ def comprehensionBody (address : Nat) (element : Expr) : List (String × Expr ×
 /-- Validate the first iterator before allocating the private result list. -/
 def comprehensionStart (anchors : Nat) (element : Expr)
     (generators : List (String × Expr × List Expr)) (env : Env)
-    (values : List Value) (stack : List Frame) (heap : Heap) : Step State Completion :=
+    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
   match generators with
   | [] => .unsupported
   | (name, iterable, filters) :: rest =>
@@ -391,9 +404,9 @@ def comprehensionStart (anchors : Nat) (element : Expr)
       match iterable with
       | .call (.name "range") _ => match rangeBounds values with
           | .ok (start, stop, stride) => enter (.rangeStepLoop name start stop stride body [])
-          | .error error => done anchors heap (.error error)
+          | .error error => done (globals := globals) anchors heap (.error error)
       | _ => match values with
-          | [value] => run anchors heap (Mutable.sequence value) fun _ heap =>
+          | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
               .next ⟨.block [.sequenceStepLoop name (sequenceSource value) 0 body []] env,
                 .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩
           | _ => .unsupported
@@ -419,16 +432,16 @@ def sumInitial (value : Value) : Eval Value := do
   | _ => return value
 
 def sumEnter (anchors : Nat) (loop : Stmt) (env : Env) (value : Value)
-    (stack : List Frame) (heap : Heap) : Step State Completion :=
-  run anchors heap (sumInitial value) fun value heap =>
+    (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  run (globals := globals) anchors heap (sumInitial value) fun value heap =>
     .next ⟨.block [loop, .return (.name sumAccumulator)] (setLocal env sumAccumulator value), stack, heap⟩
 
 /-- Ordinary call arguments finish evaluating before the iterable is validated. -/
 def sumSequenceStart (anchors : Nat) (values : List Value)
-    (stack : List Frame) (heap : Heap) : Step State Completion :=
+    (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
   match values with
-  | [source, start] => run anchors heap (Mutable.sequence source) fun _ heap =>
-      sumEnter anchors (.sequenceStepLoop sumItem (sequenceSource source) 0 (sumBody (.name sumItem) []) [])
+  | [source, start] => run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
+      sumEnter (globals := globals) anchors (.sequenceStepLoop sumItem (sequenceSource source) 0 (sumBody (.name sumItem) []) [])
         (fun _ => none) start stack heap
   | _ => .unsupported
 
@@ -436,7 +449,7 @@ def sumSequenceStart (anchors : Nat) (values : List Value)
 Subsequent iterables, filters, and elements remain lazy. -/
 def sumGeneratorStart (anchors : Nat) (element : Expr)
     (generators : List (String × Expr × List Expr)) (env : Env) (start : Expr)
-    (values : List Value) (stack : List Frame) (heap : Heap) : Step State Completion :=
+    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
   match generators with
   | [] => .unsupported
   | (name, iterable, filters) :: rest =>
@@ -446,9 +459,9 @@ def sumGeneratorStart (anchors : Nat) (element : Expr)
       match iterable with
       | .call (.name "range") _ => match rangeBounds values with
           | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
-          | .error error => done anchors heap (.error error)
+          | .error error => done (globals := globals) anchors heap (.error error)
       | _ => match values with
-          | [value] => run anchors heap (Mutable.sequence value) fun _ heap =>
+          | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
               enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
           | _ => .unsupported
 
@@ -624,57 +637,57 @@ def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Val
       | _ => Mutable.unsupported
 
 def invokeMethod (anchors : Nat) (receiver : Value) (args : List Arg) (body : List Stmt)
-    (values : List Value) (stack : List Frame) (heap : Heap) : Step State Completion :=
+    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
   match completeArguments args (receiver :: values) with
-  | some values => .next ⟨.block (executableBody body) (argumentEnv args values), stack, heap⟩
-  | none => done anchors heap (.error { typeName := "TypeError", args := [] })
+  | some values => .next ⟨.block (executableBody body) (functionEnv args body values globals), stack, heap⟩
+  | none => done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
 
 def construct (module : Module) (anchors : Nat) (name : String) (values : List Value)
-    (stack : List Frame) (heap : Heap) : Step State Completion :=
+    (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
   match module.findClass name with
   | none => .unsupported
   | some (origin, body) =>
       match findFunctionIn body "__init__" with
-      | none => if values.isEmpty then result anchors heap (Mutable.allocateInstance origin name) stack
-          else done anchors heap (.error { typeName := "TypeError", args := [] })
+      | none => if values.isEmpty then result (globals := globals) anchors heap (Mutable.allocateInstance origin name) stack
+          else done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
       | some (args, body) =>
-          invokeMethod anchors (.ref heap.length) args body values (.initialized heap.length :: stack)
+          invokeMethod (globals := globals) anchors (.ref heap.length) args body values (.initialized heap.length :: stack)
             (heap ++ [.instance origin name []])
 
-def step (module : Module) (anchors : Nat) (state : State) : Step State Completion :=
+def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Globals := []) : Step State Completion :=
   let ⟨work, stack, heap⟩ := state
   match work with
-  | .dictionary [] entries _ => result anchors heap (Mutable.allocateDict entries) stack
+  | .dictionary [] entries _ => result (globals := globals) anchors heap (Mutable.allocateDict entries) stack
   | .dictionary ((key, value) :: rest) entries env =>
       .next ⟨.expr key env, .dictionaryKey value rest entries env :: stack, heap⟩
   | .startRange name values body otherwise following env =>
       match rangeBounds values with
       | .ok (start, stop, stride) =>
           .next ⟨.block (.rangeStepLoop name start stop stride body otherwise :: following) env, stack, heap⟩
-      | .error error => done anchors heap (.error error)
+      | .error error => done (globals := globals) anchors heap (.error error)
   | .operation (.call name) values =>
       match findFunctionIn module.body name with
       | some (args, body) =>
           match completeArguments args values with
-          | some values => .next ⟨.block (executableBody body) (argumentEnv args values), stack, heap⟩
-          | none => done anchors heap (.error { typeName := "TypeError", args := [] })
+          | some values => .next ⟨.block (executableBody body) (functionEnv args body values globals), stack, heap⟩
+          | none => done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
       | none => match libraryFunction module name with
-          | some _ => result anchors heap (library module name values) stack
-          | none => construct module anchors name values stack heap
+          | some _ => result (globals := globals) anchors heap (library module name values) stack
+          | none => construct (globals := globals) module anchors name values stack heap
   | .operation (.method receiver args body) values =>
-      invokeMethod anchors receiver args body values stack heap
-  | .operation .sumSequence values => sumSequenceStart anchors values stack heap
+      invokeMethod (globals := globals) anchors receiver args body values stack heap
+  | .operation .sumSequence values => sumSequenceStart (globals := globals) anchors values stack heap
   | .operation (.sumGenerator element generators env start) values =>
-      sumGeneratorStart anchors element generators env start values stack heap
+      sumGeneratorStart (globals := globals) anchors element generators env start values stack heap
   | .operation (.comprehension element generators env) values =>
-      comprehensionStart anchors element generators env values stack heap
-  | .operation operation values => result anchors heap (primitive operation values) stack
+      comprehensionStart (globals := globals) anchors element generators env values stack heap
+  | .operation operation values => result (globals := globals) anchors heap (primitive operation values) stack
   | .expr expression env =>
       match expression with
       | .constant value => .next ⟨.value (.scalar value), stack, heap⟩
       | .name name => match env name with
           | some value => .next ⟨.value value, stack, heap⟩
-          | none => done anchors heap (.error { typeName := "UnboundLocalError", args := [] })
+          | none => done (globals := globals) anchors heap (.error { typeName := "UnboundLocalError", args := [] })
       | .attribute base field => .next ⟨.expr base env, .attribute field :: stack, heap⟩
       | .binOp a op b => .next ⟨.expr a env, .binaryLeft op b env false :: stack, heap⟩
       | .unaryOp op expression => .next ⟨.expr expression env, .unary op :: stack, heap⟩
@@ -765,7 +778,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
         | .forIn (.list [.name index, .name name]) (.call (.name "enumerate") [iterable, start]) body otherwise :: rest =>
           .next ⟨.expr iterable env, .enumerateSource index name start body otherwise rest env :: stack, heap⟩
       | .enumerateStepLoop index name source position counter body otherwise :: rest =>
-          run anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
+          run (globals := globals) anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
             match items[position]? with
             | none => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
             | some value => .next ⟨.block (body ++ [Calls.loopContinuation body
@@ -777,17 +790,17 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | some names => .next ⟨.expr iterable env, .unpackSequence names body otherwise rest env :: stack, heap⟩
           | none => .unsupported
       | .unpackStepLoop names source position body otherwise :: rest =>
-          run anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
+          run (globals := globals) anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
             match items[position]? with
             | none => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
-            | some value => run anchors heap (Mutable.sequence value) fun fields heap =>
+            | some value => run (globals := globals) anchors heap (Mutable.sequence value) fun fields heap =>
                 if names.length = fields.length then
                   .next ⟨.block (body ++ [Calls.loopContinuation body
                     (.unpackStepLoop names source (position + 1) body otherwise)] ++ rest)
                     (assignNames env names fields), stack, heap⟩
-                else done anchors heap (.error { typeName := "ValueError", args := [] })
+                else done (globals := globals) anchors heap (.error { typeName := "ValueError", args := [] })
       | .sequenceStepLoop name source position body otherwise :: rest =>
-          run anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
+          run (globals := globals) anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
             match items[position]? with
             | none => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
             | some value => .next ⟨.block (body ++ [Calls.loopContinuation body
@@ -812,7 +825,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | _ => .unsupported
   | .value value =>
       match stack with
-      | [] => done anchors heap (.ok value)
+      | [] => done (globals := globals) anchors heap (.ok value)
       | frame :: stack => match frame with
           | .dictionaryKey expression rest entries env => match value with
               | .scalar key => .next ⟨.expr expression env, .dictionaryValue key rest entries env :: stack, heap⟩
@@ -821,60 +834,60 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
               | .ref _ => .unsupported
           | .dictionaryValue key rest entries env =>
               .next ⟨.dictionary rest (ScalarDict.insert entries key value) env, stack, heap⟩
-          | .sumStart loop env => sumEnter anchors loop env value stack heap
+          | .sumStart loop env => sumEnter (globals := globals) anchors loop env value stack heap
           | .initialized address => match value with
               | .scalar .none => .next ⟨.value (.ref address), stack, heap⟩
-              | _ => done anchors heap (.error { typeName := "TypeError", args := [] })
-          | .attribute name => result anchors heap (getAttribute module value name) stack
+              | _ => done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
+          | .attribute name => result (globals := globals) anchors heap (getAttribute module value name) stack
           | .methodReceiver name expressions env =>
-              run anchors heap (bindMethod module value name) fun method heap =>
+              run (globals := globals) anchors heap (bindMethod module value name) fun method heap =>
                 .next (argumentsState method env [] expressions stack heap)
           | .assignAttribute base name rest env =>
               .next (argumentsState (.setField name value) env [] [base] (.discard rest env :: stack) heap)
           | .augmentAttribute name op right rest env =>
-              run anchors heap (getAttribute module value name) fun previous heap =>
+              run (globals := globals) anchors heap (getAttribute module value name) fun previous heap =>
                 .next ⟨.expr right env, .binaryRight op previous true ::
                   .writeAttribute value name rest env :: stack, heap⟩
           | .writeAttribute receiver name rest env =>
-              result anchors heap (Mutable.writeField receiver name value) (.discard rest env :: stack)
+              result (globals := globals) anchors heap (Mutable.writeField receiver name value) (.discard rest env :: stack)
           | .comprehensionResult address => .next ⟨.value (.ref address), stack, heap⟩
           | .binaryLeft op right env inPlace => .next ⟨.expr right env, .binaryRight op value inPlace :: stack, heap⟩
           | .binaryRight op left inPlace =>
-              result anchors heap (if inPlace then inplace op left value else Mutable.binary op left value) stack
+              result (globals := globals) anchors heap (if inPlace then inplace op left value else Mutable.binary op left value) stack
           | .compareLeft op right env => .next ⟨.expr right env, .compareRight op value :: stack, heap⟩
-          | .compareRight op left => result anchors heap (compare op left value) stack
+          | .compareRight op left => result (globals := globals) anchors heap (compare op left value) stack
           | .chainLeft op right rest env =>
               .next ⟨.expr right env, .chainRight op value rest env :: stack, heap⟩
           | .chainRight op left rest env =>
-              result anchors heap (compare op left value) (.chainResult value rest env :: stack)
+              result (globals := globals) anchors heap (compare op left value) (.chainResult value rest env :: stack)
           | .chainResult right rest env => match rest with
               | [] => .next ⟨.value value, stack, heap⟩
-              | (op, next) :: rest => run anchors heap (Mutable.truth value) fun truth heap =>
+              | (op, next) :: rest => run (globals := globals) anchors heap (Mutable.truth value) fun truth heap =>
                   if truth then .next ⟨.expr next env, .chainRight op right rest env :: stack, heap⟩
                   else .next ⟨.value value, stack, heap⟩
-          | .unary op => result anchors heap (unary op value) stack
-          | .boolean op rest env => run anchors heap (Mutable.truth value) fun truth heap =>
+          | .unary op => result (globals := globals) anchors heap (unary op value) stack
+          | .boolean op rest env => run (globals := globals) anchors heap (Mutable.truth value) fun truth heap =>
               if (match op with | .and => !truth | .or => truth) then .next ⟨.value value, stack, heap⟩
               else match rest with
                 | [] => .next ⟨.value value, stack, heap⟩
                 | first :: rest => .next ⟨.expr first env, .boolean op rest env :: stack, heap⟩
-          | .conditional yes no env => run anchors heap (Mutable.truth value) fun truth heap =>
+          | .conditional yes no env => run (globals := globals) anchors heap (Mutable.truth value) fun truth heap =>
               .next ⟨.expr (if truth then yes else no) env, stack, heap⟩
           | .arguments operation done rest env => .next (argumentsState operation env (done ++ [value]) rest stack heap)
           | .addReceiver item env =>
               match value with
               | .ref address => match heap[address]? with
-                  | some (.instance _ _ _) => run anchors heap (bindMethod module value "add") fun method heap =>
+                  | some (.instance _ _ _) => run (globals := globals) anchors heap (bindMethod module value "add") fun method heap =>
                       .next (argumentsState method env [] [item] stack heap)
-                  | _ => run anchors heap (Mutable.addReceiver value) fun address heap =>
+                  | _ => run (globals := globals) anchors heap (Mutable.addReceiver value) fun address heap =>
                       .next (argumentsState (.add address) env [] [item] stack heap)
-              | .scalar _ => done anchors heap (.error { typeName := "AttributeError", args := [] })
+              | .scalar _ => done (globals := globals) anchors heap (.error { typeName := "AttributeError", args := [] })
           | .appendReceiver item env => match value with
-              | .scalar _ => done anchors heap (.error { typeName := "AttributeError", args := [] })
+              | .scalar _ => done (globals := globals) anchors heap (.error { typeName := "AttributeError", args := [] })
               | .ref address => match heap[address]? with
-                  | some (.instance _ _ _) => run anchors heap (bindMethod module value "append") fun method heap =>
+                  | some (.instance _ _ _) => run (globals := globals) anchors heap (bindMethod module value "append") fun method heap =>
                       .next (argumentsState method env [] [item] stack heap)
-                  | _ => run anchors heap (Mutable.appendReceiver value) fun _ heap =>
+                  | _ => run (globals := globals) anchors heap (Mutable.appendReceiver value) fun _ heap =>
                       .next (argumentsState (.append address) env [] [item] stack heap)
           | .assignItem base index rest env =>
               .next (argumentsState (.setItem value) env [] [base, index] (.discard rest env :: stack) heap)
@@ -883,34 +896,34 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
                 (.discard rest env :: stack) heap)
           | .assign name rest env => .next ⟨.block rest (setLocal env name value), stack, heap⟩
           | .unpack names rest env =>
-              run anchors heap (Mutable.sequence value) fun items heap =>
+              run (globals := globals) anchors heap (Mutable.sequence value) fun items heap =>
                 if names.length = items.length then
                   .next ⟨.block rest (assignNames env names items), stack, heap⟩
-                else done anchors heap (.error { typeName := "ValueError", args := [] })
-          | .branch yes no rest env => run anchors heap (Mutable.truth value) fun truth heap =>
+                else done (globals := globals) anchors heap (.error { typeName := "ValueError", args := [] })
+          | .branch yes no rest env => run (globals := globals) anchors heap (Mutable.truth value) fun truth heap =>
               .next ⟨.block ((if truth then yes else no) ++ rest) env, stack, heap⟩
-          | .assertion message rest env => run anchors heap (Mutable.truth value) fun truth heap =>
+          | .assertion message rest env => run (globals := globals) anchors heap (Mutable.truth value) fun truth heap =>
               if truth then .next ⟨.block rest env, stack, heap⟩
               else match message with
-                | none => done anchors heap (.error { typeName := "AssertionError", args := [] })
+                | none => done (globals := globals) anchors heap (.error { typeName := "AssertionError", args := [] })
                 | some expression => .next ⟨.expr expression env, .assertionMessage :: stack, heap⟩
           | .sequence name body otherwise following env =>
-              run anchors heap (Mutable.sequence value) fun _ heap =>
+              run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
                 .next ⟨.block (.sequenceStepLoop name (sequenceSource value) 0 body otherwise :: following) env,
                   stack, heap⟩
           | .unpackSequence names body otherwise following env =>
-              run anchors heap (Mutable.sequence value) fun _ heap =>
+              run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
                 .next ⟨.block (.unpackStepLoop names (sequenceSource value) 0 body otherwise :: following) env,
                   stack, heap⟩
           | .enumerateSource index name start body otherwise following env =>
               .next ⟨.expr start env, .enumerateStart index name value body otherwise following env :: stack, heap⟩
           | .enumerateStart index name source body otherwise following env =>
-              run anchors heap (enumerateStart value) fun counter heap =>
-                run anchors heap (Mutable.sequence source) fun _ heap =>
+              run (globals := globals) anchors heap (enumerateStart value) fun counter heap =>
+                run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
                   .next ⟨.block (.enumerateStepLoop index name (sequenceSource source) 0 counter body otherwise :: following) env,
                     stack, heap⟩
           | .assertionMessage => match value with
-              | .scalar value => done anchors heap (.error { typeName := "AssertionError", args := [value] })
+              | .scalar value => done (globals := globals) anchors heap (.error { typeName := "AssertionError", args := [value] })
               -- Exception arguments currently have a scalar observation boundary.
               | .ref _ => .unsupported
           | .discard rest env => .next ⟨.block rest env, stack, heap⟩
@@ -919,18 +932,18 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
 
 /-- Entry references stay observable; freshly allocated unreachable lists do not
 become roots in the completion's alias-preserving graph. -/
-def call (module : Module) (name : String) (values : List Value) (heap : Heap) : Mutable.Call :=
-  ⟨⟨State, ⟨.operation (.call name) values, [], heap⟩, step module heap.length⟩⟩
+def call (module : Module) (name : String) (values : List Value) (heap : Heap) (globals : Mutable.Globals := []) : Mutable.Call :=
+  ⟨⟨State, ⟨.operation (.call name) values, [], heap⟩, step (globals := globals) module heap.length⟩⟩
 
 /-- Preconditions run from the same initial heap as the specified call. Their
 private evaluation may allocate or mutate without changing the call's inputs. -/
-def evaluate (module : Module) (env : Env) (expression : Expr) (heap : Heap) : Mutable.Call :=
-  ⟨⟨State, ⟨.expr expression env, [], heap⟩, step module heap.length⟩⟩
+def evaluate (module : Module) (env : Env) (expression : Expr) (heap : Heap) (globals : Mutable.Globals := []) : Mutable.Call :=
+  ⟨⟨State, ⟨.expr expression env, [], heap⟩, step (globals := globals) module heap.length⟩⟩
 
 /-- Only Boolean True satisfies a precondition; other truthy values do not. -/
-def Condition (module : Module) (env : Env) (expression : Expr) (heap : Heap) : Prop :=
-  ∃ finalHeap, (evaluate module env expression heap).Finishes
-    ⟨.ok (.scalar (.bool true)), [], finalHeap, heap.length⟩
+def Condition (module : Module) (env : Env) (expression : Expr) (heap : Heap) (globals : Mutable.Globals := []) : Prop :=
+  ∃ finalHeap, (evaluate (globals := globals) module env expression heap).Finishes
+    ⟨.ok (.scalar (.bool true)), globals, finalHeap, heap.length⟩
 
 /-- Scalar entry points can compare with existing scalar interpreters. A list
 result is outside this adapter, and must use `call` instead. -/
@@ -947,33 +960,35 @@ def scalarStep (module : Module) (state : State) : Step State Constant :=
 def scalarFunction (module : Module) (name : String) (values : List Constant) : Execution Constant :=
   ⟨State, ⟨.operation (.call name) (values.map Mutable.Value.scalar), [], []⟩, scalarStep module⟩
 
-inductive Reaches (module : Module) (anchors : Nat) : State → State → Prop where
-  | refl : Reaches module anchors state state
-  | next : step module anchors state = .next following →
-      Reaches module anchors following final → Reaches module anchors state final
+variable {globals : Mutable.Globals}
 
-theorem Reaches.trans (h : Reaches module anchors a b) (rest : Reaches module anchors b c) :
-    Reaches module anchors a c := by
+inductive Reaches (module : Module) (anchors : Nat) : (initial final : State) → (globals : Mutable.Globals := []) → Prop where
+  | refl {globals : Mutable.Globals} : Reaches (globals := globals) module anchors state state
+  | next {globals : Mutable.Globals} : step (globals := globals) module anchors state = .next following →
+      Reaches (globals := globals) module anchors following final → Reaches (globals := globals) module anchors state final
+
+theorem Reaches.trans (h : Reaches (globals := globals) module anchors a b) (rest : Reaches (globals := globals) module anchors b c) :
+    Reaches (globals := globals) module anchors a c := by
   induction h with
   | refl => exact rest
   | next h _ ih => exact .next h (ih rest)
 
-theorem Reaches.finishes (h : Reaches module anchors a b)
-    (rest : Finishes (step module anchors) b outcome) : Finishes (step module anchors) a outcome := by
+theorem Reaches.finishes (h : Reaches (globals := globals) module anchors a b)
+    (rest : Finishes (step (globals := globals) module anchors) b outcome) : Finishes (step (globals := globals) module anchors) a outcome := by
   induction h with
   | refl => exact rest
   | next h _ ih => exact .next h (ih rest)
 
 def Evaluates (module : Module) (env : Env) (expression : Expr)
-    (heap : Heap) (value : Value) (finalHeap : Heap) : Prop :=
-  ∀ anchors stack, Reaches module anchors ⟨.expr expression env, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
+    (heap : Heap) (value : Value) (finalHeap : Heap) (globals : Mutable.Globals := []) : Prop :=
+  ∀ anchors stack, Reaches (globals := globals) module anchors ⟨.expr expression env, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
 
-theorem Evaluates.finishes (h : Evaluates module env expression heap value finalHeap) :
-    (evaluate module env expression heap).Finishes ⟨.ok value, [], finalHeap, heap.length⟩ :=
+theorem Evaluates.finishes (h : Evaluates (globals := globals) module env expression heap value finalHeap) :
+    (evaluate (globals := globals) module env expression heap).Finishes ⟨.ok value, globals, finalHeap, heap.length⟩ :=
   (h heap.length []).finishes (.done rfl)
 
-theorem Evaluates.condition_iff (h : Evaluates module env expression heap value finalHeap) :
-    Condition module env expression heap ↔ value = .scalar (.bool true) := by
+theorem Evaluates.condition_iff (h : Evaluates (globals := globals) module env expression heap value finalHeap) :
+    Condition (globals := globals) module env expression heap ↔ value = .scalar (.bool true) := by
   constructor
   · rintro ⟨otherHeap, finished⟩
     have same := h.finishes.unique finished
@@ -984,8 +999,8 @@ theorem Evaluates.condition_iff (h : Evaluates module env expression heap value 
     exact ⟨finalHeap, h.finishes⟩
 
 def ReturnsValue (module : Module) (name : String) (values : List Value)
-    (heap : Heap) (value : Value) (finalHeap : Heap) : Prop :=
-  ∀ anchors stack, Reaches module anchors ⟨.operation (.call name) values, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
+    (heap : Heap) (value : Value) (finalHeap : Heap) (globals : Mutable.Globals := []) : Prop :=
+  ∀ anchors stack, Reaches (globals := globals) module anchors ⟨.operation (.call name) values, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
 
 /-- Reuse a helper result when omitted arguments expand to the already proved
 argument vector. Both entry steps bind exactly the same local environment. -/
@@ -993,8 +1008,8 @@ theorem ReturnsValue.with_defaults
     (found : findFunctionIn module.body name = some (args, body))
     (filled : completeArguments args supplied = some values)
     (complete : completeArguments args values = some values)
-    (h : ReturnsValue module name values heap value finalHeap) :
-    ReturnsValue module name supplied heap value finalHeap := by
+    (h : ReturnsValue (globals := globals) module name values heap value finalHeap) :
+    ReturnsValue (globals := globals) module name supplied heap value finalHeap := by
   intro anchors stack
   cases h anchors stack with
   | next transition rest =>
@@ -1002,18 +1017,21 @@ theorem ReturnsValue.with_defaults
       subst transition
       exact .next (by simp [step, found, filled]) rest
 
-theorem ReturnsValue.finishes (h : ReturnsValue module name values heap value finalHeap) :
-    (call module name values heap).Finishes ⟨.ok value, [], finalHeap, heap.length⟩ :=
+theorem ReturnsValue.finishes (h : ReturnsValue (globals := globals) module name values heap value finalHeap) :
+    (call (globals := globals) module name values heap).Finishes ⟨.ok value, globals, finalHeap, heap.length⟩ :=
   (h heap.length []).finishes (.done rfl)
 
-theorem ReturnsValue.returns (h : ReturnsValue module name values heap value finalHeap) :
-    (call module name values heap).Returns := ⟨value, [], finalHeap, heap.length, h.finishes⟩
+theorem ReturnsValue.returns (h : ReturnsValue (globals := globals) module name values heap value finalHeap) :
+    (call (globals := globals) module name values heap).Returns := ⟨value, globals, finalHeap, heap.length, h.finishes⟩
 
 theorem Reaches.scalar_finishes (h : Reaches module 0 a b)
     (rest : Finishes (scalarStep module) b outcome) : Finishes (scalarStep module) a outcome := by
+  generalize empty : ([] : Mutable.Globals) = context at h
   induction h with
   | refl => exact rest
-  | next transition _ ih => exact .next (by simp [scalarStep, transition]) (ih rest)
+  | next transition _ ih =>
+      cases empty
+      exact .next (by simp [scalarStep, transition]) (ih rest rfl)
 
 theorem ReturnsValue.scalar_finishes
     (h : ReturnsValue module name (values.map Mutable.Value.scalar) [] (.scalar value) heap) :
@@ -1089,8 +1107,8 @@ private theorem attribute_extend (extension : Extends target source)
 
 private theorem run_extend (left right : Eval α)
     (same : left heap ≠ none → right heap = left heap)
-    (supported : run anchors heap left next ≠ .unsupported) :
-    run anchors heap right next = run anchors heap left next := by
+    (supported : run (globals := globals) anchors heap left next ≠ .unsupported) :
+    run (globals := globals) anchors heap right next = run (globals := globals) anchors heap left next := by
   have defined : left heap ≠ none := by
     intro missing
     simp [run, missing] at supported
@@ -1098,8 +1116,8 @@ private theorem run_extend (left right : Eval α)
 
 /-- Imported helpers retain their checked bodies and share the caller's heap. -/
 theorem step_extend (extension : Extends target source) (state : State)
-    (supported : step source anchors state ≠ .unsupported) :
-    step target anchors state = step source anchors state := by
+    (supported : step (globals := globals) source anchors state ≠ .unsupported) :
+    step (globals := globals) target anchors state = step (globals := globals) source anchors state := by
   rcases state with ⟨work, stack, heap⟩
   cases work with
   | operation operation values =>
@@ -1149,8 +1167,8 @@ theorem step_extend (extension : Extends target source) (state : State)
                           exact run_extend _ _ (bindMethod_extend extension) supported
           | _ => rfl
 
-theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Extends target source) :
-    Reaches target anchors initial final := by
+theorem Reaches.extend (h : Reaches (globals := globals) source anchors initial final) (extension : Extends target source) :
+    Reaches (globals := globals) target anchors initial final := by
   induction h with
   | refl => exact .refl
   | next transition _ ih =>
@@ -1158,54 +1176,54 @@ theorem Reaches.extend (h : Reaches source anchors initial final) (extension : E
       rw [step_extend extension _ (by simp [transition])]
       exact transition
 
-theorem ReturnsValue.extend (h : ReturnsValue source name values heap value finalHeap)
-    (extension : Extends target source) : ReturnsValue target name values heap value finalHeap :=
+theorem ReturnsValue.extend (h : ReturnsValue (globals := globals) source name values heap value finalHeap)
+    (extension : Extends target source) : ReturnsValue (globals := globals) target name values heap value finalHeap :=
   fun anchors stack => (h anchors stack).extend extension
 
 
 namespace Evaluates
 
-theorem constant : Evaluates module env (.constant value) heap (.scalar value) heap :=
+theorem constant : Evaluates (globals := globals) module env (.constant value) heap (.scalar value) heap :=
   fun _ _ => .next rfl .refl
 
-theorem lookup (h : env name = some value) : Evaluates module env (.name name) heap value heap :=
+theorem lookup (h : env name = some value) : Evaluates (globals := globals) module env (.name name) heap value heap :=
   fun _ _ => .next (by simp [step, h]) .refl
 
-theorem binary (left : Evaluates module env a heap av middle)
-    (right : Evaluates module env b middle bv afterRight)
+theorem binary (left : Evaluates (globals := globals) module env a heap av middle)
+    (right : Evaluates (globals := globals) module env b middle bv afterRight)
     (operation : Mutable.binary op av bv afterRight = some (.ok value, finalHeap)) :
-    Evaluates module env (.binOp a op b) heap value finalHeap := by
+    Evaluates (globals := globals) module env (.binOp a op b) heap value finalHeap := by
   intro anchors stack
   exact .next rfl ((left _ _).trans (.next rfl ((right _ _).trans
     (.next (by simp [step, result, run, operation]) .refl))))
 
-theorem unary (evaluated : Evaluates module env expression heap value middle)
+theorem unary (evaluated : Evaluates (globals := globals) module env expression heap value middle)
     (operation : HeapCalls.unary op value middle = some (.ok resultValue, finalHeap)) :
-    Evaluates module env (.unaryOp op expression) heap resultValue finalHeap := by
+    Evaluates (globals := globals) module env (.unaryOp op expression) heap resultValue finalHeap := by
   intro anchors stack
   exact .next rfl ((evaluated anchors _).trans
     (.next (by simp [step, result, run, operation]) .refl))
 
-theorem compare (left : Evaluates module env a heap av middle)
-    (right : Evaluates module env b middle bv afterRight)
+theorem compare (left : Evaluates (globals := globals) module env a heap av middle)
+    (right : Evaluates (globals := globals) module env b middle bv afterRight)
     (operation : HeapCalls.compare op av bv afterRight = some (.ok value, finalHeap)) :
-    Evaluates module env (.compare a [(op, b)]) heap value finalHeap := by
+    Evaluates (globals := globals) module env (.compare a [(op, b)]) heap value finalHeap := by
   intro anchors stack
   exact .next rfl ((left _ _).trans (.next rfl ((right _ _).trans
     (.next (by simp [step, result, run, operation]) .refl))))
 
 /-- Continue a comparison chain with the middle operand's value already evaluated. -/
 def Compares (module : Module) (env : Env) (left : Value) (op : CmpOp) (right : Expr)
-    (rest : List (CmpOp × Expr)) (heap : Heap) (answer : Value) (finalHeap : Heap) : Prop :=
+    (rest : List (CmpOp × Expr)) (heap : Heap) (answer : Value) (finalHeap : Heap) (globals : Mutable.Globals := []) : Prop :=
   ∀ anchors stack,
-    Reaches module anchors ⟨.expr right env, .chainRight op left rest env :: stack, heap⟩
+    Reaches (globals := globals) module anchors ⟨.expr right env, .chainRight op left rest env :: stack, heap⟩
       ⟨.value answer, stack, finalHeap⟩
 
 namespace Compares
 
-theorem last (evaluated : Evaluates module env right heap value middle)
+theorem last (evaluated : Evaluates (globals := globals) module env right heap value middle)
     (operation : HeapCalls.compare op left value middle = some (.ok answer, finalHeap)) :
-    Compares module env left op right [] heap answer finalHeap := by
+    Compares (globals := globals) module env left op right [] heap answer finalHeap := by
   intro anchors stack
   apply (evaluated anchors _).trans
   apply Reaches.next (following :=
@@ -1213,10 +1231,10 @@ theorem last (evaluated : Evaluates module env right heap value middle)
     (by simp [step, result, run, operation])
   exact .next rfl .refl
 
-theorem stop (evaluated : Evaluates module env right heap value middle)
+theorem stop (evaluated : Evaluates (globals := globals) module env right heap value middle)
     (operation : HeapCalls.compare op left value middle = some (.ok answer, finalHeap))
     (truth : Mutable.truth answer finalHeap = some (.ok false, finalHeap)) :
-    Compares module env left op right (next :: rest) heap answer finalHeap := by
+    Compares (globals := globals) module env left op right (next :: rest) heap answer finalHeap := by
   intro anchors stack
   apply (evaluated anchors _).trans
   apply Reaches.next (following :=
@@ -1225,11 +1243,11 @@ theorem stop (evaluated : Evaluates module env right heap value middle)
   cases next
   exact .next (by simp [step, run, truth]) .refl
 
-theorem next (evaluated : Evaluates module env right heap value middle)
+theorem next (evaluated : Evaluates (globals := globals) module env right heap value middle)
     (operation : HeapCalls.compare op left value middle = some (.ok compared, afterComparison))
     (truth : Mutable.truth compared afterComparison = some (.ok true, afterComparison))
-    (following : Compares module env value nextOp nextRight rest afterComparison answer finalHeap) :
-    Compares module env left op right ((nextOp, nextRight) :: rest) heap answer finalHeap := by
+    (following : Compares (globals := globals) module env value nextOp nextRight rest afterComparison answer finalHeap) :
+    Compares (globals := globals) module env left op right ((nextOp, nextRight) :: rest) heap answer finalHeap := by
   intro anchors stack
   apply (evaluated anchors _).trans
   apply Reaches.next (following :=
@@ -1239,25 +1257,25 @@ theorem next (evaluated : Evaluates module env right heap value middle)
 
 end Compares
 
-theorem chain (left : Evaluates module env expression heap value middle)
-    (following : Compares module env value op right (next :: rest) middle answer finalHeap) :
-    Evaluates module env (.compare expression ((op, right) :: next :: rest)) heap answer finalHeap := by
+theorem chain (left : Evaluates (globals := globals) module env expression heap value middle)
+    (following : Compares (globals := globals) module env value op right (next :: rest) middle answer finalHeap) :
+    Evaluates (globals := globals) module env (.compare expression ((op, right) :: next :: rest)) heap answer finalHeap := by
   intro anchors stack
   exact .next rfl ((left anchors _).trans (.next rfl (following anchors stack)))
 
 /-- Short-circuiting returns the first operand without evaluating later expressions. -/
-theorem boolean_stop (evaluated : Evaluates module env first heap value middle)
+theorem boolean_stop (evaluated : Evaluates (globals := globals) module env first heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle))
     (stop : (match op with | .and => !flag | .or => flag) = true) :
-    Evaluates module env (.boolOp op (first :: rest)) heap value middle := by
+    Evaluates (globals := globals) module env (.boolOp op (first :: rest)) heap value middle := by
   intro anchors stack
   exact .next rfl ((evaluated anchors _).trans
     (.next (by simp [step, run, truth, stop]) .refl))
 
 /-- The last operand supplies the result, preserving its value and heap effects. -/
-theorem boolean_last (evaluated : Evaluates module env expression heap value middle)
+theorem boolean_last (evaluated : Evaluates (globals := globals) module env expression heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle)) :
-    Evaluates module env (.boolOp op [expression]) heap value middle := by
+    Evaluates (globals := globals) module env (.boolOp op [expression]) heap value middle := by
   intro anchors stack
   apply Reaches.next rfl
   apply (evaluated anchors _).trans
@@ -1265,11 +1283,11 @@ theorem boolean_last (evaluated : Evaluates module env expression heap value mid
   cases op <;> cases flag <;> simp [step, run, truth]
 
 /-- A non-short-circuiting operand continues in the heap it produced. -/
-theorem boolean_next (evaluated : Evaluates module env first heap value middle)
+theorem boolean_next (evaluated : Evaluates (globals := globals) module env first heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle))
     (continues : (match op with | .and => !flag | .or => flag) = false)
-    (rest : Evaluates module env (.boolOp op (next :: tail)) middle answer finalHeap) :
-    Evaluates module env (.boolOp op (first :: next :: tail)) heap answer finalHeap := by
+    (rest : Evaluates (globals := globals) module env (.boolOp op (next :: tail)) middle answer finalHeap) :
+    Evaluates (globals := globals) module env (.boolOp op (first :: next :: tail)) heap answer finalHeap := by
   intro anchors stack
   apply Reaches.next rfl
   apply (evaluated anchors _).trans
@@ -1279,42 +1297,42 @@ theorem boolean_next (evaluated : Evaluates module env first heap value middle)
       subst transition
       exact .next (by simp [step, run, truth, continues]) following
 
-theorem conditional (condition : Evaluates module env test heap value middle)
+theorem conditional (condition : Evaluates (globals := globals) module env test heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle))
-    (branch : Evaluates module env (if flag then yes else no) middle answer finalHeap) :
-    Evaluates module env (.ifExp test yes no) heap answer finalHeap := by
+    (branch : Evaluates (globals := globals) module env (if flag then yes else no) middle answer finalHeap) :
+    Evaluates (globals := globals) module env (.ifExp test yes no) heap answer finalHeap := by
   intro anchors stack
   exact .next rfl ((condition anchors _).trans
     (.next (by simp [step, run, truth]) (branch anchors stack)))
 
-inductive Arguments (module : Module) (env : Env) : List Expr → Heap → List Value → Heap → Prop where
-  | nil : Arguments module env [] heap [] heap
-  | cons : Evaluates module env expression heap value middle →
-      Arguments module env expressions middle values finalHeap →
-      Arguments module env (expression :: expressions) heap (value :: values) finalHeap
+inductive Arguments (module : Module) (env : Env) : List Expr → Heap → List Value → Heap → (globals : Mutable.Globals := []) → Prop where
+  | nil {globals : Mutable.Globals} : Arguments (globals := globals) module env [] heap [] heap
+  | cons {globals : Mutable.Globals} : Evaluates (globals := globals) module env expression heap value middle →
+      Arguments (globals := globals) module env expressions middle values finalHeap →
+      Arguments (globals := globals) module env (expression :: expressions) heap (value :: values) finalHeap
 
 /-- Argument expressions retain left-to-right effects for every call operation. -/
-theorem arguments_reach (h : Arguments module env expressions heap values finalHeap)
+theorem arguments_reach (h : Arguments (globals := globals) module env expressions heap values finalHeap)
     (operation : Operation) (done : List Value) (anchors : Nat) (stack : List Frame) :
-    Reaches module anchors (argumentsState operation env done expressions stack heap)
+    Reaches (globals := globals) module anchors (argumentsState operation env done expressions stack heap)
       ⟨.operation operation (done ++ values), stack, finalHeap⟩ := by
   induction h generalizing done with
   | nil => simp [argumentsState]; exact .refl
-  | @cons expression heap value middle expressions values finalHeap head tail ih =>
+  | @cons expression heap value middle expressions values finalHeap globals head tail ih =>
       apply (head _ _).trans
       refine .next rfl ?_
       simpa [List.append_assoc] using ih (done ++ [value])
 
-theorem call (arguments : Arguments module env expressions heap values middle)
-    (callee : ReturnsValue module name values middle value finalHeap) :
-    Evaluates module env (.call (.name name) expressions) heap value finalHeap := by
+theorem call (arguments : Arguments (globals := globals) module env expressions heap values middle)
+    (callee : ReturnsValue (globals := globals) module name values middle value finalHeap) :
+    Evaluates (globals := globals) module env (.call (.name name) expressions) heap value finalHeap := by
   intro anchors stack
   exact .next rfl ((arguments_reach arguments (.call name) [] anchors stack).trans (callee anchors stack))
 
-theorem library_call (arguments : Arguments module env expressions heap values middle)
+theorem library_call (arguments : Arguments (globals := globals) module env expressions heap values middle)
     (absent : findFunctionIn module.body name = none)
     (operation : library module name values middle = some (.ok value, finalHeap)) :
-    Evaluates module env (.call (.name name) expressions) heap value finalHeap := by
+    Evaluates (globals := globals) module env (.call (.name name) expressions) heap value finalHeap := by
   cases imported : libraryFunction module name with
   | none => simp [library, imported, Mutable.unsupported] at operation
   | some implementation =>
@@ -1323,27 +1341,27 @@ theorem library_call (arguments : Arguments module env expressions heap values m
       exact .next (by simp [step, absent, imported, result, run, operation]) .refl
 
 theorem qualified_call (notAppend : field ≠ "append")
-    (arguments : Arguments module env expressions heap values middle)
-    (callee : ReturnsValue module (alias ++ "." ++ field) values middle value finalHeap)
+    (arguments : Arguments (globals := globals) module env expressions heap values middle)
+    (callee : ReturnsValue (globals := globals) module (alias ++ "." ++ field) values middle value finalHeap)
     (notAdd : field ≠ "add" := by decide)
     (unbound : env alias = none := by rfl) :
-    Evaluates module env (.call (.attribute (.name alias) field) expressions) heap value finalHeap := by
+    Evaluates (globals := globals) module env (.call (.attribute (.name alias) field) expressions) heap value finalHeap := by
   intro anchors stack
   apply Reaches.next (following := argumentsState (.call (alias ++ "." ++ field)) env [] expressions stack heap)
     (by simp [step, notAppend, notAdd, unbound])
   exact (arguments_reach arguments (.call (alias ++ "." ++ field)) [] anchors stack).trans (callee anchors stack)
 
-theorem list (arguments : Arguments module env expressions heap values finalHeap) :
-    Evaluates module env (.list expressions) heap (.ref finalHeap.length) (finalHeap ++ [.list values]) := by
+theorem list (arguments : Arguments (globals := globals) module env expressions heap values finalHeap) :
+    Evaluates (globals := globals) module env (.list expressions) heap (.ref finalHeap.length) (finalHeap ++ [.list values]) := by
   intro anchors stack
   apply Reaches.next rfl
   apply (arguments_reach arguments .list [] anchors stack).trans
   exact .next (by simp [step, result, run, primitive, Mutable.allocate, Except.map]) .refl
 
 /-- Nonempty runtime tuple displays allocate after all their elements evaluate. -/
-theorem tuple (arguments : Arguments module env expressions heap values finalHeap)
+theorem tuple (arguments : Arguments (globals := globals) module env expressions heap values finalHeap)
     (nonempty : values ≠ []) :
-    Evaluates module env (.tuple expressions) heap (.ref finalHeap.length)
+    Evaluates (globals := globals) module env (.tuple expressions) heap (.ref finalHeap.length)
       (finalHeap ++ [.tuple values]) := by
   intro anchors stack
   apply Reaches.next rfl
@@ -1353,12 +1371,12 @@ theorem tuple (arguments : Arguments module env expressions heap values finalHea
 /-- Subscription evaluates its receiver and index before reading the shared heap. -/
 theorem subscript
     (ordinary : ∀ a b c, index ≠ .slice a b c)
-    (receiver : Evaluates module env base heap value middle)
-    (subscript : Evaluates module env index middle position afterIndex)
+    (receiver : Evaluates (globals := globals) module env base heap value middle)
+    (subscript : Evaluates (globals := globals) module env index middle position afterIndex)
     (operation : Mutable.getItem value position afterIndex = some (.ok answer, finalHeap)) :
-    Evaluates module env (.subscript base index) heap answer finalHeap := by
+    Evaluates (globals := globals) module env (.subscript base index) heap answer finalHeap := by
   intro anchors stack
-  have start : step module anchors ⟨.expr (.subscript base index) env, stack, heap⟩ =
+  have start : step (globals := globals) module anchors ⟨.expr (.subscript base index) env, stack, heap⟩ =
       .next ⟨.expr base env, .arguments .subscript [] [index] env :: stack, heap⟩ := by
     cases index <;> simp_all [step, argumentsState]
   apply Reaches.next start
@@ -1369,18 +1387,18 @@ theorem subscript
   exact .next (by simp [argumentsState, step, primitive, result, run, operation]) .refl
 
 /-- Slice arguments evaluate left to right, retaining effects before allocation. -/
-theorem slice (arguments : Arguments module env
+theorem slice (arguments : Arguments (globals := globals) module env
     [base, lower.getD (.constant .none), upper.getD (.constant .none), stride.getD (.constant .none)]
     heap [receiver, first, last, stepValue] middle)
     (operation : Mutable.getSlice receiver first last stepValue middle = some (.ok value, finalHeap)) :
-    Evaluates module env (.subscript base (.slice lower upper stride)) heap value finalHeap := by
+    Evaluates (globals := globals) module env (.subscript base (.slice lower upper stride)) heap value finalHeap := by
   intro anchors stack
   exact .next rfl ((arguments_reach arguments .slice [] anchors stack).trans
     (.next (by simp [step, primitive, result, run, operation]) .refl))
 
-theorem reversed_list (evaluated : Evaluates module env expression heap (.ref address) middle)
+theorem reversed_list (evaluated : Evaluates (globals := globals) module env expression heap (.ref address) middle)
     (found : middle[address]? = some (.list items)) :
-    Evaluates module env (.reversedList expression) heap (.ref middle.length)
+    Evaluates (globals := globals) module env (.reversedList expression) heap (.ref middle.length)
       (middle ++ [.list items.reverse]) := by
   intro anchors stack
   apply Reaches.next rfl
@@ -1388,18 +1406,18 @@ theorem reversed_list (evaluated : Evaluates module env expression heap (.ref ad
   exact .next (by simp [step, result, run, primitive, Mutable.sequence, found,
     Mutable.allocate, Except.map]) .refl
 
-theorem builtin (arguments : Arguments module env expressions heap values middle)
+theorem builtin (arguments : Arguments (globals := globals) module env expressions heap values middle)
     (operation : primitive (.builtin name) values middle = some (.ok value, finalHeap)) :
-    Evaluates module env (.builtinCall name expressions) heap value finalHeap := by
+    Evaluates (globals := globals) module env (.builtinCall name expressions) heap value finalHeap := by
   intro anchors stack
   exact .next rfl ((arguments_reach arguments (.builtin name) [] anchors stack).trans
     (.next (by simp [step, result, run, operation]) .refl))
 
-theorem append (receiver : Evaluates module env base heap (.ref address) middle)
+theorem append (receiver : Evaluates (globals := globals) module env base heap (.ref address) middle)
     (found : middle[address]? = some (.list old))
-    (item : Evaluates module env expression middle value afterItem)
+    (item : Evaluates (globals := globals) module env expression middle value afterItem)
     (items : afterItem[address]? = some (.list current)) :
-    Evaluates module env (.call (.attribute base "append") [expression]) heap (.scalar .none)
+    Evaluates (globals := globals) module env (.call (.attribute base "append") [expression]) heap (.scalar .none)
       (afterItem.set address (.list (current ++ [value]))) := by
   intro anchors stack
   apply Reaches.next rfl
@@ -1412,11 +1430,11 @@ theorem append (receiver : Evaluates module env base heap (.ref address) middle)
   exact .next (by simp [step, result, run, primitive, Mutable.appendItem, items, Except.map]) .refl
 
 /-- Method lookup precedes argument evaluation, which may itself mutate the set. -/
-theorem add (receiver : Evaluates module env base heap (.ref address) middle)
+theorem add (receiver : Evaluates (globals := globals) module env base heap (.ref address) middle)
     (found : middle[address]? = some (.set old))
-    (item : Evaluates module env expression middle (.scalar value) afterItem)
+    (item : Evaluates (globals := globals) module env expression middle (.scalar value) afterItem)
     (items : afterItem[address]? = some (.set current)) :
-    Evaluates module env (.call (.attribute base "add") [expression]) heap (.scalar .none)
+    Evaluates (globals := globals) module env (.call (.attribute base "add") [expression]) heap (.scalar .none)
       (afterItem.set address (.set (ScalarSet.insert current value))) := by
   intro anchors stack
   apply Reaches.next rfl
@@ -1431,26 +1449,26 @@ theorem add (receiver : Evaluates module env base heap (.ref address) middle)
 end Evaluates
 
 def BlockReturns (module : Module) (env : Env) (body : List Stmt)
-    (heap : Heap) (value : Value) (finalHeap : Heap) : Prop :=
-  ∀ anchors stack, Reaches module anchors ⟨.block body env, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
+    (heap : Heap) (value : Value) (finalHeap : Heap) (globals : Mutable.Globals := []) : Prop :=
+  ∀ anchors stack, Reaches (globals := globals) module anchors ⟨.block body env, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
 
 namespace BlockReturns
 
-theorem return_value (evaluated : Evaluates module env expression heap value finalHeap) :
-    BlockReturns module env (.return expression :: rest) heap value finalHeap :=
+theorem return_value (evaluated : Evaluates (globals := globals) module env expression heap value finalHeap) :
+    BlockReturns (globals := globals) module env (.return expression :: rest) heap value finalHeap :=
   fun anchors stack => .next rfl (evaluated anchors stack)
 
-theorem assign (evaluated : Evaluates module env expression heap value middle)
-    (rest : BlockReturns module (setLocal env name value) body middle answer finalHeap) :
-    BlockReturns module env (.assign [.name name] expression :: body) heap answer finalHeap :=
+theorem assign (evaluated : Evaluates (globals := globals) module env expression heap value middle)
+    (rest : BlockReturns (globals := globals) module (setLocal env name value) body middle answer finalHeap) :
+    BlockReturns (globals := globals) module env (.assign [.name name] expression :: body) heap answer finalHeap :=
   fun anchors stack => .next rfl ((evaluated anchors _).trans (.next rfl (rest anchors stack)))
 
 theorem unpack (targets : Calls.targetNames expressions = some names)
-    (evaluated : Evaluates module env expression heap value middle)
+    (evaluated : Evaluates (globals := globals) module env expression heap value middle)
     (sequence : Mutable.sequence value middle = some (.ok items, afterUnpack))
     (arity : names.length = items.length)
-    (rest : BlockReturns module (assignNames env names items) body afterUnpack answer finalHeap) :
-    BlockReturns module env (.assign [.tuple expressions] expression :: body) heap answer finalHeap := by
+    (rest : BlockReturns (globals := globals) module (assignNames env names items) body afterUnpack answer finalHeap) :
+    BlockReturns (globals := globals) module env (.assign [.tuple expressions] expression :: body) heap answer finalHeap := by
   intro anchors stack
   exact .next (following := ⟨.expr expression env, .unpack names body env :: stack, heap⟩)
     (by simp [step, targets]) ((evaluated anchors _).trans
@@ -1459,13 +1477,13 @@ theorem unpack (targets : Calls.targetNames expressions = some names)
 /-- Subscription assignment evaluates the RHS before the receiver and index. -/
 theorem setItem
     (ordinary : ∀ a b c, index ≠ .slice a b c)
-    (rhs : Evaluates module env expression heap value afterRhs)
-    (target : Evaluates.Arguments module env [base, index] afterRhs [receiver, subscript] afterTarget)
+    (rhs : Evaluates (globals := globals) module env expression heap value afterRhs)
+    (target : Evaluates.Arguments (globals := globals) module env [base, index] afterRhs [receiver, subscript] afterTarget)
     (write : Mutable.setItem receiver subscript value afterTarget = some (.ok (.scalar .none), afterWrite))
-    (rest : BlockReturns module env body afterWrite answer finalHeap) :
-    BlockReturns module env (.assign [.subscript base index] expression :: body) heap answer finalHeap := by
+    (rest : BlockReturns (globals := globals) module env body afterWrite answer finalHeap) :
+    BlockReturns (globals := globals) module env (.assign [.subscript base index] expression :: body) heap answer finalHeap := by
   intro anchors stack
-  have start : step module anchors ⟨.block (.assign [.subscript base index] expression :: body) env, stack, heap⟩ =
+  have start : step (globals := globals) module anchors ⟨.block (.assign [.subscript base index] expression :: body) env, stack, heap⟩ =
       .next ⟨.expr expression env, .assignItem base index body env :: stack, heap⟩ := by
     cases index <;> simp_all [step]
   apply Reaches.next start
@@ -1477,14 +1495,14 @@ theorem setItem
 
 /-- Slice bounds run left to right after the RHS and receiver; conversion follows. -/
 theorem setSlice
-    (rhs : Evaluates module env expression heap value afterRhs)
-    (target : Evaluates.Arguments module env [base, lower.getD (.constant .none),
+    (rhs : Evaluates (globals := globals) module env expression heap value afterRhs)
+    (target : Evaluates.Arguments (globals := globals) module env [base, lower.getD (.constant .none),
       upper.getD (.constant .none), stride.getD (.constant .none)] afterRhs
       [receiver, lowerValue, upperValue, strideValue] afterTarget)
     (write : Mutable.setSlice receiver lowerValue upperValue strideValue value afterTarget =
       some (.ok (.scalar .none), afterWrite))
-    (rest : BlockReturns module env body afterWrite answer finalHeap) :
-    BlockReturns module env (.assign [.subscript base (.slice lower upper stride)] expression :: body)
+    (rest : BlockReturns (globals := globals) module env body afterWrite answer finalHeap) :
+    BlockReturns (globals := globals) module env (.assign [.subscript base (.slice lower upper stride)] expression :: body)
       heap answer finalHeap := by
   intro anchors stack
   apply Reaches.next rfl
@@ -1495,65 +1513,65 @@ theorem setSlice
     (by simp [step, result, run, primitive, write]) (.next rfl (rest anchors stack))
 
 theorem augAssign (lookup : env name = some left)
-    (evaluated : Evaluates module env expression heap right middle)
+    (evaluated : Evaluates (globals := globals) module env expression heap right middle)
     (operation : inplace op left right middle = some (.ok value, afterOperation))
-    (rest : BlockReturns module (setLocal env name value) body afterOperation answer finalHeap) :
-    BlockReturns module env (.augAssign (.name name) op expression :: body) heap answer finalHeap := by
+    (rest : BlockReturns (globals := globals) module (setLocal env name value) body afterOperation answer finalHeap) :
+    BlockReturns (globals := globals) module env (.augAssign (.name name) op expression :: body) heap answer finalHeap := by
   intro anchors stack
   apply Reaches.next rfl
-  apply (Evaluates.lookup (module := module) (heap := heap) lookup anchors _).trans
+  apply (Evaluates.lookup (globals := globals) (module := module) (heap := heap) lookup anchors _).trans
   apply Reaches.next rfl
   apply (evaluated anchors _).trans
   exact .next (following := ⟨.value value, .assign name body env :: stack, afterOperation⟩)
     (by simp [step, result, run, operation]) (.next rfl (rest anchors stack))
 
-theorem discard (evaluated : Evaluates module env expression heap value middle)
-    (rest : BlockReturns module env body middle answer finalHeap) :
-    BlockReturns module env (.expr expression :: body) heap answer finalHeap :=
+theorem discard (evaluated : Evaluates (globals := globals) module env expression heap value middle)
+    (rest : BlockReturns (globals := globals) module env body middle answer finalHeap) :
+    BlockReturns (globals := globals) module env (.expr expression :: body) heap answer finalHeap :=
   fun anchors stack => .next rfl ((evaluated anchors _).trans (.next rfl (rest anchors stack)))
 
 /-- Successful assertions retain condition effects and skip the message. -/
-theorem assertion (evaluated : Evaluates module env condition heap value middle)
+theorem assertion (evaluated : Evaluates (globals := globals) module env condition heap value middle)
     (truth : Mutable.truth value middle = some (.ok true, middle))
-    (rest : BlockReturns module env body middle answer finalHeap) :
-    BlockReturns module env (.assert condition message :: body) heap answer finalHeap := by
+    (rest : BlockReturns (globals := globals) module env body middle answer finalHeap) :
+    BlockReturns (globals := globals) module env (.assert condition message :: body) heap answer finalHeap := by
   intro anchors stack
   exact .next rfl ((evaluated anchors _).trans
     (.next (by simp [step, run, truth]) (rest anchors stack)))
 
-theorem branch (evaluated : Evaluates module env condition heap value middle)
+theorem branch (evaluated : Evaluates (globals := globals) module env condition heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle))
-    (rest : BlockReturns module env ((if flag then yes else no) ++ body) middle answer finalHeap) :
-    BlockReturns module env (.ifThen condition yes no :: body) heap answer finalHeap := by
+    (rest : BlockReturns (globals := globals) module env ((if flag then yes else no) ++ body) middle answer finalHeap) :
+    BlockReturns (globals := globals) module env (.ifThen condition yes no :: body) heap answer finalHeap := by
   intro anchors stack
   exact .next rfl ((evaluated anchors _).trans (.next (by simp [step, run, truth]) (rest anchors stack)))
 
-theorem while_loop (evaluated : Evaluates module env condition heap value middle)
+theorem while_loop (evaluated : Evaluates (globals := globals) module env condition heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle))
-    (rest : BlockReturns module env
+    (rest : BlockReturns (globals := globals) module env
       ((if flag then body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)] else otherwise) ++ following)
       middle answer finalHeap) :
-    BlockReturns module env (.whileDo condition body otherwise :: following) heap answer finalHeap := by
+    BlockReturns (globals := globals) module env (.whileDo condition body otherwise :: following) heap answer finalHeap := by
   intro anchors stack
   exact .next rfl ((evaluated anchors _).trans (.next (by simp [step, run, truth]) (rest anchors stack)))
 
 private theorem range_reach
-    (h : Evaluates.Arguments module env expressions heap values finalHeap) (done : List Value)
+    (h : Evaluates.Arguments (globals := globals) module env expressions heap values finalHeap) (done : List Value)
     (anchors : Nat) (stack : List Frame) :
-    Reaches module anchors (rangeState name env done expressions body otherwise following stack heap)
+    Reaches (globals := globals) module anchors (rangeState name env done expressions body otherwise following stack heap)
       ⟨.startRange name (done ++ values) body otherwise following env, stack, finalHeap⟩ := by
   induction h generalizing done with
   | nil => simp [rangeState]; exact .refl
-  | @cons expression heap value middle expressions values finalHeap head tail ih =>
+  | @cons expression heap value middle expressions values finalHeap globals head tail ih =>
       apply (head _ _).trans
       refine .next rfl ?_
       simpa [List.append_assoc] using ih (done ++ [value])
 
-theorem for_range (arguments : Evaluates.Arguments module env expressions heap values middle)
+theorem for_range (arguments : Evaluates.Arguments (globals := globals) module env expressions heap values middle)
     (bounds : rangeBounds values = .ok (start, stop, stride))
-    (rest : BlockReturns module env (.rangeStepLoop name start stop stride body otherwise :: following)
+    (rest : BlockReturns (globals := globals) module env (.rangeStepLoop name start stop stride body otherwise :: following)
       middle answer finalHeap) :
-    BlockReturns module env (.forIn (.name name) (.call (.name "range") expressions) body otherwise :: following)
+    BlockReturns (globals := globals) module env (.forIn (.name name) (.call (.name "range") expressions) body otherwise :: following)
       heap answer finalHeap := by
   intro anchors stack
   exact .next rfl ((range_reach arguments [] anchors stack).trans
@@ -1561,14 +1579,14 @@ theorem for_range (arguments : Evaluates.Arguments module env expressions heap v
 
 /-- Evaluate a sequence expression once, then retain its object identity. -/
 theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
-    (evaluated : Evaluates module env iterable heap value middle)
+    (evaluated : Evaluates (globals := globals) module env iterable heap value middle)
     (sequence : Mutable.sequence value middle = some (.ok items, middle))
-    (rest : BlockReturns module env
+    (rest : BlockReturns (globals := globals) module env
       (.sequenceStepLoop name (sequenceSource value) 0 body otherwise :: following) middle answer finalHeap) :
-    BlockReturns module env (.forIn (.name name) iterable body otherwise :: following)
+    BlockReturns (globals := globals) module env (.forIn (.name name) iterable body otherwise :: following)
       heap answer finalHeap := by
   intro anchors stack
-  have start : step module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
+  have start : step (globals := globals) module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
@@ -1577,58 +1595,58 @@ theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "ran
 /-- Iteration reads the current sequence, so mutations in earlier iterations remain visible. -/
 theorem sequence_step (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
     (item : items[position]? = some value)
-    (rest : BlockReturns module (setLocal env name value)
+    (rest : BlockReturns (globals := globals) module (setLocal env name value)
       (body ++ [Calls.loopContinuation body (.sequenceStepLoop name source (position + 1) body otherwise)] ++ following)
       heap answer finalHeap) :
-    BlockReturns module env (.sequenceStepLoop name source position body otherwise :: following)
+    BlockReturns (globals := globals) module env (.sequenceStepLoop name source position body otherwise :: following)
       heap answer finalHeap := by
   intro anchors stack
   exact .next (by simp [step, run, sequence, item]) (rest anchors stack)
 
 theorem sequence_done (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
     (finished : items[position]? = none)
-    (rest : BlockReturns module env (otherwise ++ following) heap answer finalHeap) :
-    BlockReturns module env (.sequenceStepLoop name source position body otherwise :: following)
+    (rest : BlockReturns (globals := globals) module env (otherwise ++ following) heap answer finalHeap) :
+    BlockReturns (globals := globals) module env (.sequenceStepLoop name source position body otherwise :: following)
       heap answer finalHeap := by
   intro anchors stack
   exact .next (by simp [step, run, sequence, finished]) (rest anchors stack)
 
 theorem range_step (continues : Calls.rangeContinues next stop stride = true)
-    (rest : BlockReturns module (setLocal env name (.scalar (.int next)))
+    (rest : BlockReturns (globals := globals) module (setLocal env name (.scalar (.int next)))
       (body ++ [Calls.loopContinuation body (.rangeStepLoop name (next + stride) stop stride body otherwise)] ++ following)
       heap answer finalHeap) :
-    BlockReturns module env (.rangeStepLoop name next stop stride body otherwise :: following)
+    BlockReturns (globals := globals) module env (.rangeStepLoop name next stop stride body otherwise :: following)
       heap answer finalHeap := by
   intro anchors stack
   exact .next (by simp [step, continues]) (rest anchors stack)
 
 theorem range_done (finished : Calls.rangeContinues next stop stride = false)
-    (rest : BlockReturns module env (otherwise ++ following) heap answer finalHeap) :
-    BlockReturns module env (.rangeStepLoop name next stop stride body otherwise :: following)
+    (rest : BlockReturns (globals := globals) module env (otherwise ++ following) heap answer finalHeap) :
+    BlockReturns (globals := globals) module env (.rangeStepLoop name next stop stride body otherwise :: following)
       heap answer finalHeap := by
   intro anchors stack
   exact .next (by simp [step, finished]) (rest anchors stack)
 
-theorem loop_resume (rest : BlockReturns module env (next :: following) heap answer finalHeap) :
-    BlockReturns module env (.loopResume next :: following) heap answer finalHeap :=
+theorem loop_resume (rest : BlockReturns (globals := globals) module env (next :: following) heap answer finalHeap) :
+    BlockReturns (globals := globals) module env (.loopResume next :: following) heap answer finalHeap :=
   fun anchors stack => .next rfl (rest anchors stack)
 
 theorem break_loop (target : Calls.loopTarget body = some (next, following))
-    (rest : BlockReturns module env following heap answer finalHeap) :
-    BlockReturns module env (.breakLoop :: body) heap answer finalHeap := by
+    (rest : BlockReturns (globals := globals) module env following heap answer finalHeap) :
+    BlockReturns (globals := globals) module env (.breakLoop :: body) heap answer finalHeap := by
   intro anchors stack
   exact .next (by simp [step, target]) (rest anchors stack)
 
 theorem continue_loop (target : Calls.loopTarget body = some (next, following))
-    (rest : BlockReturns module env (next :: following) heap answer finalHeap) :
-    BlockReturns module env (.continueLoop :: body) heap answer finalHeap := by
+    (rest : BlockReturns (globals := globals) module env (next :: following) heap answer finalHeap) :
+    BlockReturns (globals := globals) module env (.continueLoop :: body) heap answer finalHeap := by
   intro anchors stack
   exact .next (by simp [step, target]) (rest anchors stack)
 
 theorem function (found : findFunctionIn module.body name = some (args, body))
     (arguments : completeArguments args values = some completed)
-    (evaluated : BlockReturns module (argumentEnv args completed) (executableBody body) heap value finalHeap) :
-    ReturnsValue module name values heap value finalHeap := by
+    (evaluated : BlockReturns (globals := globals) module (functionEnv args body completed globals) (executableBody body) heap value finalHeap) :
+    ReturnsValue (globals := globals) module name values heap value finalHeap := by
   intro anchors stack
   exact .next (by simp [step, found, arguments]) (evaluated anchors stack)
 
@@ -1637,41 +1655,41 @@ end BlockReturns
 /-- Normal completion of a statement block, preserving any following statements
 and caller continuation while exposing the updated locals and shared heap. -/
 def BlockContinues (module : Module) (env : Env) (body : List Stmt)
-    (heap : Heap) (finalEnv : Env) (finalHeap : Heap) : Prop :=
+    (heap : Heap) (finalEnv : Env) (finalHeap : Heap) (globals : Mutable.Globals := []) : Prop :=
   ∀ following anchors stack,
-    Reaches module anchors ⟨.block (body ++ following) env, stack, heap⟩
+    Reaches (globals := globals) module anchors ⟨.block (body ++ following) env, stack, heap⟩
       ⟨.block following finalEnv, stack, finalHeap⟩
 
 namespace BlockContinues
 
-theorem nil : BlockContinues module env [] heap env heap :=
+theorem nil : BlockContinues (globals := globals) module env [] heap env heap :=
   fun _ _ _ => .refl
 
-theorem append (first : BlockContinues module env body heap middleEnv middleHeap)
-    (second : BlockContinues module middleEnv rest middleHeap finalEnv finalHeap) :
-    BlockContinues module env (body ++ rest) heap finalEnv finalHeap := by
+theorem append (first : BlockContinues (globals := globals) module env body heap middleEnv middleHeap)
+    (second : BlockContinues (globals := globals) module middleEnv rest middleHeap finalEnv finalHeap) :
+    BlockContinues (globals := globals) module env (body ++ rest) heap finalEnv finalHeap := by
   intro following anchors stack
   simpa only [List.append_assoc] using
     (first (rest ++ following) anchors stack).trans (second following anchors stack)
 
-theorem assign (evaluated : Evaluates module env expression heap value finalHeap) :
-    BlockContinues module env [.assign [.name name] expression] heap
+theorem assign (evaluated : Evaluates (globals := globals) module env expression heap value finalHeap) :
+    BlockContinues (globals := globals) module env [.assign [.name name] expression] heap
       (setLocal env name value) finalHeap :=
   fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
 
-theorem annAssign (evaluated : Evaluates module env expression heap value finalHeap) :
-    BlockContinues module env [.annAssign (.name name) annotation (some expression)] heap
+theorem annAssign (evaluated : Evaluates (globals := globals) module env expression heap value finalHeap) :
+    BlockContinues (globals := globals) module env [.annAssign (.name name) annotation (some expression)] heap
       (setLocal env name value) finalHeap :=
   fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
 
-theorem annotation (annotation : Expr) : BlockContinues module env [.annAssign (.name name) annotation none] heap env heap :=
+theorem annotation (annotation : Expr) : BlockContinues (globals := globals) module env [.annAssign (.name name) annotation none] heap env heap :=
   fun _ _ _ => .next rfl .refl
 
 theorem unpack (targets : Calls.targetNames expressions = some names)
-    (evaluated : Evaluates module env expression heap value middle)
+    (evaluated : Evaluates (globals := globals) module env expression heap value middle)
     (sequence : Mutable.sequence value middle = some (.ok items, finalHeap))
     (arity : names.length = items.length) :
-    BlockContinues module env [.assign [.tuple expressions] expression] heap
+    BlockContinues (globals := globals) module env [.assign [.tuple expressions] expression] heap
       (assignNames env names items) finalHeap := by
   intro following anchors stack
   exact .next (following := ⟨.expr expression env, .unpack names following env :: stack, heap⟩)
@@ -1680,13 +1698,13 @@ theorem unpack (targets : Calls.targetNames expressions = some names)
 
 /-- Augmented assignment exposes its updated local and heap to following statements. -/
 theorem augAssign (lookup : env name = some left)
-    (evaluated : Evaluates module env expression heap right middle)
+    (evaluated : Evaluates (globals := globals) module env expression heap right middle)
     (operation : inplace op left right middle = some (.ok value, finalHeap)) :
-    BlockContinues module env [.augAssign (.name name) op expression] heap
+    BlockContinues (globals := globals) module env [.augAssign (.name name) op expression] heap
       (setLocal env name value) finalHeap := by
   intro following anchors stack
   apply Reaches.next rfl
-  apply (Evaluates.lookup (module := module) (heap := heap) lookup anchors _).trans
+  apply (Evaluates.lookup (globals := globals) (module := module) (heap := heap) lookup anchors _).trans
   apply Reaches.next rfl
   apply (evaluated anchors _).trans
   exact .next (following := ⟨.value value, .assign name following env :: stack, finalHeap⟩)
@@ -1695,12 +1713,12 @@ theorem augAssign (lookup : env name = some left)
 /-- Subscription assignment evaluates the RHS before the receiver and index. -/
 theorem setItem
     (ordinary : ∀ a b c, index ≠ .slice a b c)
-    (rhs : Evaluates module env expression heap value afterRhs)
-    (target : Evaluates.Arguments module env [base, index] afterRhs [receiver, subscript] afterTarget)
+    (rhs : Evaluates (globals := globals) module env expression heap value afterRhs)
+    (target : Evaluates.Arguments (globals := globals) module env [base, index] afterRhs [receiver, subscript] afterTarget)
     (write : Mutable.setItem receiver subscript value afterTarget = some (.ok (.scalar .none), afterWrite)) :
-    BlockContinues module env [.assign [.subscript base index] expression] heap env afterWrite := by
+    BlockContinues (globals := globals) module env [.assign [.subscript base index] expression] heap env afterWrite := by
   intro body anchors stack
-  have start : step module anchors ⟨.block (.assign [.subscript base index] expression :: body) env, stack, heap⟩ =
+  have start : step (globals := globals) module anchors ⟨.block (.assign [.subscript base index] expression :: body) env, stack, heap⟩ =
       .next ⟨.expr expression env, .assignItem base index body env :: stack, heap⟩ := by
     cases index <;> simp_all [step]
   apply Reaches.next start
@@ -1712,13 +1730,13 @@ theorem setItem
 
 /-- Slice bounds run left to right after the RHS and receiver; conversion follows. -/
 theorem setSlice
-    (rhs : Evaluates module env expression heap value afterRhs)
-    (target : Evaluates.Arguments module env [base, lower.getD (.constant .none),
+    (rhs : Evaluates (globals := globals) module env expression heap value afterRhs)
+    (target : Evaluates.Arguments (globals := globals) module env [base, lower.getD (.constant .none),
       upper.getD (.constant .none), stride.getD (.constant .none)] afterRhs
       [receiver, lowerValue, upperValue, strideValue] afterTarget)
     (write : Mutable.setSlice receiver lowerValue upperValue strideValue value afterTarget =
       some (.ok (.scalar .none), afterWrite)) :
-    BlockContinues module env [.assign [.subscript base (.slice lower upper stride)] expression]
+    BlockContinues (globals := globals) module env [.assign [.subscript base (.slice lower upper stride)] expression]
       heap env afterWrite := by
   intro body anchors stack
   apply Reaches.next rfl
@@ -1728,48 +1746,48 @@ theorem setSlice
   exact .next (following := ⟨.value (.scalar .none), .discard body env :: stack, afterWrite⟩)
     (by simp [step, result, run, primitive, write]) (.next rfl .refl)
 
-theorem discard (evaluated : Evaluates module env expression heap value finalHeap) :
-    BlockContinues module env [.expr expression] heap env finalHeap :=
+theorem discard (evaluated : Evaluates (globals := globals) module env expression heap value finalHeap) :
+    BlockContinues (globals := globals) module env [.expr expression] heap env finalHeap :=
   fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
 
-theorem branch (evaluated : Evaluates module env condition heap value middle)
+theorem branch (evaluated : Evaluates (globals := globals) module env condition heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle))
-    (body : BlockContinues module env (if flag then yes else no) middle finalEnv finalHeap) :
-    BlockContinues module env [.ifThen condition yes no] heap finalEnv finalHeap := by
+    (body : BlockContinues (globals := globals) module env (if flag then yes else no) middle finalEnv finalHeap) :
+    BlockContinues (globals := globals) module env [.ifThen condition yes no] heap finalEnv finalHeap := by
   intro following anchors stack
   exact .next rfl ((evaluated anchors _).trans
     (.next (by simp [step, run, truth]) (body following anchors stack)))
 
 /-- A while loop exposes its final locals and heap to the following block. -/
-theorem while_loop (evaluated : Evaluates module env condition heap value middle)
+theorem while_loop (evaluated : Evaluates (globals := globals) module env condition heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle))
-    (rest : BlockContinues module env
+    (rest : BlockContinues (globals := globals) module env
       (if flag then body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)] else otherwise)
       middle finalEnv finalHeap) :
-    BlockContinues module env [.whileDo condition body otherwise] heap finalEnv finalHeap := by
+    BlockContinues (globals := globals) module env [.whileDo condition body otherwise] heap finalEnv finalHeap := by
   intro following anchors stack
   exact .next rfl ((evaluated anchors _).trans
     (.next (by simp [step, run, truth]) (rest following anchors stack)))
 
-theorem for_range (arguments : Evaluates.Arguments module env expressions heap values middle)
+theorem for_range (arguments : Evaluates.Arguments (globals := globals) module env expressions heap values middle)
     (bounds : rangeBounds values = .ok (start, stop, stride))
-    (executed : BlockContinues module env [.rangeStepLoop name start stop stride body otherwise]
+    (executed : BlockContinues (globals := globals) module env [.rangeStepLoop name start stop stride body otherwise]
       middle finalEnv finalHeap) :
-    BlockContinues module env [.forIn (.name name) (.call (.name "range") expressions) body otherwise]
+    BlockContinues (globals := globals) module env [.forIn (.name name) (.call (.name "range") expressions) body otherwise]
       heap finalEnv finalHeap := by
   intro following anchors stack
   exact .next rfl ((BlockReturns.range_reach arguments [] anchors stack).trans
     (.next (by simp [step, bounds]) (executed following anchors stack)))
 
 theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
-    (evaluated : Evaluates module env iterable heap value middle)
+    (evaluated : Evaluates (globals := globals) module env iterable heap value middle)
     (sequence : Mutable.sequence value middle = some (.ok items, middle))
-    (rest : BlockContinues module env
+    (rest : BlockContinues (globals := globals) module env
       [.sequenceStepLoop name (sequenceSource value) 0 body otherwise] middle finalEnv finalHeap) :
-    BlockContinues module env [.forIn (.name name) iterable body otherwise]
+    BlockContinues (globals := globals) module env [.forIn (.name name) iterable body otherwise]
       heap finalEnv finalHeap := by
   intro following anchors stack
-  have start : step module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
+  have start : step (globals := globals) module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
@@ -1777,10 +1795,10 @@ theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "ran
 
 theorem sequence_step (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
     (item : items[position]? = some value)
-    (rest : BlockContinues module (setLocal env name value)
+    (rest : BlockContinues (globals := globals) module (setLocal env name value)
       (body ++ [Calls.loopContinuation body (.sequenceStepLoop name source (position + 1) body otherwise)])
       heap finalEnv finalHeap) :
-    BlockContinues module env [.sequenceStepLoop name source position body otherwise]
+    BlockContinues (globals := globals) module env [.sequenceStepLoop name source position body otherwise]
       heap finalEnv finalHeap := by
   intro following anchors stack
   refine .next ?_ (rest following anchors stack)
@@ -1788,8 +1806,8 @@ theorem sequence_step (sequence : Mutable.sequence (sequenceValue source) heap =
 
 theorem sequence_done (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
     (finished : items[position]? = none)
-    (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
-    BlockContinues module env [.sequenceStepLoop name source position body otherwise]
+    (rest : BlockContinues (globals := globals) module env otherwise heap finalEnv finalHeap) :
+    BlockContinues (globals := globals) module env [.sequenceStepLoop name source position body otherwise]
       heap finalEnv finalHeap :=
   fun following anchors stack => .next (by simp [step, run, sequence, finished]) (rest following anchors stack)
 
@@ -1797,14 +1815,14 @@ theorem sequence_done (sequence : Mutable.sequence (sequenceValue source) heap =
 theorem for_unpack
     (ordinary : ∀ expressions, iterable ≠ .call (.name "enumerate") expressions)
     (targets : Calls.targetNames expressions = some names)
-    (evaluated : Evaluates module env iterable heap value middle)
+    (evaluated : Evaluates (globals := globals) module env iterable heap value middle)
     (sequence : Mutable.sequence value middle = some (.ok items, middle))
-    (rest : BlockContinues module env
+    (rest : BlockContinues (globals := globals) module env
       [.unpackStepLoop names (sequenceSource value) 0 body otherwise] middle finalEnv finalHeap) :
-    BlockContinues module env [.forIn (.tuple expressions) iterable body otherwise]
+    BlockContinues (globals := globals) module env [.forIn (.tuple expressions) iterable body otherwise]
       heap finalEnv finalHeap := by
   intro following anchors stack
-  have start : step module anchors
+  have start : step (globals := globals) module anchors
       ⟨.block (.forIn (.tuple expressions) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .unpackSequence names body otherwise following env :: stack, heap⟩ := by
     cases iterable <;> simp_all [step]
@@ -1817,10 +1835,10 @@ theorem unpack_step
     (item : items[position]? = some value)
     (fields : Mutable.sequence value heap = some (.ok values, heap))
     (arity : names.length = values.length)
-    (rest : BlockContinues module (assignNames env names values)
+    (rest : BlockContinues (globals := globals) module (assignNames env names values)
       (body ++ [Calls.loopContinuation body (.unpackStepLoop names source (position + 1) body otherwise)])
       heap finalEnv finalHeap) :
-    BlockContinues module env [.unpackStepLoop names source position body otherwise]
+    BlockContinues (globals := globals) module env [.unpackStepLoop names source position body otherwise]
       heap finalEnv finalHeap := by
   intro following anchors stack
   refine .next ?_ (rest following anchors stack)
@@ -1829,20 +1847,20 @@ theorem unpack_step
 theorem unpack_done
     (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
     (finished : items[position]? = none)
-    (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
-    BlockContinues module env [.unpackStepLoop names source position body otherwise]
+    (rest : BlockContinues (globals := globals) module env otherwise heap finalEnv finalHeap) :
+    BlockContinues (globals := globals) module env [.unpackStepLoop names source position body otherwise]
       heap finalEnv finalHeap :=
   fun following anchors stack => .next (by simp [step, run, sequence, finished]) (rest following anchors stack)
 
 /-- Evaluate the iterable and explicit start before constructing the iterator. -/
 theorem for_enumerate_start
-    (iterable : Evaluates module env expression heap source afterSource)
-    (start : Evaluates module env startExpression afterSource startValue middle)
+    (iterable : Evaluates (globals := globals) module env expression heap source afterSource)
+    (start : Evaluates (globals := globals) module env startExpression afterSource startValue middle)
     (counter : enumerateStart startValue middle = some (.ok initial, middle))
     (sequence : Mutable.sequence source middle = some (.ok items, middle))
-    (rest : BlockContinues module env
+    (rest : BlockContinues (globals := globals) module env
       [.enumerateStepLoop index name (sequenceSource source) 0 initial body otherwise] middle finalEnv finalHeap) :
-    BlockContinues module env
+    BlockContinues (globals := globals) module env
       [.forIn (.tuple [.name index, .name name]) (.call (.name "enumerate") [expression, startExpression]) body otherwise]
       heap finalEnv finalHeap := by
   intro following anchors stack
@@ -1850,11 +1868,11 @@ theorem for_enumerate_start
     (.next (by simp [step, run, counter, sequence]) (rest following anchors stack)))))
 
 theorem for_enumerate
-    (iterable : Evaluates module env expression heap source middle)
+    (iterable : Evaluates (globals := globals) module env expression heap source middle)
     (sequence : Mutable.sequence source middle = some (.ok items, middle))
-    (rest : BlockContinues module env
+    (rest : BlockContinues (globals := globals) module env
       [.enumerateStepLoop index name (sequenceSource source) 0 0 body otherwise] middle finalEnv finalHeap) :
-    BlockContinues module env
+    BlockContinues (globals := globals) module env
       [.forIn (.tuple [.name index, .name name]) (.call (.name "enumerate") [expression]) body otherwise]
       heap finalEnv finalHeap := by
   intro following anchors stack
@@ -1865,11 +1883,11 @@ theorem for_enumerate
 theorem enumerate_step
     (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
     (item : items[position]? = some value)
-    (rest : BlockContinues module (setLocal (setLocal env index (.scalar (.int counter))) name value)
+    (rest : BlockContinues (globals := globals) module (setLocal (setLocal env index (.scalar (.int counter))) name value)
       (body ++ [Calls.loopContinuation body
         (.enumerateStepLoop index name source (position + 1) (counter + 1) body otherwise)])
       heap finalEnv finalHeap) :
-    BlockContinues module env [.enumerateStepLoop index name source position counter body otherwise]
+    BlockContinues (globals := globals) module env [.enumerateStepLoop index name source position counter body otherwise]
       heap finalEnv finalHeap := by
   intro following anchors stack
   refine .next ?_ (rest following anchors stack)
@@ -1878,34 +1896,34 @@ theorem enumerate_step
 theorem enumerate_done
     (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
     (finished : items[position]? = none)
-    (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
-    BlockContinues module env [.enumerateStepLoop index name source position counter body otherwise]
+    (rest : BlockContinues (globals := globals) module env otherwise heap finalEnv finalHeap) :
+    BlockContinues (globals := globals) module env [.enumerateStepLoop index name source position counter body otherwise]
       heap finalEnv finalHeap :=
   fun following anchors stack => .next (by simp [step, run, sequence, finished]) (rest following anchors stack)
 
 theorem range_step (continues : Calls.rangeContinues next stop stride = true)
-    (rest : BlockContinues module (setLocal env name (.scalar (.int next)))
+    (rest : BlockContinues (globals := globals) module (setLocal env name (.scalar (.int next)))
       (body ++ [Calls.loopContinuation body (.rangeStepLoop name (next + stride) stop stride body otherwise)])
       heap finalEnv finalHeap) :
-    BlockContinues module env [.rangeStepLoop name next stop stride body otherwise]
+    BlockContinues (globals := globals) module env [.rangeStepLoop name next stop stride body otherwise]
       heap finalEnv finalHeap := by
   intro following anchors stack
   refine .next ?_ (rest following anchors stack)
   simp [step, continues, List.append_assoc]
 
 theorem range_done (finished : Calls.rangeContinues next stop stride = false)
-    (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
-    BlockContinues module env [.rangeStepLoop name next stop stride body otherwise]
+    (rest : BlockContinues (globals := globals) module env otherwise heap finalEnv finalHeap) :
+    BlockContinues (globals := globals) module env [.rangeStepLoop name next stop stride body otherwise]
       heap finalEnv finalHeap :=
   fun following anchors stack => .next (by simp [step, finished]) (rest following anchors stack)
 
-theorem loop_resume (rest : BlockContinues module env [next] heap finalEnv finalHeap) :
-    BlockContinues module env [.loopResume next] heap finalEnv finalHeap :=
+theorem loop_resume (rest : BlockContinues (globals := globals) module env [next] heap finalEnv finalHeap) :
+    BlockContinues (globals := globals) module env [.loopResume next] heap finalEnv finalHeap :=
   fun following anchors stack => .next rfl (rest following anchors stack)
 
-theorem returns (first : BlockContinues module env body heap middleEnv middleHeap)
-    (rest : BlockReturns module middleEnv following middleHeap answer finalHeap) :
-    BlockReturns module env (body ++ following) heap answer finalHeap :=
+theorem returns (first : BlockContinues (globals := globals) module env body heap middleEnv middleHeap)
+    (rest : BlockReturns (globals := globals) module middleEnv following middleHeap answer finalHeap) :
+    BlockReturns (globals := globals) module env (body ++ following) heap answer finalHeap :=
   fun anchors stack => (first following anchors stack).trans (rest anchors stack)
 
 end BlockContinues
@@ -1913,9 +1931,9 @@ end BlockContinues
 /-- Emission keeps the current comprehension locals and appends the actual value,
 including shared references, after evaluating the element's effects. -/
 theorem BlockContinues.comprehension_append
-    (evaluated : Evaluates module env expression heap value middle)
+    (evaluated : Evaluates (globals := globals) module env expression heap value middle)
     (found : middle[address]? = some (.list items)) :
-    BlockContinues module env [.comprehensionAppend address expression] heap env
+    BlockContinues (globals := globals) module env [.comprehensionAppend address expression] heap env
       (middle.set address (.list (items ++ [value]))) := by
   intro following anchors stack
   apply Reaches.next rfl
@@ -1928,14 +1946,14 @@ theorem BlockContinues.comprehension_append
 /-- Prove a range comprehension by composing ordinary loop proofs. Only its
 first range arguments use the enclosing scope. -/
 theorem Evaluates.list_comp_range
-    (arguments : Arguments module env expressions heap values middle)
+    (arguments : Arguments (globals := globals) module env expressions heap values middle)
     (bounds : rangeBounds values = .ok (start, stop, stride))
-    (executed : BlockContinues module
+    (executed : BlockContinues (globals := globals) module
       (comprehensionEnv env ((name, .call (.name "range") expressions, filters) :: generators))
       [.rangeStepLoop name start stop stride
         (comprehensionFilters filters (comprehensionBody middle.length element generators)) []]
       (middle ++ [.list []]) finalEnv finalHeap) :
-    Evaluates module env
+    Evaluates (globals := globals) module env
       (.listComp element ((name, .call (.name "range") expressions, filters) :: generators))
       heap (.ref middle.length) finalHeap := by
   intro anchors stack
@@ -1949,17 +1967,17 @@ theorem Evaluates.list_comp_range
 local scope; the loop continues to read the same shared object. -/
 theorem Evaluates.list_comp_sequence
     (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
-    (evaluated : Evaluates module env iterable heap value middle)
+    (evaluated : Evaluates (globals := globals) module env iterable heap value middle)
     (sequence : Mutable.sequence value middle = some (.ok items, middle))
-    (executed : BlockContinues module
+    (executed : BlockContinues (globals := globals) module
       (comprehensionEnv env ((name, iterable, filters) :: generators))
       [.sequenceStepLoop name (sequenceSource value) 0
         (comprehensionFilters filters (comprehensionBody middle.length element generators)) []]
       (middle ++ [.list []]) finalEnv finalHeap) :
-    Evaluates module env (.listComp element ((name, iterable, filters) :: generators))
+    Evaluates (globals := globals) module env (.listComp element ((name, iterable, filters) :: generators))
       heap (.ref middle.length) finalHeap := by
   intro anchors stack
-  have first : step module anchors
+  have first : step (globals := globals) module anchors
       ⟨.expr (.listComp element ((name, iterable, filters) :: generators)) env, stack, heap⟩ =
       .next (argumentsState
         (.comprehension element ((name, iterable, filters) :: generators)

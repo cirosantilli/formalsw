@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""
+Compare explicit global contexts with Python across calls, scopes, and mutation.
+"""
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+def dictionary(value):
+    return '.dict [' + ', '.join(f'(({constant(key)}), .scalar ({constant(item)}))'
+                                for key, item in value.items()) + ']'
+
+
+source = '''
+TABLE: dict[int, int] = {}
+ALIAS: dict[int, int] = {}
+N: int = 9
+
+def read(n: int = 0) -> int:
+    return TABLE.get(n, N)
+
+def change(n: int) -> int:
+    TABLE[n] = n + N
+    return ALIAS.get(n, 0)
+
+def recurse(n: int) -> int:
+    if n <= 0:
+        return read(n)
+    return read(n) + recurse(n - 1)
+
+def local_callee(n: int) -> int:
+    TABLE = {n: 99}
+    return TABLE[n]
+
+class Reader:
+    def __init__(self, n: int):
+        self.value = TABLE.get(n, N)
+        TABLE[n] = n + 1
+    def read(self, n: int) -> int:
+        return self.value + TABLE.get(n, N)
+'''
+bodies = {
+    'read_global': 'return TABLE.get(n, N)',
+    'forward': 'return read(n)',
+    'default_call': 'return read()',
+    'recursive_call': 'return recurse(n)',
+    'mutate': 'TABLE[n] = n + 1\nreturn ALIAS.get(n, N)',
+    'callee_mutation': 'return change(n) + read(n)',
+    'argument_alias': 'argument[n] = n + 2\nreturn read(n)',
+    'error_after_mutation': 'TABLE[n] = n\nreturn 1 // 0',
+    'helper_error': 'TABLE[n] = n\nreturn read(1 // 0)',
+    'missing_key': 'return TABLE[n]',
+    'caller_local': 'TABLE = {n: 99}\nreturn read(n)',
+    'callee_local': 'value = local_callee(n)\nreturn value + read(n)',
+    'dead_assignment': 'if False:\n    TABLE = {}\nreturn TABLE[n]',
+    'dead_unpack': 'if False:\n    TABLE, other = (n, n + 1)\nreturn TABLE[n]',
+    'annotation_local': 'TABLE: dict[int, int]\nreturn TABLE[n]',
+    'loop_local': 'for TABLE in range(0):\n    pass\nreturn TABLE[n]',
+    'loop_unpack_local': 'for TABLE, other in []:\n    pass\nreturn TABLE[n]',
+    'augmented_local': 'N += n\nreturn N',
+    'comprehension_scope': 'items = [TABLE + read(n) for TABLE in range(2)]\nreturn items[0] + TABLE.get(n, N)',
+    'generator_scope': 'return sum(TABLE + read(n) for TABLE in range(2))',
+    'constructor_and_method': 'return Reader(n).read(n)',
+    'explicit_return_alias': 'return TABLE',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int, argument: dict[int, int]):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+
+with project_temporary_directory(prefix='heap-globals-') as temporary:
+    directory = Path(temporary)
+    path = directory / 'source.py'
+    path.write_text(source)
+    module = api['source_module'](path)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    world = {}
+    exec(source, world)
+    lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+             'def source : Module := pyast_from_json% (include_str "source.json")']
+    count = 0
+    for name, shared, n in itertools.product(bodies, (False, True), (-1, 0, 2)):
+        table = {0: 10, 2: 20}
+        alias = table if shared else {0: 30, 2: 40}
+        anchors = [table] if shared else [table, alias]
+        world.update(TABLE=table, ALIAS=alias, N=9)
+        heap = '[' + ', '.join(map(dictionary, anchors)) + ']'
+        globals_term = f'[("TABLE", .ref 0), ("ALIAS", .ref {0 if shared else 1}), ("N", .scalar (.int 9))]'
+        try:
+            result = world[name](n, alias)
+            error, args = None, []
+        except (UnboundLocalError, KeyError, ZeroDivisionError) as exception:
+            result, error = None, type(exception).__name__
+            args = list(exception.args) if error == 'KeyError' else []
+        roots = anchors + [world['TABLE'], world['ALIAS'], world['N']] + ([result] if error is None else [])
+        expected = data(snapshot_roots(roots))
+        call = f'HeapCalls.call source "{name}" [.scalar (.int ({n})), .ref {0 if shared else 1}] {heap} {globals_term}'
+        encoded_args = '[' + ', '.join('(' + constant(arg) + ')' for arg in args) + ']'
+        outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+                   f'match c.outcome with | .error e => decide (e = ⟨"{error}", {encoded_args}⟩) | _ => false')
+        lines += [f'-- {name}, shared={shared}, n={n}',
+                  f'example : (match ({call}).execution.observe 2000 with',
+                  f'  | .done (.ok c) => ({outcome}) && decide (c.globals = {globals_term}) &&',
+                  f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 10000) == some true)',
+                  '  | _ => false) = true := by native_decide']
+        count += 1
+    # Predicate helper calls see globals, but their effects stay private to evaluation.
+    globals_term = '[("TABLE", .ref 0), ("ALIAS", .ref 0), ("N", .scalar (.int 9))]'
+    lines += [f'''
+example : (HeapCalls.evaluate source (fun _ => none)
+    (.call (.name "change") [.constant (.int 3)]) [.dict []] {globals_term}).execution.observe 200 =
+  .done (.ok ⟨.ok (.scalar (.int 12)), {globals_term}, [.dict [(.int 3, .scalar (.int 12))]], 1⟩) := by native_decide
+example : (HeapCalls.call source "read" [.scalar (.int 3)] [.dict []] {globals_term}).execution.observe 200 =
+  .done (.ok ⟨.ok (.scalar (.int 9)), {globals_term}, [.dict []], 1⟩) := by native_decide
+''']
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'Heap global contexts: {count} Python comparisons and predicate isolation passed', flush=True)
+subprocess.run([str(ROOT / 'formalsw'), 'tests/py/heap_global_context.py'], cwd=ROOT, check=True)
+print('Heap global contexts: arbitrary-input source proofs passed')
