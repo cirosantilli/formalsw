@@ -54,7 +54,7 @@ class SupportChecker:
         if isinstance(annotation, ast.Constant):
             return annotation.value is None or isinstance(annotation.value, str)
         return (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
-                and annotation.value.id == 'list' and isinstance(annotation.slice, ast.Name))
+                and annotation.value.id in ('list', 'set') and isinstance(annotation.slice, ast.Name))
 
     def check(self, name: str, stack: tuple[str, ...] = (), *, parallel: bool = False, mutable: bool = False, heap_calls: bool = False) -> tuple[UnsupportedConstruct, ...]:
         if name in stack:
@@ -675,7 +675,7 @@ class SupportChecker:
                     issues.append(UnsupportedConstruct(target, function.lineno,
                         'heap-call specifications currently require scalar entry arguments'))
                 kind = annotation_kind(function.returns)
-                if model == 'HeapCalls.scalarFunction' and kind and (kind.startswith('list[') or kind == 'bytearray'):
+                if model == 'HeapCalls.scalarFunction' and kind and (kind.startswith(('list[', 'set[')) or kind == 'bytearray'):
                     issues.append(UnsupportedConstruct(target, function.lineno,
                         f'{kind.split("[")[0]} results require HeapCalls.call rather than its scalar adapter'))
                 issues.extend(self.check(target, heap_calls=True))

@@ -1,6 +1,6 @@
 """Explicit observation boundary for graph_equivalence.same_snapshot.
 
-Exact int/bool/str/bytes/None, list/tuple/dict/bytearray, and ordinary instances are supported.
+Exact int/bool/str/bytes/None, list/tuple/dict/bytearray, scalar sets, and ordinary instances are supported.
 Never invoke user equality or getters. Unsupported objects raise TypeError.
 The adapter is executable Python; it is not a model of arbitrary CPython heaps.
 """
@@ -56,6 +56,13 @@ def snapshot_roots(roots):
         cls = type(value)
         if cls is list or cls is tuple or cls is bytearray:
             node = [cls.__name__, [], [edge(item) for item in value]]
+        elif cls is set:
+            if any(not _scalar(item) for item in value):
+                raise TypeError("unsupported snapshot: non-scalar set element")
+            # Set iteration order is not part of stored-state observation.
+            # Equal numeric keys retain their actual representative type.
+            children = sorted(value, key=lambda item: (type(item).__name__, item))
+            node = ["set", [], [edge(item) for item in children]]
         elif cls is dict:
             children = []
             for key, item in value.items():

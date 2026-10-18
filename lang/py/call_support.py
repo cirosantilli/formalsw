@@ -208,7 +208,7 @@ def uses_heap_calls(module, function):
         visited.add(current.name)
         kinds = [annotation_kind(arg.annotation) for arg in current.args.args]
         kinds.append(annotation_kind(current.returns))
-        if any(kind and (kind.startswith('list[') or kind == 'bytearray') for kind in kinds):
+        if any(kind and (kind.startswith(('list[', 'set[')) or kind == 'bytearray') for kind in kinds):
             return True
         # Defaults are evaluated at definition time, outside the modeled body.
         # Their validation must not select a different execution backend.
@@ -216,8 +216,8 @@ def uses_heap_calls(module, function):
             if (isinstance(node, ast.List) or reversed_list(node) is not None
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
-                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "bytearray"
-                    or isinstance(node, ast.Attribute) and node.attr == 'append'):
+                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("bytearray", "set")
+                    or isinstance(node, ast.Attribute) and node.attr in ('append', 'add')):
                 return True
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
                 pending.append(functions[node.func.id])
@@ -308,7 +308,7 @@ def check_calls(module, function, reject, *, heap=False):
             reject(function, 'local bindings must not shadow module-level call targets')
         for arg in function.args.args:
             kind = annotation_kind(arg.annotation)
-            if kind not in ('int', 'str', 'bytes', 'bool') and not (heap and kind and (kind.startswith('list[') or kind in ('bytes', 'bytearray'))):
+            if kind not in ('int', 'str', 'bytes', 'bool') and not (heap and kind and (kind.startswith(('list[', 'set[')) or kind in ('bytes', 'bytearray'))):
                 reject(arg, 'call arguments require scalar annotations or supported heap list annotations' if heap
                        else 'call arguments require scalar int, str, or bool annotations')
 
@@ -345,7 +345,7 @@ def check_calls(module, function, reject, *, heap=False):
                     recurse(item)
                 return
             if (heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == 'append' and len(node.args) == 1 and not node.keywords):
+                    and node.func.attr in ('append', 'add') and len(node.args) == 1 and not node.keywords):
                 recurse(node.func.value)
                 recurse(node.args[0])
                 return
@@ -410,6 +410,11 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'a local math module shadows the modeled standard library')
                 for item in node.args:
                     recurse(item)
+            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'set':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'set construction requires the unshadowed builtin set')
+                if node.args or node.keywords:
+                    reject(node, 'set construction currently supports only the empty constructor')
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'bytearray':
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, 'buffer construction requires the unshadowed builtin bytearray')
@@ -443,8 +448,8 @@ def check_calls(module, function, reject, *, heap=False):
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'max':
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, 'maximum requires the unshadowed builtin max')
-                if node.keywords or len(node.args) < 2:
-                    reject(node, 'positional max requires at least two arguments and no keywords')
+                if node.keywords or len(node.args) < (1 if heap else 2):
+                    reject(node, 'max requires positional arguments and no keywords; scalar execution needs at least two')
                 for item in node.args:
                     recurse(item)
             else:

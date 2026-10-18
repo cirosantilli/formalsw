@@ -94,6 +94,7 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
   | .ref a, .ref b =>
       match (← get)[a]?, (← get)[b]? with
       | some (.bytearray xs), some (.bytearray ys) => compareScalars op (.bytes xs) (.bytes ys)
+      | some (.set xs), some (.set ys) => return .scalar (.bool (ScalarSet.compare op xs ys))
       | some (.list _), some (.list _) =>
           let (_, xs) ← Mutable.array left
           let (_, ys) ← Mutable.array right
@@ -174,6 +175,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
       match (← get)[address]? with
       | none => Mutable.unsupported
       | some (.list _) => listInplace op left right
+      | some (.set _) => Mutable.binary op left right
       | some (.bytearray bytes) =>
           match op with
           | .mult =>
@@ -188,7 +190,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
                     | some (.bytearray more) =>
                         if other = address ∧ !more.isEmpty then Mutable.error "BufferError"
                         else pure more
-                    | some (.list _) => Mutable.error "TypeError"
+                    | some (.list _) | some (.set _) => Mutable.error "TypeError"
                     | none => Mutable.unsupported
                 | _ => Mutable.error "TypeError"
               modify fun heap => heap.set address (.bytearray (bytes ++ more))
@@ -203,6 +205,7 @@ inductive Operation where
   | setItem (replacement : Value)
   | setSlice (replacement : Value)
   | append (address : Nat)
+  | add (address : Nat)
   | builtin (name : Builtin)
   | reversedList
 
@@ -220,6 +223,7 @@ inductive Frame where
   | arguments (operation : Operation) (done : List Value) (rest : List Expr) (env : Env)
   /-- Resolve the bound method before evaluating its argument. -/
   | appendReceiver (item : Expr) (env : Env)
+  | addReceiver (item : Expr) (env : Env)
   | assign (name : String) (rest : List Stmt) (env : Env)
   | branch (yes no rest : List Stmt) (env : Env)
   | discard (rest : List Stmt) (env : Env)
@@ -299,13 +303,15 @@ def primitive : Operation → List Value → Eval Value
   | .setItem replacement, [base, index] => Mutable.setItem base index replacement
   | .setSlice replacement, [base, lower, upper, stride] => Mutable.setSlice base lower upper stride replacement
   | .append address, [value] => Mutable.appendItem address value
+  | .add address, [value] => Mutable.addItem address value
   | .builtin .len, [value] => Mutable.length value
   | .builtin .bytearray, values => Mutable.bytearray values
+  | .builtin .set, [] => Mutable.allocateSet []
   | .builtin .intBitLength, [.scalar value] => scalarResult (some (Math.bitLengthCall value))
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
   | .builtin .int, [.ref address] => do
       match (← get)[address]? with
-      | some (.list _) => Mutable.error "TypeError"
+      | some (.list _) | some (.set _) => Mutable.error "TypeError"
       | _ => Mutable.unsupported
   | .builtin .int, values => do
       let values ← values.mapM fun value => match value with
@@ -317,6 +323,16 @@ def primitive : Operation → List Value → Eval Value
         | .scalar value => pure value
         | .ref _ => Mutable.unsupported
       scalarResult (some (Strings.str values))
+  | .builtin .max, [value] => do
+      let items ← match value with
+        | .ref address => match (← get)[address]? with
+            | some (.set items) => pure (items.map Mutable.Value.scalar)
+            | _ => Mutable.sequence value
+        | _ => Mutable.sequence value
+      let scalars ← items.mapM fun item => match item with
+        | .scalar value => pure value
+        | .ref _ => Mutable.unsupported
+      scalarResult (some (ScalarSet.maximum scalars))
   | .builtin .max, values => do
       let values ← values.mapM fun value => match value with
         | .scalar value => pure value
@@ -368,6 +384,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .builtinCall name expressions => .next (argumentsState (.builtin name) env [] expressions stack heap)
       | .call (.name name) expressions => .next (argumentsState (.call name) env [] expressions stack heap)
       | .call (.attribute base "append") [item] => .next ⟨.expr base env, .appendReceiver item env :: stack, heap⟩
+      | .call (.attribute base "add") [item] => .next ⟨.expr base env, .addReceiver item env :: stack, heap⟩
       | .call (.attribute (.name name) field) args =>
           .next (argumentsState (.call (name ++ "." ++ field)) env [] args stack heap)
       | _ => .unsupported
@@ -442,6 +459,9 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           | .conditional yes no env => run anchors heap (Mutable.truth value) fun truth heap =>
               .next ⟨.expr (if truth then yes else no) env, stack, heap⟩
           | .arguments operation done rest env => .next (argumentsState operation env (done ++ [value]) rest stack heap)
+          | .addReceiver item env =>
+              run anchors heap (Mutable.addReceiver value) fun address heap =>
+                .next (argumentsState (.add address) env [] [item] stack heap)
           | .appendReceiver item env => match value with
               | .scalar _ => done anchors heap (.error { typeName := "AttributeError", args := [] })
               | .ref address => run anchors heap (Mutable.appendReceiver value) fun _ heap =>
@@ -597,7 +617,7 @@ theorem step_extend (extension : Calls.Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | subscript | slice | setItem _ | setSlice _ | append _ | builtin _ | reversedList => rfl
+      | list | subscript | slice | setItem _ | setSlice _ | append _ | add _ | builtin _ | reversedList => rfl
   | expr _ _ | block _ _ | value _ | startRange _ _ _ _ _ _ => rfl
 
 theorem Reaches.extend (h : Reaches source anchors initial final) (extension : Calls.Extends target source) :
@@ -771,11 +791,12 @@ theorem library_call (arguments : Arguments module env expressions heap values m
 
 theorem qualified_call (notAppend : field ≠ "append")
     (arguments : Arguments module env expressions heap values middle)
-    (callee : ReturnsValue module (alias ++ "." ++ field) values middle value finalHeap) :
+    (callee : ReturnsValue module (alias ++ "." ++ field) values middle value finalHeap)
+    (notAdd : field ≠ "add" := by decide) :
     Evaluates module env (.call (.attribute (.name alias) field) expressions) heap value finalHeap := by
   intro anchors stack
   apply Reaches.next (following := argumentsState (.call (alias ++ "." ++ field)) env [] expressions stack heap)
-    (by simp [step, notAppend])
+    (by simp [step, notAppend, notAdd])
   exact (arguments_reach arguments (.call (alias ++ "." ++ field)) [] anchors stack).trans (callee anchors stack)
 
 theorem list (arguments : Arguments module env expressions heap values finalHeap) :
@@ -845,6 +866,23 @@ theorem append (receiver : Evaluates module env base heap (.ref address) middle)
   apply (item anchors _).trans
   apply Reaches.next (following := ⟨.operation (.append address) [value], stack, afterItem⟩) rfl
   exact .next (by simp [step, result, run, primitive, Mutable.appendItem, items, Except.map]) .refl
+
+/-- Method lookup precedes argument evaluation, which may itself mutate the set. -/
+theorem add (receiver : Evaluates module env base heap (.ref address) middle)
+    (found : middle[address]? = some (.set old))
+    (item : Evaluates module env expression middle (.scalar value) afterItem)
+    (items : afterItem[address]? = some (.set current)) :
+    Evaluates module env (.call (.attribute base "add") [expression]) heap (.scalar .none)
+      (afterItem.set address (.set (ScalarSet.insert current value))) := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := ⟨.expr expression env,
+    .arguments (.add address) [] [] env :: stack, middle⟩)
+    (by simp [step, run, Mutable.addReceiver, found, argumentsState])
+  apply (item anchors _).trans
+  apply Reaches.next (following := ⟨.operation (.add address) [.scalar value], stack, afterItem⟩) rfl
+  exact .next (by simp [step, result, run, primitive, Mutable.addItem, items, Except.map]) .refl
 
 end Evaluates
 

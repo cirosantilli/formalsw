@@ -20,9 +20,9 @@ def annotation_kind(annotation):
     if isinstance(annotation, ast.Name) and annotation.id in ('int', 'str', 'bytes', 'bytearray', 'bool'):
         return annotation.id
     if (isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name)
-            and annotation.value.id == 'list' and isinstance(annotation.slice, ast.Name)
+            and annotation.value.id in ('list', 'set') and isinstance(annotation.slice, ast.Name)
             and annotation.slice.id in ('int', 'str', 'bool')):
-        return f'list[{annotation.slice.id}]'
+        return f'{annotation.value.id}[{annotation.slice.id}]'
     return None
 
 
@@ -61,6 +61,8 @@ def function_globals(module, function):
             if isinstance(stmt, ast.Assign) and (len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name)):
                 raise GlobalInputError(stmt, f'global {name!r} needs a simple declaration')
             expected = annotation_kind(annotation)
+            if expected and expected.startswith('set['):
+                raise GlobalInputError(stmt, 'set globals are not yet supported; pass the set as an argument')
             if isinstance(value, ast.Name):
                 kind = domain(value.id, (*visiting, name))
             elif value is None and expected:

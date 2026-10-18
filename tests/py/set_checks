@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""
+Check scalar sets against Python, preserving aliases, types, and exception order.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+source = """
+def touch(items: set[int], events: list[int], n: int) -> int:
+    events.append(n)
+    items.add(n)
+    return n
+def fail(events: list[int], n: int) -> int:
+    events.append(n)
+    return n // 0
+def iterate(items: set[int]) -> int:
+    for item in items:
+        return item
+    return 0
+def difference(items: set[int]) -> set[int]:
+    return items - items
+"""
+bodies = {
+    'add': 'items.add(n)\nreturn alias',
+    'duplicate': 'items.add(n)\nitems.add(n)\nreturn len(items)',
+    'result': 'return items.add(n)',
+    'argument_mutation': 'items.add(touch(alias, events, n))\nreturn items',
+    'argument_failure': 'items.add(fail(events, n))\nreturn items',
+    'bad_receiver': 'events.add(fail(events, n))\nreturn events',
+    'bad_append': 'items.append(fail(events, n))\nreturn items',
+    'unhashable': 'items.add(events)\nreturn items',
+    'self_insert': 'items.add(items)\nreturn items',
+    'maximum': 'items.add(n)\nreturn max(items)',
+    'empty_maximum': 'return max(set())',
+    'truth': 'return n if items else -n',
+    'bool_first': 'out = set()\nout.add(True)\nout.add(1)\nreturn [out, max(out)]',
+    'int_first': 'out = set()\nout.add(1)\nout.add(True)\nreturn [out, max(out)]',
+    'mixed': 'out = set()\nout.add(None)\nout.add("λ")\nout.add(n)\nout.add(b"abc")\nreturn out',
+    'mixed_max': 'items.add(None)\nitems.add(n)\nreturn max(items)',
+    'none_max': 'out = set()\nout.add(None)\nreturn max(out)',
+    'bytes_max': 'out = set()\nout.add(b"abc")\nout.add(b"xyz")\nreturn max(out)',
+    'strings_max': 'out = set()\nout.add("λ")\nout.add("😀")\nreturn max(out)',
+    'not_sequence': 'return items[n]',
+    'not_int': 'return int(items)',
+    'fresh': 'out = set()\nout.add(n)\nreturn [out, out, items]',
+    'list_max': 'return max([True, 1, 0])',
+    'text_max': 'return max("λ😀")',
+    'buffer_max': 'return max(bytearray([3, 1, 9]))',
+    'invalid_max': 'return max(n)',
+}
+for op in ('==', '!=', '<', '<=', '>', '>='):
+    bodies['comparison_' + str(len(bodies))] = f'items.add(n)\nreturn items {op} alias'
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int, items: set[int], alias: set[int], events: list[int]):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name, heap_calls=True), (name, checker.check(name, heap_calls=True))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, n, shared in itertools.product(bodies, ([], [1, -2]), (-2, 0, 2), (False, True)):
+    anchors = [set(initial), {3}, []]
+    try:
+        result = world[name](n, anchors[0], anchors[0 if shared else 1], anchors[2])
+        error = None
+    except (ValueError, TypeError, AttributeError, ZeroDivisionError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    initial_set = '.set [' + ', '.join(constant(x) for x in initial) + ']'
+    call = f'HeapCalls.call source "{name}" [.scalar (.int ({n})), .ref 0, .ref {0 if shared else 1}, .ref 2] [{initial_set}, .set [.int 3], .list []]'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, n={n}, shared={shared}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+# Unmodeled set iteration and arithmetic must not manufacture Python outcomes.
+for name in ('iterate', 'difference'):
+    lines.append(f'example : (HeapCalls.call source "{name}" [.ref 0] [.set [.int 1]]).execution.observe 100 = .unsupported := by decide')
+
+# Binding validation must not silently substitute the builtin for user code.
+plain = 'def f(n: int) -> set[int]:\n    out = set()\n    out.add(n)\n    return out\n'
+assert not SupportChecker(ast.parse(plain)).check('f')
+for suffix in ('set = 3\n', 'from other import set\n'):
+    module = ast.parse(plain + suffix)
+    assert SupportChecker(module).check('f')
+    assert api['AstJsonEmitter'](module).expr(module.body[0].body[0].value)['type'] == 'Call'
+for constructor in ('set([n])', 'set(value=n)'):
+    assert SupportChecker(ast.parse(plain.replace('set()', constructor))).check('f')
+for runtime in ('Calls.function', 'scalarFunction', 'Mutable.function', 'HeapCalls.scalarFunction'):
+    issues = SupportChecker(ast.parse(plain)).requirement('f',
+        f'theorem wrong : Not ({runtime} Probe.module "f" []).Halts')
+    assert issues, runtime
+
+with project_temporary_directory(prefix='set-checks-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(items: set[int]) -> int:\n    """\n    @formalsw: '
+                        + marker + '\n    """\n    for item in items:\n        return item\n    return 0\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} scalar-set Python comparisons passed, including aliases, types, and exceptions')

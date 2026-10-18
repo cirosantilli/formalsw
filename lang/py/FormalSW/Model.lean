@@ -79,6 +79,7 @@ inductive Builtin where
   | intBitLength
   | len
   | bytearray
+  | set
 deriving Repr, BEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
@@ -336,6 +337,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "str" => pure Builtin.str
         | "max" => pure Builtin.max
         | "bytearray" => pure Builtin.bytearray
+        | "set" => pure Builtin.set
         | "int.bit_length" => pure Builtin.intBitLength
         | builtinName => throw s!"unsupported scalar builtin: {builtinName}"
       return .builtinCall builtin (← jsonArray json "args" Expr.fromJson?)
