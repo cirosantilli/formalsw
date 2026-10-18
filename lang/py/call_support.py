@@ -74,6 +74,26 @@ def library_name(node):
     return None
 
 
+def uses_library_calls(module, function):
+    """Follow local helpers to library calls that require the call interpreters."""
+    libraries = library_functions(module)
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    pending, visited = [function], set()
+    while pending:
+        current = pending.pop()
+        if current.name in visited:
+            continue
+        visited.add(current.name)
+        for statement in current.body:
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Call):
+                    if library_name(node.func) in libraries:
+                        return True
+                    if isinstance(node.func, ast.Name) and node.func.id in functions:
+                        pending.append(functions[node.func.id])
+    return False
+
+
 def uses_builtin(module, function, name):
     """Find an unshadowed builtin in the reachable local function bodies."""
     if bindings(module, name):

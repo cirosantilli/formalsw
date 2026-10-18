@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind
 from lang.py.mutable_support import check_mutable
-from lang.py.call_support import check_calls, uses_calls_model, uses_heap_calls, uses_builtin, uses_method
+from lang.py.call_support import check_calls, uses_calls_model, uses_heap_calls, uses_builtin, uses_method, uses_library_calls
 
 
 @dataclass(frozen=True)
@@ -700,6 +700,9 @@ class SupportChecker:
             function = self.functions.get(target)
             if function is None:
                 continue
+            if uses_library_calls(self.module, function) and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'standard-library calls require a call interpreter'))
             if uses_method(self.module, function, 'bit_length') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'int.bit_length requires a call interpreter'))
@@ -757,6 +760,10 @@ class SupportChecker:
         for prop, target, other in properties:
             if target in self.functions:
                 issues.extend(self.requirement(target, f'{prop}({other})' if other else prop))
+                if any(uses_library_calls(self.module, self.functions[f])
+                       for f in (target, other) if f in self.functions):
+                    issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
+                        'legacy Function properties omit standard-library calls; use the short DSL or Calls'))
                 if any(uses_calls_model(self.module, self.functions[f]) and uses_heap_calls(self.module, self.functions[f])
                        for f in (target, other) if f in self.functions):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,

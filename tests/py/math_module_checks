@@ -2,7 +2,6 @@
 """Compare qualified math calls and heap effects with Python."""
 import ast
 import json
-import math
 from pathlib import Path
 import runpy
 import subprocess
@@ -66,7 +65,7 @@ for name in bodies:
             expected = '.ok ' + constant(namespace[function](value))
         except (TypeError, ValueError, ZeroDivisionError) as error:
             expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
-        equations.append(f'example : ({backend} Probe.module "{function}" [{constant(value)}]).observe 120 = .done ({expected}) := by decide')
+        equations.append(f'example : ({backend} Probe.module "{function}" [{constant(value)}]).observe 120 = .done ({expected}) := by native_decide')
 
 with project_temporary_directory(prefix='math-module-check-') as temporary:
     directory = Path(temporary)
@@ -94,6 +93,11 @@ with project_temporary_directory(prefix='math-module-check-') as temporary:
     assert issues(base.replace('f(n: int)', 'f(n: int, m: int)'))
     assert issues(base.replace('return m.isqrt', 'm = n\n    return m.isqrt'))
     assert issues(base.replace('import math as m', 'import other as m'))
+    for text in (base, base.replace('return m.isqrt(n)', 'return helper(n)')
+                 + '\ndef helper(n: int) -> int: return m.isqrt(n)\n'):
+        checker = SupportChecker(ast.parse(text))
+        assert checker.requirement('f', 'theorem bad : (scalarFunction Probe.module "f" [.int n]).Throws')
+        assert checker.requirement('f', 'theorem bad : FormalSW.Property.Function.Throws Probe.module "f"')
     (directory / 'math.py').write_text('def isqrt(n): return 42\n')
     assert any('shadows the modeled standard library' in issue.reason for issue in issues(base))
 
