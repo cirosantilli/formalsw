@@ -338,6 +338,17 @@ def sequence : Value → Eval (List Value)
       | none => unsupported
   | _ => error "TypeError"
 
+/-- Reading a length never copies or changes the referenced object. -/
+def length : Value → Eval Value
+  | .scalar (.string text) => pure (.scalar (.int text.length))
+  | .scalar (.bytes bytes) => pure (.scalar (.int bytes.length))
+  | .scalar _ => error "TypeError"
+  | .ref address => do
+      match (← get)[address]? with
+      | some (.list items) => return .scalar (.int items.length)
+      | some (.bytearray bytes) => return .scalar (.int bytes.length)
+      | none => unsupported
+
 def getItem (value subscript : Value) : Eval Value := do
   match value, subscript with
   | .scalar value, .scalar subscript =>
@@ -510,10 +521,8 @@ def expr (env : Env) : Expr → Eval Value
           | some v => return .scalar (.bool v)
           | none => error "TypeError"
       | _, _ => unsupported -- recursive Python list equality needs its own execution
-  | .call (.name "len") [a] => do
-      match ← expr env a with
-      | .scalar (.string s) => return .scalar (.int s.length)
-      | v => return .scalar (.int (← array v).2.length)
+  | .call (.name "len") [a] | .builtinCall .len [a] => do
+      length (← expr env a)
   | .call (.attribute base "append") [item] => do
       let value ← expr env base
       let item ← expr env item

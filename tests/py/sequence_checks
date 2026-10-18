@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Compare call-interpreter sequence iteration with Python, including mutations."""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is bytes:
+        return '.bytes ' + str(list(value))
+    if type(value) is str:
+        return '.string ' + json.dumps(value, ensure_ascii=False)
+    return f'.int ({value})'
+
+
+def values(items):
+    return '[' + ', '.join(f'.scalar ({constant(item)})' for item in items) + ']'
+
+
+source = '''def length(s: str) -> int: return len(s)
+def scalar_sequence(s: str) -> int:
+    count = 0
+    for item in s:
+        count += 1
+    return count
+def product(xs: list[int]) -> int:
+    result = 1
+    for x in xs:
+        result *= x
+    return result
+def windows(k: int, xs: list[int]) -> list[int]:
+    if not xs: return []
+    if len(xs) < k: return []
+    return [product(xs[:k])] + windows(k, xs[1:])
+def maximum(xs: list[int]) -> int:
+    result = 0
+    for x in xs: result = max(result, x)
+    return result
+def naive(xs: list[int], k: int) -> int:
+    return maximum(windows(k, xs))
+def edit(xs: list[int], n: int) -> int:
+    result = 0
+    for x in xs:
+        result = result * 10 + x
+        if n == 0:
+            if len(xs) < 4: xs.append(3)
+        elif n == 1:
+            xs[1:] = []
+        elif n == 2:
+            xs[:] = [4, 5, 6]
+        elif n == 3:
+            xs = [9]
+        elif n == 4:
+            if x == 2: break
+        elif n == 5:
+            if x == 2: continue
+            result += 1
+        elif n == 6:
+            xs[:] = [3]
+        elif n == 7:
+            xs[0] = 5
+        elif n == 8:
+            for y in [1, 2]:
+                if y == 1: continue
+                result += y
+        elif n == 9:
+            for y in []:
+                result += y
+            else:
+                break
+    else:
+        result += 10000
+    return result
+def touch(xs: list[int]) -> list[int]:
+    xs.append(7)
+    return xs
+def once(xs: list[int], n: int) -> int:
+    result = 0
+    for x in touch(xs): result += x
+    return result
+def length_effect(xs: list[int], n: int) -> int:
+    return len(touch(xs))
+def fail(xs: list[int], n: int) -> int:
+    for x in xs:
+        xs.append(7)
+        return len(n)
+    return 0
+def first(xs: list[int], n: int) -> int:
+    for x in xs:
+        return x
+    return n
+def unbound(xs: list[int], n: int) -> int:
+    for x in xs: pass
+    return x
+'''
+program = ast.parse(source)
+namespace = {}
+exec(source, namespace)
+for node in program.body:
+    issues = SupportChecker(program).check(node.name, heap_calls=True)
+    assert not issues, (node.name, issues)
+
+equations = []
+for value in ('', 'a', 'é🙂漢', b'', b'\x00\xff', True, 3, None):
+    for name in ('length', 'scalar_sequence'):
+        try:
+            outcome = '.ok (' + constant(namespace[name](value)) + ')'
+        except TypeError:
+            outcome = '.error { typeName := "TypeError", args := [] }'
+        models = ('Calls.function', 'HeapCalls.scalarFunction') if name == 'length' else ('HeapCalls.scalarFunction',)
+        for model in models:
+            equations.append(f'example : ({model} Probe.module "{name}" [{constant(value)}]).observe 300 = .done ({outcome}) := by decide')
+
+for initial in ([], [1], [1, 2], [1, 2, 3], [0, -1, 2]):
+    for name, ns in (('edit', range(10)), ('once', [0]), ('length_effect', [0]), ('fail', [0]), ('first', [-1]), ('unbound', [0])):
+        for n in ns:
+            xs = initial.copy()
+            try:
+                outcome = '.ok (.scalar (' + constant(namespace[name](xs, n)) + '))'
+            except (TypeError, UnboundLocalError) as error:
+                outcome = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+            call = f'(HeapCalls.call Probe.module "{name}" [.ref 0, .scalar (.int ({n}))] [.list {values(initial)}]).execution.observe 1000'
+            if name == 'edit' and n in (1, 2, 3, 6, 8, 9):
+                # Unreachable allocations may remain; the input object and scalar result are observable.
+                observed = f'result.outcome = {outcome} ∧ result.heap[0]? = some (.list {values(xs)}) ∧ result.anchors = 1'
+                equation = f'(match {call} with | .done (.ok result) => decide ({observed}) | _ => false) = true'
+            else:
+                equation = call + f' = .done (.ok {{outcome := {outcome}, globals := [], heap := [.list {values(xs)}], anchors := 1}})'
+            equations.append(f'example : {equation} := by decide')
+
+# Window recursion allocates slices and products; its input object stays unchanged.
+for size in range(4):
+    for xs in itertools.product((-1, 0, 2), repeat=size):
+        for k in range(-1, size + 2):
+            result = namespace['naive'](list(xs), k)
+            equations.append(f'example : (match (HeapCalls.call Probe.module "naive" [.ref 0, .scalar (.int ({k}))] [.list {values(xs)}]).execution.observe 3000 with '
+                             f'| .done (.ok result) => decide (result.outcome = .ok (.scalar (.int ({result}))) ∧ result.heap[0]? = some (.list {values(xs)}) ∧ result.anchors = 1) | _ => false) = true := by decide')
+
+# A bytearray iterator sees writes through aliases, just like a list iterator.
+for n in (4, 5, 7, 8, 9):
+    initial = bytearray([1, 2, 3])
+    xs = initial.copy()
+    result = namespace['edit'](xs, n)
+    equations.append(f'example : (match (HeapCalls.call Probe.module "edit" [.ref 0, .scalar (.int ({n}))] [.bytearray {list(initial)}]).execution.observe 1000 with '
+                     f'| .done (.ok result) => decide (result.outcome = .ok (.scalar (.int ({result}))) ∧ result.heap[0]? = some (.bytearray {list(xs)})) | _ => false) = true := by decide')
+
+with project_temporary_directory(prefix='sequence-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
+                     + 'open FormalSW.PyAst\nset_option maxRecDepth 8192\nset_option maxHeartbeats 1000000\n'
+                     + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+for suffix in ('len = 1\n', 'from other import len\n'):
+    assert SupportChecker(ast.parse('def f(s: str) -> int: return len(s)\n' + suffix)).check('f', heap_calls=True)
+for call in ('len()', 'len(n, n)', 'len(obj=n)', 'len(*n)'):
+    assert SupportChecker(ast.parse(f'def f(n: int) -> int: return {call}\n')).check('f', heap_calls=True)
+assert SupportChecker(ast.parse('def f(len: int) -> int: return len(0)\n')).check('f', heap_calls=True)
+custom = ast.parse('def f(n: int) -> int: return len(n)\ndef len(n: int) -> int: return n + 1\n')
+assert not SupportChecker(custom).check('f')
+assert 'BuiltinCall' not in api['AstJsonEmitter'](custom).emit()
+print(f'Sequences: {len(equations)} Python comparisons, effects, loop transfers, and binding checks passed')

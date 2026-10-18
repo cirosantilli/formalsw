@@ -33,7 +33,14 @@ def integerConversion : List Constant → Option (Except ExceptionObject Constan
   | [.none] => some (.error { typeName := "TypeError", args := [] })
   | _ => none
 
+/-- Length counts Unicode characters in text and octets in bytes. -/
+def length : Constant → Except ExceptionObject Constant
+  | .string text => .ok (.int text.length)
+  | .bytes bytes => .ok (.int bytes.length)
+  | _ => .error { typeName := "TypeError", args := [] }
+
 def Primitive.apply : Primitive → List Constant → Option (Except ExceptionObject Constant)
+  | .builtin .len, [value] => some (length value)
   | .builtin .int, values => integerConversion values
   | .builtin .str, values => some (Strings.str values)
   | .builtin .max, values => positionalMaximum values

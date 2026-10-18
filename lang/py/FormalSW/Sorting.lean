@@ -158,10 +158,10 @@ decreasing_by
 
 /-- Exact AST template for the supported merge-sort implementation. -/
 def mergeSortBody (functionName argument : String) : List Stmt := [
-  .ifThen (.compare (.call (.name "len") [.name argument]) [(.ltE, .constant (.int 1))])
+  .ifThen (.compare (.builtinCall .len [.name argument]) [(.ltE, .constant (.int 1))])
     [.return (.name argument)] [],
   .assign [.name "middle"]
-    (.binOp (.call (.name "len") [.name argument]) .floorDiv (.constant (.int 2))),
+    (.binOp (.builtinCall .len [.name argument]) .floorDiv (.constant (.int 2))),
   .assign [.name "left"] (.call (.name functionName)
     [.subscript (.name argument) (.slice none (some (.name "middle")) none)]),
   .assign [.name "right"] (.call (.name functionName)
@@ -170,8 +170,8 @@ def mergeSortBody (functionName argument : String) : List Stmt := [
   .assign [.name "left_index"] (.constant (.int 0)),
   .assign [.name "right_index"] (.constant (.int 0)),
   .whileDo (.boolOp .and [
-    .compare (.name "left_index") [(.lt, .call (.name "len") [.name "left"])],
-    .compare (.name "right_index") [(.lt, .call (.name "len") [.name "right"])]] ) [
+    .compare (.name "left_index") [(.lt, .builtinCall .len [.name "left"])],
+    .compare (.name "right_index") [(.lt, .builtinCall .len [.name "right"])]] ) [
     .ifThen (.compare (.subscript (.name "left") (.name "left_index"))
       [(.ltE, .subscript (.name "right") (.name "right_index"))]) [
       .augAssign (.name "merged") .add (.list [.subscript (.name "left") (.name "left_index")]),

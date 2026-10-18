@@ -212,6 +212,8 @@ def uses_heap_calls(module, function):
         # Their validation must not select a different execution backend.
         for node in (part for statement in current.body for part in ast.walk(statement)):
             if (isinstance(node, ast.List) or reversed_list(node) is not None
+                    or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
+                        and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "bytearray"
                     or isinstance(node, ast.Attribute) and node.attr == 'append'):
                 return True
@@ -238,7 +240,7 @@ def uses_calls_model(module, function):
         or general_division(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'max'}
+        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'max', 'len'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -404,6 +406,13 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'bytearray supports zero or one positional argument; encoding arguments are not modeled')
                 for item in node.args:
                     recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'len':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'length requires the unshadowed builtin len')
+                if node.keywords or len(node.args) != 1:
+                    reject(node, 'len requires exactly one positional argument')
+                for item in node.args:
+                    recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'int':
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, 'integer conversion requires the unshadowed builtin int')
@@ -471,6 +480,10 @@ def check_calls(module, function, reject, *, heap=False):
                         reject(node, 'range loops require the unshadowed builtin range')
                     for argument in node.iter.args:
                         expr(argument)
+                    block(node.body, loop_depth + 1)
+                    block(node.orelse, loop_depth)
+                elif heap and isinstance(node, ast.For) and isinstance(node.target, ast.Name):
+                    expr(node.iter)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)
                 elif isinstance(node, ast.Expr):

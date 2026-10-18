@@ -77,6 +77,7 @@ inductive Builtin where
   | str
   | max
   | intBitLength
+  | len
   | bytearray
 deriving Repr, BEq, Lean.ToExpr
 
@@ -145,6 +146,12 @@ instance : Repr Arg where
     | none => reprPrec (RequiredArgView.mk arg.name arg.annotation) prec
     | some value => reprPrec (DefaultArgView.mk arg.name arg.annotation value) prec
 
+/-- A sequence iterator keeps either an immutable value or a shared object address. -/
+inductive SequenceSource where
+  | scalar (value : Constant)
+  | ref (address : Nat)
+deriving Repr, BEq, Lean.ToExpr
+
 /-- Python statements currently represented by the AST bridge. -/
 inductive Stmt where
   /-- A Python class definition. -/
@@ -172,6 +179,8 @@ inductive Stmt where
   | rangeLoop : String -> Int -> Int -> List Stmt -> List Stmt -> Stmt
   /-- Internal iterator state for the scalar call interpreter's stepped ranges. -/
   | rangeStepLoop : String → Int → Int → Int → List Stmt → List Stmt → Stmt
+  /-- Internal sequence iterator: a scalar sequence or a shared heap address. -/
+  | sequenceStepLoop : String → SequenceSource → Nat → List Stmt → List Stmt → Stmt
   /-- A Python `if` statement. -/
   | ifThen : Expr -> List Stmt -> List Stmt -> Stmt
   /-- A Python `while` statement. -/
@@ -323,6 +332,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
   | "BuiltinCall" =>
       let builtin ← match ← jsonString json "name" with
         | "int" => pure Builtin.int
+        | "len" => pure Builtin.len
         | "str" => pure Builtin.str
         | "max" => pure Builtin.max
         | "bytearray" => pure Builtin.bytearray
@@ -853,7 +863,7 @@ mutual
     | .loopResume loop => 1 + loop.operationCount
     | .rangeLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
-    | .rangeStepLoop _ _ _ _ body otherwise =>
+    | .rangeStepLoop _ _ _ _ body otherwise | .sequenceStepLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
     | .functionDef _ args returns body =>

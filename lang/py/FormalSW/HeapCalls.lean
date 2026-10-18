@@ -222,6 +222,7 @@ inductive Frame where
   | discard (rest : List Stmt) (env : Env)
   | assertion (message : Option Expr) (rest : List Stmt) (env : Env)
   | assertionMessage
+  | sequence (name : String) (body otherwise following : List Stmt) (env : Env)
   | assignItem (base index : Expr) (rest : List Stmt) (env : Env)
   | assignSlice (base lower upper stride : Expr) (rest : List Stmt) (env : Env)
   | rangeArguments (name : String) (done : List Value) (rest : List Expr)
@@ -274,6 +275,18 @@ private def rangeState (name : String) (env : Env) (done : List Value)
   | first :: rest =>
       ⟨.expr first env, .rangeArguments name done rest body otherwise following env :: stack, heap⟩
 
+/-- The iterator retains the original reference even if its local is rebound. -/
+def sequenceSource : Value → SequenceSource
+  | .scalar value => .scalar value
+  | .ref address => .ref address
+
+def sequenceValue : SequenceSource → Value
+  | .scalar value => .scalar value
+  | .ref address => .ref address
+
+@[simp] theorem sequenceValue_source (value : Value) :
+    sequenceValue (sequenceSource value) = value := by cases value <;> rfl
+
 def primitive : Operation → List Value → Eval Value
   | .list, values => Mutable.allocate values
   | .reversedList, [value] => do
@@ -283,6 +296,7 @@ def primitive : Operation → List Value → Eval Value
   | .setItem replacement, [base, index] => Mutable.setItem base index replacement
   | .setSlice replacement, [base, lower, upper, stride] => Mutable.setSlice base lower upper stride replacement
   | .append address, [value] => Mutable.appendItem address value
+  | .builtin .len, [value] => Mutable.length value
   | .builtin .bytearray, values => Mutable.bytearray values
   | .builtin .intBitLength, [.scalar value] => scalarResult (some (Math.bitLengthCall value))
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
@@ -373,6 +387,15 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
             .branch (body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)]) otherwise rest env :: stack, heap⟩
       | .forIn (.name name) (.call (.name "range") expressions) body otherwise :: rest =>
           .next (rangeState name env [] expressions body otherwise rest stack heap)
+      | .forIn (.name name) iterable body otherwise :: rest =>
+          .next ⟨.expr iterable env, .sequence name body otherwise rest env :: stack, heap⟩
+      | .sequenceStepLoop name source position body otherwise :: rest =>
+          run anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
+            match items[position]? with
+            | none => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
+            | some value => .next ⟨.block (body ++ [Calls.loopContinuation body
+                (.sequenceStepLoop name source (position + 1) body otherwise)] ++ rest)
+                (setLocal env name value), stack, heap⟩
       | .rangeStepLoop name next stop stride body otherwise :: rest =>
           if Calls.rangeContinues next stop stride then
             .next ⟨.block (body ++ [Calls.loopContinuation body
@@ -423,6 +446,10 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
               else match message with
                 | none => done anchors heap (.error { typeName := "AssertionError", args := [] })
                 | some expression => .next ⟨.expr expression env, .assertionMessage :: stack, heap⟩
+          | .sequence name body otherwise following env =>
+              run anchors heap (Mutable.sequence value) fun _ heap =>
+                .next ⟨.block (.sequenceStepLoop name (sequenceSource value) 0 body otherwise :: following) env,
+                  stack, heap⟩
           | .assertionMessage => match value with
               | .scalar value => done anchors heap (.error { typeName := "AssertionError", args := [value] })
               -- Exception arguments currently have a scalar observation boundary.
@@ -646,6 +673,16 @@ theorem subscript
   apply Reaches.next rfl
   exact .next (by simp [argumentsState, step, primitive, result, run, operation]) .refl
 
+/-- Slice arguments evaluate left to right, retaining effects before allocation. -/
+theorem slice (arguments : Arguments module env
+    [base, lower.getD (.constant .none), upper.getD (.constant .none), stride.getD (.constant .none)]
+    heap [receiver, first, last, stepValue] middle)
+    (operation : Mutable.getSlice receiver first last stepValue middle = some (.ok value, finalHeap)) :
+    Evaluates module env (.subscript base (.slice lower upper stride)) heap value finalHeap := by
+  intro anchors stack
+  exact .next rfl ((arguments_reach arguments .slice [] anchors stack).trans
+    (.next (by simp [step, primitive, result, run, operation]) .refl))
+
 theorem reversed_list (evaluated : Evaluates module env expression heap (.ref address) middle)
     (found : middle[address]? = some (.list items)) :
     Evaluates module env (.reversedList expression) heap (.ref middle.length)
@@ -799,6 +836,40 @@ theorem for_range (arguments : Evaluates.Arguments module env expressions heap v
   exact .next rfl ((range_reach arguments [] anchors stack).trans
     (.next (by simp [step, bounds]) (rest anchors stack)))
 
+/-- Evaluate a sequence expression once, then retain its object identity. -/
+theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
+    (evaluated : Evaluates module env iterable heap value middle)
+    (sequence : Mutable.sequence value middle = some (.ok items, middle))
+    (rest : BlockReturns module env
+      (.sequenceStepLoop name (sequenceSource value) 0 body otherwise :: following) middle answer finalHeap) :
+    BlockReturns module env (.forIn (.name name) iterable body otherwise :: following)
+      heap answer finalHeap := by
+  intro anchors stack
+  have start : step module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
+      .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
+    cases iterable <;> simp_all [step]
+  exact .next start ((evaluated anchors _).trans
+    (.next (by simp [step, run, sequence]) (rest anchors stack)))
+
+/-- Iteration reads the current sequence, so mutations in earlier iterations remain visible. -/
+theorem sequence_step (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
+    (item : items[position]? = some value)
+    (rest : BlockReturns module (setLocal env name value)
+      (body ++ [Calls.loopContinuation body (.sequenceStepLoop name source (position + 1) body otherwise)] ++ following)
+      heap answer finalHeap) :
+    BlockReturns module env (.sequenceStepLoop name source position body otherwise :: following)
+      heap answer finalHeap := by
+  intro anchors stack
+  exact .next (by simp [step, run, sequence, item]) (rest anchors stack)
+
+theorem sequence_done (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
+    (finished : items[position]? = none)
+    (rest : BlockReturns module env (otherwise ++ following) heap answer finalHeap) :
+    BlockReturns module env (.sequenceStepLoop name source position body otherwise :: following)
+      heap answer finalHeap := by
+  intro anchors stack
+  exact .next (by simp [step, run, sequence, finished]) (rest anchors stack)
+
 theorem range_step (continues : Calls.rangeContinues next stop stride = true)
     (rest : BlockReturns module (setLocal env name (.scalar (.int next)))
       (body ++ [Calls.loopContinuation body (.rangeStepLoop name (next + stride) stop stride body otherwise)] ++ following)
@@ -936,6 +1007,38 @@ theorem for_range (arguments : Evaluates.Arguments module env expressions heap v
   intro following anchors stack
   exact .next rfl ((BlockReturns.range_reach arguments [] anchors stack).trans
     (.next (by simp [step, bounds]) (executed following anchors stack)))
+
+theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
+    (evaluated : Evaluates module env iterable heap value middle)
+    (sequence : Mutable.sequence value middle = some (.ok items, middle))
+    (rest : BlockContinues module env
+      [.sequenceStepLoop name (sequenceSource value) 0 body otherwise] middle finalEnv finalHeap) :
+    BlockContinues module env [.forIn (.name name) iterable body otherwise]
+      heap finalEnv finalHeap := by
+  intro following anchors stack
+  have start : step module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
+      .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
+    cases iterable <;> simp_all [step]
+  exact .next start ((evaluated anchors _).trans
+    (.next (by simp [step, run, sequence]) (rest following anchors stack)))
+
+theorem sequence_step (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
+    (item : items[position]? = some value)
+    (rest : BlockContinues module (setLocal env name value)
+      (body ++ [Calls.loopContinuation body (.sequenceStepLoop name source (position + 1) body otherwise)])
+      heap finalEnv finalHeap) :
+    BlockContinues module env [.sequenceStepLoop name source position body otherwise]
+      heap finalEnv finalHeap := by
+  intro following anchors stack
+  refine .next ?_ (rest following anchors stack)
+  simp [step, run, sequence, item, List.append_assoc]
+
+theorem sequence_done (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok items, heap))
+    (finished : items[position]? = none)
+    (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
+    BlockContinues module env [.sequenceStepLoop name source position body otherwise]
+      heap finalEnv finalHeap :=
+  fun following anchors stack => .next (by simp [step, run, sequence, finished]) (rest following anchors stack)
 
 theorem range_step (continues : Calls.rangeContinues next stop stride = true)
     (rest : BlockContinues module (setLocal env name (.scalar (.int next)))

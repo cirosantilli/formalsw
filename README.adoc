@@ -1545,6 +1545,8 @@ Byte literals such as `b"\x01"` retain their binary type. Call execution support
 
 Mutable `bytearray` objects retain their type and shared identity in heap calls. Allocation, copying, repetition, concatenation, indexing, slicing, `append`, and index or slice assignment preserve Python evaluation order and mutations before errors. `HeapCalls.BlockReturns.setItem` and `setSlice` compose these writes with later statements. See link:tests/py/buffers.py[] for allocation and initialization proofs over arbitrary lengths.
 
+`len` supports text, bytes, lists, and bytearrays. Heap calls execute `for item in sequence` with `break`, `continue`, and loop `else` clauses. Iterators retain the original sequence and observe list or bytearray mutations made during the loop. See link:tests/py/sequences.py[] for a product-loop proof over arbitrary integer lists.
+
 `Calls.Extends target source` records preservation of the source module's function definitions and modeled library bindings. `ReturnsValue.extend` reuses a verified result in such a target module, and `finishes_extend` also preserves finite exceptional executions. `Extends.prepend` constructs this preservation proof when added declarations have fresh names; its conditions inspect finite name lists. The linking examples in the adjacent square-root proof demonstrate result reuse and rejection of a replaced function. Source-level imported equivalence references use the import resolver described above; ordinary calls to imported user functions still require frontend linking support.
 
 === Python builtin model

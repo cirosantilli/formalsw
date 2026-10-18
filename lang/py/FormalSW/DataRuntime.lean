@@ -84,7 +84,7 @@ def dataExpr (env : DataEnv) : Expr → Option (Except ExceptionObject Data)
   | .call (.name "type") [arg] => do
       let value ← dataExpr env arg
       return (fun v => Data.type v.typeName) <$> value
-  | .call (.name "len") [arg] => do
+  | .call (.name "len") [arg] | .builtinCall .len [arg] => do
       let value ← dataExpr env arg
       return do
         match ← value with
