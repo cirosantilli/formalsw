@@ -873,6 +873,14 @@ theorem getSlice_list_suffix (heap : Heap) (address : Nat) (items : List Value) 
   simp [getSlice, found, sliceBounds, sliceBound, integer, Py.Builtin.Sequence.slice_suffix,
     sequenceResult, allocate, Except.map]
 
+/-- A whole-list slice allocates a new list and retains each element's identity. -/
+theorem getSlice_list_copy (heap : Heap) (address : Nat) (items : List Value)
+    (found : heap[address]? = some (.list items)) :
+    getSlice (.ref address) (.scalar .none) (.scalar .none) (.scalar .none) heap =
+      some (.ok (.ref heap.length), heap ++ [.list items]) := by
+  simp [getSlice, found, sliceBounds, sliceBound, Py.Builtin.Sequence.slice_full,
+    sequenceResult, allocate, Except.map]
+
 def setSlice (value lower upper stride replacement : Value) : Eval Value := do
   match value with
   | .ref address =>

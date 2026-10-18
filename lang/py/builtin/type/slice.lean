@@ -180,6 +180,13 @@ theorem indexList_suffix (length start : Nat) :
     indexList { start := some start } length = .ok (List.range' start (length - start)) := by
   simpa only [Nat.add_sub_cancel, Nat.div_one] using indexList_positive_end length start 1 (by decide)
 
+/-- Omitting all bounds visits every index in order. -/
+theorem indexList_full (length : Nat) : indexList {} length = .ok (List.range length) := by
+  change Except.ok (indexListFuel length 0 length 1) = _
+  congr 1
+  simpa [List.range_eq_range'] using
+    indexListFuel_positive length 0 length 1 (by decide) (by omega)
+
 /-- Python's inclusive count expression matches the number of selected positions. -/
 theorem positive_end_count (length start stride : Nat) (positive : 0 < stride) :
     (((length : Int) - 1 - start) / stride + 1).toNat =

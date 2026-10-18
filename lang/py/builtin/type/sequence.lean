@@ -62,6 +62,13 @@ theorem slice_suffix (values : List α) (start : Nat) :
   congr 1
   simpa [List.length_drop, List.getElem?_drop, Function.comp_def] using get_range (values.drop start)
 
+/-- A full unit-stride slice selects every value in its original order. -/
+theorem slice_full (values : List α) : slice values {} = .ok values := by
+  unfold slice
+  rw [Slice.indexList_full]
+  change Except.ok ((List.range values.length).filterMap (fun index => values[index]?)) = _
+  rw [get_range]
+
 /-- A full negative-unit slice reverses any sequence of values. -/
 theorem slice_reverse (values : List α) :
     slice values { step := some (-1) } = .ok values.reverse := by
