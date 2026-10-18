@@ -257,6 +257,12 @@ theorem assign (h : Evaluates module env expression value)
   intro stack
   exact .next rfl ((h _).trans (.next rfl (rest stack)))
 
+theorem augAssign (h : Evaluates module env (.binOp (.name name) op expression) value)
+    (rest : BlockReturns module (env.set name value) body result) :
+    BlockReturns module env (.augAssign (.name name) op expression :: body) result := by
+  intro stack
+  exact .next rfl ((h _).trans (.next rfl (rest stack)))
+
 theorem branch (h : Evaluates module env condition value)
     (rest : BlockReturns module env ((if scalarTruth value then yes else no) ++ body) result) :
     BlockReturns module env (.ifThen condition yes no :: body) result := by
