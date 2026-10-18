@@ -20,12 +20,16 @@ inductive Frame where
   | discard (rest : List Stmt) (env : ScalarEnv)
   | unpack (names : List String) (done : List Constant) (rest : List Expr)
       (body : List Stmt) (env : ScalarEnv)
+  | rangeArguments (name : String) (done : List Constant) (rest : List Expr)
+      (body otherwise following : List Stmt) (env : ScalarEnv)
 
 inductive Work where
   | expr (expression : Expr) (env : ScalarEnv)
   | block (body : List Stmt) (env : ScalarEnv)
   | value (value : Constant)
   | invoke (name : String) (values : List Constant)
+  | startRange (name : String) (values : List Constant)
+      (body otherwise following : List Stmt) (env : ScalarEnv)
 
 structure State where
   work : Work
@@ -50,9 +54,39 @@ def assignNames (env : ScalarEnv) (names : List String) : List Constant → Scal
     | [] => env
     | name :: names => assignNames (env.set name value) names values
 
+/-- Builtin range accepts integer indices, including booleans. Implicit error
+messages use the same abstraction as the other scalar builtins. -/
+def rangeBounds (values : List Constant) : Except ExceptionObject (Int × Int × Int) := do
+  let numbers ← values.mapM fun value => match value with
+    | .int n => .ok n
+    | .bool b => .ok (if b then 1 else 0)
+    | _ => .error { typeName := "TypeError", args := [] }
+  let (start, stop, stride) ← match numbers with
+    | [stop] => .ok (0, stop, 1)
+    | [start, stop] => .ok (start, stop, 1)
+    | [start, stop, stride] => .ok (start, stop, stride)
+    | _ => .error { typeName := "TypeError", args := [] }
+  if stride = 0 then .error { typeName := "ValueError", args := [] }
+  else .ok (start, stop, stride)
+
+def rangeContinues (next stop stride : Int) : Bool :=
+  decide (0 < stride ∧ next < stop ∨ stride < 0 ∧ stop < next)
+
+private def rangeState (name : String) (env : ScalarEnv) (done : List Constant)
+    (expressions : List Expr) (body otherwise following : List Stmt) (stack : List Frame) : State :=
+  match expressions with
+  | [] => ⟨.startRange name done body otherwise following env, stack⟩
+  | first :: rest =>
+      ⟨.expr first env, .rangeArguments name done rest body otherwise following env :: stack⟩
+
 def step (module : Module) (state : State) : Step State Constant :=
   let ⟨work, stack⟩ := state
   match work with
+  | .startRange name values body otherwise following env =>
+      match rangeBounds values with
+      | .ok (start, stop, stride) =>
+          .next ⟨.block (.rangeStepLoop name start stop stride body otherwise :: following) env, stack⟩
+      | .error exception => .done (.error exception)
   | .invoke name values =>
       match findFunctionIn module.body name with
       | some (args, body) =>
@@ -100,6 +134,13 @@ def step (module : Module) (state : State) : Step State Constant :=
       | .whileDo condition body otherwise :: rest =>
           .next ⟨.expr condition env,
             .branch (body ++ [.whileDo condition body otherwise]) otherwise rest env :: stack⟩
+      | .forIn (.name name) (.call (.name "range") expressions) body otherwise :: rest =>
+          .next (rangeState name env [] expressions body otherwise rest stack)
+      | .rangeStepLoop name next stop stride body otherwise :: rest =>
+          if rangeContinues next stop stride then
+            .next ⟨.block (body ++ [.rangeStepLoop name (next + stride) stop stride body otherwise] ++ rest)
+              (env.set name (.int next)), stack⟩
+          else .next ⟨.block (otherwise ++ rest) env, stack⟩
       | .expr expr :: rest => .next ⟨.expr expr env, .discard rest env :: stack⟩
       | _ => .unsupported
   | .value value =>
@@ -135,6 +176,8 @@ def step (module : Module) (state : State) : Step State Constant :=
               | [] => .next ⟨.block body (assignNames env names (done ++ [value])), stack⟩
               | first :: tail =>
                   .next ⟨.expr first env, .unpack names (done ++ [value]) tail body env :: stack⟩
+          | .rangeArguments name done rest body otherwise following env =>
+              .next (rangeState name env (done ++ [value]) rest body otherwise following stack)
 
 def function (module : Module) (name : String) (args : List Constant) : Execution Constant :=
   ⟨State, ⟨.invoke name args, []⟩, step module⟩
@@ -199,6 +242,12 @@ theorem binary (left : Evaluates module env a av) (right : Evaluates module env 
   intro stack
   exact .next rfl ((left _).trans (.next rfl
     ((right _).trans (.next (by simp [step, outcome, result]) .refl))))
+
+theorem unary (operand : Evaluates module env expression value)
+    (result : scalarExpr (fun _ => none) (.unaryOp op (.constant value)) = some (.ok answer)) :
+    Evaluates module env (.unaryOp op expression) answer := by
+  intro stack
+  exact .next rfl ((operand _).trans (.next (by simp [step, outcome, result]) .refl))
 
 theorem compare (left : Evaluates module env a av) (right : Evaluates module env b bv)
     (result : scalarCompare op av bv = some value) :
@@ -305,6 +354,39 @@ theorem while_loop (h : Evaluates module env condition value)
     BlockReturns module env (.whileDo condition loop otherwise :: body) result := by
   intro stack
   exact .next rfl ((h _).trans (.next rfl (rest stack)))
+
+private theorem range_reach
+    (h : Evaluates.Arguments module env expressions values) (done : List Constant)
+    (stack : List Frame) :
+    Reaches module (rangeState name env done expressions body otherwise following stack)
+      ⟨.startRange name (done ++ values) body otherwise following env, stack⟩ := by
+  induction h generalizing done with
+  | nil => simp [rangeState]; exact .refl
+  | @cons expression value expressions values head tail ih =>
+      apply (head _).trans
+      refine .next rfl ?_
+      simpa [List.append_assoc] using ih (done ++ [value])
+
+theorem for_range (arguments : Evaluates.Arguments module env expressions values)
+    (bounds : rangeBounds values = .ok (start, stop, stride))
+    (rest : BlockReturns module env (.rangeStepLoop name start stop stride body otherwise :: following) result) :
+    BlockReturns module env (.forIn (.name name) (.call (.name "range") expressions) body otherwise :: following) result := by
+  intro stack
+  exact .next rfl ((range_reach arguments [] stack).trans
+    (.next (by simp [step, bounds]) (rest stack)))
+
+theorem range_step (continues : rangeContinues next stop stride = true)
+    (rest : BlockReturns module (env.set name (.int next))
+      (body ++ [.rangeStepLoop name (next + stride) stop stride body otherwise] ++ following) result) :
+    BlockReturns module env (.rangeStepLoop name next stop stride body otherwise :: following) result := by
+  intro stack
+  exact .next (by simp [step, continues]) (rest stack)
+
+theorem range_done (finished : rangeContinues next stop stride = false)
+    (rest : BlockReturns module env (otherwise ++ following) result) :
+    BlockReturns module env (.rangeStepLoop name next stop stride body otherwise :: following) result := by
+  intro stack
+  exact .next (by simp [step, finished]) (rest stack)
 
 private def unpackState (names : List String) (env : ScalarEnv) (done : List Constant)
     (expressions : List Expr) (body : List Stmt) (stack : List Frame) : State :=

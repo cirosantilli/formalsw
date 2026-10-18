@@ -130,6 +130,8 @@ inductive Stmt where
   | forIn : Expr -> Expr -> List Stmt -> List Stmt -> Stmt
   /-- Internal state of an evaluated `range(stop)` iterator, not source syntax. -/
   | rangeLoop : String -> Int -> Int -> List Stmt -> List Stmt -> Stmt
+  /-- Internal iterator state for the scalar call interpreter's stepped ranges. -/
+  | rangeStepLoop : String → Int → Int → Int → List Stmt → List Stmt → Stmt
   /-- A Python `if` statement. -/
   | ifThen : Expr -> List Stmt -> List Stmt -> Stmt
   /-- A Python `while` statement. -/
@@ -744,6 +746,8 @@ mutual
   /-- Count statement operations, assigning unit cost to every AST node. -/
   partial def Stmt.operationCount : Stmt → Nat
     | .rangeLoop _ _ _ body otherwise =>
+        1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
+    | .rangeStepLoop _ _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
     | .functionDef _ args returns body =>

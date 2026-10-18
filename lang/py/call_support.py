@@ -1,6 +1,7 @@
 """Coverage checks for scalar functions with ordinary recursive calls."""
 import ast
 from lang.py.global_inputs import GlobalInputError, function_globals
+from lang.py.imports import bindings
 
 
 def uses_calls_model(module, function):
@@ -17,6 +18,8 @@ def uses_calls_model(module, function):
         isinstance(node, ast.IfExp)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names
+        or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
+        and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
     )
 
@@ -104,6 +107,16 @@ def check_calls(module, function, reject):
                     expr(ast.BinOp(node.target, node.op, node.value))
                 elif isinstance(node, (ast.If, ast.While)):
                     expr(node.test)
+                    block(node.body)
+                    block(node.orelse)
+                elif (isinstance(node, ast.For) and isinstance(node.target, ast.Name)
+                      and isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
+                      and node.iter.func.id == 'range' and 1 <= len(node.iter.args) <= 3
+                      and not node.iter.keywords):
+                    if 'range' in locals_ or bindings(module, 'range'):
+                        reject(node, 'range loops require the unshadowed builtin range')
+                    for argument in node.iter.args:
+                        expr(argument)
                     block(node.body)
                     block(node.orelse)
                 elif isinstance(node, ast.Expr):

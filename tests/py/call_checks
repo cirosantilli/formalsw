@@ -44,4 +44,13 @@ for body in (
 assert issues(base.replace('g(n: int)', 'g(n: int = 0)'))
 assert issues(base.replace('g(n: int)', 'g(n: list[int])'))
 assert not issues(base.replace('return n', 'return f(n - 1) if n else 0'))
+range_source = base.replace('return g(n)', 'for k in range(n, 0, -1):\n        n = g(n)\n    return n')
+assert not issues(range_source)
+for suffix in ('range = g\n', 'from other import range\n', 'from other import *\n', 'del range\n'):
+    assert issues(range_source + suffix), suffix
+for replacement in ('range()', 'range(n, 0, -1, 2)', 'range(n, stop=0)', 'iter(n)'):
+    assert issues(range_source.replace('range(n, 0, -1)', replacement)), replacement
+assert issues(range_source.replace('def f(n: int)', 'def f(n: int, range: int)'))
+assert issues(range_source.replace('n = g(n)', 'break'))
+assert issues(range_source.replace('n = g(n)', 'continue'))
 print("Recursive call coverage passed")
