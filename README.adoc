@@ -1565,6 +1565,8 @@ Scalar functions with ordinary module-local calls or conditional expressions use
 
 Functions without requirements do not need execution coverage unless a requirement depends on them. Module-level raw theorems about source metadata, such as AST fingerprints, can inspect source without requesting its execution semantics.
 
+The call interpreter also recognizes explicit `from math import isqrt` bindings, including aliases. Its arbitrary-precision integer square-root model uses terminating binary search. `FormalSW.PyAst.Math.isqrt_spec` proves the defining inequalities for every natural input, so client proofs can connect it to their mathematical square-root library. Negative integers raise `ValueError`; non-integer scalar arguments raise `TypeError`; Boolean arguments follow Python's integer-index behavior. Implicit exception messages have the same abstraction as other scalar errors. Rebound or shadowed function bindings, local modules shadowing `math`, and unsupported argument forms are rejected. link:tests/py/math_isqrt.py[] checks the source-bound execution model, including aliases and exception cases.
+
 === Python builtin model
 
 The reusable non-floating-point builtin semantics live under link:lang/py/builtin/type[]. Builtins that can be expressed faithfully in Python have a `.py` implementation and an adjacent `.py.lean` proof. Each source requests explicit structural and complete-AST-fingerprint theorems, so the proofs are checked against the generated AST of that exact Python file. Builtin functions are grouped in link:lang/py/builtin/function.lean[], with feasible pure and protocol-delegating implementations in link:lang/py/builtin/function.py[] and its adjacent proof.

@@ -1,7 +1,16 @@
 """Coverage checks for scalar functions with ordinary recursive calls."""
 import ast
+from pathlib import Path
 from lang.py.global_inputs import GlobalInputError, function_globals
 from lang.py.imports import bindings
+
+
+def library_functions(module):
+    """Supported standard-library functions, preserving their import bindings."""
+    return {alias.asname or alias.name: (node.module, alias.name, node)
+            for node in module.body if isinstance(node, ast.ImportFrom)
+            and node.level == 0 and node.module == 'math'
+            for alias in node.names if alias.name == 'isqrt'}
 
 
 def uses_calls_model(module, function):
@@ -14,6 +23,7 @@ def uses_calls_model(module, function):
     except GlobalInputError:
         return False
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
+    names.update(library_functions(module))
     return any(
         isinstance(node, ast.IfExp)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
@@ -26,6 +36,7 @@ def uses_calls_model(module, function):
 
 def check_calls(module, function, reject):
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    libraries = library_functions(module)
     visited = set()
 
     def visit(function):
@@ -87,6 +98,18 @@ def check_calls(module, function, reject):
                 for item in node.args:
                     expr(item)
                 visit(target)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in libraries:
+                target = node.func.id
+                if target in locals_ or bindings(module, target) != [libraries[target][2]]:
+                    reject(node, 'standard-library call targets must not be rebound or shadowed')
+                if node.keywords or len(node.args) != 1:
+                    reject(node, 'math.isqrt requires exactly one positional argument')
+                source = getattr(module, 'formalsw_source', None)
+                if source is not None and any((root / 'math.py').exists() or (root / 'math').is_dir()
+                                              for root in (source.parent, Path.cwd())):
+                    reject(node, 'a local math module shadows the modeled standard library')
+                for item in node.args:
+                    expr(item)
             else:
                 reject(node, f'{type(node).__name__} expression is unsupported by call execution')
 

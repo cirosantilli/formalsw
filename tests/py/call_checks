@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 import sys
 import textwrap
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from lang.py.support import SupportChecker
@@ -53,4 +54,18 @@ for replacement in ('range()', 'range(n, 0, -1, 2)', 'range(n, stop=0)', 'iter(n
 assert issues(range_source.replace('def f(n: int)', 'def f(n: int, range: int)'))
 assert issues(range_source.replace('n = g(n)', 'break'))
 assert issues(range_source.replace('n = g(n)', 'continue'))
+sqrt_source = 'from math import isqrt as root\ndef f(n: int) -> int:\n    return root(n)\n'
+assert not issues(sqrt_source)
+for suffix in ('root = f\n', 'from other import root\n', 'del root\n'):
+    assert issues(sqrt_source + suffix), suffix
+assert issues(sqrt_source.replace('return root(n)', 'root = n\n    return root(n)'))
+assert issues(sqrt_source.replace('root(n)', 'root(n, n)'))
+assert issues(sqrt_source.replace('root(n)', 'root(n=n)'))
+assert issues(sqrt_source.replace('from math ', 'from other '))
+with tempfile.TemporaryDirectory(prefix='formalsw-math-shadow-') as directory:
+    program = ast.parse(sqrt_source)
+    program.formalsw_source = Path(directory) / 'probe.py'
+    (Path(directory) / 'math.py').write_text('def isqrt(n): return n\n')
+    assert any('shadows the modeled standard library' in issue.reason
+               for issue in SupportChecker(program).check('f'))
 print("Recursive call coverage passed")

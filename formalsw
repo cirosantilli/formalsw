@@ -572,6 +572,7 @@ def collect_requirements(
 ) -> list[Requirement]:
     """Collect proof obligations requested by source docstring markers."""
     requirements: list[Requirement] = []
+    module.formalsw_source = source_path.resolve()
     support = SupportChecker(module)
     for marker in docstring_markers(
         ast.get_docstring(module, clean=False),

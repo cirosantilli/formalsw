@@ -1,4 +1,4 @@
-import lang.py.FormalSW.Runtime
+import lang.py.FormalSW.Math
 
 /-! Scalar Python execution with an explicit expression and function call stack.
 Recursive calls consume transitions, not Lean recursion fuel. Unsupported syntax
@@ -93,7 +93,7 @@ def step (module : Module) (state : State) : Step State Constant :=
           if args.length = values.length then
             .next ⟨.block (executableBody body) (argumentEnv args values), stack⟩
           else .unsupported
-      | none => .unsupported
+      | none => outcome (libraryCall module name values) stack
   | .expr expression env =>
       match expression with
       | .constant value => .next ⟨.value value, stack⟩
@@ -317,6 +317,14 @@ theorem call (arguments : Arguments module env expressions values)
   refine .next (following := argumentsWork name env [] expressions stack) ?_ ?_
   · cases expressions <;> rfl
   · exact (arguments_reach arguments [] stack).trans (result stack)
+
+theorem library_call (arguments : Arguments module env expressions values)
+    (absent : findFunctionIn module.body name = none)
+    (result : libraryCall module name values = some (.ok value)) :
+    Evaluates module env (.call (.name name) expressions) value := by
+  apply call arguments
+  intro stack
+  exact .next (by simp [step, absent, outcome, result]) .refl
 
 end Evaluates
 
