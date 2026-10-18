@@ -13,8 +13,11 @@ theorem root.result (n : Nat) :
   change some (Math.isqrtCall [.int n]) = _
   simp [Math.isqrtCall]
 
-theorem root.«Returns» (n : Int) (hn : n ≥ 0) :
+theorem root.«Returns» (n : Int) (hp : Calls.Condition program
+      (fun key => if key = "n" then some (.int n) else none) MathIsqrtAst.requires_root_0) :
     (Calls.function program "root" [.int n]).Returns := by
+  have hn : n ≥ 0 := by
+    simpa [evalCmpOp] using Evaluates.condition_int_compare hp rfl
   simpa [Int.toNat_of_nonneg hn] using (root.result n.toNat).returns
 
 theorem root.correct (n : Nat) :

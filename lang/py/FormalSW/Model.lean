@@ -218,7 +218,7 @@ private def CmpOp.fromJson? (json : Lean.Json) : Except String CmpOp := do
   | name => throw s!"unsupported comparison operator: {name}"
 
 /-- Decode one expression from the version 1 JSON schema. -/
-private partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
+partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
   match ← jsonString json "type" with
   | "Constant" =>
       match ← jsonField json "value" with
@@ -386,6 +386,23 @@ elab_rules : term
         | .ok value => pure value
         | .error message => throwError "invalid formalsw AST document: {message}"
       return Lean.toExpr module
+
+/-- Decode a source expression for a specification predicate. -/
+syntax "pyexpr_from_json% " term : term
+
+open Lean Elab Term Meta in
+elab_rules : term
+  | `(pyexpr_from_json% $jsonSource:term) => do
+      let sourceExpr ← elabTerm jsonSource (some (mkConst ``String))
+      let some source := getStringValue? sourceExpr
+        | throwError "pyexpr_from_json% expects a string literal"
+      let json ← match Json.parse source with
+        | .ok value => pure value
+        | .error message => throwError "invalid Python expression JSON: {message}"
+      let expression ← match FormalSW.PyAst.Expr.fromJson? json with
+        | .ok value => pure value
+        | .error message => throwError "invalid Python expression: {message}"
+      return Lean.toExpr expression
 
 /-!
 Partial semantic interpreters for `FormalSW.PyAst`.

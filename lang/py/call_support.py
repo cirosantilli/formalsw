@@ -120,10 +120,11 @@ def check_calls(module, function, reject):
                 recurse(node.right)
             elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):
                 recurse(node.operand)
-            elif isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(
-                    node.ops[0], (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
+            elif isinstance(node, ast.Compare) and all(isinstance(
+                    op, (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in node.ops):
                 recurse(node.left)
-                recurse(node.comparators[0])
+                for comparator in node.comparators:
+                    recurse(comparator)
             elif isinstance(node, ast.BoolOp):
                 for item in node.values:
                     recurse(item)

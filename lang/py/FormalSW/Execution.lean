@@ -50,6 +50,20 @@ def Returns (execution : Execution α) : Prop :=
 def Throws (execution : Execution α) : Prop :=
   ∃ exception, Finishes execution.step execution.initial (.error exception)
 
+/-- Successful executions agree, without requiring either execution to finish. -/
+def EquivReturn (left right : Execution α) : Prop :=
+  ∀ a b, Finishes left.step left.initial (.ok a) →
+    Finishes right.step right.initial (.ok b) → a = b
+
+/-- Termination with the annotated scalar type, or a Python exception. -/
+def ReturnType (execution : Execution Constant) (kind : String) : Prop :=
+  execution.Throws ∨ ∃ value, Finishes execution.step execution.initial (.ok value) ∧
+    (match value with
+      | .int _ => kind = "int"
+      | .string _ => kind = "str"
+      | .bool _ => kind = "bool"
+      | .none => kind = "None")
+
 /-- A supported infinite execution, witnessed by an invariant closed under steps.
 Unsupported code is not divergence: the invariant must always produce a next step. -/
 def Diverges (execution : Execution α) : Prop :=

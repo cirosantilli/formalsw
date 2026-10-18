@@ -10,17 +10,19 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from lang.py.contracts import ContractError, input_condition
 
-function = ast.parse('def f(n: int, flag: bool): pass').body[0]
-assert '∧' in input_condition('0 <= n < 10 and n % 2 == 0', function)
-assert '¬' in input_condition('not (n < 0 or n > 10)', function)
-for condition in ('n / 0 > 1', 'n % 0 == 0', 'n % -2 == 0', 'missing > 0',
-                  'flag > 0', 'n', 'n > len([])', '__import__("os").system("false")'):
-    try:
-        input_condition(condition, function)
-    except ContractError:
-        pass
-    else:
-        raise AssertionError(condition)
+module = ast.parse('def f(n: int, flag: bool): pass\ndef predicate(n: int, bound: int) -> bool: return n >= bound')
+function = module.body[0]
+for condition in ('0 <= n < 10 and n % 2 == 0', 'not (n < 0 or n > 10)',
+                  'predicate(n, 0)', 'n % 0 == 0', 'n % -2 == 0', 'flag > 0', 'n'):
+    assert not input_condition(condition, function, module).unsupported, condition
+for condition in ('n / 0 > 1', 'missing > 0', 'n > len([])', '__import__("os").system("false")'):
+    assert input_condition(condition, function, module).unsupported, condition
+try:
+    input_condition('n >=', function, module)
+except ContractError:
+    pass
+else:
+    raise AssertionError('invalid Python predicate accepted')
 
 with tempfile.TemporaryDirectory(prefix='formalsw-contract-') as temporary:
     project = Path(temporary)
@@ -31,13 +33,16 @@ with tempfile.TemporaryDirectory(prefix='formalsw-contract-') as temporary:
     (project / 'reference').mkdir()
     reference = project / 'reference' / '1.py'
     reference.write_text('def f(n: int) -> int:\n'
-        '    """@formalsw: Requires(n >= 0)\n    @formalsw: Returns\n    """\n'
+        '    """\n    @formalsw: Requires(n >= 0)\n    @formalsw: Returns\n    """\n'
         '    return n\n')
     reference.with_suffix('.py.lean').write_text('''import «.formalsw».reference.«1.py.ast»
 import FormalSW
 open FormalSW.PyAst
 namespace reference.«1»
-theorem f.«Returns» (n : Int) (_hn : n ≥ 0) :
+theorem f.«Returns» (n : Int)
+    (_hp : Calls.Condition Reference.P1Ast.module
+      (fun name => if name = "n" then some (.int n) else none)
+      (.compare (.name "n") [(.gtE, .constant (.int 0))])) :
     (scalarFunction Reference.P1Ast.module "f" [.int n]).Returns := ⟨.int n, .done rfl⟩
 end reference.«1»
 ''')
@@ -45,7 +50,7 @@ end reference.«1»
     original = ('from importlib import import_module\n'
         'naive = import_module("reference.1").f\n'
         'def solve(n: int) -> int:\n'
-        '    """@formalsw: Requires(n >= 0)\n    @formalsw: Equiv(naive)\n    """\n'
+        '    """\n    @formalsw: Requires(n >= 0)\n    @formalsw: Equiv(naive)\n    """\n'
         '    return n\n')
     solver.write_text(original)
     # The proof intentionally imports only the reference AST. The Python
@@ -55,7 +60,10 @@ import «.formalsw».reference.«1.py.ast»
 import FormalSW
 open FormalSW.PyAst
 namespace solver
-theorem solve.«Equiv(naive)» (n : Int) (_hn : n ≥ 0) :
+theorem solve.«Equiv(naive)» (n : Int)
+    (_hp : Calls.Condition SolverAst.module
+      (fun name => if name = "n" then some (.int n) else none)
+      (.compare (.name "n") [(.gtE, .constant (.int 0))])) :
     (scalarFunction SolverAst.module "solve" [.int n]).Equiv
       (scalarFunction Reference.P1Ast.module "f" [.int n]) := fun _ => Iff.rfl
 end solver
@@ -81,7 +89,7 @@ end solver
     solver.write_text(original.replace('n >= 0', 'n >= -1'))
     check(1, 'proof check failed')
     solver.write_text(original.replace('    @formalsw: Equiv(naive)\n', ''))
-    check(1, 'Requires needs a Returns, Halts, or Equiv obligation')
+    check(1, 'Requires needs a property obligation')
     solver.write_text(original + '\nnaive = solve\n')
     check(1, 'must not be rebound')
     solver.write_text(original + '\nsolve = naive\n')

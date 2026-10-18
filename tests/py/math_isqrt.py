@@ -2,7 +2,8 @@ from math import isqrt as integer_root
 
 
 def root(n: int) -> int:
-    """@formalsw: Requires(n >= 0)
+    """
+    @formalsw: Requires(n >= 0)
     @formalsw: Returns
     """
     return integer_root(n)

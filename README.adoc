@@ -428,12 +428,13 @@ The mutex model permits only its owner to execute body operations; every other w
 
 ==== Requires
 
-`Requires(predicate)` restricts the input domain of the short `Returns`, `Halts`, and scalar `Equiv` contracts in the same function docstring. It does not change Python execution or insert an assertion. For example, a recursive countdown only terminates on nonnegative integers:
+`Requires(predicate)` supplies a precondition for every property in the same function docstring, including raw Lean specifications. A module-level precondition also applies to its function specifications. It does not insert a Python assertion or change normal execution.
 
 [source,python]
 ----
 def countdown(n: int) -> int:
-    """@formalsw: Requires(n >= 0)
+    """
+    @formalsw: Requires(n >= 0)
     @formalsw: Returns
     """
     if n == 0:
@@ -441,9 +442,13 @@ def countdown(n: int) -> int:
     return countdown(n - 1)
 ----
 
-The obligation remains named `countdown.«Returns»`, with type `∀ n : Int, n ≥ 0 → (Calls.function module "countdown" [.int n]).Returns`. Changing or removing the precondition changes the checked theorem. Multiple `Requires` markers contribute separate premises; `Not` negates the whole guarded obligation. A precondition without a property is an error.
+A predicate is parsed as an ordinary Python expression, including calls to Python helpers, and checked against the same execution model used for programs. Helpers may use supported branches, loops, and recursion. There is no separate arithmetic-only predicate language. Constructs without execution semantics are reported as unsupported, including in unused branches; they cannot be hidden behind a false precondition. Predicates currently use scalar inputs and module-local helpers; imported calls, heap objects, and global-state predicates still require interpreter support.
 
-Predicates use Python integer comparisons (including chained comparisons), `and`, `or`, `not`, Boolean constants, integer arguments and constants, `+`, `-`, `*`, and `%` by a positive constant. Calls, division, arbitrary truthiness, and stateful predicates are rejected. Constrained contracts currently require scalar arguments without global state; raw Lean statements retain their own explicit premises and cannot be combined with `Requires`.
+The domain consists of inputs on which the expression finishes with exactly Boolean `True`. A truthy integer or string is not `True`; an exception or nontermination does not establish the precondition. `Calls.Condition` records this finite Python execution, and `Evaluates.condition_iff` connects an evaluated result to the domain. The source AST module exposes each predicate as `requires_<function>_<index>`, so editing it changes the checked obligation. For the example, the guard is provably equivalent to `n ≥ 0`.
+
+`Returns`, `Halts`, `ReturnType`, `Equiv`, and `EquivReturn` are required on inputs satisfying all preconditions. `Throws` needs a witness inside that domain. `Not` negates the whole guarded short obligation, so `Not Throws` excludes exceptions on valid inputs. Multiple preconditions apply together; a precondition without any property is an error. `BigO` keeps its existing structural cost abstraction and is guarded as a whole proposition; preconditions do not change the classifier or substitute a different cost model.
+
+Raw theorems receive the precondition after their input binders. Lean's parser also recognizes leading `∀` and `∃` binders: the guard is an implication for universally quantified inputs and a conjunction for existential witnesses. This preserves the distinction between an admissible witness and a vacuous implication. Explicit theorem parameters remain in scope. link:tests/py/requires.py[] and its adjacent proof cover helper calls, every scalar short property, raw statements, chained-comparison short circuiting, signed arithmetic, and exact Boolean results.
 
 ==== Returns
 
@@ -1559,7 +1564,7 @@ The diagnostic identifies the requirement, function, source location, and unsupp
 
 The scalar interpreter supports literals, local variables, supported arithmetic and comparisons, assignments, `if`, `while`, one-argument `range` loops, builtin exception raises, and returns. Coverage checking is conservative: for example, division and modulo currently require a nonnegative integer literal divisor. Variadics, keyword-only arguments, and arbitrary list programs need further execution-model support.
 
-Scalar functions with ordinary module-local calls or conditional expressions use `FormalSW.PyAst.Calls.function`. This interpreter supports recursive and mutually recursive calls with fresh local environments, left-to-right argument evaluation, conditional expressions, and short-circuit `and`/`or`. Its explicit continuation stack has no fixed recursion limit. Calls currently require undecorated positional functions with scalar annotations and no globals, imports, defaults, or local shadowing of call targets; their bodies support scalar expressions, assignments, flat tuple unpacking from tuple displays of the same length, `if`, `while`, builtin `range` loops with one to three arguments, and returns. Tuple right-hand sides are evaluated left to right in the original environment before any target is assigned; repeated targets are then assigned in order. Coverage checks include all reachable callees and all their branches. This model supports `Returns`, `Halts`, and scalar `Equiv` contracts; other execution properties can be written as raw Lean theorems.
+Scalar functions with ordinary module-local calls or conditional expressions use `FormalSW.PyAst.Calls.function`. This interpreter supports recursive and mutually recursive calls with fresh local environments, left-to-right argument evaluation, conditional expressions, and short-circuit `and`/`or`. Its explicit continuation stack has no fixed recursion limit. Calls currently require undecorated positional functions with scalar annotations and no globals, imports, defaults, or local shadowing of call targets; their bodies support scalar expressions, assignments, flat tuple unpacking from tuple displays of the same length, `if`, `while`, builtin `range` loops with one to three arguments, and returns. Tuple right-hand sides are evaluated left to right in the original environment before any target is assigned; repeated targets are then assigned in order. Coverage checks include all reachable callees and all their branches. This model supports scalar `Returns`, `Halts`, `Throws`, `ReturnType`, `Equiv`, and `EquivReturn` contracts, with optional preconditions; raw Lean theorems can state further execution properties.
 
 `Calls.ReturnsValue` proves a function's result independently of its caller continuation; `Calls.Evaluates` and `Calls.BlockReturns` provide compositional expression and block lemmas. A `ReturnsValue` proof implies successful termination, and two such proofs with the same result imply execution equivalence. link:tests/py/recursive_calls.py[] and its adjacent Lean proof demonstrate induction over recursive calls, nested arguments, and short-circuiting around a divergent branch. link:tests/py/tuple_assignments.py[] checks simultaneous assignment, repeated targets, empty unpacking, and exception order. `Calls.BlockReturns.unpack` and `Calls.BlockReturns.while_loop` support proofs of iterative algorithms. Stepped ranges evaluate all arguments once, from left to right, then retain the start, stop, and step independently of body assignments. Positive and negative steps, empty ranges, loop `else`, and early returns are modeled; zero steps raise `ValueError`. Shadowed `range`, `break`, and `continue` are rejected. `Calls.BlockReturns.for_range`, `range_step`, and `range_done` support unbounded iteration proofs; link:tests/py/stepped_ranges.py[] checks these rules and exception ordering.
 

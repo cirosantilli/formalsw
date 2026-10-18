@@ -11,13 +11,13 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_model
 from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
-from lang.py.lean_frontend import parse_imports, parse_theorem
+from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
 from lang.py.call_support import range_sum, uses_calls_model
 from lang.py.contracts import ContractError, input_condition
 from lang.py.imports import bindings, resolve_function
@@ -161,7 +161,7 @@ def mutable_domain(name, kind, heap):
     return f'FormalSW.PyAst.Mutable.Value.HasType {heap} (.ref {name}) {lean_string(kind)}'
 
 
-def global_property_type(ast_namespace, function, property_name, args, negations, globals):
+def global_property_type(ast_namespace, function, property_name, args, negations, globals, conditions=()):
     """Quantify the shared initial state, then compare all observable final state."""
     arguments = [(arg.arg, annotation_kind(arg.annotation)) for arg in function.args.args]
     used = {name for name, _ in arguments}
@@ -203,6 +203,7 @@ def global_property_type(ast_namespace, function, property_name, args, negations
             body = " ∧ ".join(f"({condition})" for condition in constraints) + f" ∧ ({body})"
         else:
             body = " → ".join(f"({condition})" for condition in constraints) + f" →\n{body}"
+    body = guarded_type(body, conditions, existential=property_name == "Throws")
     result = f"{quantifier} {binders},\n{body}"
     for _ in range(negations):
         result = f"Not ({result})"
@@ -217,6 +218,7 @@ def property_type_for_short_requirement(
     negations: int,
     function: ast.FunctionDef,
     module: ast.Module | None = None,
+    conditions=(),
 ) -> str:
     """Return the Lean property type for a short property marker."""
     if module is not None:
@@ -225,7 +227,7 @@ def property_type_for_short_requirement(
             other = next(f for f in module.body if isinstance(f, ast.FunctionDef) and f.name == args[0])
             global_args = merge_globals(global_args, function_globals(module, other))
         if global_args:
-            return global_property_type(ast_namespace, function, property_name, args, negations, global_args)
+            return global_property_type(ast_namespace, function, property_name, args, negations, global_args, conditions)
     match property_name, args:
         case "Returns" | "Halts", []:
             arguments = [*function.args.posonlyargs, *function.args.args]
@@ -305,6 +307,12 @@ def property_type_for_short_requirement(
                 f"{function_name}: unsupported formalsw property marker: "
                 f"{property_name}({', '.join(args)})"
             )
+    if conditions:
+        if property_name == "Throws":
+            property_type = guarded_type(property_type, conditions, existential=True)
+        else:
+            property_type = raw_theorem_type_for_function(
+                RawTheoremRequirement("", "", property_type), function, ast_namespace, module, conditions)
     for _ in range(negations):
         property_type = f"Not ({property_type})"
     return property_type
@@ -323,6 +331,8 @@ def parse_short_marker(marker: str) -> tuple[str, list[str], int] | None:
     args_text = match.group(2)
     if args_text is None:
         args = []
+    elif property_name == "Requires":
+        args = [args_text.strip()] if args_text.strip() else []
     elif property_name == "BigO":
         big_o_match = re.fullmatch(
             r"(.+),\s*n\s*=\s*(.+)", args_text.strip(), re.DOTALL
@@ -394,15 +404,30 @@ def explicitly_bound_names(params: str) -> set[str]:
     return names
 
 
+def guard_raw_requirement(requirement, function, conditions):
+    bound = explicitly_bound_names(requirement.params)
+    if not conditions:
+        return requirement, bound
+    inputs = [arg.arg for arg in function.args.args]
+    captures = [name for name in inputs if any(f"«{name}»" in condition for condition in conditions)]
+    try:
+        guarded = guard_proposition(requirement.property_type,
+            " ∧ ".join(f"({condition})" for condition in conditions), captures, inputs, bound)
+    except ScenarioError as error:
+        raise InvalidRequirement(str(error)) from error
+    return replace(requirement, property_type=guarded['type']), bound | set(guarded['bound'])
+
+
 def raw_theorem_type_for_function(
     requirement: RawTheoremRequirement,
     function: ast.FunctionDef,
     ast_namespace: str,
     module: ast.Module | None = None,
+    conditions=(),
 ) -> str:
     """Infer referenced, unbound Python arguments in a function-level theorem."""
+    requirement, bound = guard_raw_requirement(requirement, function, conditions)
     referenced_text = f"{requirement.params}\n{requirement.property_type}"
-    bound = explicitly_bound_names(requirement.params)
     inferred = []
     global_args = function_globals(module, function) if module is not None and re.search(r"\bthis_function\b", referenced_text) else ()
     mutable = any(item.kind.startswith('list[') for item in global_args)
@@ -531,6 +556,44 @@ def docstring_start_line(node: ast.Module | ast.FunctionDef) -> int | None:
     return first.lineno
 
 
+def guarded_type(body, conditions, *, existential=False):
+    """Restrict quantified witnesses too: a false domain cannot witness Throws."""
+    if not conditions:
+        return body
+    if existential:
+        return " ∧ ".join(f"({condition})" for condition in conditions) + f" ∧ ({body})"
+    return " → ".join(f"({condition})" for condition in conditions) + f" →\n({body})"
+
+
+def collect_conditions(markers, function, module, namespace):
+    conditions, properties, unsupported = [], [], []
+    for marker in markers:
+        parsed = parse_short_marker(marker.text)
+        if not parsed or parsed[0] != "Requires":
+            properties.append(marker)
+            continue
+        if len(parsed[1]) != 1 or parsed[2]:
+            raise InvalidRequirement("Requires takes one Python predicate and cannot be negated")
+        try:
+            predicate = input_condition(parsed[1][0], function, module)
+        except ContractError as error:
+            raise InvalidRequirement(str(error)) from error
+        unsupported.extend(predicate.unsupported)
+        name = f"requires_{function.name if function else 'module'}_{len(conditions)}"
+        if predicate.unsupported:
+            conditions.append("False")
+            continue
+        module.formalsw_conditions[name] = predicate.expression
+        env = "none"
+        for arg in reversed(predicate.arguments):
+            kind = annotation_kind(arg.annotation)
+            env = f"if _arg = {lean_string(arg.arg)} then some ({scalar_term('«' + arg.arg + '»', kind)}) else {env}"
+        conditions.append(f"FormalSW.PyAst.Calls.Condition {namespace}.module (fun _arg => {env}) {namespace}.{name}")
+    if function is not None and conditions and not properties:
+        raise InvalidRequirement("Requires needs a property obligation")
+    return conditions, properties, tuple(dict.fromkeys(unsupported))
+
+
 def scalar_contract_type(module, function, namespace, property_name, conditions, negations, target=None):
     """Quantify scalar inputs and keep any explicit domain inside the quantifier."""
     arguments = function.args.args
@@ -554,11 +617,18 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
     body = f"({left}).{property_name}"
     if target:
         body += f" ({call(*target)})"
-    if conditions:
-        body = " → ".join(f"({condition})" for condition in conditions) + f" →\n{body}"
+    if property_name == "ReturnType":
+        kind = annotation_kind(function.returns)
+        if kind is None and isinstance(function.returns, ast.Constant) and function.returns.value is None:
+            kind = "None"
+        if kind not in ("int", "bool", "str", "None"):
+            raise InvalidRequirement("ReturnType needs a supported scalar return annotation")
+        body += f" {lean_string(kind)}"
+    body = guarded_type(body, conditions, existential=property_name == "Throws")
     if names:
         binders = " ".join(f"({name} : {scalar_lean_type(kind)})" for name, kind in zip(names, kinds))
-        body = f"∀ {binders},\n{body}"
+        quantifier = "∃" if property_name == "Throws" else "∀"
+        body = f"{quantifier} {binders},\n{body}"
     for _ in range(negations):
         body = f"Not ({body})"
     return body
@@ -574,10 +644,11 @@ def collect_requirements(
     requirements: list[Requirement] = []
     module.formalsw_source = source_path.resolve()
     support = SupportChecker(module)
-    for marker in docstring_markers(
-        ast.get_docstring(module, clean=False),
-        docstring_start_line(module),
-    ):
+    module.formalsw_conditions = {}
+    module_conditions, module_markers, module_unsupported = collect_conditions(
+        docstring_markers(ast.get_docstring(module, clean=False), docstring_start_line(module)),
+        None, module, ast_namespace)
+    for marker in module_markers:
         raw_theorem = parse_raw_theorem(marker.text)
         if raw_theorem is None:
             raise InvalidRequirement(f"module docstring: unsupported formalsw marker: {marker.text}")
@@ -586,11 +657,11 @@ def collect_requirements(
             theorem_name = f"{proof_namespace}.{theorem_name}"
         requirements.append(Requirement(
             theorem_name,
-            raw_theorem_type(raw_theorem),
+            guarded_type(raw_theorem_type(raw_theorem), module_conditions),
             source_path,
             marker.line,
             marker.text,
-            support.requirement(None, marker.text),
+            module_unsupported + support.requirement(None, marker.text),
         ))
     for stmt in module.body:
         if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -599,36 +670,27 @@ def collect_requirements(
             ast.get_docstring(stmt, clean=False),
             docstring_start_line(stmt),
         )
-        conditions = []
-        properties = []
-        for marker in markers:
-            parsed = parse_short_marker(marker.text)
-            if parsed and parsed[0] == "Requires":
-                if len(parsed[1]) != 1 or parsed[2]:
-                    raise InvalidRequirement("Requires takes one Python predicate and cannot be negated")
-                try:
-                    conditions.append(input_condition(parsed[1][0], stmt))
-                except ContractError as error:
-                    raise InvalidRequirement(f"{stmt.name}: {error}") from error
-            else:
-                properties.append(marker)
-        if conditions and not properties:
-            raise InvalidRequirement(f"{stmt.name}: Requires needs a Returns, Halts, or Equiv obligation")
+        conditions, properties, condition_unsupported = collect_conditions(markers, stmt, module, ast_namespace)
+        conditions = [*module_conditions, *conditions]
+        condition_unsupported = (*module_unsupported, *condition_unsupported)
+        first_requirement = len(requirements)
         for marker in properties:
             parsed = parse_short_marker(marker.text)
-            scalar_equiv = (parsed and parsed[0] == "Equiv" and len(parsed[1]) == 1 and
+            scalar_equiv = (parsed and parsed[0] in ("Equiv", "EquivReturn") and len(parsed[1]) == 1 and
                             (uses_calls_model(module, stmt) or parsed[1][0] not in support.functions
                              or uses_calls_model(module, support.functions[parsed[1][0]])))
-            if conditions or scalar_equiv:
-                if not parsed or parsed[0] not in ("Returns", "Halts", "Equiv"):
-                    raise InvalidRequirement(f"{stmt.name}: Requires supports short Returns, Halts, and Equiv contracts")
+            scalar_property = (parsed and parsed[0] in ("Returns", "Halts", "Throws", "ReturnType", "Equiv", "EquivReturn")
+                               and all(annotation_kind(arg.annotation) in ("int", "str", "bool") for arg in stmt.args.args)
+                               and not support.check(stmt.name)
+                               and not function_globals(module, stmt))
+            if scalar_equiv or scalar_property and (conditions or uses_calls_model(module, stmt)):
                 property_name, args, negations = parsed
                 theorem_name = proof_name_for_short_requirement(
                     proof_namespace, stmt.name, property_name, args, marker.text)
                 unsupported = list(support.check(stmt.name))
                 target = None
                 dependencies = ()
-                if property_name == "Equiv":
+                if property_name in ("Equiv", "EquivReturn"):
                     target = support.functions.get(args[0])
                     if target is None:
                         try:
@@ -657,7 +719,7 @@ def collect_requirements(
                         unsupported += tuple(UnsupportedConstruct(stmt.name, line, reason)
                                              for line, reason in trial.unsupported())
                         if not unsupported:
-                            property_type = trial.proposition()
+                            property_type = guarded_type(trial.proposition(), conditions, existential=bool(concurrent.group(1)))
                     except ScenarioUnsupported as error:
                         unsupported = (UnsupportedConstruct(concurrent.group(2), error.line, str(error)),)
                     except ScenarioError as error:
@@ -677,7 +739,7 @@ def collect_requirements(
                             compile_quotation(module, stmt, quotation['expression'], quotation['mode'])
                         property_type = (
                             f'python_context {lean_string(str(source_path))} {lean_string(stmt.name)} '
-                            f'{ast_namespace}.module in\n{raw_theorem_type(raw_theorem)}'
+                            f'{ast_namespace}.module in\n{raw_theorem_type(guard_raw_requirement(raw_theorem, stmt, conditions)[0])}'
                         )
                     except ScenarioUnsupported as error:
                         unsupported = (UnsupportedConstruct(stmt.name, error.line, str(error)),)
@@ -696,7 +758,7 @@ def collect_requirements(
                     theorem_name = f"{proof_namespace}.{lean_import_component(stmt.name)}.{theorem_name}"
                 requirements.append(Requirement(
                     theorem_name,
-                    "False" if unsupported else raw_theorem_type_for_function(raw_theorem, stmt, ast_namespace, module),
+                    "False" if unsupported else raw_theorem_type_for_function(raw_theorem, stmt, ast_namespace, module, conditions),
                     source_path,
                     marker.line,
                     marker.text,
@@ -725,12 +787,17 @@ def collect_requirements(
                     negations,
                     stmt,
                     module,
+                    conditions,
                 ),
                 source_path,
                 marker.line,
                 marker.text,
                 unsupported,
             ))
+        for index in range(first_requirement, len(requirements)):
+            if condition_unsupported:
+                requirements[index] = replace(requirements[index], property_type="False",
+                    unsupported=tuple(dict.fromkeys((*condition_unsupported, *requirements[index].unsupported))))
     top_level = {id(stmt) for stmt in module.body}
     for stmt in ast.walk(module):
         if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) or id(stmt) in top_level:
@@ -745,6 +812,8 @@ def collect_requirements(
                 (UnsupportedConstruct(stmt.name, stmt.lineno,
                     "requirements on nested functions and class methods are unsupported"),),
             ))
+    if module_conditions and not requirements:
+        raise InvalidRequirement("Requires needs a property obligation")
     return requirements
 
 
@@ -1115,10 +1184,11 @@ class AstJsonEmitter:
 class AstLeanBridgeEmitter:
     """Render the small Lean module that imports a generated JSON AST."""
 
-    def __init__(self, json_path: Path, namespace: str):
+    def __init__(self, json_path: Path, namespace: str, conditions=None):
         """Store the JSON file name and output Lean namespace."""
         self.json_path = json_path
         self.namespace = namespace
+        self.conditions = conditions or {}
 
     def emit(self) -> str:
         """Render a Lean definition loaded from the adjacent JSON file."""
@@ -1133,6 +1203,9 @@ class AstLeanBridgeEmitter:
             "/-- The Python AST imported from the adjacent JSON document. -/",
             "def module : Module :=",
             f"  pyast_from_json% (include_str {lean_string(self.json_path.name)})",
+            "",
+            *(f"def {name} : Expr := pyexpr_from_json% {lean_string(json.dumps(AstJsonEmitter(ast.Module(body=[], type_ignores=[])).expr(expr)))}"
+              for name, expr in self.conditions.items()),
             "",
             f"end {self.namespace}",
             "",
@@ -1473,7 +1546,7 @@ def check_source(source: Path, report: CheckReport) -> int:
     ast_path.parent.mkdir(parents=True, exist_ok=True)
     requirements_path.parent.mkdir(parents=True, exist_ok=True)
     ast_json_path.write_text(AstJsonEmitter(semantic_module).emit())
-    ast_path.write_text(AstLeanBridgeEmitter(ast_json_path, namespace).emit())
+    ast_path.write_text(AstLeanBridgeEmitter(ast_json_path, namespace, module.formalsw_conditions).emit())
     requirements_path.write_text(
         RequirementEmitter(proof_path, proof_module, requirements).emit()
     )
@@ -1590,7 +1663,7 @@ def proof_dependencies(source: Path) -> list[Path]:
             continue
         for marker in docstring_markers(ast.get_docstring(function, clean=False), docstring_start_line(function)):
             parsed = parse_short_marker(marker.text)
-            if parsed and parsed[0] == "Equiv" and len(parsed[1]) == 1 and parsed[1][0] not in functions:
+            if parsed and parsed[0] in ("Equiv", "EquivReturn") and len(parsed[1]) == 1 and parsed[1][0] not in functions:
                 try:
                     path, _, _ = resolve_function(source, module, parsed[1][0])
                 except ContractError as error:

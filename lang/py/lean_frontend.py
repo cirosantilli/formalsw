@@ -53,3 +53,9 @@ def parse_theorem(text):
 def parse_imports(text):
     """Return import names as components, using Lean's actual header parser."""
     return _request({"imports": text})["imports"]
+
+
+def guard_proposition(proposition, condition, captures, inputs, bound):
+    """Place a domain premise inside the native quantifiers binding its inputs."""
+    return _request({"guard": proposition, "condition": condition,
+                     "captures": captures, "inputs": inputs, "bound": list(bound)})

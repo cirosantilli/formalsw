@@ -23,6 +23,8 @@ inductive Frame where
   | binaryRight (op : BinOp) (left : Constant)
   | compareLeft (op : CmpOp) (right : Expr) (env : ScalarEnv)
   | compareRight (op : CmpOp) (left : Constant)
+  | chainLeft (op : CmpOp) (right : Expr) (rest : List (CmpOp × Expr)) (env : ScalarEnv)
+  | chainRight (op : CmpOp) (left : Constant) (rest : List (CmpOp × Expr)) (env : ScalarEnv)
   | unary (op : UnaryOp)
   | boolean (op : BoolOp) (rest : List Expr) (env : ScalarEnv)
   | conditional (yes no : Expr) (env : ScalarEnv)
@@ -148,6 +150,8 @@ def step (module : Module) (state : State) : Step State Constant :=
       | .unaryOp op expr => .next ⟨.expr expr env, .unary op :: stack⟩
       | .compare left [(op, right)] =>
           .next ⟨.expr left env, .compareLeft op right env :: stack⟩
+      | .compare left ((op, right) :: rest) =>
+          .next ⟨.expr left env, .chainLeft op right rest env :: stack⟩
       | .boolOp _ [] => .unsupported
       | .boolOp op (first :: rest) =>
           .next ⟨.expr first env, .boolean op rest env :: stack⟩
@@ -198,6 +202,16 @@ def step (module : Module) (state : State) : Step State Constant :=
           | .compareLeft op right env => .next ⟨.expr right env, .compareRight op value :: stack⟩
           | .compareRight op left =>
               outcome ((fun b => .ok (.bool b)) <$> scalarCompare op left value) stack
+          | .chainLeft op right rest env =>
+              .next ⟨.expr right env, .chainRight op value rest env :: stack⟩
+          | .chainRight op left rest env =>
+              match scalarCompare op left value with
+              | none => .unsupported
+              | some false => .next ⟨.value (.bool false), stack⟩
+              | some true => match rest with
+                  | [] => .next ⟨.value (.bool true), stack⟩
+                  | (op, right) :: rest =>
+                      .next ⟨.expr right env, .chainRight op value rest env :: stack⟩
           | .unary op => outcome (scalarExpr (fun _ => none) (.unaryOp op (.constant value))) stack
           | .boolean op rest env =>
               if (match op with | .and => !scalarTruth value | .or => scalarTruth value) then
@@ -237,6 +251,15 @@ def step (module : Module) (state : State) : Step State Constant :=
 def function (module : Module) (name : String) (args : List Constant) : Execution Constant :=
   ⟨State, ⟨.invoke name args, []⟩, step module⟩
 
+/-- Execute a Python expression in its input environment, including helper calls. -/
+def evaluate (module : Module) (env : ScalarEnv) (expr : Expr) : Execution Constant :=
+  ⟨State, ⟨.expr expr env, []⟩, step module⟩
+
+/-- A precondition holds only when evaluation returns Boolean True, not a truthy
+integer or string. Exceptions and nontermination do not satisfy the condition. -/
+def Condition (module : Module) (env : ScalarEnv) (expr : Expr) : Prop :=
+  Finishes (evaluate module env expr).step (evaluate module env expr).initial (.ok (.bool true))
+
 /-- A finite sequence of transitions, ending before the continuation executes. -/
 inductive Reaches (module : Module) : State → State → Prop where
   | refl : Reaches module state state
@@ -258,6 +281,19 @@ theorem Reaches.finishes (h : Reaches module a b)
 /-- Expression evaluation is compositional in every caller continuation. -/
 def Evaluates (module : Module) (env : ScalarEnv) (expression : Expr) (value : Constant) : Prop :=
   ∀ stack, Reaches module ⟨.expr expression env, stack⟩ ⟨.value value, stack⟩
+
+theorem Evaluates.finishes (h : Evaluates module env expr value) :
+    Finishes (evaluate module env expr).step (evaluate module env expr).initial (.ok value) :=
+  (h []).finishes (.done rfl)
+
+theorem Evaluates.condition_iff (h : Evaluates module env expr value) :
+    Condition module env expr ↔ value = .bool true := by
+  constructor
+  · intro holds
+    exact Except.ok.inj (h.finishes.unique holds)
+  · intro equal
+    subst value
+    exact h.finishes
 
 def ReturnsValue (module : Module) (name : String) (args : List Constant) (value : Constant) : Prop :=
   ∀ stack, Reaches module ⟨.invoke name args, stack⟩ ⟨.value value, stack⟩
@@ -380,6 +416,15 @@ theorem library_call (arguments : Arguments module env expressions values)
   apply call arguments
   intro stack
   exact .next (by simp [step, absent, outcome, result]) .refl
+
+/-- Recover a mathematical comparison from a simple Python input precondition. -/
+theorem condition_int_compare
+    (holds : Condition module env (.compare (.name name) [(op, .constant (.int bound))]))
+    (lookup : env name = some (.int input)) : evalCmpOp op input bound = true := by
+  have run : Evaluates module env (.compare (.name name) [(op, .constant (.int bound))])
+      (.bool (evalCmpOp op input bound)) :=
+    compare (Evaluates.lookup lookup) constant rfl
+  simpa using run.condition_iff.mp holds
 
 end Evaluates
 

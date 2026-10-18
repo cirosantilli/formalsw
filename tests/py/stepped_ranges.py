@@ -3,7 +3,8 @@ def increment(n: int) -> int:
 
 
 def countdown(n: int) -> int:
-    """@formalsw: Requires(n >= 0)
+    """
+    @formalsw: Requires(n >= 0)
     @formalsw: Returns
     """
     total = 0
@@ -49,7 +50,8 @@ def boolean_bound(n: int) -> int:
 
 
 def single_bound(n: int) -> int:
-    """@formalsw: Requires(n >= 0)
+    """
+    @formalsw: Requires(n >= 0)
     @formalsw: Returns
     """
     for k in range(increment(n)):

@@ -1,57 +1,53 @@
-"""Translate explicit scalar input domains without evaluating user Python."""
+"""Parse Python preconditions and check them using the ordinary execution model."""
 import ast
+from copy import deepcopy
+from dataclasses import dataclass
 
 
 class ContractError(ValueError):
     pass
 
 
-def input_condition(text: str, function: ast.FunctionDef) -> str:
-    """Translate a Python integer predicate to a Lean proposition.
+@dataclass(frozen=True)
+class InputCondition:
+    expression: ast.expr
+    arguments: tuple[ast.arg, ...]
+    unsupported: tuple
 
-    Only total, side-effect-free integer arithmetic is accepted. In particular,
-    division and arbitrary calls cannot turn a failing Python expression into a
-    false premise that would make the contract vacuous.
+
+def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Module) -> InputCondition:
     """
-    arguments = {arg.arg: arg.annotation for arg in function.args.args}
-
-    def integer(node):
-        if isinstance(node, ast.Constant) and type(node.value) is int:
-            return f"({node.value} : Int)"
-        if isinstance(node, ast.Name) and node.id in arguments:
-            annotation = arguments[node.id]
-            if isinstance(annotation, ast.Name) and annotation.id == "int":
-                return f"«{node.id}»"
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            return f"(-{integer(node.operand)})"
-        if isinstance(node, ast.BinOp):
-            operations = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*"}
-            op = operations.get(type(node.op))
-            if isinstance(node.op, ast.Mod) and isinstance(node.right, ast.Constant) \
-                    and type(node.right.value) is int and node.right.value > 0:
-                op = "%"
-            if op:
-                return f"({integer(node.left)} {op} {integer(node.right)})"
-        raise ContractError("Requires accepts integer arguments, constants, +, -, *, and % by a positive constant")
-
-    def predicate(node):
-        if isinstance(node, ast.Constant) and type(node.value) is bool:
-            return "True" if node.value else "False"
-        if isinstance(node, ast.Compare):
-            operations = {ast.Eq: "=", ast.NotEq: "≠", ast.Lt: "<", ast.LtE: "≤", ast.Gt: ">", ast.GtE: "≥"}
-            terms = [node.left, *node.comparators]
-            if all(type(op) in operations for op in node.ops):
-                return " ∧ ".join(
-                    f"({integer(left)} {operations[type(op)]} {integer(right)})"
-                    for left, op, right in zip(terms, node.ops, terms[1:]))
-        if isinstance(node, ast.BoolOp):
-            op = " ∧ " if isinstance(node.op, ast.And) else " ∨ "
-            return op.join(f"({predicate(value)})" for value in node.values)
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return f"¬ ({predicate(node.operand)})"
-        raise ContractError("Requires expects a Python integer comparison, and/or/not, or a Boolean constant")
-
+    A precondition is an ordinary Python expression in the function's input scope.
+    Its domain is defined by returning exactly True, including when it calls
+    looping or recursive helpers. Coverage checks do not execute user Python.
+    """
     try:
-        return predicate(ast.parse(text, mode="eval").body)
+        expression = ast.parse(text, mode='eval').body
     except SyntaxError as error:
-        raise ContractError(f"invalid Requires predicate: {text}") from error
+        raise ContractError(f'invalid Requires predicate: {text}') from error
+    # These imports are local because call coverage itself uses import resolution.
+    from lang.py.call_support import check_calls
+    from lang.py.support import UnsupportedConstruct
+    names = {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
+    arguments = tuple(arg for arg in function.args.args if arg.arg in names) if function else ()
+    used = {node.id for node in ast.walk(module) if isinstance(node, ast.Name)}
+    used.update(node.name for node in module.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)))
+    used.update(alias.asname or alias.name.split('.')[0] for node in module.body
+                if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names)
+    name = '_formalsw_requires'
+    while name in used:
+        name += '_'
+    helper = ast.FunctionDef(name=name,
+        args=ast.arguments(posonlyargs=[], args=list(deepcopy(arguments)), vararg=None,
+                           kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+        body=[ast.Return(expression)], decorator_list=[], returns=ast.Name(id='bool', ctx=ast.Load()),
+        type_params=[])
+    ast.fix_missing_locations(helper)
+    context = ast.Module(body=[*module.body, helper], type_ignores=[])
+    context.formalsw_source = getattr(module, 'formalsw_source', None)
+    issues = []
+    def reject(node, reason):
+        issues.append(UnsupportedConstruct(function.name if function else '<module>',
+            getattr(function, 'lineno', 1), f'Requires: {reason}'))
+    check_calls(context, helper, reject)
+    return InputCondition(expression, arguments, tuple(dict.fromkeys(issues)))

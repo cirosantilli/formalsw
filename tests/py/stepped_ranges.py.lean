@@ -44,8 +44,11 @@ private theorem countdown_result (n : Nat) :
   · rfl
   · simpa using loop_result n 0 _ rfl
 
-theorem countdown.«Returns» (n : Int) (hn : n ≥ 0) :
+theorem countdown.«Returns» (n : Int) (hp : Calls.Condition program
+      (fun key => if key = "n" then some (.int n) else none) SteppedRangesAst.requires_countdown_0) :
     (Calls.function program "countdown" [.int n]).Returns := by
+  have hn : n ≥ 0 := by
+    simpa [evalCmpOp] using Evaluates.condition_int_compare hp rfl
   simpa [Int.toNat_of_nonneg hn] using (countdown_result n.toNat).returns
 
 private theorem first_result (n : Int) :
@@ -73,8 +76,11 @@ theorem boolean_bound.«Returns» (n : Int) : (Calls.function program "boolean_b
   refine ⟨.int n, ?_⟩
   exact Execution.finishes_of_observe (fuel := 20) rfl
 
-theorem single_bound.«Returns» (n : Int) (hn : n ≥ 0) :
+theorem single_bound.«Returns» (n : Int) (hp : Calls.Condition program
+      (fun key => if key = "n" then some (.int n) else none) SteppedRangesAst.requires_single_bound_0) :
     (Calls.function program "single_bound" [.int n]).Returns := by
+  have hn : n ≥ 0 := by
+    simpa [evalCmpOp] using Evaluates.condition_int_compare hp rfl
   apply ReturnsValue.returns (value := .int 0)
   apply BlockReturns.function rfl rfl
   apply BlockReturns.for_range (values := [.int (n + 1)])
