@@ -19,6 +19,8 @@ from lang.py.concurrent_spec import Trial, ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem
 from lang.py.call_support import uses_calls_model
+from lang.py.contracts import ContractError, input_condition
+from lang.py.imports import bindings, resolve_function
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind
 
 
@@ -44,6 +46,7 @@ class Requirement:
     source_line: int
     marker: str
     unsupported: tuple[UnsupportedConstruct, ...] = ()
+    dependencies: tuple[Path, ...] = ()
 
 
 @dataclass
@@ -528,6 +531,39 @@ def docstring_start_line(node: ast.Module | ast.FunctionDef) -> int | None:
     return first.lineno
 
 
+def scalar_contract_type(module, function, namespace, property_name, conditions, negations, target=None):
+    """Quantify scalar inputs and keep any explicit domain inside the quantifier."""
+    arguments = function.args.args
+    kinds = [annotation_kind(arg.annotation) for arg in arguments]
+    if any(kind not in ('int', 'str', 'bool') for kind in kinds):
+        raise InvalidRequirement(f"{function.name}: this contract requires scalar argument annotations")
+    names = [f"«{arg.arg}»" for arg in arguments]
+
+    def call(program, func, ns):
+        if bindings(program, func.name) != [func]:
+            raise InvalidRequirement(f"{func.name}: contract functions must have one definition and must not be rebound")
+        if function_globals(program, func):
+            raise InvalidRequirement(f"{func.name}: constrained or imported contracts with globals are unsupported")
+        if [annotation_kind(arg.annotation) for arg in func.args.args] != kinds:
+            raise InvalidRequirement("Equiv requires matching supported argument domains")
+        runtime = "Calls.function" if uses_calls_model(program, func) else "scalarFunction"
+        values = ", ".join(scalar_term(name, kind) for name, kind in zip(names, kinds))
+        return f'FormalSW.PyAst.{runtime} {ns}.module {lean_string(func.name)} [{values}]'
+
+    left = call(module, function, namespace)
+    body = f"({left}).{property_name}"
+    if target:
+        body += f" ({call(*target)})"
+    if conditions:
+        body = " → ".join(f"({condition})" for condition in conditions) + f" →\n{body}"
+    if names:
+        binders = " ".join(f"({name} : {scalar_lean_type(kind)})" for name, kind in zip(names, kinds))
+        body = f"∀ {binders},\n{body}"
+    for _ in range(negations):
+        body = f"Not ({body})"
+    return body
+
+
 def collect_requirements(
     source_path: Path,
     module: ast.Module,
@@ -558,10 +594,58 @@ def collect_requirements(
     for stmt in module.body:
         if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        for marker in docstring_markers(
+        markers = docstring_markers(
             ast.get_docstring(stmt, clean=False),
             docstring_start_line(stmt),
-        ):
+        )
+        conditions = []
+        properties = []
+        for marker in markers:
+            parsed = parse_short_marker(marker.text)
+            if parsed and parsed[0] == "Requires":
+                if len(parsed[1]) != 1 or parsed[2]:
+                    raise InvalidRequirement("Requires takes one Python predicate and cannot be negated")
+                try:
+                    conditions.append(input_condition(parsed[1][0], stmt))
+                except ContractError as error:
+                    raise InvalidRequirement(f"{stmt.name}: {error}") from error
+            else:
+                properties.append(marker)
+        if conditions and not properties:
+            raise InvalidRequirement(f"{stmt.name}: Requires needs a Returns, Halts, or Equiv obligation")
+        for marker in properties:
+            parsed = parse_short_marker(marker.text)
+            scalar_equiv = (parsed and parsed[0] == "Equiv" and len(parsed[1]) == 1 and
+                            (uses_calls_model(module, stmt) or parsed[1][0] not in support.functions
+                             or uses_calls_model(module, support.functions[parsed[1][0]])))
+            if conditions or scalar_equiv:
+                if not parsed or parsed[0] not in ("Returns", "Halts", "Equiv"):
+                    raise InvalidRequirement(f"{stmt.name}: Requires supports short Returns, Halts, and Equiv contracts")
+                property_name, args, negations = parsed
+                theorem_name = proof_name_for_short_requirement(
+                    proof_namespace, stmt.name, property_name, args, marker.text)
+                unsupported = list(support.check(stmt.name))
+                target = None
+                dependencies = ()
+                if property_name == "Equiv":
+                    target = support.functions.get(args[0])
+                    if target is None:
+                        try:
+                            target_path, target_module, target = resolve_function(source_path, module, args[0])
+                        except ContractError as error:
+                            raise InvalidRequirement(str(error)) from error
+                        target_namespace = namespace_for_source(target_path)
+                        dependencies = (target_path,)
+                        unsupported.extend(SupportChecker(target_module).check(target.name))
+                    else:
+                        target_module, target_namespace = module, ast_namespace
+                        unsupported.extend(support.check(target.name))
+                property_type = "False" if unsupported else scalar_contract_type(
+                    module, stmt, ast_namespace, property_name, conditions, negations,
+                    (target_module, target, target_namespace) if target else None)
+                requirements.append(Requirement(theorem_name, property_type, source_path,
+                    marker.line, marker.text, tuple(unsupported), dependencies))
+                continue
             concurrent = re.fullmatch(r"(Not )?Concurrent\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", marker.text)
             if concurrent:
                 unsupported = support.requirement(stmt.name, "theorem trial : True")
@@ -686,6 +770,7 @@ class RequirementEmitter:
         )
         lines = [
             f"import {checked_import}",
+            *dependency_imports(self.requirements),
             "",
             "open FormalSW.PyAst",
             "",
@@ -726,6 +811,7 @@ class ProofStubEmitter:
         """Render a complete Lean proof-file stub."""
         lines = [
             f"import {self.ast_module}",
+            *dependency_imports(self.requirements),
             "import FormalSW",
             "",
             "open FormalSW.PyAst",
@@ -1478,12 +1564,36 @@ def iter_python_sources(directory: Path) -> list[Path]:
     return sources
 
 
+def dependency_imports(requirements: list[Requirement]) -> list[str]:
+    return [f"import {lean_module_for_path(proof_path_for_source(path))}"
+            for path in dict.fromkeys(path for req in requirements for path in req.dependencies)]
+
+
 def proof_dependencies(source: Path) -> list[Path]:
     """Find source-bound imports of adjacent Python proofs and generated ASTs."""
     proof = proof_path_for_source(source)
-    if not proof.is_file():
-        return []
+    module = ast.parse(source.read_text(), filename=str(source))
+    functions = {stmt.name for stmt in module.body if isinstance(stmt, ast.FunctionDef)}
     dependencies = []
+    # Dependency discovery needs only the imported binding. Do not compile raw
+    # Python quotations or elaborate requirements twice for every source file.
+    for function in module.body:
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for marker in docstring_markers(ast.get_docstring(function, clean=False), docstring_start_line(function)):
+            parsed = parse_short_marker(marker.text)
+            if parsed and parsed[0] == "Equiv" and len(parsed[1]) == 1 and parsed[1][0] not in functions:
+                try:
+                    path, _, _ = resolve_function(source, module, parsed[1][0])
+                except ContractError as error:
+                    raise InvalidRequirement(str(error)) from error
+                if path not in dependencies:
+                    dependencies.append(path)
+    for dependency in dependencies:
+        if not proof_path_for_source(dependency).is_file():
+            raise SystemExit(f"error: imported Python source or adjacent proof is missing: {dependency}")
+    if not proof.is_file():
+        return dependencies
     for parts in parse_imports(proof.read_text()):
         if parts[-1].endswith(".py"):
             dependency = Path.cwd().joinpath(*parts)
@@ -1524,7 +1634,7 @@ def check_sources(sources: list[Path], report: CheckReport) -> None:
                 if not visit(dependency):
                     raise SystemExit(f"error: {source}: imported Python proof failed: {dependency}")
             report.passed += check_source(source, report)
-        except (UnsupportedSyntax, InvalidRequirement, ScenarioError) as error:
+        except (UnsupportedSyntax, InvalidRequirement, ScenarioError, SyntaxError) as error:
             print(f"error: {source}: {error}", file=sys.stderr)
             report.failed_files += 1
         except SystemExit as error:

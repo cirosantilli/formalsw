@@ -371,6 +371,14 @@ def main() -> int:
     print(f"{'PASS' if project_checks_passed else 'FAIL'} external projects and numeric filenames", flush=True)
     if not project_checks_passed:
         print(textwrap.indent((project_checks.stdout + project_checks.stderr).rstrip(), "  "))
+    contract_checks = subprocess.run(
+        [sys.executable, "tests/py/contract_checks"],
+        cwd=REPO, text=True, capture_output=True,
+    )
+    contract_checks_passed = contract_checks.returncode == 0
+    print(f"{'PASS' if contract_checks_passed else 'FAIL'} guarded contracts and imported references", flush=True)
+    if not contract_checks_passed:
+        print(textwrap.indent((contract_checks.stdout + contract_checks.stderr).rstrip(), "  "))
     raw_docs = (REPO / "README.adoc").read_text().split("=== Raw Lean specification\n", 1)[1].split("\n== How it works", 1)[0]
     raw_headers = re.findall(r"^==== (.+)$", raw_docs, re.MULTILINE)
     raw_ids = re.findall(r"^\[\[(raw-lean-[^\]]+)\]\]\n==== ", raw_docs, re.MULTILINE)
@@ -393,6 +401,7 @@ def main() -> int:
         and parallel_passed
         and raw_docs_passed
         and project_checks_passed
+        and contract_checks_passed
         and call_checks_passed
     ) else 1
 

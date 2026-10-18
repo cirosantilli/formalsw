@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Check guarded contracts, imported references, and stale-proof rejection."""
+import ast
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.contracts import ContractError, input_condition
+
+function = ast.parse('def f(n: int, flag: bool): pass').body[0]
+assert '∧' in input_condition('0 <= n < 10 and n % 2 == 0', function)
+assert '¬' in input_condition('not (n < 0 or n > 10)', function)
+for condition in ('n / 0 > 1', 'n % 0 == 0', 'n % -2 == 0', 'missing > 0',
+                  'flag > 0', 'n', 'n > len([])', '__import__("os").system("false")'):
+    try:
+        input_condition(condition, function)
+    except ContractError:
+        pass
+    else:
+        raise AssertionError(condition)
+
+with tempfile.TemporaryDirectory(prefix='formalsw-contract-') as temporary:
+    project = Path(temporary)
+    subprocess.run(['git', 'init', '-q', str(project)], check=True)
+    (project / 'lean-toolchain').write_text((REPO / 'lean-toolchain').read_text())
+    (project / 'lakefile.toml').write_text(
+        f'name = "contract_checks"\n[[require]]\nname = "formalsw"\npath = "{REPO}"\n')
+    (project / 'reference').mkdir()
+    reference = project / 'reference' / '1.py'
+    reference.write_text('def f(n: int) -> int:\n'
+        '    """@formalsw: Requires(n >= 0)\n    @formalsw: Returns\n    """\n'
+        '    return n\n')
+    reference.with_suffix('.py.lean').write_text('''import «.formalsw».reference.«1.py.ast»
+import FormalSW
+open FormalSW.PyAst
+namespace reference.«1»
+theorem f.«Returns» (n : Int) (_hn : n ≥ 0) :
+    (scalarFunction Reference.P1Ast.module "f" [.int n]).Returns := ⟨.int n, .done rfl⟩
+end reference.«1»
+''')
+    solver = project / 'solver.py'
+    original = ('from importlib import import_module\n'
+        'naive = import_module("reference.1").f\n'
+        'def solve(n: int) -> int:\n'
+        '    """@formalsw: Requires(n >= 0)\n    @formalsw: Equiv(naive)\n    """\n'
+        '    return n\n')
+    solver.write_text(original)
+    # The proof intentionally imports only the reference AST. The Python
+    # Equiv binding must still cause the reference contract to be checked.
+    solver.with_suffix('.py.lean').write_text('''import «.formalsw».«solver.py.ast»
+import «.formalsw».reference.«1.py.ast»
+import FormalSW
+open FormalSW.PyAst
+namespace solver
+theorem solve.«Equiv(naive)» (n : Int) (_hn : n ≥ 0) :
+    (scalarFunction SolverAst.module "solve" [.int n]).Equiv
+      (scalarFunction Reference.P1Ast.module "f" [.int n]) := fun _ => Iff.rfl
+end solver
+''')
+
+    def check(expected=0, message='', stub=False):
+        result = subprocess.run([str(REPO / 'formalsw'), *(['--stub'] if stub else []), str(solver)],
+                                cwd=project, text=True, capture_output=True)
+        output = result.stdout + result.stderr
+        assert (result.returncode == 0) == (expected == 0), output
+        assert message in output, output
+        return output
+
+    check(message='All 2 checks passed')
+    check(message='import reference.«1.py»', stub=True)
+    # A changed reference must be rechecked even though old objects exist.
+    original_reference = reference.read_text()
+    reference.write_text(original_reference.replace('return n', 'return n + 1'))
+    check(1, 'imported Python proof failed')
+    reference.write_text(original_reference.replace('n >= 0', 'n >= -1'))
+    check(1, 'imported Python proof failed')
+    reference.write_text(original_reference)
+    solver.write_text(original.replace('n >= 0', 'n >= -1'))
+    check(1, 'proof check failed')
+    solver.write_text(original.replace('    @formalsw: Equiv(naive)\n', ''))
+    check(1, 'Requires needs a Returns, Halts, or Equiv obligation')
+    solver.write_text(original + '\nnaive = solve\n')
+    check(1, 'must not be rebound')
+    solver.write_text(original + '\nsolve = naive\n')
+    check(1, 'must not be rebound')
+    solver.write_text(original.replace('from importlib import import_module\n'
+        'naive = import_module("reference.1").f', 'from reference import *'))
+    check(1, 'wildcard imports are unsupported')
+    solver.write_text(original.replace('"reference.1"', '"reference.missing"'))
+    check(1, 'cannot resolve local Equiv import')
+    solver.write_text(original.replace('return n', 'return n + 1'))
+    check(1, 'proof check failed')
+    # The ordinary import spelling uses exactly the same dependency path.
+    named = project / 'reference' / 'named.py'
+    named.symlink_to('1.py')
+    solver.write_text(original.replace('from importlib import import_module\n'
+        'naive = import_module("reference.1").f', 'from reference.named import f as naive'))
+    check(message='All 2 checks passed')
+    solver.write_text(original)
+    (project / 'reference.py').write_text('')
+    check(1, 'shadowed by a Python module')
+    (project / 'reference.py').unlink()
+    (project / 'reference' / '__init__.py').write_text('raise RuntimeError("side effect")\n')
+    check(1, 'package initialization is unsupported')
+
+print('Guarded contracts and imported equivalence checks passed')

@@ -426,6 +426,25 @@ For the unbounded reference-object guarantee, the worker must acquire the common
 
 The mutex model permits only its owner to execute body operations; every other worker is blocked at acquire. An inductive proof covers all choices of the next owner and every individual body step. It uses an unbounded reference heap. The scope is these workers and their shared objects, with no outside mutation. As with <<raw-lean-parallel>>, steps are sequentially consistent; signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside the execution model.
 
+==== Requires
+
+`Requires(predicate)` restricts the input domain of the short `Returns`, `Halts`, and scalar `Equiv` contracts in the same function docstring. It does not change Python execution or insert an assertion. For example, a recursive countdown only terminates on nonnegative integers:
+
+[source,python]
+----
+def countdown(n: int) -> int:
+    """@formalsw: Requires(n >= 0)
+    @formalsw: Returns
+    """
+    if n == 0:
+        return 0
+    return countdown(n - 1)
+----
+
+The obligation remains named `countdown.«Returns»`, with type `∀ n : Int, n ≥ 0 → (Calls.function module "countdown" [.int n]).Returns`. Changing or removing the precondition changes the checked theorem. Multiple `Requires` markers contribute separate premises; `Not` negates the whole guarded obligation. A precondition without a property is an error.
+
+Predicates use Python integer comparisons (including chained comparisons), `and`, `or`, `not`, Boolean constants, integer arguments and constants, `+`, `-`, `*`, and `%` by a positive constant. Calls, division, arbitrary truthiness, and stateful predicates are rejected. Constrained contracts currently require scalar arguments without global state; raw Lean statements retain their own explicit premises and cannot be combined with `Requires`.
+
 ==== Returns
 
 `Returns` means that every input in the modeled argument domain finishes successfully. This is the usual marker for a total function:
@@ -547,6 +566,10 @@ Other valid bounds include `BigO(1)`, `BigO(n)`, `BigO(n * n, n = len(values))`,
 The cost model assigns cost 1 to every represented statement and expression operation. It then proves a constant multiple of the selected bound beyond some input-size threshold. Calls are unit-cost by default too; later standard-library models can replace that default with operation-specific complexity. The initial structural analyzer recognizes constant and iterative integer functions plus the recursive list-sort shapes demonstrated in link:tests/py/sort.py[].
 
 ==== Equiv
+
+The reference can be a function imported from another local Python source file, using `from reference import naive` (including aliases). Numeric filenames can use `from importlib import import_module` followed by `naive = import_module("reference.1").naive`. The solver then uses `@formalsw: Equiv(naive)`, optionally with a `Requires` input domain.
+
+Formalsw resolves these imports statically, compares the two generated AST executions on the same arguments, and checks the reference source and adjacent proof before the solver. `--stub` includes the reference proof import. Rebinding, missing sources or proofs, packages with executable initialization, and imports outside the current project are rejected. Module lookup uses the source directory and then the current project directory; relative from-imports are also supported. This feature identifies scalar contract references with matching parameter types and no global state; imported calls inside function bodies still need separate interpreter support.
 
 `Equiv` states that two functions have identical evaluation results for every input, i.e. that either:
 
