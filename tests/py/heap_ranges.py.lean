@@ -13,22 +13,27 @@ private def encode (values : List Nat) : List Mutable.Value :=
 
 /-- Every iteration preserves the caller's existing objects and appends exactly
 the current range index to the newly allocated list. -/
-private theorem loop_result (remaining start stop : Nat) (bound : stop = start + remaining)
+private theorem loop_continues (remaining start stop : Nat) (bound : stop = start + remaining)
     (env : Mutable.Env) (prior : Mutable.Heap) (acc : List Mutable.Value)
     (items : env "items" = some (.ref prior.length)) :
-    HeapCalls.BlockReturns program env
-      [.rangeStepLoop "k" start stop 1 body [], .return (.name "items")]
-      (prior ++ [acc]) (.ref prior.length)
-      (prior ++ [acc ++ encode (List.range' start remaining)]) := by
+    ∃ finalEnv,
+      HeapCalls.BlockContinues program env [.rangeStepLoop "k" start stop 1 body []]
+        (prior ++ [acc]) finalEnv (prior ++ [acc ++ encode (List.range' start remaining)]) ∧
+      finalEnv "items" = some (.ref prior.length) := by
   induction remaining generalizing start env acc with
   | zero =>
       simp only [List.range'_zero, encode, List.map_nil, List.append_nil]
-      apply HeapCalls.BlockReturns.range_done (by simp [Calls.rangeContinues, bound])
-      exact HeapCalls.BlockReturns.return_value (HeapCalls.Evaluates.lookup items)
+      exact ⟨env, HeapCalls.BlockContinues.range_done
+        (by simp [Calls.rangeContinues, bound]) HeapCalls.BlockContinues.nil, items⟩
   | succ remaining ih =>
-      apply HeapCalls.BlockReturns.range_step (by simp [Calls.rangeContinues]; omega)
-      apply HeapCalls.BlockReturns.discard
-      · apply HeapCalls.Evaluates.append
+      obtain ⟨finalEnv, recurse, finalItems⟩ := ih (start + 1) (by omega)
+        (HeapCalls.setLocal env "k" (.scalar (.int start)))
+        (acc ++ [.scalar (.int start)]) (by simpa [HeapCalls.setLocal] using items)
+      refine ⟨finalEnv, HeapCalls.BlockContinues.range_step
+        (by simp [Calls.rangeContinues]; omega) ?_, finalItems⟩
+      apply HeapCalls.BlockContinues.append (body := body)
+      · apply HeapCalls.BlockContinues.discard
+        apply HeapCalls.Evaluates.append
           (HeapCalls.Evaluates.lookup (by simpa [HeapCalls.setLocal] using items))
           (old := acc) (current := acc) (afterItem := prior ++ [acc]) (by simp)
           (value := .scalar (.int (start : Int)))
@@ -37,10 +42,18 @@ private theorem loop_result (remaining start stop : Nat) (bound : stop = start +
       · have update : (prior ++ [acc]).set prior.length (acc ++ [.scalar (.int (start : Int))]) =
             prior ++ [acc ++ [.scalar (.int (start : Int))]] := by simp
         rw [update]
-        have recurse := ih (start + 1) (by omega)
-          (HeapCalls.setLocal env "k" (.scalar (.int start)))
-          (acc ++ [.scalar (.int start)]) (by simpa [HeapCalls.setLocal] using items)
-        simpa [List.range'_succ, encode, List.append_assoc, Int.natCast_add] using recurse
+        simpa [Calls.loopContinuation, body, List.range'_succ, encode, List.append_assoc,
+          Int.natCast_add] using recurse
+
+private theorem loop_result (remaining start stop : Nat) (bound : stop = start + remaining)
+    (env : Mutable.Env) (prior : Mutable.Heap) (acc : List Mutable.Value)
+    (items : env "items" = some (.ref prior.length)) :
+    HeapCalls.BlockReturns program env
+      [.rangeStepLoop "k" start stop 1 body [], .return (.name "items")]
+      (prior ++ [acc]) (.ref prior.length)
+      (prior ++ [acc ++ encode (List.range' start remaining)]) := by
+  obtain ⟨finalEnv, executed, finalItems⟩ := loop_continues remaining start stop bound env prior acc items
+  exact executed.returns (HeapCalls.BlockReturns.return_value (HeapCalls.Evaluates.lookup finalItems))
 
 theorem build.result (n : Nat) (heap : Mutable.Heap) :
     HeapCalls.ReturnsValue program "build" [.scalar (.int n)] heap (.ref heap.length)

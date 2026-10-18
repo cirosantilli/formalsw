@@ -475,6 +475,14 @@ theorem compare (left : Evaluates module env a heap av middle)
   exact .next rfl ((left _ _).trans (.next rfl ((right _ _).trans
     (.next (by simp [step, result, run, operation]) .refl))))
 
+theorem conditional (condition : Evaluates module env test heap value middle)
+    (truth : Mutable.truth value middle = some (.ok flag, middle))
+    (branch : Evaluates module env (if flag then yes else no) middle answer finalHeap) :
+    Evaluates module env (.ifExp test yes no) heap answer finalHeap := by
+  intro anchors stack
+  exact .next rfl ((condition anchors _).trans
+    (.next (by simp [step, run, truth]) (branch anchors stack)))
+
 inductive Arguments (module : Module) (env : Env) : List Expr → Heap → List Value → Heap → Prop where
   | nil : Arguments module env [] heap [] heap
   | cons : Evaluates module env expression heap value middle →
@@ -651,6 +659,80 @@ theorem function (found : findFunctionIn module.body name = some (args, body))
   exact .next (by simp [step, found, arguments]) (evaluated anchors stack)
 
 end BlockReturns
+
+/-- Normal completion of a statement block, preserving any following statements
+and caller continuation while exposing the updated locals and shared heap. -/
+def BlockContinues (module : Module) (env : Env) (body : List Stmt)
+    (heap : Heap) (finalEnv : Env) (finalHeap : Heap) : Prop :=
+  ∀ following anchors stack,
+    Reaches module anchors ⟨.block (body ++ following) env, stack, heap⟩
+      ⟨.block following finalEnv, stack, finalHeap⟩
+
+namespace BlockContinues
+
+theorem nil : BlockContinues module env [] heap env heap :=
+  fun _ _ _ => .refl
+
+theorem append (first : BlockContinues module env body heap middleEnv middleHeap)
+    (second : BlockContinues module middleEnv rest middleHeap finalEnv finalHeap) :
+    BlockContinues module env (body ++ rest) heap finalEnv finalHeap := by
+  intro following anchors stack
+  simpa only [List.append_assoc] using
+    (first (rest ++ following) anchors stack).trans (second following anchors stack)
+
+theorem assign (evaluated : Evaluates module env expression heap value finalHeap) :
+    BlockContinues module env [.assign [.name name] expression] heap
+      (setLocal env name value) finalHeap :=
+  fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
+
+theorem discard (evaluated : Evaluates module env expression heap value finalHeap) :
+    BlockContinues module env [.expr expression] heap env finalHeap :=
+  fun _ anchors _ => .next rfl ((evaluated anchors _).trans (.next rfl .refl))
+
+theorem branch (evaluated : Evaluates module env condition heap value middle)
+    (truth : Mutable.truth value middle = some (.ok flag, middle))
+    (body : BlockContinues module env (if flag then yes else no) middle finalEnv finalHeap) :
+    BlockContinues module env [.ifThen condition yes no] heap finalEnv finalHeap := by
+  intro following anchors stack
+  exact .next rfl ((evaluated anchors _).trans
+    (.next (by simp [step, run, truth]) (body following anchors stack)))
+
+theorem for_range (arguments : Evaluates.Arguments module env expressions heap values middle)
+    (bounds : rangeBounds values = .ok (start, stop, stride))
+    (executed : BlockContinues module env [.rangeStepLoop name start stop stride body otherwise]
+      middle finalEnv finalHeap) :
+    BlockContinues module env [.forIn (.name name) (.call (.name "range") expressions) body otherwise]
+      heap finalEnv finalHeap := by
+  intro following anchors stack
+  exact .next rfl ((BlockReturns.range_reach arguments [] anchors stack).trans
+    (.next (by simp [step, bounds]) (executed following anchors stack)))
+
+theorem range_step (continues : Calls.rangeContinues next stop stride = true)
+    (rest : BlockContinues module (setLocal env name (.scalar (.int next)))
+      (body ++ [Calls.loopContinuation body (.rangeStepLoop name (next + stride) stop stride body otherwise)])
+      heap finalEnv finalHeap) :
+    BlockContinues module env [.rangeStepLoop name next stop stride body otherwise]
+      heap finalEnv finalHeap := by
+  intro following anchors stack
+  refine .next ?_ (rest following anchors stack)
+  simp [step, continues, List.append_assoc]
+
+theorem range_done (finished : Calls.rangeContinues next stop stride = false)
+    (rest : BlockContinues module env otherwise heap finalEnv finalHeap) :
+    BlockContinues module env [.rangeStepLoop name next stop stride body otherwise]
+      heap finalEnv finalHeap :=
+  fun following anchors stack => .next (by simp [step, finished]) (rest following anchors stack)
+
+theorem loop_resume (rest : BlockContinues module env [next] heap finalEnv finalHeap) :
+    BlockContinues module env [.loopResume next] heap finalEnv finalHeap :=
+  fun following anchors stack => .next rfl (rest following anchors stack)
+
+theorem returns (first : BlockContinues module env body heap middleEnv middleHeap)
+    (rest : BlockReturns module middleEnv following middleHeap answer finalHeap) :
+    BlockReturns module env (body ++ following) heap answer finalHeap :=
+  fun anchors stack => (first following anchors stack).trans (rest anchors stack)
+
+end BlockContinues
 end FormalSW.PyAst.HeapCalls
 
 namespace FormalSW.PyAst.Mutable.Call
