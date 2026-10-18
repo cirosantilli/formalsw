@@ -21,6 +21,12 @@ def annotation_kind(annotation):
         return annotation.id
     if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name):
         container = annotation.value.id
+        if container == 'dict' and isinstance(annotation.slice, ast.Tuple) and len(annotation.slice.elts) == 2:
+            kinds = tuple('None' if isinstance(part, ast.Constant) and part.value is None
+                          else annotation_kind(part) for part in annotation.slice.elts)
+            if all(kind in ('int', 'str', 'bytes', 'bool', 'None') for kind in kinds):
+                return f'dict[{kinds[0]},{kinds[1]}]'
+            return None
         element = annotation_kind(annotation.slice)
         if element in ('int', 'str', 'bool') and container in ('list', 'set'):
             return f'{container}[{element}]'
@@ -68,6 +74,8 @@ def function_globals(module, function):
                 raise GlobalInputError(stmt, 'nested list globals are not yet supported; pass the list as an argument')
             if expected and expected.startswith('set['):
                 raise GlobalInputError(stmt, 'set globals are not yet supported; pass the set as an argument')
+            if expected and expected.startswith('dict['):
+                raise GlobalInputError(stmt, 'dictionary globals are not yet supported; pass the dictionary as an argument')
             if isinstance(value, ast.Name):
                 kind = domain(value.id, (*visiting, name))
             elif value is None and expected:

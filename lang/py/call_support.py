@@ -252,7 +252,7 @@ def uses_heap_calls(module, function):
         visited.add(current.name)
         kinds = [annotation_kind(arg.annotation) for arg in current.args.args]
         kinds.append(annotation_kind(current.returns))
-        if any(kind and (kind.startswith(('list[', 'set[')) or kind == 'bytearray') for kind in kinds):
+        if any(kind and (kind.startswith(('list[', 'set[', 'dict[')) or kind == 'bytearray') for kind in kinds):
             return True
         # Defaults are evaluated at definition time, outside the modeled body.
         # Their validation must not select a different execution backend.
@@ -379,7 +379,7 @@ def check_calls(module, function, reject, *, heap=False):
                 visit_class(classes[arg.annotation.id])
                 continue
             kind = annotation_kind(arg.annotation)
-            if kind not in ('int', 'str', 'bytes', 'bool') and not (heap and kind and (kind.startswith(('list[', 'set[')) or kind in ('bytes', 'bytearray'))):
+            if kind not in ('int', 'str', 'bytes', 'bool') and not (heap and kind and (kind.startswith(('list[', 'set[', 'dict[')) or kind in ('bytes', 'bytearray'))):
                 reject(arg, 'call arguments require scalar annotations or supported heap list annotations' if heap
                        else 'call arguments require scalar int, str, or bool annotations')
 

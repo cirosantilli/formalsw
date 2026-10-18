@@ -682,7 +682,7 @@ class SupportChecker:
                     issues.append(UnsupportedConstruct(target, function.lineno,
                         'heap-call specifications currently require scalar entry arguments'))
                 kind = annotation_kind(function.returns)
-                if model == 'HeapCalls.scalarFunction' and kind and (kind.startswith(('list[', 'set[')) or kind == 'bytearray'):
+                if model == 'HeapCalls.scalarFunction' and kind and (kind.startswith(('list[', 'set[', 'dict[')) or kind == 'bytearray'):
                     issues.append(UnsupportedConstruct(target, function.lineno,
                         f'{kind.split("[")[0]} results require HeapCalls.call rather than its scalar adapter'))
                 issues.extend(self.check(target, heap_calls=True))

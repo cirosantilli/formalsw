@@ -50,6 +50,26 @@ decreasing_by
   change elementKind.length < 5 + elementKind.length + 1
   omega
 
+/-- Annotation names differ from runtime type names only for None. -/
+def scalarKind : Constant → String
+  | .none => "None"
+  | value => (Data.scalar value).typeName
+
+/-- Parse the supported scalar-key, scalar-value dictionary annotations. -/
+def dictionaryKinds (kind : String) : Option (String × String) :=
+  let kinds := ["int", "str", "bytes", "bool", "None"]
+  kinds.findSome? fun keyKind => kinds.findSome? fun valueKind =>
+    if kind = "dict[" ++ keyKind ++ "," ++ valueKind ++ "]" then some (keyKind, valueKind)
+    else none
+
+/-- The input dictionary keeps its address and insertion order; aliases are permitted. -/
+def Value.DictionaryHasType (heap : Heap) (value : Value) (keyKind valueKind : String) : Prop :=
+  match value with
+  | .scalar _ => False
+  | .ref address => ∃ entries, heap[address]? = some (.dict entries) ∧
+      ∀ entry ∈ entries, scalarKind entry.1 = keyKind ∧
+        ∃ scalar, entry.2 = .scalar scalar ∧ scalarKind scalar = valueKind
+
 def Value.HasType (heap : Heap) (value : Value) (kind : String) : Prop :=
   match value with
   | .scalar (.int _) => kind = "int"
@@ -57,20 +77,22 @@ def Value.HasType (heap : Heap) (value : Value) (kind : String) : Prop :=
   | .scalar (.bytes _) => kind = "bytes"
   | .scalar (.bool _) => kind = "bool"
   | .scalar .none => kind = "None"
-  | .ref address => if kind = "bytearray" then
-      ∃ bytes, heap[address]? = some (.bytearray bytes)
-    else if kind = "set" ∨ kind = "set[int]" ∨ kind = "set[str]" ∨ kind = "set[bool]" then
-      ∃ items, heap[address]? = some (.set items) ∧
-        (kind = "set" ∨ ∃ elementKind, kind = "set[" ++ elementKind ++ "]" ∧
-          ∀ item ∈ items, (Data.scalar item).typeName = elementKind)
-    else ∃ items, heap[address]? = some (.list items) ∧
-      (kind = "list" ∨ ∃ elementKind, ∃ (_ : kind = "list[" ++ elementKind ++ "]"),
-        ∀ item ∈ items, match item with
-          | .scalar (.int _) => elementKind = "int"
-          | .scalar (.string _) => elementKind = "str"
-          | .scalar (.bool _) => elementKind = "bool"
-          | .ref _ => elementKind.startsWith "list[" = true ∧ Value.ListHasType heap item elementKind
-          | _ => False)
+  | .ref address => match dictionaryKinds kind with
+    | some (keyKind, valueKind) => Value.DictionaryHasType heap value keyKind valueKind
+    | none => if kind = "bytearray" then
+        ∃ bytes, heap[address]? = some (.bytearray bytes)
+      else if kind = "set" ∨ kind = "set[int]" ∨ kind = "set[str]" ∨ kind = "set[bool]" then
+        ∃ items, heap[address]? = some (.set items) ∧
+          (kind = "set" ∨ ∃ elementKind, kind = "set[" ++ elementKind ++ "]" ∧
+            ∀ item ∈ items, (Data.scalar item).typeName = elementKind)
+      else ∃ items, heap[address]? = some (.list items) ∧
+        (kind = "list" ∨ ∃ elementKind, ∃ (_ : kind = "list[" ++ elementKind ++ "]"),
+          ∀ item ∈ items, match item with
+            | .scalar (.int _) => elementKind = "int"
+            | .scalar (.string _) => elementKind = "str"
+            | .scalar (.bool _) => elementKind = "bool"
+            | .ref _ => elementKind.startsWith "list[" = true ∧ Value.ListHasType heap item elementKind
+            | _ => False)
 
 theorem Value.ListHasType.of_heap_preserved {heap other : Heap} (typed : Value.ListHasType heap value kind)
     (preserved : ∀ (address : Nat) (object : Object), heap[address]? = some object → other[address]? = some object) :
@@ -103,27 +125,40 @@ theorem Value.HasType.of_heap_preserved {heap other : Heap} (typed : Value.HasTy
   cases value with
   | scalar constant => cases constant <;> exact typed
   | ref address =>
-      simp only [Value.HasType] at typed ⊢
-      by_cases buffer : kind = "bytearray"
-      · simp only [if_pos buffer] at typed ⊢
-        obtain ⟨bytes, found⟩ := typed
-        exact ⟨bytes, preserved address _ found⟩
-      · simp only [if_neg buffer] at typed ⊢
-        by_cases isSet : kind = "set" ∨ kind = "set[int]" ∨ kind = "set[str]" ∨ kind = "set[bool]"
-        · simp only [if_pos isSet] at typed ⊢
-          obtain ⟨items, found, kinds⟩ := typed
-          exact ⟨items, preserved address _ found, kinds⟩
-        · simp only [if_neg isSet] at typed ⊢
-          obtain ⟨items, found, kinds⟩ := typed
-          refine ⟨items, preserved address _ found, ?_⟩
-          rcases kinds with plain | ⟨elementKind, domain, elements⟩
-          · exact .inl plain
-          · refine .inr ⟨elementKind, domain, ?_⟩
-            intro item member
-            have inner := elements item member
-            cases item with
-            | scalar constant => cases constant <;> exact inner
-            | ref row => exact ⟨inner.1, inner.2.of_heap_preserved preserved⟩
+      cases parsed : dictionaryKinds kind with
+      | some kinds =>
+          rcases kinds with ⟨keyKind, valueKind⟩
+          simp only [Value.HasType, parsed, Value.DictionaryHasType] at typed ⊢
+          obtain ⟨entries, found, types⟩ := typed
+          exact ⟨entries, preserved address _ found, types⟩
+      | none =>
+          simp only [Value.HasType, parsed] at typed ⊢
+          by_cases buffer : kind = "bytearray"
+          · simp only [if_pos buffer] at typed ⊢
+            obtain ⟨bytes, found⟩ := typed
+            exact ⟨bytes, preserved address _ found⟩
+          · simp only [if_neg buffer] at typed ⊢
+            by_cases isSet : kind = "set" ∨ kind = "set[int]" ∨ kind = "set[str]" ∨ kind = "set[bool]"
+            · simp only [if_pos isSet] at typed ⊢
+              obtain ⟨items, found, kinds⟩ := typed
+              exact ⟨items, preserved address _ found, kinds⟩
+            · simp only [if_neg isSet] at typed ⊢
+              obtain ⟨items, found, kinds⟩ := typed
+              refine ⟨items, preserved address _ found, ?_⟩
+              rcases kinds with plain | ⟨elementKind, domain, elements⟩
+              · exact .inl plain
+              · refine .inr ⟨elementKind, domain, ?_⟩
+                intro item member
+                have inner := elements item member
+                cases item with
+                | scalar constant => cases constant <;> exact inner
+                | ref row => exact ⟨inner.1, inner.2.of_heap_preserved preserved⟩
+
+theorem Value.dictionary_of_hasType
+    (typed : Value.HasType heap (.ref address) kind)
+    (parsed : dictionaryKinds kind = some (keyKind, valueKind)) :
+    Value.DictionaryHasType heap (.ref address) keyKind valueKind := by
+  simpa only [Value.HasType, parsed] using typed
 
 theorem Value.HasType.append (typed : Value.HasType heap value kind) (extra : Heap) :
     Value.HasType (heap ++ extra) value kind := by

@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""
+Check dictionary domains, aliases, prerequisites, and observed shared mutation.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.global_inputs import annotation_kind
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+def dictionary(value):
+    return '.dict [' + ', '.join(f'(({constant(key)}), .scalar ({constant(item)}))'
+                                for key, item in value.items()) + ']'
+
+
+source = '''
+def guard(table: dict[int, str], flag: bool) -> bool:
+    table[0] = 'changed'
+    return flag
+
+def other(table: dict[int, str], flag: bool) -> dict[int, str]:
+    return table
+
+def f(table: dict[int, str], flag: bool) -> dict[int, str]:
+    """
+    @formalsw: Requires(guard(table, flag))
+    @formalsw: MARKER
+    """
+    return table
+
+def write_read(left: dict[int, str], right: dict[int, str], key: int, value: str) -> str:
+    left[key] = value
+    return right.get(key, '')
+'''
+markers = ('Returns', 'Halts', 'Throws', 'ReturnType', 'Not Returns', 'Not Halts', 'Not Throws',
+           'Equiv(other)', 'Not Equiv(other)', 'EquivReturn(other)',
+           'theorem raw : Returns(this_function(table, flag))')
+kinds = {'int': 3, 'str': 'λ😀', 'bytes': b'bytes', 'bool': True, 'None': None}
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192']
+for key_kind, value_kind in itertools.product(kinds, repeat=2):
+    kind = f'dict[{key_kind},{value_kind}]'
+    assert annotation_kind(ast.parse(kind, mode='eval').body) == kind
+    key, value = constant(kinds[key_kind]), constant(kinds[value_kind])
+    entry = f'(({key}), Mutable.Value.scalar ({value}))'
+    lines += [f'example : Mutable.dictionaryKinds "{kind}" = some ("{key_kind}", "{value_kind}") := rfl',
+              f'example : Mutable.Value.HasType [.dict [{entry}]] (.ref 0) "{kind}" := by',
+              f'  refine ⟨[{entry}], rfl, ?_⟩',
+              '  intro item member',
+              '  have same := List.mem_singleton.mp member',
+              '  subst item',
+              f'  exact ⟨rfl, ({value}), rfl, rfl⟩',
+              f'example : Mutable.Value.HasType [.dict []] (.ref 0) "{kind}" := ⟨[], rfl, by simp⟩']
+for kind in ('dict[int]', 'dict[int,str,bool]', 'dict[float,str]', 'dict[list[int],str]',
+             'dict[str,list[int]]', 'dict[str,object]', 'list[dict[int,str]]'):
+    assert annotation_kind(ast.parse(kind, mode='eval').body) is None, kind
+for declaration in ('table: dict[int, str]', 'table: dict[int, str] = {}'):
+    assert SupportChecker(ast.parse(declaration + '\ndef f() -> int: return len(table)\n')).check('f')
+lines += ['''
+example : ¬ Mutable.Value.HasType [.list []] (.ref 0) "dict[int,str]" := by
+  intro typed
+  obtain ⟨entries, found, _⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  simp at found
+
+example : ¬ Mutable.Value.HasType [] (.ref 42) "dict[int,str]" := by
+  intro typed
+  obtain ⟨entries, found, _⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  simp at found
+
+example : ¬ Mutable.Value.HasType [.dict [(.bool true, .scalar (.string "value"))]] (.ref 0) "dict[int,str]" := by
+  intro typed
+  obtain ⟨entries, found, types⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  have shape : entries = [(.bool true, .scalar (.string "value"))] := by simpa using found.symm
+  subst entries
+  have bad := (types (.bool true, .scalar (.string "value")) (by simp)).1
+  simp [Mutable.scalarKind, Data.typeName] at bad
+
+example : ¬ Mutable.Value.HasType [.dict [(.int 1, .scalar (.int 2))]] (.ref 0) "dict[int,str]" := by
+  intro typed
+  obtain ⟨entries, found, types⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  have shape : entries = [(.int 1, .scalar (.int 2))] := by simpa using found.symm
+  subst entries
+  obtain ⟨value, same, kind⟩ := (types (.int 1, .scalar (.int 2)) (by simp)).2
+  cases same
+  simp [Mutable.scalarKind, Data.typeName] at kind
+
+example : ¬ Mutable.Value.HasType [.dict [(.int 1, .ref 0)]] (.ref 0) "dict[int,str]" := by
+  intro typed
+  obtain ⟨entries, found, types⟩ := Mutable.Value.dictionary_of_hasType typed rfl
+  have shape : entries = [(.int 1, .ref 0)] := by simpa using found.symm
+  subst entries
+  obtain ⟨value, same, _⟩ := (types (.int 1, .ref 0) (by simp)).2
+  cases same
+''']
+with project_temporary_directory(prefix='dictionary-inputs-') as temporary:
+    directory = Path(temporary)
+    for index, marker in enumerate(markers):
+        path = directory / f'source_{index}.py'
+        path.write_text(source.replace('MARKER', marker))
+        module = api['source_module'](path)
+        requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        assert requirements and not any(item.unsupported for item in requirements), (marker, requirements)
+        term = next(item.property_type for item in requirements if item.marker == marker)
+        assert 'HeapCalls.Condition' in term and 'HeapCalls.call' in term, term
+        assert 'Mutable.Heap.Valid' in term and '"dict[int,str]"' in term, term
+        coverage = next(item for item in requirements if item.marker == 'execution model coverage')
+        assert 'HeapCalls.Condition' in coverage.property_type
+        predicate = next(item for item in requirements if item.theorem_name.endswith('requires_f_0_supported'))
+        assert 'HeapCalls.evaluate' in predicate.property_type and 'HeapCalls.Condition' not in predicate.property_type
+    path = directory / 'aliases.py'
+    path.write_text('def f(left: dict[int,str], right: dict[int,str], _formalsw_heap: int) -> dict[int,str]:\n'
+                    '    """\n    @formalsw: Returns\n    """\n    return right\n')
+    module = api['source_module'](path)
+    term = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')[0].property_type
+    assert '(«_formalsw_heap_» : FormalSW.PyAst.Mutable.Heap)' in term and '≠' not in term, term
+    assert '[.ref «left», .ref «right», .scalar (.int «_formalsw_heap»)]' in term, term
+
+    reference = directory / 'reference.py'
+    reference.write_text('def naive(table: dict[int,str]) -> dict[int,str]: return table\n')
+    path = directory / 'imported.py'
+    path.write_text('def f(table: dict[int,str]) -> dict[int,str]:\n'
+                    '    """\n    @formalsw: Py from reference import naive\n'
+                    '    @formalsw: Equiv(naive)\n    """\n    return table\n')
+    requirements = api['collect_requirements'](path, api['source_module'](path), 'Probe', 'ProbeAst')
+    assert not any(item.unsupported for item in requirements), requirements
+    assert requirements[0].dependencies == (reference.resolve(),)
+    assert requirements[0].property_type.count('HeapCalls.call') == 2
+
+    path = directory / 'runtime.py'
+    path.write_text(source.replace('MARKER', 'Returns'))
+    module = api['source_module'](path)
+    api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    bridge = api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
+    lines.insert(1, '\n'.join(line for line in bridge.splitlines() if not line.startswith('import ')))
+    world = {}
+    exec(path.read_text(), world)
+    for shared, key, value in itertools.product((True, False), (-1, 0, 7), ('', 'changed', 'λ😀')):
+        left = {0: 'zero'}
+        right = left if shared else {0: 'other', 7: 'seven'}
+        initial = '[' + dictionary(left) + ('' if shared else ', ' + dictionary(right)) + ']'
+        result = world['write_read'](left, right, key, value)
+        expected = data(snapshot_roots(([left] if shared else [left, right]) + [result]))
+        call = f'HeapCalls.call ProbeAst.module "write_read" [.ref 0, .ref {0 if shared else 1}, .scalar (.int ({key})), .scalar ({constant(value)})] {initial}'
+        lines += [f'example : (match ({call}).execution.observe 200 with',
+                  f'  | .done (.ok c) => Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 1000) == some true',
+                  '  | _ => false) = true := by native_decide']
+    for flag in (True, False):
+        lines += [f'''example : (HeapCalls.evaluate ProbeAst.module
+  (fun name => if name = "table" then some (.ref 0) else if name = "flag" then some (.scalar (.bool {str(flag).lower()})) else none)
+  ProbeAst.requires_f_0 [.dict []]).execution.observe 200 =
+  .done (.ok ⟨.ok (.scalar (.bool {str(flag).lower()})), [], [.dict [(.int 0, .scalar (.string "changed"))]], 1⟩) := by native_decide
+example : (HeapCalls.call ProbeAst.module "f" [.ref 0, .scalar (.bool {str(flag).lower()})] [.dict []]).execution.observe 50 =
+  .done (.ok ⟨.ok (.ref 0), [], [.dict []], 1⟩) := by native_decide''']
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print('Dictionary inputs: 25 scalar domains, 18 alias comparisons, prerequisite effects, and rejected domains passed')
