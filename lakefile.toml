@@ -1,6 +1,6 @@
 # Lake package configuration for the Python-to-Lean AST framework.
 name = "formalsw"
-version = "0.1.0"
+version = "0.2.0"
 defaultTargets = ["FormalSW", "lang.py.FormalSW"]
 
 # Umbrella module re-exporting installed language models.
