@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""
+Compare minima and maxima with Python, including ties, errors, and heap effects.
+"""
+import ast
+from itertools import product
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    if type(value) is bytes:
+        return '(.bytes [' + ', '.join(map(str, value)) + '])'
+    return f'(.string {json.dumps(value, ensure_ascii=False)})'
+
+
+values = [-3, 0, 1, 5, 10**100, True, False, None, '', 'a', 'é', b'', b'a']
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192']
+count = 0
+for name, operation in (('Minimum', min), ('Maximum', max)):
+    for args in [*product(values, repeat=2), (True, 1, False, 0), (1, True, 0, False)]:
+        try:
+            expected = '.ok ' + constant(operation(*args))
+        except TypeError:
+            expected = '.error { typeName := "TypeError", args := [] }'
+        lines.append(f'example : Calls.positional{name} [{", ".join(map(constant, args))}] = some ({expected}) := by native_decide')
+        count += 1
+
+source = '''
+def record(items: list[int], n: int) -> int:
+    items.append(n)
+    return n
+'''
+bodies = {
+    'pair': 'return min(n, 2)',
+    'effects': 'return min(record(items, n), record(items, 2), record(items, -3))',
+    'bad_type': 'return min(None, record(items, n))',
+    'left_error': 'return min(1 // 0, record(items, n))',
+    'right_error': 'return min(record(items, n), 1 // 0)',
+    'list': 'return min(items)',
+    'tuple': 'return min((n, 3, -4))',
+    'set': 'values = set()\nvalues.add(n)\nvalues.add(3)\nvalues.add(-4)\nreturn min(values)',
+    'string': 'return min("éaz")',
+    'bytes': 'return min(b"az")',
+    'empty': 'return min([])',
+}
+for name, body in bodies.items():
+    source += f'\ndef probe_{name}(items: list[int], n: int) -> int:\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+world = {}
+exec(source, world)
+lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
+for name, n in product(bodies, [-3, 0, 5]):
+    assert not SupportChecker(program).check('probe_' + name), (name, SupportChecker(program).check('probe_' + name))
+    items = [n, 2]
+    try:
+        expected = '.ok (.scalar ' + constant(world['probe_' + name](items, n)) + ')'
+    except (TypeError, ValueError, ZeroDivisionError) as error:
+        expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+    contents = '[' + ', '.join('.scalar ' + constant(x) for x in items) + ']'
+    call = f'HeapCalls.call source "probe_{name}" [.ref 0, .scalar {constant(n)}] [.list [.scalar {constant(n)}, .scalar (.int 2)]]'
+    lines.extend([f'example : (match ({call}).execution.observe 300 with',
+                  f'  | .done (.ok c) => decide (c.outcome = ({expected}) ∧ c.heap[0]? = some (.list {contents}))',
+                  '  | _ => false) = true := by native_decide'])
+    count += 1
+
+with project_temporary_directory(prefix='minimum-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+    base = 'def f(n: int) -> int:\n    return min(n, 2)\n'
+    def issues(text):
+        return SupportChecker(ast.parse(text)).check('f')
+    for call in ('min()', 'min(n)', 'min(n, 2, key=n)', 'min(n, default=0)', 'min(*n)'):
+        assert issues(base.replace('min(n, 2)', call)), call
+    for prefix in ('min = 0\n', 'from elsewhere import min\n'):
+        assert issues(prefix + base)
+    assert issues(base.replace('f(n: int)', 'f(n: int, min: int)'))
+    checker = SupportChecker(ast.parse(base))
+    for legacy in ('theorem bad : (scalarFunction Probe.module "f" [.int n]).Returns',
+                   'theorem bad : FormalSW.Property.Function.Throws Probe.module "f"'):
+        assert checker.requirement('f', legacy)
+    local = ast.parse('def min(a: int, b: int) -> int: return a + b\n' + base)
+    assert not SupportChecker(local).check('f')
+    assert 'BuiltinCall' not in api['AstJsonEmitter'](local).emit()
+
+print(f'Minimum/maximum: {count} Python comparisons, source effects, and binding checks passed')

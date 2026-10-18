@@ -144,7 +144,7 @@ maximum_module = ast.parse(maximum_source + 'def g(n: int) -> int: return f(n)\n
 for name in ('f', 'g'):
     issues = SupportChecker(maximum_module).requirement(name,
         f'theorem wrong : Not (scalarFunction Probe.module "{name}" [.int 0]).Halts')
-    assert any('positional max requires' in issue.reason for issue in issues)
+    assert any('positional min/max requires' in issue.reason for issue in issues)
 custom_max = ast.parse('def max(n: int) -> int: return n\ndef f(n: int) -> int: return max(n)\n')
 assert not SupportChecker(custom_max).check('f')
 assert api['AstJsonEmitter'](custom_max).expr(custom_max.body[1].body[0].value)['type'] == 'Call'

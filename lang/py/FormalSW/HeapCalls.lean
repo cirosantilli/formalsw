@@ -501,6 +501,21 @@ def primitive : Operation → List Value → Eval Value
         | .scalar value => pure value
         | .ref _ => Mutable.unsupported
       scalarResult (Calls.positionalMaximum values)
+  | .builtin .min, [value] => do
+      let items ← match value with
+        | .ref address => match (← get)[address]? with
+            | some (.set items) => pure (items.map Mutable.Value.scalar)
+            | _ => Mutable.sequence value
+        | _ => Mutable.sequence value
+      let scalars ← items.mapM fun item => match item with
+        | .scalar value => pure value
+        | .ref _ => Mutable.unsupported
+      scalarResult (some (ScalarSet.minimum scalars))
+  | .builtin .min, values => do
+      let values ← values.mapM fun value => match value with
+        | .scalar value => pure value
+        | .ref _ => Mutable.unsupported
+      scalarResult (Calls.positionalMinimum values)
   | _, _ => Mutable.unsupported
 
 private theorem mapM_identity (items : List Constant) :

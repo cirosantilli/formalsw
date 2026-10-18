@@ -1408,7 +1408,7 @@ class AstJsonEmitter:
                 if (reversed_value is not None
                         and not any(bindings(self.bindings_module, name) for name in ('list', 'reversed'))):
                     return {"type": "ReversedList", "value": self.expr(reversed_value)}
-                if isinstance(func, ast.Name) and func.id in ('int', 'str', 'max', 'bytearray', 'len', 'set', 'sorted') and not bindings(self.bindings_module, func.id):
+                if isinstance(func, ast.Name) and func.id in ('int', 'str', 'max', 'min', 'bytearray', 'len', 'set', 'sorted') and not bindings(self.bindings_module, func.id):
                     return {"type": "BuiltinCall", "name": func.id,
                             "args": [self.expr(arg) for arg in args]}
                 return {

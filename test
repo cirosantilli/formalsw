@@ -113,6 +113,7 @@ def main() -> int:
         TestCase("decimal parsing round-trips arbitrary signed integers", Path("tests/py/decimal_roundtrip.py"), 0, "All 2 checks passed"),
         TestCase("integer conversion and square roots", Path("tests/py/int_conversion.py"), 0, "All 6 checks passed"),
         TestCase("positional scalar maximum", Path("tests/py/maximum.py"), 0, "All 1 checks passed"),
+        TestCase("positional scalar minimum", Path("tests/py/minimum.py"), 0, "All 1 checks passed"),
         TestCase("immutable scalar default arguments", Path("tests/py/defaults.py"), 0, "All 3 checks passed"),
         TestCase("deadlock, livelock, and joined worker termination", Path("tests/py/parallel_liveness.py"), 0),
         TestCase("mutable global lists, aliases, and exceptional state", Path("tests/py/mutable_globals.py"), 0),

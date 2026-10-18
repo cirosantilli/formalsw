@@ -26,6 +26,17 @@ def positionalMaximum : List Constant → Option (Except ExceptionObject Constan
   | first :: second :: rest => some (maximumFrom first (second :: rest))
   | _ => none
 
+/-- Python's positional minimum also keeps the first value on ties. -/
+def minimumFrom (best : Constant) : List Constant → Except ExceptionObject Constant
+  | [] => .ok best
+  | value :: rest => match scalarCompare .lt value best with
+      | some smaller => minimumFrom (if smaller then value else best) rest
+      | none => .error { typeName := "TypeError", args := [] }
+
+def positionalMinimum : List Constant → Option (Except ExceptionObject Constant)
+  | first :: second :: rest => some (minimumFrom first (second :: rest))
+  | _ => none
+
 /-- Parsing failures use the same exception-class abstraction as other implicit errors. -/
 def parsedInteger : Py.Builtin.Result Int → Option (Except ExceptionObject Constant)
   | .ok value => some (.ok (.int value))
@@ -54,6 +65,7 @@ def Primitive.apply : Primitive → List Constant → Option (Except ExceptionOb
   | .builtin .int, values => integerConversion values
   | .builtin .str, values => some (Strings.str values)
   | .builtin .max, values => positionalMaximum values
+  | .builtin .min, values => positionalMinimum values
   | .builtin .intBitLength, [value] => some (Math.bitLengthCall value)
   | .subscript, [value, index] => some (Strings.get value index)
   | .slice, [value, lower, upper, stride] => some (Strings.slice value lower upper stride)

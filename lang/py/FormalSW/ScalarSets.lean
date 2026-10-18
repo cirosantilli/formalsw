@@ -42,6 +42,11 @@ def maximum : List Constant → Except ExceptionObject Constant
   | [] => .error { typeName := "ValueError", args := [] }
   | first :: rest => Calls.maximumFrom first rest
 
+/-- Minimum on an iterable, including the empty-input exception. -/
+def minimum : List Constant → Except ExceptionObject Constant
+  | [] => .error { typeName := "ValueError", args := [] }
+  | first :: rest => Calls.minimumFrom first rest
+
 theorem contains_insert_self (items : List Constant) (value : Constant) :
     contains (insert items value) value = true := by
   have reflexive : scalarCompare .eq value value = some true := by

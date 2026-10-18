@@ -667,9 +667,9 @@ class SupportChecker:
             if uses_builtin(self.module, function, 'len') and model in ('scalarFunction', 'scalarFunctionWithGlobals'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'sequence length requires a call interpreter'))
-            if uses_builtin(self.module, function, 'max') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+            if any(uses_builtin(self.module, function, name) for name in ('min', 'max')) and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
-                    'positional max requires a call interpreter'))
+                    'positional min/max requires a call interpreter'))
             if (uses_calls_model(self.module, function) and uses_heap_calls(self.module, function)
                     and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction', 'parallelFunction')):
                 issues.append(UnsupportedConstruct(target, function.lineno,
@@ -734,10 +734,10 @@ class SupportChecker:
                        for f in (target, other) if f in self.functions):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
                         'legacy Function properties omit heap calls; use the short DSL or HeapCalls'))
-                if any(uses_builtin(self.module, self.functions[f], 'max')
-                       for f in (target, other) if f in self.functions):
+                if any(uses_builtin(self.module, self.functions[f], name)
+                       for f in (target, other) if f in self.functions for name in ('min', 'max')):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
-                        'legacy Function properties omit positional max; use the short DSL or Calls'))
+                        'legacy Function properties omit positional min/max; use the short DSL or Calls'))
                 if any(uses_method(self.module, self.functions[f], 'bit_length')
                        for f in (target, other) if f in self.functions):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,

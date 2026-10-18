@@ -307,7 +307,7 @@ def uses_calls_model(module, function):
         or general_division(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'max', 'len'}
+        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'max', 'min', 'len'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -586,11 +586,11 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'list string conversion is not yet supported by heap call execution')
                 for item in node.args:
                     recurse(item)
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'max':
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ('min', 'max'):
                 if node.func.id in scope or bindings(module, node.func.id):
-                    reject(node, 'maximum requires the unshadowed builtin max')
+                    reject(node, f'{node.func.id} requires the unshadowed builtin {node.func.id}')
                 if node.keywords or len(node.args) < (1 if heap else 2):
-                    reject(node, 'max requires positional arguments and no keywords; scalar execution needs at least two')
+                    reject(node, f'{node.func.id} requires positional arguments and no keywords; scalar execution needs at least two')
                 for item in node.args:
                     recurse(item)
             else:
