@@ -1,4 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "formalsw"
-version = "0.0.0"
+version = "0.1.0"
+description = "Prove properties of Python source code with Lean"
+readme = {file = "README.adoc", content-type = "text/plain"}
 requires-python = "==3.14.4"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/cirosantilli/formalsw"
+Documentation = "https://github.com/cirosantilli/formalsw/blob/master/README.adoc"
+Issues = "https://github.com/cirosantilli/formalsw/issues"
+
+[project.scripts]
+formalsw = "formalsw.cli:main"
+
+[tool.setuptools]
+packages = ["formalsw"]
+package-dir = {"formalsw" = "src/formalsw"}
+include-package-data = false
+
+[tool.setuptools.cmdclass]
+build_py = "build_support.BuildPy"

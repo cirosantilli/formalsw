@@ -1,0 +1,1 @@
+"""FormalSW command-line application."""

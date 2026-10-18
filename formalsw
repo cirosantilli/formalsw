@@ -25,6 +25,7 @@ from lang.py.defaults import literal_default
 from lang.py.imports import bindings, resolve_function, resolve_python_function
 from lang.py.linking import link_imports
 from lang import spec_setup
+from lang.runtime import lake_command, runtime_env
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind
 
 
@@ -1511,9 +1512,9 @@ def lean_env() -> dict[str, str]:
     dependency paths first, which would hide the current project's AST objects.
     """
     completed = subprocess.run(
-        ["lake", "env", "python3", "-c",
-         "import json, os; print(json.dumps(dict(os.environ)))"],
-        text=True, capture_output=True, check=True,
+        lake_command("env", sys.executable, "-c",
+                     "import json, os; print(json.dumps(dict(os.environ)))"),
+        env=runtime_env(), text=True, capture_output=True, check=True,
     )
     env = json.loads(completed.stdout)
     paths = [str(Path.cwd() / ".lake/build/lib/lean"), "."]
@@ -1727,7 +1728,7 @@ def check_source(source: Path, report: CheckReport) -> int:
     proof_module = lean_module_for_path(proof_path)
 
     run(
-        ["python3", "-m", "py_compile", str(source)],
+        [sys.executable, "-m", "py_compile", str(source)],
         failure_message=f"Python syntax check failed for {source}",
         failure_hint="Fix the Python syntax error before running Lean proofs.",
     )
@@ -1768,7 +1769,8 @@ def check_source(source: Path, report: CheckReport) -> int:
         lean_path.with_suffix(".olean").unlink(missing_ok=True)
     require_executable("lake")
     run(
-        ["lake", "build", "FormalSW", "lang.py.FormalSW"],
+        lake_command("build", "FormalSW", "lang.py.FormalSW"),
+        env=runtime_env(),
         failure_message="failed to build the FormalSW core or Python model",
         failure_hint="Fix the Lean libraries before checking Python source proofs.",
     )

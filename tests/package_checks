@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Install a release wheel and check real proofs outside the source checkout."""
+
+import argparse
+import os
+from pathlib import Path
+import subprocess
+from tempfile import TemporaryDirectory
+import venv
+import zipfile
+
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('wheel', type=Path)
+    wheel = parser.parse_args().wheel.resolve()
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+        for required in ('formalsw', 'FormalSW.lean', 'lakefile.toml', 'lean-toolchain',
+                         'lang/py/spec_frontend.lean', 'lang/py/quotation.py',
+                         'lang/py/builtin/type/str.py', 'lang/py/FormalSW/Model.lean'):
+            assert 'formalsw/_runtime/' + required in names, required
+        assert not any('/tests/' in name or '/.lake/' in name or '/.formalsw/' in name
+                       or '__pycache__' in name or name.endswith(('.pyc', '.olean')) for name in names)
+
+    with TemporaryDirectory(prefix='formalsw-package-') as temporary:
+        root = Path(temporary)
+        environment = root / 'venv'
+        venv.EnvBuilder(with_pip=True).create(environment)
+        python = environment / 'bin/python'
+        subprocess.run([str(python), '-m', 'pip', 'install', '--no-cache-dir', '--no-index', '--no-deps', str(wheel)], check=True)
+        project = root / 'project'
+        project.mkdir()
+        env = dict(os.environ)
+        env.pop('PYTHONPATH', None)
+        env.pop('LEAN_PATH', None)
+        env.pop('LEAN_SRC_PATH', None)
+        env.pop('ELAN_TOOLCHAIN', None)
+        # Compiler subprocesses must use the installing interpreter, not python3 on PATH.
+        shims = root / 'bin'
+        shims.mkdir()
+        shim = shims / 'python3'
+        shim.write_text('#!/bin/sh\necho "unexpected system Python" >&2\nexit 99\n')
+        shim.chmod(0o755)
+        env['PATH'] = str(shims) + os.pathsep + env['PATH']
+        cli = str(environment / 'bin/formalsw')
+
+        def run(arguments, expected):
+            result = subprocess.run(arguments, cwd=project, env=env, text=True,
+                                    capture_output=True, timeout=300)
+            assert result.returncode == 0 and expected in result.stdout, result.stdout + result.stderr
+
+        run([cli, '--help'], '--stub')
+        run([str(python), '-m', 'formalsw', '--help'], '--stub')
+        for name, count in (('range_sum', 5), ('parallel_shared_counter', 4)):
+            (project / f'{name}.py').write_text((REPO / f'tests/py/{name}.py').read_text())
+            proof = (REPO / f'tests/py/{name}.py.lean').read_text()
+            proof = proof.replace('«.formalsw».tests.py.', '«.formalsw».')
+            proof = proof.replace(f'tests.py.{name}', name).replace(f'tests/py/{name}.py', f'{name}.py')
+            (project / f'{name}.py.lean').write_text(proof)
+            run([cli, '--stub', f'{name}.py'], f'namespace {name}')
+            run([cli, f'{name}.py'], f'All {count} checks passed')
+        assert not (project / 'lakefile.toml').exists()
+        assert not (project / 'lean-toolchain').exists()
+
+        # An explicit user project still owns dependency resolution.
+        runtime = next((project / '.formalsw/runtime').iterdir())
+        (project / 'lean-toolchain').write_text((runtime / 'lean-toolchain').read_text())
+        (project / 'lakefile.toml').write_text(
+            'name = "package_check"\n[[require]]\nname = "formalsw"\npath = ' + repr(str(runtime)) + '\n')
+        run([cli, 'range_sum.py'], 'All 5 checks passed')
+        source = project / 'range_sum.py'
+        source.write_text(source.read_text().replace('n * (n - 1)', 'n * (n + 1)'))
+        failed = subprocess.run([cli, 'range_sum.py'], cwd=project, env=env,
+                                text=True, capture_output=True, timeout=120)
+        assert failed.returncode != 0 and 'proof check failed' in failed.stderr, failed.stdout + failed.stderr
+        installed = subprocess.check_output([str(python), '-c',
+            'import formalsw; print(formalsw.__path__[0])'], cwd=project, env=env, text=True).strip()
+        assert not list(Path(installed).rglob('.lake')), 'build products written into the installation'
+    print('Release wheel: isolated CLI, standalone and existing Lake projects, quotations, and rejected invalid proof passed')
+
+
+if __name__ == '__main__':
+    main()

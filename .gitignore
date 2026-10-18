@@ -16,3 +16,9 @@ __pycache__/
 .DS_Store
 
 tmp.*
+
+# Python distribution artifacts and release environment.
+/dist/
+/build/
+/*.egg-info/
+/.venv-release/

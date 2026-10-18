@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from .trial import ScenarioError
+from lang.runtime import lake_command, runtime_env
 
 
 _parser = None
@@ -24,11 +25,11 @@ atexit.register(_close)
 def _request(request):
     global _parser
     if _parser is None:
-        built = subprocess.run(['lake', 'build', 'FormalSW'], capture_output=True, text=True)
+        built = subprocess.run(lake_command('build', 'FormalSW'), env=runtime_env(), capture_output=True, text=True)
         if built.returncode:
             raise ScenarioError('failed to build Lean specification parser:\n' + built.stdout + built.stderr)
         frontend = Path(__file__).with_name('spec_frontend.lean').resolve()
-        _parser = subprocess.Popen(['lake', 'env', 'lean', '--run', str(frontend)],
+        _parser = subprocess.Popen(lake_command('env', 'lean', '--run', str(frontend)), env=runtime_env(),
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
     _parser.stdin.write(json.dumps(request) + '\n')

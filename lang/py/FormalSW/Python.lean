@@ -20,7 +20,7 @@ def runPythonCompiler (moduleName : String) (args : Array String) : IO IO.Proces
   let existing := ((← IO.getEnv "PYTHONPATH").map System.SearchPath.parse).getD []
   let path : System.SearchPath := root :: existing
   IO.Process.output {
-    cmd := "python3", args := #["-m", moduleName] ++ args
+    cmd := (← IO.getEnv "FORMALSW_PYTHON").getD "python3", args := #["-m", moduleName] ++ args
     env := #[("PYTHONPATH", some path.toString)] }
 
 end FormalSW.PyAst

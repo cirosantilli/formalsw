@@ -1,0 +1,11 @@
+include README.adoc pyproject.toml build_support.py .python-version
+include formalsw FormalSW.lean lakefile.toml lean-toolchain test
+recursive-include src/formalsw *.py
+recursive-include lang *.py *.lean
+recursive-include tests *.py *.lean *_checks test_support.py
+include tests/py/builtin_coverage
+prune .formalsw
+prune .lake
+prune .test-tmp
+prune tests/py/__pycache__
+global-exclude *.pyc *.olean *.ilean
