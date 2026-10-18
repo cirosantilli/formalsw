@@ -1106,7 +1106,11 @@ class RequirementEmitter:
             "",
         ]
         for requirement in self.requirements:
+            # Prerequisites keep the full function signature even when they
+            # depend on only some arguments. This is generated binder noise;
+            # the imported user proof still receives its ordinary lint checks.
             lines.extend([
+                "set_option linter.unusedVariables false in",
                 "example :",
                 f"{indent(requirement.property_type, 4)}",
                 f"  := {requirement.theorem_name}",
