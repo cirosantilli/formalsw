@@ -80,6 +80,9 @@ with project_temporary_directory(prefix='int-conversion-') as temporary:
         assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
 
 base = 'def f(n: int) -> int: return int(n)\n'
+for marker in ('theorem bad : (scalarFunction Probe.module "f" [.int n]).Throws',
+               'theorem bad : FormalSW.Property.Function.Throws Probe.module "f"'):
+    assert SupportChecker(ast.parse(base)).requirement('f', marker)
 for suffix in ('int = 1\n', 'from other import int\n'):
     assert SupportChecker(ast.parse(base + suffix)).check('f')
 for call in ('int(n, 10)', 'int(x=n)', 'int(*n)'):
