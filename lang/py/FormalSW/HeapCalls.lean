@@ -275,6 +275,7 @@ inductive Operation where
   | sumGenerator (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env) (start : Expr)
   | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
   | comprehensionTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
+  | zipStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
 
 inductive Frame where
@@ -377,6 +378,30 @@ def sequenceValue : SequenceSource → Value
 @[simp] theorem sequenceValue_source (value : Value) :
     sequenceValue (sequenceSource value) = value := by cases value <;> rfl
 
+/-- All argument expressions finish before zip acquires any of its iterators. -/
+def zipSources (values : List Value) : Eval (List SequenceSource) :=
+  values.mapM fun value => do
+    let _ ← Mutable.sequence value
+    pure (sequenceSource value)
+
+/-- Fetch fields left to right, stopping at the first exhausted sequence. The
+iterators are private; each retained source is read from the current shared heap. -/
+def zipFields : List SequenceSource → Nat → Eval (Option (List Value))
+  | [], _ => pure (some [])
+  | source :: rest, position => do
+      let items ← Mutable.sequence (sequenceValue source)
+      match items[position]? with
+      | none => pure none
+      | some value =>
+          let more ← zipFields rest position
+          pure (more.map (value :: ·))
+
+/-- zip() is empty rather than an infinite sequence of empty tuples. -/
+def zipItem (sources : List SequenceSource) (position : Nat) : Eval (Option (List Value)) :=
+  match sources with
+  | [] => pure none
+  | _ :: _ => zipFields sources position
+
 /-- All targets are local to the comprehension, including targets in later loops.
 The first iterable is evaluated separately in the enclosing environment. -/
 def comprehensionEnv (env : Env) (generators : List (String × Expr × List Expr)) : Env :=
@@ -434,9 +459,11 @@ def comprehensionTargetBody (target : Expr) (body : List Stmt) : List Stmt :=
 def comprehensionTargetsBody (terminal : List Stmt) : List (Expr × Expr × List Expr) → List Stmt
   | [] => terminal
   | (target, iterable, filters) :: rest =>
-      [.forIn (.name (comprehensionTargetName target)) iterable
-        (comprehensionTargetBody target
-          (comprehensionFilters filters (comprehensionTargetsBody terminal rest))) []]
+      let body := comprehensionTargetBody target
+        (comprehensionFilters filters (comprehensionTargetsBody terminal rest))
+      match iterable with
+      | .zipIterable expressions => [.forZip (.name (comprehensionTargetName target)) expressions body []]
+      | _ => [.forIn (.name (comprehensionTargetName target)) iterable body []]
 
 /-- Capture the first iterator in the outer scope, before allocating the result. -/
 def comprehensionTargetsStart (anchors : Nat) (element : Expr)
@@ -451,6 +478,8 @@ def comprehensionTargetsStart (anchors : Nat) (element : Expr)
       let enter := fun loop heap => Step.next
         ⟨.block [loop] env, .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩
       match iterable with
+      | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
+          enter (.zipStepLoop name sources 0 body []) heap
       | .call (.name "range") _ => match rangeBounds values with
           | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
           | .error error => done (globals := globals) anchors heap (.error error)
@@ -526,6 +555,8 @@ def sumGeneratorTargetsStart (anchors : Nat) (element : Expr)
       let enter := fun loop heap => Step.next
         ⟨.expr start env, .sumStart loop (comprehensionTargetsEnv env generators) :: stack, heap⟩
       match iterable with
+      | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
+          enter (.zipStepLoop name sources 0 body []) heap
       | .call (.name "range") _ => match rangeBounds values with
           | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
           | .error error => done (globals := globals) anchors heap (.error error)
@@ -750,6 +781,10 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       sumGeneratorStart (globals := globals) anchors element generators env start values stack heap
   | .operation (.comprehension element generators env) values =>
       comprehensionStart (globals := globals) anchors element generators env values stack heap
+  | .operation (.zipStart target body otherwise following env) values =>
+      run (globals := globals) anchors heap (zipSources values) fun sources heap =>
+        .next ⟨.block (.zipStepLoop (comprehensionTargetName target) sources 0
+          (comprehensionTargetBody target body) otherwise :: following) env, stack, heap⟩
   | .operation (.comprehensionTargets element generators env) values =>
       comprehensionTargetsStart (globals := globals) anchors element generators env values stack heap
   | .operation (.sumGeneratorTargets element generators env start) values =>
@@ -789,13 +824,13 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             env [] expressions stack heap)
       | .listCompTargets element (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
-            | .call (.name "range") expressions => expressions
+            | .call (.name "range") expressions | .zipIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.comprehensionTargets element generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .sumGeneratorTargets element (generators@((_, iterable, _) :: _)) start =>
           let expressions := match iterable with
-            | .call (.name "range") expressions => expressions
+            | .call (.name "range") expressions | .zipIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
       | .reversedList expression => .next (argumentsState .reversedList env [] [expression] stack heap)
@@ -850,6 +885,16 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       | .whileDo condition body otherwise :: rest =>
           .next ⟨.expr condition env,
             .branch (body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)]) otherwise rest env :: stack, heap⟩
+      | .forZip target expressions body otherwise :: rest =>
+          .next (argumentsState (.zipStart target body otherwise rest env) env [] expressions stack heap)
+      | .zipStepLoop name sources position body otherwise :: rest =>
+          run (globals := globals) anchors heap (zipItem sources position) fun fields heap =>
+            match fields with
+            | none => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
+            | some values => run (globals := globals) anchors heap (Mutable.allocateTuple values) fun tuple heap =>
+                .next ⟨.block (body ++ [Calls.loopContinuation body
+                  (.zipStepLoop name sources (position + 1) body otherwise)] ++ rest)
+                  (setLocal env name tuple), stack, heap⟩
       | .forIn (.name name) (.call (.name "range") expressions) body otherwise :: rest =>
           .next (rangeState name env [] expressions body otherwise rest stack heap)
       | .forIn (.name name) iterable body otherwise :: rest =>
@@ -1223,7 +1268,7 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | sumGeneratorTargets _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>

@@ -19,7 +19,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
-from lang.py.call_support import range_sum, sequence_sum, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
+from lang.py.call_support import range_sum, sequence_sum, zip_iterable, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
 from lang.py.tuple_support import flat_unpacking
@@ -1353,6 +1353,11 @@ class AstJsonEmitter:
                     "value": self.expr(value),
                 }
             case ast.For(target=target, iter=iter_expr, body=body, orelse=orelse):
+                if zip_iterable(iter_expr, self.bindings_module):
+                    encoded = self.iterator_expr(iter_expr)
+                    return {"type": "ForZip", "target": self.expr(target), "args": encoded["args"],
+                            "body": [self.stmt(child) for child in body],
+                            "orelse": [self.stmt(child) for child in orelse]}
                 return {
                     "type": "For",
                     "target": self.expr(target),
@@ -1463,9 +1468,10 @@ class AstJsonEmitter:
                 if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
                        for generator in generators):
                     raise UnsupportedSyntax('list comprehensions require synchronous loops with names or flat tuple/list targets')
-                if any(not isinstance(generator.target, ast.Name) for generator in generators):
+                if any(not isinstance(generator.target, ast.Name)
+                       or zip_iterable(generator.iter, self.bindings_module) for generator in generators):
                     return {"type": "ListCompTargets", "elt": self.expr(elt), "generators": [
-                        {"target": self.expr(generator.target), "iter": self.expr(generator.iter),
+                        {"target": self.expr(generator.target), "iter": self.iterator_expr(generator.iter),
                          "ifs": [self.expr(condition) for condition in generator.ifs]}
                         for generator in generators]}
                 return {"type": "ListComp", "elt": self.expr(elt), "generators": [
@@ -1533,6 +1539,14 @@ class AstJsonEmitter:
                 }
             case _:
                 raise UnsupportedSyntax(f"unsupported expression: {ast.dump(expr)}")
+
+    def iterator_expr(self, node: ast.expr) -> dict[str, object]:
+        """Retain fresh builtin zip iterators without admitting escaping iterator objects."""
+        if zip_iterable(node, self.bindings_module):
+            if node.keywords:
+                raise UnsupportedSyntax('zip iteration supports positional sequence arguments, without strict')
+            return {"type": "ZipIterable", "args": [self.expr(arg) for arg in node.args]}
+        return self.expr(node)
 
     def constant(self, value: object) -> dict[str, object]:
         """Encode one Python constant."""

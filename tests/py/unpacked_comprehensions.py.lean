@@ -19,6 +19,7 @@ private theorem pair_sum.result (n : Int) (heap : Mutable.Heap) :
   apply HeapCalls.Evaluates.sum_generator_targets_sequence
     (source := .ref (heap.length + 1)) (middle := finalHeap) (afterStart := finalHeap)
     (by intro expressions impossible; cases impossible)
+    (by intro expressions impossible; cases impossible)
   · have row : HeapCalls.Evaluates program
         (HeapCalls.argumentEnv [⟨"n", some (.name "int"), none⟩] [.scalar (.int n)])
         (.list [.name "n", .binOp (.name "n") .add (.constant (.int 1))]) heap

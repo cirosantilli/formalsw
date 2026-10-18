@@ -29,6 +29,7 @@ theorem Evaluates.list_comp_targets_range
 local scope; the loop continues to read the same shared object. -/
 theorem Evaluates.list_comp_targets_sequence
     (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
+    (notZip : ∀ expressions, iterable ≠ .zipIterable expressions)
     (evaluated : Evaluates (globals := globals) module env iterable heap value middle)
     (sequence : Mutable.sequence value middle = some (.ok items, middle))
     (executed : BlockContinues (globals := globals) module
@@ -84,6 +85,7 @@ theorem Evaluates.sum_generator_targets_range
 /-- The first iterator retains its identity while later generator work stays lazy. -/
 theorem Evaluates.sum_generator_targets_sequence
     (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
+    (notZip : ∀ expressions, iterable ≠ .zipIterable expressions)
     (evaluated : Evaluates (globals := globals) module env iterable heap source middle)
     (sequence : Mutable.sequence source middle = some (.ok items, middle))
     (started : Evaluates (globals := globals) module env start middle initial afterStart)

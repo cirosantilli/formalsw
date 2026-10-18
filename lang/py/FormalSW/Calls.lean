@@ -187,7 +187,7 @@ mutual
   def loopControlStmt : Stmt → Bool
     | .breakLoop | .continueLoop => true
     | .ifThen _ yes no => loopControl yes || loopControl no
-    | .whileDo _ _ otherwise | .forIn _ _ _ otherwise => loopControl otherwise
+    | .whileDo _ _ otherwise | .forIn _ _ _ otherwise | .forZip _ _ _ otherwise => loopControl otherwise
     | _ => false
 
   /-- Structural recursion keeps finite syntax inspection reducible in proofs. -/

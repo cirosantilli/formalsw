@@ -122,6 +122,8 @@ inductive Expr where
   | sumGenerator : Expr → List (String × Expr × List Expr) → Expr → Expr
   /-- Eager `list(reversed(value))` with both builtin bindings resolved. -/
   | reversedList : Expr → Expr
+  /-- Resolved builtin zip, only supported as an immediately consumed iterable. -/
+  | zipIterable : List Expr → Expr
   /-- Eager list comprehension: local target, iterable, and ordered filters. -/
   | listComp : Expr → List (String × Expr × List Expr) → Expr
   /-- Comprehensions with flat tuple/list targets, retaining explicit binding syntax. -/
@@ -191,6 +193,10 @@ inductive Stmt where
   | augAssign : Expr -> BinOp -> Expr -> Stmt
   /-- A Python `for target in iter` statement. -/
   | forIn : Expr -> Expr -> List Stmt -> List Stmt -> Stmt
+  /-- A loop consuming a fresh builtin zip over supported sequences. -/
+  | forZip : Expr → List Expr → List Stmt → List Stmt → Stmt
+  /-- Private zip cursors retain every original sequence reference. -/
+  | zipStepLoop : String → List SequenceSource → Nat → List Stmt → List Stmt → Stmt
   /-- Internal state of an evaluated `range(stop)` iterator, not source syntax. -/
   | rangeLoop : String -> Int -> Int -> List Stmt -> List Stmt -> Stmt
   /-- Internal iterator state for the scalar call interpreter's stepped ranges. -/
@@ -323,6 +329,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
           return (← jsonString generator "name",
             ← Expr.fromJson? (← jsonField generator "iter"),
             ← jsonArray generator "ifs" Expr.fromJson?))
+  | "ZipIterable" => return .zipIterable (← jsonArray json "args" Expr.fromJson?)
   | "ListCompTargets" =>
       return .listCompTargets (← Expr.fromJson? (← jsonField json "elt"))
         (← jsonArray json "generators" fun generator => do
@@ -471,6 +478,10 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
         (← Expr.fromJson? (← jsonField json "target"))
         (← BinOp.fromJson? (← jsonField json "op"))
         (← Expr.fromJson? (← jsonField json "value"))
+  | "ForZip" =>
+      return .forZip (← Expr.fromJson? (← jsonField json "target"))
+        (← jsonArray json "args" Expr.fromJson?)
+        (← jsonArray json "body" Stmt.fromJson?) (← jsonArray json "orelse" Stmt.fromJson?)
   | "For" =>
       return .forIn
         (← Expr.fromJson? (← jsonField json "target"))
@@ -932,6 +943,7 @@ mutual
     | .listComp element generators =>
         1 + element.operationCount + (generators.map fun (_, iterable, filters) =>
           1 + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
+    | .zipIterable arguments => 1 + (arguments.map Expr.operationCount).sum
     | .listCompTargets element generators =>
         1 + element.operationCount + (generators.map fun (target, iterable, filters) =>
           target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
@@ -954,7 +966,8 @@ mutual
     | .rangeLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .rangeStepLoop _ _ _ _ body otherwise | .sequenceStepLoop _ _ _ body otherwise
-      | .enumerateStepLoop _ _ _ _ _ body otherwise | .unpackStepLoop _ _ _ body otherwise =>
+      | .enumerateStepLoop _ _ _ _ _ body otherwise | .unpackStepLoop _ _ _ body otherwise
+      | .zipStepLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
     | .functionDef _ args returns body =>
@@ -968,6 +981,9 @@ mutual
         1 + target.operationCount + annotation.operationCount + (value.map Expr.operationCount).getD 0
     | .globalDecl _ => 0
     | .augAssign target _ value => 1 + target.operationCount + value.operationCount
+    | .forZip target arguments body orelse =>
+        1 + target.operationCount + (arguments.map Expr.operationCount).sum +
+          (body.map Stmt.operationCount).sum + (orelse.map Stmt.operationCount).sum
     | .forIn target iter body orelse =>
         1 + target.operationCount + iter.operationCount +
           (body.map Stmt.operationCount).sum + (orelse.map Stmt.operationCount).sum
@@ -984,7 +1000,7 @@ end
 
 /-- Whether a statement is a `for` loop. -/
 def Stmt.hasFor : Stmt → Bool
-  | .forIn _ _ _ _ => true
+  | .forIn _ _ _ _ | .forZip _ _ _ _ => true
   | _ => false
 
 /-- Whether a statement is a `while` loop. -/
@@ -998,6 +1014,9 @@ def Expr.callsFunction (name : String) : Expr → Bool
   | .binOp left _ right => left.callsFunction name || right.callsFunction name
   | .unaryOp _ operand => operand.callsFunction name
   | .reversedList value => value.callsFunction name || name == "list" || name == "reversed"
+  | .zipIterable values => name == "zip" || values.attach.any (fun value =>
+      have _smaller := List.sizeOf_lt_of_mem value.property
+      value.val.callsFunction name)
   | .call (.name functionName) _ => functionName == name
   | .call function _ => function.callsFunction name
   | .subscript value index => value.callsFunction name || index.callsFunction name
@@ -1009,6 +1028,8 @@ def Stmt.callsFunction (name : String) : Stmt → Bool
   | .assign _ value => value.callsFunction name
   | .augAssign target _ value => target.callsFunction name || value.callsFunction name
   | .forIn target iter _ _ => target.callsFunction name || iter.callsFunction name
+  | .forZip target values _ _ =>
+      name == "zip" || target.callsFunction name || values.any (fun value => value.callsFunction name)
   | .ifThen test _ _ | .whileDo test _ _ => test.callsFunction name
   | .assert test message =>
       test.callsFunction name || (message.map (Expr.callsFunction name)).getD false
@@ -1389,7 +1410,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.ifExp _ _ _ => none
   | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
-  | Expr.reversedList _ => none
+  | Expr.reversedList _ | Expr.zipIterable _ => none
   | Expr.listComp _ _ | Expr.listCompTargets _ _ | Expr.sumGeneratorTargets _ _ _ => none
   | Expr.tuple _ | Expr.dict _ => none
   | Expr.binOp

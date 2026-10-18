@@ -63,6 +63,12 @@ def range_sum(node):
     return RangeSum(name, element, iterable.args, conditions)
 
 
+def zip_iterable(node, module):
+    """Recognize the builtin only where its iterator is immediately consumed."""
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'zip' and not bindings(module, 'zip'))
+
+
 def sequence_sum(node):
     """Recognize a consumed iterable or generator, retaining the optional start."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -416,6 +422,16 @@ def check_calls(module, function, reject, *, heap=False):
                             reject(iterable, 'range requires one to three positional arguments')
                         for argument in iterable.args:
                             expr(argument, iterable_scope)
+                    elif zip_iterable(iterable, module):
+                        if 'zip' in iterable_scope:
+                            reject(iterable, 'zip iteration requires the unshadowed builtin zip')
+                        if iterable.keywords:
+                            reject(iterable, 'zip iteration supports positional sequence arguments, without strict')
+                        for argument in iterable.args:
+                            # The sequence tuple itself cannot escape its private zip iterator.
+                            if isinstance(argument, ast.Tuple):
+                                hidden_tuples.add(argument)
+                            expr(argument, iterable_scope)
                     else:
                         expr(iterable, iterable_scope)
                     for condition in generator.ifs:
@@ -714,6 +730,19 @@ def check_calls(module, function, reject, *, heap=False):
                     if not 1 <= len(node.iter.args) <= 2 or node.iter.keywords:
                         reject(node, 'enumerate loops support an iterable and optional positional start')
                     for argument in node.iter.args:
+                        expr(argument)
+                    block(node.body, loop_depth + 1)
+                    block(node.orelse, loop_depth)
+                elif heap and isinstance(node, ast.For) and zip_iterable(node.iter, module):
+                    if 'zip' in locals_:
+                        reject(node.iter, 'zip iteration requires the unshadowed builtin zip')
+                    if not (isinstance(node.target, ast.Name) or flat_unpacking(node.target)):
+                        reject(node, 'zip loops require a name or flat tuple/list target')
+                    if node.iter.keywords:
+                        reject(node.iter, 'zip iteration supports positional sequence arguments, without strict')
+                    for argument in node.iter.args:
+                        if isinstance(argument, ast.Tuple):
+                            hidden_tuples.add(argument)
                         expr(argument)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)

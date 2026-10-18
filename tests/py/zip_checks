@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""
+Compare immediately consumed zip iteration, effects, and exceptions with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n
+def fail(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n // 0
+def grow(xs: list[int], n: int) -> int:
+    if len(xs) < 4:
+        xs.append(n + 1)
+    return n
+def replace(xs: list[int], n: int) -> int:
+    xs[-1] = n
+    return n
+def unsupported(xs: list[int], n: int):
+    return [x for x in set()]
+'''
+bodies = {
+    'plain': 'return [pair for pair in zip(xs, [n, n + 1])]',
+    'unpack': 'return [x + y for x, y in zip(xs, [n, n + 1])]',
+    'list_target': 'return [x - y for [x, y] in zip(xs, xs)]',
+    'triple': 'return [x + y + z for x, y, z in zip(xs, xs, xs[1:])]',
+    'empty': 'return [x for x in zip()]',
+    'one': 'return [x for x, in zip(xs)]',
+    'one_tuples': 'return [x for x in zip(xs)]',
+    'first_empty': 'return [pair for pair in zip([], xs)]',
+    'last_empty': 'return [pair for pair in zip(xs, [])]',
+    'constant_tuple_sequences': 'return [x + y for x, y in zip((1, 2), (3, 4))]',
+    'dynamic_tuple_sequences': 'return [x + y for x, y in zip((n + 1, n + 2), (n, n))]',
+    'unicode': 'return [x + y for x, y in zip("λ😀x", "αβ")]',
+    'bytes': 'return [x + y for x, y in zip(b"az", b"xy")]',
+    'bytearray_items': 'return [x + y for x, y in zip(bytearray(b"az"), b"xy")]',
+    'capture_alias': 'return [x for x, y in zip([xs, xs], [xs, xs])]',
+    'grow_live': 'return [grow(xs, x) + y for x, y in zip(xs, xs)]',
+    'replace_live': 'return [replace(xs, n) for x, y in zip(xs, xs)]',
+    'snapshot_second': 'return [grow(xs, x) + y for x, y in zip(xs, xs[1:])]',
+    'ordered_arguments': 'return [x + y for x, y in zip([touch(xs, 10)], [touch(xs, 20)])]',
+    'argument_failure': 'return [x for x, y in zip([touch(xs, 10)], [fail(xs, 20)])]',
+    'validate_after_arguments': 'return [x for x, y in zip(0, [touch(xs, 20)])]',
+    'validate_later_even_if_empty': 'return [x for x, y in zip([], 0)]',
+    'filters': 'return [touch(xs, x + y) for x, y in zip([n, n + 1], [2, 3]) if touch(xs, x) if touch(xs, y)]',
+    'filter_stops_element': 'return [fail(xs, x) for x, y in zip(xs, xs) if False]',
+    'wrong_arity': 'return [touch(xs, x) for x, y, z in zip(xs, xs) if touch(xs, 99)]',
+    'empty_target': 'return [n for () in zip(xs)]',
+    'no_leak': 'x = 42\ny = 43\nout = [x + y for x, y in zip(xs, xs)]\nreturn [out, x, y]',
+    'first_scope': 'return [xs for xs, y in zip(xs, xs)]',
+    'zip_target': 'return [zip for zip, y in zip(xs, xs)]',
+    'nested': 'return [x + y + z for x, y in zip(xs, xs) for z in range(y)]',
+    'inner': 'return [x + y + z for x in range(n) for y, z in zip([x], [n])]',
+    'double_zip': 'return [x + y + z + w for x, y in zip(xs, xs) for z, w in zip([x], [y])]',
+    'for_pairs': 'out = []\nfor pair in zip(xs, xs):\n    out.append(pair)\nreturn out',
+    'for_unpack': 'out = []\nfor x, y in zip(xs, xs):\n    out.append(x + y)\nreturn out',
+    'for_list_target': 'out = []\nfor [x, y] in zip(xs, xs):\n    out.append(x - y)\nreturn out',
+    'for_else': 'out = []\nfor x, y in zip(xs, xs):\n    out.append(x)\nelse:\n    out.append(n)\nreturn out',
+    'for_break': 'out = []\nfor x, y in zip(xs, xs):\n    out.append(x)\n    break\nelse:\n    out.append(n)\nreturn out',
+    'for_continue': 'out = []\nfor x, y in zip(xs, xs):\n    if x == 0:\n        continue\n    out.append(x + y)\nelse:\n    out.append(n)\nreturn out',
+    'for_rebound_source': 'out = []\nfor x, y in zip(xs, xs):\n    out.append(x + y)\n    xs = []\nreturn out',
+    'for_tuple_sequences': 'out = []\nfor x, y in zip((1, 2), (3, 4)):\n    out.append(x + y)\nreturn out',
+    'generator': 'return sum(x + y for x, y in zip(xs, xs))',
+    'generator_start_order': 'return sum((touch(xs, x + y) for x, y in zip([n], [n + 1])), touch(xs, 50))',
+    'generator_bad_iterator': 'return sum((x for x, y in zip([], 0)), touch(xs, 50))',
+    'generator_reject_start': 'return sum((fail(xs, x) for x, y in zip(xs, xs)), "")',
+    'generator_start_growth': 'return sum((x + y for x, y in zip(xs, xs)), touch(xs, n))',
+    'generator_inner': 'return sum(x + y + z for x in range(n) for y, z in zip([x], [n]))',
+    'generator_empty': 'return sum((x for x in zip()), n)',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(xs: list[int], n: int):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, n in itertools.product(bodies, ([], [0, 2]), (-2, 3)):
+    value = initial.copy()
+    try:
+        result = world[name](value, n)
+        error = None
+    except (TypeError, ValueError, ZeroDivisionError, UnboundLocalError) as exception:
+        result, error = None, type(exception).__name__
+    snapshot = data(snapshot_roots([value] + ([result] if error is None else [])))
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    call = f'HeapCalls.call source "{name}" [.ref 0, .scalar (.int ({n}))] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, n={n}',
+        f'example : (match ({call}).execution.observe 3000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
+for expression in ('[x for x in zip(xs, strict=True)]', '[x for x in zip(xs, strict=False)]',
+                   '[x for x in zip(xs, unknown=n)]', '[x for x in zip(*xs)]',
+                   '[x for x in zip(range(n), xs)]', 'zip(xs)', 'list(zip(xs))',
+                   '[x for x, *ys in zip(xs)]', '[x for x, (y, z) in zip(xs)]',
+                   '[x for x in xs for zip in zip(xs)]'):
+    text = source + f'\ndef f(xs: list[int], n: int):\n    return {expression}\n'
+    assert SupportChecker(ast.parse(text)).check('f'), expression
+for header, body in (
+    ('def f(xs: list[int], zip: int):', 'return [x for x in zip(xs)]'),
+    ('def f(xs: list[int]):', 'for zip in zip(xs): pass'),
+    ('def f(xs: list[int]):', 'for xs[0] in zip(xs): pass'),
+):
+    assert SupportChecker(ast.parse(header + '\n    ' + body + '\n')).check('f'), body
+custom = ast.parse('def zip(xs: list[int]) -> list[int]: return xs\n'
+                   'def custom(xs: list[int]) -> list[int]: return [x for x in zip(xs)]\n')
+assert not SupportChecker(custom).check('custom')
+assert 'ZipIterable' not in api['AstJsonEmitter'](custom).emit()
+
+with project_temporary_directory(prefix='zip-checks-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(n: int) -> list[int]:\n    """\n    @formalsw: ' + marker
+                        + '\n    """\n    return [x for x in set()]\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} zip Python comparisons passed, including live sources, argument order, and errors')
