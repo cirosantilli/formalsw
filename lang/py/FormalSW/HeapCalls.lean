@@ -632,6 +632,40 @@ theorem compare (left : Evaluates module env a heap av middle)
   exact .next rfl ((left _ _).trans (.next rfl ((right _ _).trans
     (.next (by simp [step, result, run, operation]) .refl))))
 
+/-- Short-circuiting returns the first operand without evaluating later expressions. -/
+theorem boolean_stop (evaluated : Evaluates module env first heap value middle)
+    (truth : Mutable.truth value middle = some (.ok flag, middle))
+    (stop : (match op with | .and => !flag | .or => flag) = true) :
+    Evaluates module env (.boolOp op (first :: rest)) heap value middle := by
+  intro anchors stack
+  exact .next rfl ((evaluated anchors _).trans
+    (.next (by simp [step, run, truth, stop]) .refl))
+
+/-- The last operand supplies the result, preserving its value and heap effects. -/
+theorem boolean_last (evaluated : Evaluates module env expression heap value middle)
+    (truth : Mutable.truth value middle = some (.ok flag, middle)) :
+    Evaluates module env (.boolOp op [expression]) heap value middle := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (evaluated anchors _).trans
+  apply Reaches.next _ .refl
+  cases op <;> cases flag <;> simp [step, run, truth]
+
+/-- A non-short-circuiting operand continues in the heap it produced. -/
+theorem boolean_next (evaluated : Evaluates module env first heap value middle)
+    (truth : Mutable.truth value middle = some (.ok flag, middle))
+    (continues : (match op with | .and => !flag | .or => flag) = false)
+    (rest : Evaluates module env (.boolOp op (next :: tail)) middle answer finalHeap) :
+    Evaluates module env (.boolOp op (first :: next :: tail)) heap answer finalHeap := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (evaluated anchors _).trans
+  cases rest anchors stack with
+  | next transition following =>
+      simp only [step, Step.next.injEq] at transition
+      subst transition
+      exact .next (by simp [step, run, truth, continues]) following
+
 theorem conditional (condition : Evaluates module env test heap value middle)
     (truth : Mutable.truth value middle = some (.ok flag, middle))
     (branch : Evaluates module env (if flag then yes else no) middle answer finalHeap) :
@@ -1029,6 +1063,17 @@ theorem branch (evaluated : Evaluates module env condition heap value middle)
   intro following anchors stack
   exact .next rfl ((evaluated anchors _).trans
     (.next (by simp [step, run, truth]) (body following anchors stack)))
+
+/-- A while loop exposes its final locals and heap to the following block. -/
+theorem while_loop (evaluated : Evaluates module env condition heap value middle)
+    (truth : Mutable.truth value middle = some (.ok flag, middle))
+    (rest : BlockContinues module env
+      (if flag then body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)] else otherwise)
+      middle finalEnv finalHeap) :
+    BlockContinues module env [.whileDo condition body otherwise] heap finalEnv finalHeap := by
+  intro following anchors stack
+  exact .next rfl ((evaluated anchors _).trans
+    (.next (by simp [step, run, truth]) (rest following anchors stack)))
 
 theorem for_range (arguments : Evaluates.Arguments module env expressions heap values middle)
     (bounds : rangeBounds values = .ok (start, stop, stride))

@@ -412,6 +412,14 @@ def setItem (value subscript replacement : Value) : Eval Value := do
       | none => unsupported
   | _ => error "TypeError"
 
+/-- Reading an in-range list element preserves the shared heap. -/
+theorem getItem_list (heap : Heap) (address position : Nat) (items : List Value)
+    (found : heap[address]? = some (.list items)) (valid : position < items.length) :
+    getItem (.ref address) (.scalar (.int position)) heap = some (.ok items[position], heap) := by
+  have nonnegative : ¬ (position : Int) < 0 := by omega
+  have inside : ¬ items.length ≤ position := by omega
+  simp [getItem, found, index, nonnegative, inside, Except.map, List.getElem?_eq_getElem valid]
+
 /-- Writing an in-range byte preserves the buffer address and every other object. -/
 theorem setItem_buffer (heap : Heap) (address position : Nat) (bytes : List UInt8) (value : UInt8)
     (found : heap[address]? = some (.bytearray bytes)) (valid : position < bytes.length) :
