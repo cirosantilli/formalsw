@@ -57,6 +57,23 @@ def main():
     check(a, b, True)
     check(a, c, False)
 
+    # Entry objects are all roots. Arbitrary garbage on either side must not
+    # hide a mutation of a retained object, including aliases and cycles.
+    for nodes in (
+        [["list", [], [["ref", 0]]]],
+        [["list", [], [["ref", 1], ["ref", 1]]], ["list", [], [["int", 7]]]],
+        [["bytearray", [], [["int", 0], ["int", 255]]]],
+    ):
+        roots = [["ref", index] for index in range(len(nodes))] + [["int", 42]]
+        left = [roots, nodes + [["list", [], [["ref", 999]]]]]
+        right = [roots, nodes + [["tuple", [], [["str", "unused"]]], ["dict", [], []]]]
+        assert same_snapshot(left, right)
+        pairs.append((left, right, True))
+        changed = json.loads(json.dumps(right))
+        changed[1][0][2].append(["int", 8])
+        assert not same_snapshot(left, changed)
+        pairs.append((left, changed, False))
+
     class Record:
         def __eq__(self, other):
             raise AssertionError("user __eq__ ran")

@@ -177,6 +177,95 @@ def dataFunction (module : Module) (name : String) (values : List Data) : Execut
       else Execution.unsupported
   | none => Execution.unsupported
 
+namespace DataProof
+
+/-- Finite execution of a data-program fragment, before its continuation runs. -/
+inductive Reaches : DataState → DataState → Prop where
+  | refl : Reaches state state
+  | next (transition : dataStep state = .next following) (rest : Reaches following final) : Reaches state final
+
+theorem Reaches.trans (first : Reaches initial middle) (second : Reaches middle final) : Reaches initial final := by
+  induction first with
+  | refl => exact second
+  | next transition _ ih => exact .next transition (ih second)
+
+theorem Reaches.finishes (first : Reaches initial final) (rest : Finishes dataStep final outcome) :
+    Finishes dataStep initial outcome := by
+  induction first with
+  | refl => exact rest
+  | next transition _ ih => exact .next transition (ih rest)
+
+def BlockContinues (env : DataEnv) (body : List Stmt) (finalEnv : DataEnv) : Prop :=
+  ∀ following, Reaches ⟨body ++ following, env⟩ ⟨following, finalEnv⟩
+
+namespace BlockContinues
+
+theorem nil : BlockContinues env [] env := fun _ => .refl
+
+theorem append (first : BlockContinues env body middle) (second : BlockContinues middle rest final) :
+    BlockContinues env (body ++ rest) final := by
+  intro following
+  simpa only [List.append_assoc] using (first (rest ++ following)).trans (second following)
+
+theorem assign (evaluated : dataExpr env expression = some (.ok value)) :
+    BlockContinues env [.assign [.name name] expression] (env.set name value) :=
+  fun _ => .next (by simp [dataStep, evaluated]) .refl
+
+theorem branch (evaluated : dataExpr env condition = some (.ok (.scalar (.bool flag))))
+    (body : BlockContinues env (if flag then yes else no) final) :
+    BlockContinues env [.ifThen condition yes no] final :=
+  fun following => .next (by simp [dataStep, evaluated, Data.truth, scalarTruth]) (body following)
+
+theorem while_loop (evaluated : dataExpr env condition = some (.ok (.scalar (.bool flag))))
+    (executed : BlockContinues env
+      (if flag then body ++ [.whileDo condition body otherwise] else otherwise) final) :
+    BlockContinues env [.whileDo condition body otherwise] final := by
+  intro following
+  apply Reaches.next _ (executed following)
+  cases flag <;> simp [dataStep, evaluated, Data.truth, scalarTruth, List.append_assoc]
+
+end BlockContinues
+
+def BlockReturns (env : DataEnv) (body : List Stmt) (value : Data) : Prop :=
+  Finishes dataStep ⟨body, env⟩ (.ok value)
+
+namespace BlockReturns
+
+theorem return_value (evaluated : dataExpr env expression = some (.ok value)) :
+    BlockReturns env (.return expression :: rest) value := .done (by simp [dataStep, evaluated])
+
+theorem assign (evaluated : dataExpr env expression = some (.ok value))
+    (rest : BlockReturns (env.set name value) body result) :
+    BlockReturns env (.assign [.name name] expression :: body) result :=
+  .next (by simp [dataStep, evaluated]) rest
+
+theorem branch (evaluated : dataExpr env condition = some (.ok (.scalar (.bool flag))))
+    (rest : BlockReturns env ((if flag then yes else no) ++ following) result) :
+    BlockReturns env (.ifThen condition yes no :: following) result :=
+  .next (by simp [dataStep, evaluated, Data.truth, scalarTruth]) rest
+
+theorem while_loop (evaluated : dataExpr env condition = some (.ok (.scalar (.bool flag))))
+    (rest : BlockReturns env
+      ((if flag then body ++ [.whileDo condition body otherwise] else otherwise) ++ following) result) :
+    BlockReturns env (.whileDo condition body otherwise :: following) result := by
+  apply Finishes.next _ rest
+  cases flag <;> simp [dataStep, evaluated, Data.truth, scalarTruth, List.append_assoc]
+
+end BlockReturns
+
+theorem BlockContinues.returns (first : BlockContinues env body middle)
+    (rest : BlockReturns middle following value) : BlockReturns env (body ++ following) value :=
+  (first following).finishes rest
+
+/-- A successful list subscript uses Python's nonnegative index case. -/
+theorem getItem (collection : dataExpr env base = some (.ok (.list items)))
+    (index : dataExpr env subscript = some (.ok (.scalar (.int position))))
+    (nonnegative : 0 ≤ position) (found : items[position.toNat]? = some value) :
+    dataExpr env (.subscript base subscript) = some (.ok value) := by
+  simp [dataExpr, collection, index, show ¬ position < 0 by omega, found]
+
+end DataProof
+
 end FormalSW.PyAst
 
 /-- Parse Python through the normal AST bridge and validate the entire data subset.

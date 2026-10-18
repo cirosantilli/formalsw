@@ -24,6 +24,7 @@ roots = [
   "lang.py.FormalSW.HeapCalls",
   "lang.py.FormalSW.DataRuntime",
   "lang.py.FormalSW.GraphEquivalence",
+  "lang.py.FormalSW.GraphPreservation",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",

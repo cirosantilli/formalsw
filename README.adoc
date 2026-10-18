@@ -632,6 +632,8 @@ assert not equivalent(1, True)  # Exact scalar types matter.
 
 The comparator matches runtime types, scalar values, stored fields, container order, cycles, and sharing through a one-to-one mapping of reachable references. Unreachable objects are ignored. Lists and tuples preserve position; dictionaries preserve insertion order, including their key/value edges. Instance dictionaries preserve field order as well as names and values. Class identity matters even when two classes have the same name. User equality and getters are never invoked. Scalar identity and numeric `id()` values are outside this observation: freshly allocated containers and instances may be renamed consistently.
 
+`Graph.equivalent_allocations` proves that appending unreachable objects preserves equivalence, even when the original heap contains aliases or cycles. For function proofs, `Mutable.Completion.equivalent_allocations` applies this result when the entry heap is unchanged and the result and globals refer only to its objects or scalar values.
+
 Compare all observable roots together when specifying function equivalence: the result, caller-owned inputs, and relevant supported global state. Comparing only results would miss whether a function returned its input or a copy:
 
 [source,python]

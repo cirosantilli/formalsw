@@ -1,5 +1,5 @@
 import lang.py.FormalSW.Globals
-import lang.py.FormalSW.GraphEquivalence
+import lang.py.FormalSW.GraphPreservation
 import lang.py.builtin.type.bytearray
 import lang.py.FormalSW.Strings
 
@@ -97,6 +97,43 @@ def Completion.Equivalent (a b : Completion) : Prop :=
       | .ok _, .ok _ => True
       | .error x, .error y => x = y
       | _, _ => False) ∧ Graph.Equivalent a.snapshot b.snapshot)
+
+/-- Allocation alone is unobservable when all returned and global references still
+point into the unchanged entry heap. Aliases and cycles in that heap are retained. -/
+theorem Completion.equivalent_allocations (heap leftExtra rightExtra : Heap) (result : Value) (globals : Globals)
+    (valid : heap.Valid)
+    (resultWithin : result.edge.Within heap.length)
+    (globalsWithin : ∀ entry ∈ globals, entry.2.edge.Within heap.length) :
+    Completion.Equivalent ⟨.ok result, globals, heap ++ leftExtra, heap.length⟩
+      ⟨.ok result, globals, heap ++ rightExtra, heap.length⟩ := by
+  refine Or.inr ⟨rfl, rfl, trivial, ?_⟩
+  let encode : Object → Graph.Node := fun object => match object with
+    | .list items => ⟨.list, [], items.map Value.edge⟩
+    | .bytearray bytes => ⟨.bytearray, [], bytes.map (fun byte => .scalar (.int byte.toNat))⟩
+  have closed : ∀ node ∈ heap.map encode, ∀ edge ∈ node.edges, edge.Within heap.length := by
+    intro node member edge edgeMember
+    obtain ⟨object, objectMember, rfl⟩ := List.mem_map.mp member
+    have objectValid := valid object objectMember
+    cases object with
+    | list items =>
+        obtain ⟨value, valueMember, rfl⟩ := List.mem_map.mp edgeMember
+        have valueValid := objectValid value valueMember
+        cases value with
+        | scalar _ => trivial
+        | ref _ => exact valueValid
+    | bytearray bytes =>
+        obtain ⟨byte, _, rfl⟩ := List.mem_map.mp edgeMember
+        trivial
+  have rootsClosed : ∀ edge ∈ globals.map (fun entry => entry.2.edge) ++ [result.edge], edge.Within heap.length := by
+    intro edge member
+    rcases List.mem_append.mp member with global | returned
+    · obtain ⟨entry, entryMember, rfl⟩ := List.mem_map.mp global
+      exact globalsWithin entry entryMember
+    · simpa only [List.mem_singleton.mp returned] using resultWithin
+  have equivalent := Graph.equivalent_allocations (heap.map encode) (leftExtra.map encode) (rightExtra.map encode)
+    (globals.map (fun entry => entry.2.edge) ++ [result.edge])
+    (by simpa only [List.length_map] using closed) (by simpa only [List.length_map] using rootsClosed)
+  simpa only [Completion.snapshot, List.map_append, List.length_map, List.append_assoc, encode] using equivalent
 
 structure Call where
   execution : Execution Completion
