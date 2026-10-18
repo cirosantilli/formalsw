@@ -150,4 +150,42 @@ theorem increment_safe.preserves_updates :
   dsimp only [Bind.bind, Option.bind, PyValue.asInt]
   simpa only [List.length_map, List.length_range] using CounterProof.all_updates head tail count nonnegative
 
+theorem increment_unsafe.returns :
+    let _this_module := ParallelSharedCounterAst.module;
+    let this_function := parallelFunction ParallelSharedCounterAst.module "increment_unsafe";
+    ∀ (head : Int) (tail : List Int),
+      Returns(Parallel([this_function [.ref 0, .lock 0]],
+        { objects := [.array ((head :: tail).map SharedValue.int)] })) := by
+  dsimp only
+  intro head tail
+  apply ParallelRun.Ensures.returns (post := fun _ => True)
+  have outcomes :
+      (parallelRun [parallelFunction ParallelSharedCounterAst.module "increment_unsafe" [.ref 0, .lock 0]]
+        { objects := [.array ((head :: tail).map SharedValue.int)] }).outcomes =
+      [.ok { objects := [.array (((head + 1) :: tail).map SharedValue.int)] }] := by
+    cbv
+  constructor
+  · rw [outcomes]; simp
+  · rw [outcomes]; simp
+
+set_option maxHeartbeats 800000 in
+theorem increment_safe.returns :
+    let _this_module := ParallelSharedCounterAst.module;
+    let this_function := parallelFunction ParallelSharedCounterAst.module "increment_safe";
+    ∀ (head : Int) (tail : List Int),
+      Returns(Parallel([this_function [.ref 0, .lock 0]],
+        { objects := [.array ((head :: tail).map SharedValue.int)] })) := by
+  dsimp only
+  intro head tail
+  apply ParallelRun.Ensures.returns (post := fun _ => True)
+  have outcomes :
+      (parallelRun [parallelFunction ParallelSharedCounterAst.module "increment_safe" [.ref 0, .lock 0]]
+        { objects := [.array ((head :: tail).map SharedValue.int)] }).outcomes =
+      [.ok { objects := [.array (((head + 1) :: tail).map SharedValue.int)] }] := by
+    rw [CounterProof.safe_source]
+    cbv
+  constructor
+  · rw [outcomes]; simp
+  · rw [outcomes]; simp
+
 end tests.py.parallel_shared_counter

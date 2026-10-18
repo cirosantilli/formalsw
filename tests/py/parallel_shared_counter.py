@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""A shared counter and the classic lost-update race.
+"""
+A shared counter and the classic lost-update race.
 
 Run: python3 tests/py/parallel_shared_counter.py
 Prove: ./formalsw tests/py/parallel_shared_counter.py
 
 The counter is the first element of a nonempty integer list. The proof covers
 any initial contents and any nonnegative worker count; main demonstrates two workers.
-Both workers also receive the SAME mutex. sleep(0) gives the other worker a
+Each worker also returns when called alone with a nonempty integer list and an
+unlocked mutex. Both workers receive the SAME mutex in a trial. sleep(0) gives the other worker a
 chance to run, making the unsafe version's lost update easy to see.
 """
 from concurrent.futures import ThreadPoolExecutor
@@ -15,7 +17,13 @@ from time import sleep
 
 
 def increment_unsafe(counter: list[int], mutex: Lock) -> None:
-    """Increment using an unprotected read-modify-write operation.
+    """
+    Increment using an unprotected read-modify-write operation.
+
+    @formalsw: theorem returns :
+      ∀ (head : Int) (tail : List Int),
+        Returns(Parallel([this_function [.ref 0, .lock 0]],
+          { objects := [.array ((head :: tail).map SharedValue.int)] }))
 
     @formalsw: theorem loses_an_update :
       ∃ (counter worker_count : PyValue),
@@ -28,7 +36,13 @@ def increment_unsafe(counter: list[int], mutex: Lock) -> None:
 
 
 def increment_safe(counter: list[int], mutex: Lock) -> None:
-    """Hold the shared mutex for the whole read-modify-write operation.
+    """
+    Hold the shared mutex for the whole read-modify-write operation.
+
+    @formalsw: theorem returns :
+      ∀ (head : Int) (tail : List Int),
+        Returns(Parallel([this_function [.ref 0, .lock 0]],
+          { objects := [.array ((head :: tail).map SharedValue.int)] }))
 
     @formalsw: theorem preserves_updates :
       ∀ (counter worker_count : PyValue),

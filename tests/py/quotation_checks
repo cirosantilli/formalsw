@@ -28,7 +28,7 @@ with project_temporary_directory(prefix='quotation_checks_') as directory:
         '"tests/py/parallel_shared_counter.py"', json.dumps(str(path)))
     path.with_suffix('.py.lean').write_text(proof)
     result = run(path)
-    assert result.returncode == 0 and 'All 2 checks passed' in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0 and 'All 4 checks passed' in result.stdout, result.stdout + result.stderr
 
     # None of the setup, precondition, worker, or postcondition is a trusted hint.
     for description, source in [
