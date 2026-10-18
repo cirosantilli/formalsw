@@ -225,7 +225,7 @@ def uses_heap_calls(module, function):
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
-                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("bytearray", "set")
+                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("bytearray", "set", "sorted")
                     or isinstance(node, ast.Attribute) and node.attr in ('append', 'add')):
                 return True
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
@@ -421,6 +421,13 @@ def check_calls(module, function, reject, *, heap=False):
                 if source is not None and any((root / 'math.py').exists() or (root / 'math').is_dir()
                                               for root in (source.parent, Path.cwd())):
                     reject(node, 'a local math module shadows the modeled standard library')
+                for item in node.args:
+                    recurse(item)
+            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'sorted':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'sorting requires the unshadowed builtin sorted')
+                if len(node.args) != 1 or node.keywords:
+                    reject(node, 'sorted supports one positional iterable; key and reverse are not modeled')
                 for item in node.args:
                     recurse(item)
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'set':

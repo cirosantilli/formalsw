@@ -21,6 +21,7 @@ roots = [
   "lang.py.FormalSW.Linking",
   "lang.py.FormalSW.Globals",
   "lang.py.FormalSW.ScalarSets",
+  "lang.py.FormalSW.ScalarSort",
   "lang.py.FormalSW.MutableGlobals",
   "lang.py.FormalSW.HeapCalls",
   "lang.py.FormalSW.DataRuntime",

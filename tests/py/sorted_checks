@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""
+Compare scalar sorting, stable ties, and fresh result lists with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def ascending(xs: list[int]):
+    return sorted(xs)
+def independent(xs: list[int]):
+    result = sorted(xs)
+    result.append(9)
+    xs.append(4)
+    return result
+def touch(xs: list[int]):
+    xs.append(3)
+    return xs
+def effect(xs: list[int]):
+    return sorted(touch(xs))
+def triple(a: int, b: int, c: int):
+    return sorted((a, b, c))
+def text():
+    return sorted("λz😀λa")
+def bytes_value():
+    return sorted(b"cabac")
+def buffer():
+    return sorted(bytearray([9, 1, 7, 1]))
+def set_value():
+    values = set()
+    values.add(3)
+    values.add(-1)
+    values.add(True)
+    values.add(1)
+    return sorted(values)
+def empty_tuple():
+    return sorted(())
+def invalid():
+    return sorted(3)
+def nested(xs: list[int]):
+    return sorted([xs])
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    assert not checker.check(function.name, heap_calls=True), function.name
+assert uses_heap_calls(program, program.body[0])
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+
+
+def compare(name, arguments, heap, actual, anchors):
+    global count
+    try:
+        result = world[name](*actual)
+        error = None
+    except TypeError:
+        result, error = None, 'TypeError'
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [{arguments}] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {count}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+
+cases = [[], [None], [None, None], [1, "a"], [True, False],
+         ["λ", "😀", "a", "λ"], [b"z", b"a", b"z"], list(range(12, -1, -1))]
+cases += [list(values) for values in itertools.product((-2, 0, 1), repeat=3)]
+cases += [list(values) for values in itertools.permutations((False, 0, True, 1))]
+for name, initial in itertools.product(('ascending', 'independent', 'effect'), cases):
+    value = initial.copy()
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    compare(name, '.ref 0', heap, [value], [value])
+for values in itertools.product((-2, 0, 3), repeat=3):
+    arguments = ', '.join('.scalar (' + constant(x) + ')' for x in values)
+    compare('triple', arguments, '[]', list(values), [])
+for name in ('text', 'bytes_value', 'buffer', 'set_value', 'empty_tuple', 'invalid'):
+    compare(name, '', '[]', [], [])
+
+# Nested object comparisons and keyword options are outside this scalar model.
+lines.append('example : (HeapCalls.call source "nested" [.ref 0] [.list []]).execution.observe 100 = .unsupported := by decide')
+for expression in ('sorted()', 'sorted(xs, xs)', 'sorted(xs, key=int)',
+                   'sorted(xs, reverse=True)'):
+    module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
+    assert SupportChecker(module).check('f'), expression
+for binding in ('sorted = 1\n', 'from somewhere import sorted\n'):
+    module = ast.parse(binding + 'def f(xs: list[int]):\n    return sorted(xs)\n')
+    assert SupportChecker(module).check('f'), binding
+
+with project_temporary_directory(prefix='sorted-checks-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(xs: list[int]):\n    """\n    @formalsw: ' + marker
+                        + '\n    """\n    return sorted([xs])\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} sorted Python comparisons passed, including stable ties, fresh lists, and effects')
