@@ -1,3 +1,4 @@
+import lang.py.FormalSW.Python
 import lang.py.FormalSW.Runtime
 
 /-! An interpreter for read-only Python data programs: scalars, nested lists,
@@ -187,8 +188,7 @@ elab_rules : term
       let expr ← elabTerm source (some (mkConst ``String))
       let some text := getStringValue? expr
         | throwError "python_data% expects a string literal or include_str"
-      let result ← IO.Process.output {
-        cmd := "python3", args := #["-m", "lang.py.data_ast", (toJson text).compress] }
+      let result ← FormalSW.PyAst.runPythonCompiler "lang.py.data_ast" #[(toJson text).compress]
       if result.exitCode != 0 then throwError "{result.stderr}"
       let json ← ofExcept (Json.parse result.stdout)
       return Lean.toExpr (← ofExcept (FormalSW.PyAst.Module.fromJsonDocument? json))

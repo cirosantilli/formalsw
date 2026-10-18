@@ -44,6 +44,16 @@ with tempfile.TemporaryDirectory(prefix="formalsw-project-") as temporary:
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert f"All {1 if directory == 'left' else 2} checks passed" in result.stdout, result.stdout
+    compiler_check = project / "compiler_check.lean"
+    compiler_check.write_text(
+        'import FormalSW\n'
+        'def parsed : FormalSW.PyAst.Module := python_data% "def f(n):\\n    return n\\n"\n'
+        'example : parsed.body.length = 1 := by decide\n'
+    )
+    result = subprocess.run(
+        ["lake", "env", "lean", str(compiler_check)], cwd=project, text=True, capture_output=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
     # Checking only the importing solver must recheck the current dependency,
     # even when a previous successful object's cache remains on disk.
     left = project / "left" / "1.py"

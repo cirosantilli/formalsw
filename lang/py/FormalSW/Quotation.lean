@@ -1,3 +1,4 @@
+import lang.py.FormalSW.Python
 import Lean
 import lang.py.FormalSW.Syntax
 import lang.py.FormalSW.PyValue
@@ -34,8 +35,7 @@ private def compileQuote (source : TSyntax `str) (mode : String) : TermElabM Lea
   let request := Json.mkObj [
     ("source", toJson path), ("function", toJson function),
     ("expression", toJson source.getString), ("mode", toJson mode)]
-  let result ← IO.Process.output {
-    cmd := "python3", args := #["-m", "lang.py.quotation", request.compress] }
+  let result ← FormalSW.PyAst.runPythonCompiler "lang.py.quotation" #[request.compress]
   if result.exitCode != 0 then
     throwError "Python quotation compiler failed: {result.stderr}"
   let response ← ofExcept (Json.parse result.stdout)
