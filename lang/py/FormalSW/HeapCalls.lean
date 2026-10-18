@@ -455,6 +455,7 @@ def primitive : Operation → List Value → Eval Value
   | .add address, [value] => Mutable.addItem address value
   | .append _, _ | .add _, _ => Mutable.error "TypeError"
   | .builtin .len, [value] => Mutable.length value
+  | .builtin .divmod, values => Mutable.divmod values
   | .builtin .bytearray, values => Mutable.bytearray values
   | .builtin .set, [] => Mutable.allocateSet []
   | .builtin .sorted, [value] => do

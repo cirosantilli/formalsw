@@ -664,6 +664,9 @@ class SupportChecker:
             if uses_builtin(self.module, function, 'int') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'integer conversion requires a call interpreter'))
+            if uses_builtin(self.module, function, 'divmod') and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'divmod returns a tuple and requires the heap call interpreter'))
             if uses_builtin(self.module, function, 'len') and model in ('scalarFunction', 'scalarFunctionWithGlobals'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'sequence length requires a call interpreter'))

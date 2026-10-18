@@ -271,6 +271,8 @@ def uses_heap_calls(module, function):
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "set", "sorted"}
+                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "divmod" and not bindings(module, "divmod")
                     or isinstance(node, ast.Attribute) and node.attr in ('append', 'add')):
                 return True
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
@@ -561,6 +563,13 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'buffer construction requires the unshadowed builtin bytearray')
                 if node.keywords or len(node.args) > 1:
                     reject(node, 'bytearray supports zero or one positional argument; encoding arguments are not modeled')
+                for item in node.args:
+                    recurse(item)
+            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'divmod':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'divmod requires the unshadowed builtin divmod')
+                if node.keywords or len(node.args) != 2:
+                    reject(node, 'divmod requires exactly two positional arguments')
                 for item in node.args:
                     recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'len':

@@ -77,6 +77,7 @@ inductive Builtin where
   | str
   | max
   | min
+  | divmod
   | intBitLength
   | len
   | bytearray
@@ -369,6 +370,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "str" => pure Builtin.str
         | "max" => pure Builtin.max
         | "min" => pure Builtin.min
+        | "divmod" => pure Builtin.divmod
         | "bytearray" => pure Builtin.bytearray
         | "set" => pure Builtin.set
         | "sorted" => pure Builtin.sorted

@@ -139,6 +139,7 @@ def main() -> int:
         TestCase("setup imports in preconditions", Path("tests/py/requires_imported.py"), 0, "All 3 checks passed"),
         TestCase("local helper calls and reused source proofs", Path("tests/py/linked_calls.py"), 0, "All 2 checks passed"),
         TestCase("variable and signed integer division", Path("tests/py/division.py"), 0, "All 4 checks passed"),
+        TestCase("signed divmod and tuple unpacking", Path("tests/py/divmod.py"), 0, "All 3 checks passed"),
         TestCase("nested break, continue, and loop else scopes", Path("tests/py/loop_control.py"), 0, "All 10 checks passed"),
         TestCase("scalar string conversion, indexing, and slices", Path("tests/py/strings.py"), 0, "All 12 checks passed"),
         TestCase("assertion conditions, lazy messages and failures", Path("tests/py/assertions.py"), 0, "All 4 checks passed"),

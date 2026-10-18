@@ -448,6 +448,34 @@ def allocateTuple (items : List Value) : Eval Value := do
     set (heap ++ [.tuple items])
     return .ref heap.length
 
+/-- Python floor division and remainder, returned in a newly allocated tuple.
+Unknown numeric protocols remain unsupported, on either side of the operation. -/
+def divmod : List Value → Eval Value
+  | [.scalar left, .scalar right] =>
+      match scalarNumber left, scalarNumber right with
+      | some n, some d =>
+          match Py.Builtin.Int.divMod n d with
+          | .ok (quotient, remainder) => allocateTuple [.scalar (.int quotient), .scalar (.int remainder)]
+          | .error (.zeroDivisionError _) => error "ZeroDivisionError"
+          | .error _ => unsupported
+      | _, _ => error "TypeError"
+  | [left, right] => do
+      let heap ← get
+      if [left, right].any (fun value => match value with
+          | .scalar _ => false
+          | .ref address => match heap[address]? with
+              | some (.instance _ _ _) | none => true
+              | _ => false) then unsupported
+      else error "TypeError"
+  | _ => error "TypeError"
+
+theorem divmod_ints (n d : Int) (nonzero : d ≠ 0) (heap : Heap) :
+    divmod [.scalar (.int n), .scalar (.int d)] heap =
+      some (.ok (.ref heap.length), heap ++
+        [.tuple [.scalar (.int (n.fdiv d)), .scalar (.int (n - d * n.fdiv d))]]) := by
+  simp [divmod, Py.Builtin.Int.divMod, Py.Builtin.Int.floorDiv, nonzero]
+  rfl
+
 def addReceiver (value : Value) : Eval Nat := do
   match value with
   | .ref address =>

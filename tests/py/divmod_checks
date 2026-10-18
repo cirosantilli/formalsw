@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""
+Compare signed divmod results, tuple allocation, and argument effects with Python.
+"""
+import ast
+from itertools import product
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    if type(value) is bytes:
+        return '(.bytes [' + ', '.join(map(str, value)) + '])'
+    return f'(.string {json.dumps(value)})'
+
+
+def tuple_object(pair):
+    return '.tuple [' + ', '.join('.scalar ' + constant(x) for x in pair) + ']'
+
+
+values = [*range(-6, 7), True, False, None, 'invalid', b'bytes']
+cases = [*product(values, repeat=2),
+         *((s * (10**100 + 7), t * 13) for s, t in product((-1, 1), repeat=2))]
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192']
+for n, d in cases:
+    arguments = f'[.scalar {constant(n)}, .scalar {constant(d)}]'
+    try:
+        pair = divmod(n, d)
+        expected = f'some (.ok (.ref 1), [.list [], {tuple_object(pair)}])'
+    except (TypeError, ZeroDivisionError) as error:
+        expected = f'some (.error ⟨"{type(error).__name__}", []⟩, [.list []])'
+    lines.append(f'example : HeapCalls.primitive (.builtin .divmod) {arguments} [.list []] = {expected} := by native_decide')
+
+source = '''
+def record(items: list[int], value: int) -> int:
+    items.append(value)
+    return value
+'''
+bodies = {
+    'pair': 'return divmod(n, d)',
+    'effects': 'return divmod(record(items, n), record(items, d))',
+    'bad_type': 'return divmod(items, record(items, d))',
+    'left_error': 'return divmod(1 // 0, record(items, d))',
+    'right_error': 'return divmod(record(items, n), 1 // 0)',
+    'unpack': 'q, r = divmod(n, d)\nreturn q * d + r',
+    'quotient': 'return divmod(n, d)[0]',
+    'remainder': 'return divmod(n, d)[1]',
+    'arity': 'a, b, c = divmod(n, d)\nreturn a',
+}
+for name, body in bodies.items():
+    source += f'\ndef probe_{name}(items: list[int], n: int, d: int):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+world = {}
+exec(source, world)
+lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
+checks = 0
+for name, n, d in product(bodies, (-7, True, 'invalid'), (-3, 0, 3)):
+    function = 'probe_' + name
+    assert not SupportChecker(program).check(function), (function, SupportChecker(program).check(function))
+    items = [99]
+    try:
+        result = world[function](items, n, d)
+        if isinstance(result, tuple):
+            outcome = '.ok (.ref 1)'
+            allocation = f' ∧ c.heap[1]? = some ({tuple_object(result)})'
+        else:
+            outcome = '.ok (.scalar ' + constant(result) + ')'
+            allocation = ''
+    except (TypeError, ValueError, ZeroDivisionError) as error:
+        outcome = f'.error ⟨"{type(error).__name__}", []⟩'
+        allocation = ''
+    contents = '[' + ', '.join('.scalar ' + constant(x) for x in items) + ']'
+    call = f'HeapCalls.call source "{function}" [.ref 0, .scalar {constant(n)}, .scalar {constant(d)}] [.list [.scalar (.int 99)]]'
+    lines.extend([f'example : (match ({call}).execution.observe 300 with',
+                  f'  | .done (.ok c) => decide (c.outcome = ({outcome}) ∧ c.heap[0]? = some (.list {contents}){allocation})',
+                  '  | _ => false) = true := by native_decide'])
+    checks += 1
+lines.append('example : Mutable.divmod [.ref 0, .scalar (.int 2)] [.instance "source" "Numeric" []] = none := by rfl')
+
+for arguments in ('[.scalar (.string "invalid"), .ref 0]', '[.ref 0, .scalar (.string "invalid")]'):
+    lines.append(f'example : Mutable.divmod {arguments} [.instance "source" "Numeric" []] = none := by rfl')
+
+with project_temporary_directory(prefix='divmod-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+    base = 'def f(n: int) -> int:\n    q, r = divmod(n, 2)\n    return q + r\n'
+    def issues(text):
+        return SupportChecker(ast.parse(text)).check('f')
+    assert not issues(base)
+    for call in ('divmod()', 'divmod(n)', 'divmod(n, 2, 3)', 'divmod(n, y=2)', 'divmod(*n)'):
+        assert issues(base.replace('divmod(n, 2)', call)), call
+    for prefix in ('divmod = 0\n', 'from elsewhere import divmod\n'):
+        assert issues(prefix + base)
+    assert issues(base.replace('f(n: int)', 'f(n: int, divmod: int)'))
+    checker = SupportChecker(ast.parse(base))
+    for model in ('scalarFunction', 'Calls.function'):
+        assert checker.requirement('f', f'theorem bad : ({model} Probe.module "f" [.int n]).Throws')
+    assert checker.requirement('f', 'theorem bad : FormalSW.Property.Function.Throws Probe.module "f"')
+    local = ast.parse('def divmod(a: int, b: int) -> int: return a + b\ndef f(n: int) -> int: return divmod(n, 2)\n')
+    assert not SupportChecker(local).check('f')
+    assert 'BuiltinCall' not in api['AstJsonEmitter'](local).emit()
+
+print(f'divmod: {len(cases)} primitive and {checks} source/heap comparisons; binding checks passed')
