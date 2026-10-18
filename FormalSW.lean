@@ -3,6 +3,7 @@ import lang.py.FormalSW.MutableGlobals
 import Lean
 import lang.py.FormalSW.Model
 import lang.py.FormalSW.Calls
+import lang.py.FormalSW.Linking
 import lang.py.FormalSW.GraphEquivalence
 import lang.py.FormalSW.Syntax
 import lang.py.FormalSW.Parallel
