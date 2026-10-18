@@ -100,12 +100,12 @@ def library_functions(module):
     functions = {alias.asname or alias.name: (node.module, alias.name, node)
             for node in module.body if isinstance(node, ast.ImportFrom)
             and node.level == 0 and node.module == 'math'
-            for alias in node.names if alias.name in ('isqrt', 'gcd')}
+            for alias in node.names if alias.name in ('isqrt', 'gcd', 'comb')}
     for node in module.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == 'math':
-                    for name in ('isqrt', 'gcd'):
+                    for name in ('isqrt', 'gcd', 'comb'):
                         functions[f'{alias.asname or alias.name}.{name}'] = ('math', name, node)
     return functions
 
@@ -521,6 +521,8 @@ def check_calls(module, function, reject, *, heap=False):
                 primitive = libraries[target][1]
                 if primitive == 'isqrt' and (node.keywords or len(node.args) != 1):
                     reject(node, 'math.isqrt requires exactly one positional argument')
+                elif primitive == 'comb' and (node.keywords or len(node.args) != 2):
+                    reject(node, 'math.comb requires exactly two positional arguments')
                 elif node.keywords:
                     reject(node, f'math.{primitive} accepts only positional arguments')
                 source = getattr(module, 'formalsw_source', None)

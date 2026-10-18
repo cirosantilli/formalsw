@@ -148,6 +148,7 @@ def main() -> int:
         TestCase("generator sum scoping, filters, ranges and exceptions", Path("tests/py/generator_sums.py"), 0),
         TestCase("integer square root and imported builtin aliases", Path("tests/py/math_isqrt.py"), 0),
         TestCase("integer gcd and imported builtin aliases", Path("tests/py/math_gcd.py"), 0),
+        TestCase("binomial coefficients and imported builtin aliases", Path("tests/py/math_comb.py"), 0),
         TestCase("math module imports and heap calls", Path("tests/py/math_modules.py"), 0, "All 6 checks passed"),
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
         TestCase("typed, object, and return sort equivalence", Path("tests/py/sort.py"), 0),

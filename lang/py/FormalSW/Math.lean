@@ -70,6 +70,32 @@ theorem gcdCall_pair (a b : Int) :
   change Except.ok (Constant.int ((Nat.gcd (Nat.gcd 0 a.natAbs) b.natAbs : Nat) : Int)) = _
   simp
 
+/-- Exact multiplicative recurrence for the coefficient `(offset + k) choose k`.
+The recursion follows the number of factors, without an input or fuel cutoff. -/
+def combProduct (offset : Nat) : Nat → Nat
+  | 0 => 1
+  | k + 1 => combProduct offset k * (offset + k + 1) / (k + 1)
+
+/-- Symmetry keeps the number of factors small even for large `k` near `n`. -/
+def comb (n k : Nat) : Nat :=
+  if k > n then 0 else
+    let count := min k (n - k)
+    combProduct (n - count) count
+
+/-- Both integer-index conversions precede validation of negative arguments. -/
+def combCall : List Constant → Except ExceptionObject Constant
+  | [n, k] =>
+      match scalarNumber n, scalarNumber k with
+      | some n, some k =>
+          if n < 0 ∨ k < 0 then .error { typeName := "ValueError", args := [] }
+          else .ok (.int (comb n.toNat k.toNat))
+      | _, _ => .error { typeName := "TypeError", args := [] }
+  | _ => .error { typeName := "TypeError", args := [] }
+
+theorem combCall_naturals (n k : Nat) :
+    combCall [.int n, .int k] = .ok (.int (comb n k)) := by
+  simp [combCall]
+
 end FormalSW.PyAst.Math
 
 namespace FormalSW.PyAst
@@ -79,7 +105,7 @@ includes the module alias, keeping it distinct from Python function names. -/
 def moduleImports (names : List (String × String)) : List ((String × String) × String) :=
   names.flatMap fun (library, alias) =>
     if library = "math" then [((library, "isqrt"), alias ++ ".isqrt"),
-      ((library, "gcd"), alias ++ ".gcd")]
+      ((library, "gcd"), alias ++ ".gcd"), ((library, "comb"), alias ++ ".comb")]
     else []
 
 /-- Source import bindings are retained in the AST, including aliases. -/
@@ -101,6 +127,7 @@ def libraryFunction (module : Module) (name : String) :
   match importedFunction module.body name with
   | some ("math", "isqrt") => some Math.isqrtCall
   | some ("math", "gcd") => some Math.gcdCall
+  | some ("math", "comb") => some Math.combCall
   | _ => none
 
 def libraryCall (module : Module) (name : String) (values : List Constant) :

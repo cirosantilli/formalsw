@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""
+Compare binomial coefficients, import bindings, and argument effects with Python.
+"""
+import ast
+from itertools import product
+import json
+import math
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    return f'(.string {json.dumps(value)})'
+
+
+values = [*range(-2, 16), True, False, None, 'invalid']
+cases = [*product(values, repeat=2), (100, 50), (1000, 3), (200, 100),
+         *((10**100, k) for k in (0, 1, 2, 10**100 - 1, 10**100, 10**100 + 1))]
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192']
+for args in cases:
+    try:
+        expected = '.ok ' + constant(math.comb(*args))
+    except (TypeError, ValueError) as error:
+        expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+    lines.append(f'example : Math.combCall [{", ".join(map(constant, args))}] = ({expected}) := by native_decide')
+
+source = '''
+import math as arithmetic
+from math import comb as choose
+
+def record(items: list[int], value: int) -> int:
+    items.append(value)
+    return value
+'''
+bodies = {
+    'qualified': 'return arithmetic.comb(n, k)',
+    'imported': 'return choose(n, k)',
+    'effects': 'return arithmetic.comb(record(items, n), record(items, k))',
+    'bad_type': 'return choose(items, record(items, k))',
+    'left_error': 'return arithmetic.comb(1 // 0, record(items, k))',
+    'right_error': 'return choose(record(items, n), 1 // 0)',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(items: list[int], n: int, k: int) -> int:\n    {body}\n'
+program = ast.parse(source)
+world = {}
+exec(source, world)
+lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
+checks = 0
+for name in bodies:
+    assert not SupportChecker(program).check(name), name
+    for n, k in ((0, 0), (5, 2), (3, 5), (-1, 2), (2, -1), (True, False),
+                 (-1, 'invalid'), ('invalid', -1), (100, 50), (10**100, 2)):
+        items = []
+        try:
+            expected = '.ok (.scalar ' + constant(world[name](items, n, k)) + ')'
+        except (TypeError, ValueError, ZeroDivisionError) as error:
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+        heap = '[.list [' + ', '.join('.scalar ' + constant(x) for x in items) + ']]'
+        call = f'HeapCalls.call source "{name}" [.ref 0, .scalar {constant(n)}, .scalar {constant(k)}] [.list []]'
+        lines.append(f'example : ({call}).execution.observe 200 = .done (.ok ⟨{expected}, [], {heap}, 1⟩) := by native_decide')
+        checks += 1
+
+with project_temporary_directory(prefix='comb-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+    base = 'from math import comb as choose\ndef f(n: int) -> int:\n    return choose(n, 2)\n'
+    def issues(text):
+        module = ast.parse(text)
+        module.formalsw_source = directory / 'probe.py'
+        return SupportChecker(module).check('f')
+
+    assert not issues(base)
+    for call in ('choose()', 'choose(n)', 'choose(n, 2, 3)', 'choose(n=n, k=2)', 'choose(*n)', 'choose(**n)'):
+        assert issues(base.replace('choose(n, 2)', call)), call
+    for suffix in ('choose = f\n', 'del choose\n', 'from other import choose\n'):
+        assert issues(base + suffix), suffix
+    assert issues(base.replace('f(n: int)', 'f(n: int, choose: int)'))
+    qualified = base.replace('from math import comb as choose', 'import math as m').replace('choose(n, 2)', 'm.comb(n, 2)')
+    assert not issues(qualified)
+    for suffix in ('m.comb = f\n', 'del m.comb\n', 'import math as alias\ndef mutate():\n    alias.comb = f\n'):
+        assert issues(qualified + suffix), suffix
+    (directory / 'math.py').write_text('def comb(n, k): return 1\n')
+    assert any('shadows the modeled standard library' in issue.reason for issue in issues(base))
+
+print(f'Binomial coefficients: {len(cases)} primitive and {checks} source/heap comparisons; import checks passed')
