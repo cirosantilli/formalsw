@@ -33,6 +33,35 @@ private theorem get_range (values : List α) :
       simpa [List.range_succ_eq_map, List.filterMap_map, Function.comp_def] using
         congrArg (List.cons value) ih
 
+private theorem get_range_prefix (values : List α) (count : Nat) :
+    (List.range count).filterMap (fun index => values[index]?) = values.take count := by
+  induction count generalizing values with
+  | zero => simp
+  | succ count ih =>
+      cases values with
+      | nil => simp
+      | cons value values =>
+          simpa [List.range_succ_eq_map, List.filterMap_map, Function.comp_def] using
+            congrArg (List.cons value) (ih values)
+
+/-- Python prefix slicing copies exactly the normalized prefix. -/
+theorem slice_prefix (values : List α) (stop : Int) :
+    slice values { stop := some stop } = .ok (values.take (Slice.prefixLength values.length stop)) := by
+  unfold slice
+  rw [Slice.indexList_prefix]
+  change Except.ok ((List.range _).filterMap (fun index => values[index]?)) = _
+  rw [get_range_prefix]
+
+/-- Python suffix slicing copies the tail after the selected starting index. -/
+theorem slice_suffix (values : List α) (start : Nat) :
+    slice values { start := some start } = .ok (values.drop start) := by
+  unfold slice
+  rw [Slice.indexList_suffix]
+  change Except.ok ((List.range' start (values.length - start)).filterMap (fun index => values[index]?)) = _
+  rw [List.range'_eq_map_range, List.filterMap_map]
+  congr 1
+  simpa [List.length_drop, List.getElem?_drop, Function.comp_def] using get_range (values.drop start)
+
 /-- A full negative-unit slice reverses any sequence of values. -/
 theorem slice_reverse (values : List α) :
     slice values { step := some (-1) } = .ok values.reverse := by

@@ -146,6 +146,40 @@ theorem indexList_positive_end (length start stride : Nat) (positive : 0 < strid
     rw [indexListFuel_positive length length length stride positive (by omega)]
     simp [empty, Nat.div_eq_of_lt (show stride - 1 < stride by omega)]
 
+/-- Number of elements selected by `values[:stop]`, including negative bounds. -/
+def prefixLength (length : Nat) (stop : Int) : Nat :=
+  (max 0 (min (if stop < 0 then stop + length else stop) length)).toNat
+
+theorem prefixLength_le (length : Nat) (stop : Int) : prefixLength length stop ≤ length := by
+  unfold prefixLength
+  omega
+
+theorem prefixLength_nonnegative (length stop : Nat) : prefixLength length stop = min stop length := by
+  unfold prefixLength
+  have nonnegative : ¬ (stop : Int) < 0 := by omega
+  simp only [nonnegative, ↓reduceIte]
+  omega
+
+/-- A unit-stride prefix has contiguous indices even when its bound is negative. -/
+theorem indexList_prefix (length : Nat) (stop : Int) :
+    indexList { stop := some stop } length = .ok (List.range (prefixLength length stop)) := by
+  have normalized : (prefixLength length stop : Int) =
+      max 0 (min (if stop < 0 then stop + length else stop) length) := by
+    unfold prefixLength
+    omega
+  change Except.ok (indexListFuel length 0
+    (max 0 (min (if stop < 0 then stop + length else stop) length)) 1) = _
+  rw [← normalized]
+  congr 1
+  simpa [List.range_eq_range'] using
+    indexListFuel_positive length 0 (prefixLength length stop) 1 (by decide)
+      (by simpa using prefixLength_le length stop)
+
+/-- Omitting the stride in a suffix selects every remaining position. -/
+theorem indexList_suffix (length start : Nat) :
+    indexList { start := some start } length = .ok (List.range' start (length - start)) := by
+  simpa only [Nat.add_sub_cancel, Nat.div_one] using indexList_positive_end length start 1 (by decide)
+
 /-- Python's inclusive count expression matches the number of selected positions. -/
 theorem positive_end_count (length start stride : Nat) (positive : 0 < stride) :
     (((length : Int) - 1 - start) / stride + 1).toNat =

@@ -466,6 +466,22 @@ def getSlice (value lower upper stride : Value) : Eval Value := do
           allocateBuffer (← sequenceResult (Py.Builtin.Sequence.slice bytes bounds))
       | none => unsupported
 
+/-- A list prefix is a fresh object; all existing references keep their contents. -/
+theorem getSlice_list_prefix (heap : Heap) (address : Nat) (items : List Value) (stop : Int)
+    (found : heap[address]? = some (.list items)) :
+    getSlice (.ref address) (.scalar .none) (.scalar (.int stop)) (.scalar .none) heap =
+      some (.ok (.ref heap.length), heap ++ [.list (items.take (Py.Builtin.Slice.prefixLength items.length stop))]) := by
+  simp [getSlice, found, sliceBounds, sliceBound, integer, Py.Builtin.Sequence.slice_prefix,
+    sequenceResult, allocate, Except.map]
+
+/-- A list suffix is a fresh object, including when its start lies past the end. -/
+theorem getSlice_list_suffix (heap : Heap) (address : Nat) (items : List Value) (start : Nat)
+    (found : heap[address]? = some (.list items)) :
+    getSlice (.ref address) (.scalar (.int start)) (.scalar .none) (.scalar .none) heap =
+      some (.ok (.ref heap.length), heap ++ [.list (items.drop start)]) := by
+  simp [getSlice, found, sliceBounds, sliceBound, integer, Py.Builtin.Sequence.slice_suffix,
+    sequenceResult, allocate, Except.map]
+
 def setSlice (value lower upper stride replacement : Value) : Eval Value := do
   match value with
   | .ref address =>

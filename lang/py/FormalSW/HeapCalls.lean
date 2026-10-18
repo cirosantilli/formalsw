@@ -617,6 +617,13 @@ theorem binary (left : Evaluates module env a heap av middle)
   exact .next rfl ((left _ _).trans (.next rfl ((right _ _).trans
     (.next (by simp [step, result, run, operation]) .refl))))
 
+theorem unary (evaluated : Evaluates module env expression heap value middle)
+    (operation : HeapCalls.unary op value middle = some (.ok resultValue, finalHeap)) :
+    Evaluates module env (.unaryOp op expression) heap resultValue finalHeap := by
+  intro anchors stack
+  exact .next rfl ((evaluated anchors _).trans
+    (.next (by simp [step, result, run, operation]) .refl))
+
 theorem compare (left : Evaluates module env a heap av middle)
     (right : Evaluates module env b middle bv afterRight)
     (operation : HeapCalls.compare op av bv afterRight = some (.ok value, finalHeap)) :
