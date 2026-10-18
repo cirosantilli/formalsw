@@ -1,4 +1,5 @@
 import lang.py.builtin.type.core
+import lang.py.builtin.type.unicode
 
 /-! Arbitrary-precision Python integer operations, excluding float-producing branches. -/
 
@@ -164,63 +165,83 @@ def fromBytes (bytes : List UInt8) (byteOrder : ByteOrder := .big)
 def asIntegerRatio (value : IntValue) : IntValue × IntValue := (value, 1)
 def isInteger (_ : IntValue) : Bool := true
 
-private def isAsciiSpace (codePoint : Nat) : Bool :=
+/-- The six ASCII whitespace characters accepted in byte integer literals. -/
+def isAsciiSpace (codePoint : Nat) : Bool :=
   codePoint = 9 || codePoint = 10 || codePoint = 11 || codePoint = 12 ||
     codePoint = 13 || codePoint = 32
 
-private def trimLeft : List Nat → List Nat
+def trimLeft : List Nat → List Nat
   | [] => []
   | head :: tail => if isAsciiSpace head then trimLeft tail else head :: tail
 
-private def trim (value : List Nat) : List Nat := (trimLeft value.reverse).reverse |> trimLeft
+def trim (source : List Nat) : List Nat := (trimLeft source.reverse).reverse |> trimLeft
 
-private def digitValue (codePoint : Nat) : Option Nat :=
+def digitValue (codePoint : Nat) : Option Nat :=
   if 48 ≤ codePoint && codePoint ≤ 57 then some (codePoint - 48)
   else if 65 ≤ codePoint && codePoint ≤ 90 then some (codePoint - 55)
   else if 97 ≤ codePoint && codePoint ≤ 122 then some (codePoint - 87)
   else none
 
-private def inferBase (requested : Nat) : List Nat → Nat × List Nat
-  | 48 :: marker :: rest =>
-      if marker = 98 || marker = 66 then (if requested = 0 then 2 else requested, rest)
-      else if marker = 111 || marker = 79 then (if requested = 0 then 8 else requested, rest)
-      else if marker = 120 || marker = 88 then (if requested = 0 then 16 else requested, rest)
-      else (if requested = 0 then 10 else requested, 48 :: marker :: rest)
-  | digits => (if requested = 0 then 10 else requested, digits)
-
-private def parseDigits (base : Nat) : List Nat → Bool → Bool → Result Nat
-  | [], sawDigit, previousUnderscore =>
-      if sawDigit && !previousUnderscore then .ok 0
-      else .error (.valueError "invalid literal for int()")
-  | codePoint :: rest, sawDigit, previousUnderscore =>
-      if codePoint = 95 then
-        if !sawDigit || previousUnderscore then .error (.valueError "invalid literal for int()")
-        else parseDigits base rest sawDigit true
-      else
-        match digitValue codePoint with
-        | none => .error (.valueError "invalid literal for int()")
+/-- Accumulate digits left to right. An underscore must have digits on both sides. -/
+def parseDigits (base : Nat) : List Nat → Nat → Bool → Result Nat
+  | [], total, needDigit =>
+      if needDigit then .error (.valueError "invalid literal for int()") else .ok total
+  | point :: rest, total, needDigit =>
+      if point = 95 then
+        if needDigit then .error (.valueError "invalid literal for int()")
+        else parseDigits base rest total true
+      else match digitValue point with
         | some digit =>
-            if digit ≥ base then .error (.valueError "invalid literal for int()")
-            else do
-              let suffix ← parseDigits base rest true false
-              return digit * base ^ (rest.filter (· != 95)).length + suffix
+            if digit < base then parseDigits base rest (total * base + digit) false
+            else .error (.valueError "invalid literal for int()")
+        | none => .error (.valueError "invalid literal for int()")
 
-/-- `int(string, base)`, for bases zero or 2 through 36. -/
+def sign : List Nat → Bool × List Nat
+  | 43 :: rest => (false, rest)
+  | 45 :: rest => (true, rest)
+  | rest => (false, rest)
+
+/-- Decimal syntax has no base prefix. Conversion has no configurable digit cap. -/
+def parseDecimal (source : List Nat) : Result IntValue := do
+  let (negative, unsigned) := sign (trim source)
+  let magnitude ← parseDigits 10 unsigned 0 true
+  return if negative then -(magnitude : Int) else magnitude
+
+private def prefixBase : Nat → Nat
+  | 98 | 66 => 2
+  | 111 | 79 => 8
+  | 120 | 88 => 16
+  | _ => 0
+
+/-- Strip a prefix only when it agrees with the requested base (or the base is zero).
+Python permits one underscore immediately after a recognized prefix. -/
+def baseDigits (requested : Nat) (source : List Nat) : Nat × List Nat × Bool :=
+  match source with
+  | 48 :: marker :: rest =>
+      let inferred := prefixBase marker
+      if inferred ≠ 0 && (requested = 0 || requested = inferred) then
+        let rest := match rest with | 95 :: tail => tail | tail => tail
+        (inferred, rest, false)
+      else (if requested = 0 then 10 else requested, source, requested = 0)
+  | _ => (if requested = 0 then 10 else requested, source, false)
+
+/-- ASCII integer syntax for bases zero or 2 through 36. In base zero, leading
+zeroes are permitted only when the value is zero or a base prefix is present. -/
 def parse (source : List Nat) (requestedBase : Nat := 10) : Result IntValue :=
-  if requestedBase != 0 && (requestedBase < 2 || requestedBase > 36) then
+  if requestedBase = 10 then parseDecimal source
+  else if requestedBase != 0 && (requestedBase < 2 || requestedBase > 36) then
     .error (.valueError "int() base must be >= 2 and <= 36, or 0")
-  else
-    let stripped := trim source
-    let (negative, unsigned) := match stripped with
-      | 43 :: rest => (false, rest)
-      | 45 :: rest => (true, rest)
-      | rest => (false, rest)
-    let (base, digits) := inferBase requestedBase unsigned
-    if requestedBase != 0 && base != requestedBase then
-      .error (.valueError "invalid literal for int()")
-    else do
-      let magnitude ← parseDigits base digits false false
-      return if negative then -(magnitude : Int) else magnitude
+  else do
+    let (negative, unsigned) := sign (trim source)
+    let (base, digits, leadingZero) := baseDigits requestedBase unsigned
+    let magnitude ← parseDigits base digits 0 true
+    if leadingZero && magnitude ≠ 0 then .error (.valueError "invalid literal for int()")
+    else return if negative then -(magnitude : Int) else magnitude
+
+/-- Text conversion accepts Unicode decimal digits and Unicode whitespace;
+byte and bytearray conversion use `parseDecimal` directly. -/
+def parseText (source : String) : Result IntValue :=
+  parseDecimal (source.toList.map Unicode.integerCharacter)
 
 example : floorDiv (-3) 2 = .ok (-2) := rfl
 example : mod 3 (-2) = .ok (-1) := rfl

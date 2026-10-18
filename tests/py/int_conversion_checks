@@ -57,7 +57,7 @@ for name in ('identity', 'empty', 'heap_identity', 'bad_list', 'bad_argument'):
             expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
         equations.append(f'example : ({backend} Probe.module "{name}" [{constant(value)}]).observe 80 = .done ({expected}) := by decide')
 for name, backend in (('text', 'Calls.function'), ('bytes_value', 'Calls.function'), ('buffer', 'HeapCalls.scalarFunction')):
-    equations.append(f'example : ({backend} Probe.module "{name}" [.int 0]).observe 80 = .unsupported := by decide')
+    equations.append(f'example : ({backend} Probe.module "{name}" [.int 0]).observe 80 = .done (.ok (.int 12)) := by decide')
 for value in values:
     result = f'.ok (.scalar ({constant(int(value))}))' if value is not None else '.error { typeName := "TypeError", args := [] }'
     equations.append(f'example : (HeapCalls.call Probe.module "effects" [.scalar ({constant(value)}), .ref 0] [.list []]).execution.observe 80 = '

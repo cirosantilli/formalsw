@@ -110,6 +110,7 @@ def main() -> int:
         TestCase("mutable buffers, initialization, and helper reads", Path("tests/py/buffers.py"), 0, "All 6 checks passed"),
         TestCase("shared heap range loops", Path("tests/py/heap_ranges.py"), 0, "All 2 checks passed"),
         TestCase("prerequisites with unrelated parameters", Path("tests/py/prerequisite_parameters.py"), 0, "All 2 checks passed"),
+        TestCase("decimal parsing round-trips arbitrary signed integers", Path("tests/py/decimal_roundtrip.py"), 0, "All 2 checks passed"),
         TestCase("integer conversion and square roots", Path("tests/py/int_conversion.py"), 0, "All 6 checks passed"),
         TestCase("positional scalar maximum", Path("tests/py/maximum.py"), 0, "All 1 checks passed"),
         TestCase("immutable scalar default arguments", Path("tests/py/defaults.py"), 0, "All 3 checks passed"),

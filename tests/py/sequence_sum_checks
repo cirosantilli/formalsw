@@ -115,7 +115,7 @@ exec(source, world)
 lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
          'def source : Module := pyast_from_json% (include_str "source.json")']
 count = 0
-for name, initial, n in itertools.product((name for name in bodies if name not in ('unsupported', 'converted_strings')),
+for name, initial, n in itertools.product((name for name in bodies if name != 'unsupported'),
                                          ([], [0, 2], [-2, 1]), (-2, 3)):
     value = initial.copy()
     try:
@@ -136,8 +136,6 @@ for name, initial, n in itertools.product((name for name in bodies if name not i
         '  | _ => false) = true := by native_decide',
     ])
     count += 1
-# Decimal parsing is a separate primitive; unsupported elements must propagate.
-lines.append('example : (HeapCalls.call source "converted_strings" [.ref 0, .scalar (.int 3)] [.list []]).execution.observe 5000 = .unsupported := by decide')
 lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
 for expression in ('sum()', 'sum(xs, n, n)', 'sum(xs, other=n)', 'sum(xs, n, start=n)',
                    'sum(x for x, y in xs)', 'sum(x async for x in xs)',

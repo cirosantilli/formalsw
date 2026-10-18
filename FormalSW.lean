@@ -5,6 +5,7 @@ import lang.py.FormalSW.MutableGlobals
 import lang.py.FormalSW.Instances
 import lang.py.FormalSW.HeapCalls
 import lang.py.FormalSW.SumCalls
+import lang.py.FormalSW.IntegerParsing
 import lang.py.FormalSW.ClassCalls
 import Lean
 import lang.py.FormalSW.Model

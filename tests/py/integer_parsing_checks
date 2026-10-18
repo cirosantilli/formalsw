@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+Compare integer text, bytes, Unicode, base syntax, and argument effects with Python.
+"""
+import ast
+import itertools
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import unicodedata
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / 'formalsw'))
+# This matches the model's unbounded arithmetic and decimal conversion.
+sys.set_int_max_str_digits(0)
+
+
+def text_literal(value):
+    return '"' + ''.join(f'\\u{ord(char):04x}' if ord(char) < 32 else
+                         '\\\\' if char == '\\' else '\\"' if char == '"' else char
+                         for char in value) + '"'
+
+
+def expected(value, base=None):
+    try:
+        result = int(value) if base is None else int(value, base)
+        return f'.ok (.int ({result}))'
+    except ValueError:
+        return '.error { typeName := "ValueError", args := [] }'
+
+
+def scalar(value):
+    if isinstance(value, bytes):
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + text_literal(value)
+
+
+source = '''
+def text(value: str) -> int:
+    return int(value)
+
+def heap_text(value: str) -> int:
+    stored = [value]
+    return int(stored[0])
+
+def octets(value: bytes) -> int:
+    return int(value)
+
+def buffer(value: bytes) -> int:
+    return int(bytearray(value))
+
+def effects(value: str, log: list[int]) -> int:
+    log.append(7)
+    return int(value)
+'''
+program = ast.parse(source)
+from lang.py.support import SupportChecker
+for name in ('text', 'heap_text', 'octets', 'buffer', 'effects'):
+    assert not SupportChecker(program).check(name)
+
+ascii_cases = {''.join(chars) for length in range(4)
+               for chars in itertools.product('01_+- x\x00', repeat=length)}
+ascii_cases.update(('0001', '00_01', '-0', '+0', '1_234_567', '0x10', '0b10', '0o10',
+                    '  \t-12\r\n', '12\x00', '12.0', '++12', '1__2', '1_ 2', '_12', '12_',
+                    '9' * 100, '1' + '0' * 4500))
+zeroes = [point for point in range(0x110000) if unicodedata.decimal(chr(point), None) == 0]
+unicode_cases = {''.join(chr(zero + digit) for digit in (0, 1, 9)) for zero in zeroes}
+unicode_cases.update({'+' + chr(zero + 3) + '_' + chr(zero + 7) for zero in zeroes})
+unicode_cases.update(('²', 'Ⅳ', '½', '−12', '＋12', '１ ２', '12😀', '１_٢', '\ufeff12'))
+spaces = [chr(point) for point in range(0x110000) if chr(point).isspace()]
+unicode_cases.update(space + '12' + space for space in spaces)
+unicode_cases.update('1' + space + '2' for space in spaces)
+text_cases = sorted(ascii_cases | unicode_cases)
+byte_cases = [value.encode('ascii') for value in sorted(ascii_cases)]
+byte_cases.extend(bytes([point]) for point in range(256))
+byte_cases.extend((b'\xc2\xa012', b'12\x85', b'\x0012'))
+
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 32768',
+         'set_option maxHeartbeats 2000000',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+# Batch each runtime comparison so native compilation is proportional to the
+# categories, not the number of test inputs.
+for name, backend, values in (('text', 'Calls.function', text_cases),
+                              ('heap_text', 'HeapCalls.scalarFunction', text_cases),
+                              ('octets', 'Calls.function', byte_cases),
+                              ('buffer', 'HeapCalls.scalarFunction', byte_cases)):
+    pairs = ',\n'.join(f'({scalar(value)}, {expected(value)})' for value in values)
+    lines.extend([f'def cases_{name} : List (Constant × Except ExceptionObject Constant) := [{pairs}]',
+                  f'example : (cases_{name}.all fun (input, output) =>',
+                  f'  decide (({backend} source "{name}" [input]).observe 100 = .done output)) = true := by native_decide'])
+    count += len(values)
+
+base_sources = sorted((ascii_cases - {'1' + '0' * 4500}) |
+                      {'0x_10', '0x__10', '0x', '-0x_FF', '0b_11', '0o_17',
+                       '012', '00_0', '0_1', '0B1', '0o7', '0x10', 'Z_z', '0z1'})
+base_pairs = []
+for base, value in itertools.product((0, 1, 2, 8, 10, 12, 16, 25, 36, 37), base_sources):
+    points = '[' + ', '.join(str(ord(char)) for char in value) + ']'
+    base_pairs.append(f'(({base}, {points}), {expected(value, base)})')
+lines.extend(['def bases : List ((Nat × List Nat) × Except ExceptionObject Constant) := [',
+              ',\n'.join(base_pairs), ']',
+              'example : (bases.all fun ((base, input), output) =>',
+              '  decide (Calls.parsedInteger (FormalSW.Py.Builtin.Int.parse input base) = some output)) = true := by native_decide'])
+count += len(base_pairs)
+
+for value in ('12', '-3', '\u0661\u0662', 'bad', '_', '12\x00'):
+    result = expected(value).replace('.ok (.int', '.ok (.scalar (.int')
+    if result.startswith('.ok'):
+        result += ')'
+    lines.append(f'example : (HeapCalls.call source "effects" [.scalar ({scalar(value)}), .ref 0] [.list []]).execution.observe 100 = '
+                 f'.done (.ok {{outcome := {result}, globals := [], heap := [.list [.scalar (.int 7)]], anchors := 1}}) := by native_decide')
+    count += 1
+
+# Confirm every Unicode code point, including unassigned characters, against
+# the matching Unicode database. On other Python versions, keep the grammar
+# and shared-character checks above, without equating different Unicode versions.
+if unicodedata.unidata_version == '16.0.0':
+    digits = [(point, unicodedata.decimal(chr(point))) for point in range(0x110000)
+              if unicodedata.decimal(chr(point), None) is not None]
+    expected_digits = '[' + ', '.join(f'({point}, {digit})' for point, digit in digits) + ']'
+    lines.extend([f'def decimalCharacters : List (Nat × Nat) := {expected_digits}',
+                  'example : ((List.range 0x110000).filterMap fun point =>',
+                  '  (FormalSW.Py.Builtin.Unicode.decimalValue? point).map (point, ·)) = decimalCharacters := by native_decide'])
+
+with project_temporary_directory(prefix='integer-parsing-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'{count} integer parsing Python comparisons passed; Unicode {unicodedata.unidata_version}, bases, buffers, and retained effects')

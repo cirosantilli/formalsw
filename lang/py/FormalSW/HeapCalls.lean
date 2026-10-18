@@ -473,6 +473,7 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
   | .builtin .int, [.ref address] => do
       match (← get)[address]? with
+      | some (.bytearray bytes) => scalarResult (Calls.integerConversion [.bytes bytes])
       | some (.list _) | some (.set _) | some (.tuple _) | some (.instance _ _ _) => Mutable.error "TypeError"
       | _ => Mutable.unsupported
   | .builtin .int, values => do
