@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Compare qualified math calls and heap effects with Python."""
+import ast
+import json
+import math
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    return f'(.string {json.dumps(value)})'
+
+
+source = '''import math
+import math as arithmetic
+from math import isqrt as root
+from math import gcd as divisor
+
+def record(items: list[int], n: int) -> int:
+    items.append(n)
+    return n
+'''
+bodies = {
+    'root': 'return math.isqrt(n)',
+    'root_alias': 'return arithmetic.isqrt(n)',
+    'gcd': 'return math.gcd(n, 12, -18)',
+    'gcd_alias': 'return arithmetic.gcd(n, 12, -18)',
+    'gcd_empty': 'return math.gcd()',
+    'heap_root': 'items = []\nreturn math.isqrt(record(items, n)) + items[0]',
+    'heap_root_import': 'items = []\nreturn root(record(items, n)) + items[0]',
+    'heap_gcd': 'items = []\nreturn arithmetic.gcd(record(items, n), 12) + items[0]',
+    'heap_gcd_import': 'items = []\nreturn divisor(record(items, n), 12) + items[0]',
+    'heap_invalid': 'items = []\nreturn arithmetic.gcd(items, record(items, n))',
+    'heap_argument_error': 'items = []\nreturn math.gcd(items, 1 // 0)',
+}
+for name, body in bodies.items():
+    source += f'\ndef probe_{name}(n: int) -> int:\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+namespace = {}
+exec(source, namespace)
+values = [*range(-2, 18), True, False, None, 'invalid', 10**30, 10**30 - 1]
+equations = []
+for name in bodies:
+    function = 'probe_' + name
+    assert not SupportChecker(program).check(function), function
+    backend = 'HeapCalls.scalarFunction' if name.startswith('heap_') else 'Calls.function'
+    for value in values:
+        try:
+            expected = '.ok ' + constant(namespace[function](value))
+        except (TypeError, ValueError, ZeroDivisionError) as error:
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+        equations.append(f'example : ({backend} Probe.module "{function}" [{constant(value)}]).observe 120 = .done ({expected}) := by decide')
+
+with project_temporary_directory(prefix='math-module-check-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
+                     + 'open FormalSW.PyAst\nset_option maxRecDepth 4096\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+    base = 'import math as m\ndef f(n: int) -> int:\n    return m.isqrt(n)\n'
+    def issues(text):
+        module = ast.parse(text)
+        module.formalsw_source = directory / 'probe.py'
+        return SupportChecker(module).check('f')
+
+    assert not issues(base)
+    for suffix in ('m = f\n', 'del m\n', 'import other as m\n', 'from other import *\n',
+                   'm.isqrt = f\n', 'del m.isqrt\n',
+                   'def mutate():\n    m.isqrt = f\n',
+                   'import math as other\ndef mutate():\n    other.isqrt = f\n'):
+        assert issues(base + suffix), suffix
+    for call in ('m.isqrt()', 'm.isqrt(n, n)', 'm.isqrt(n=n)', 'm.isqrt(*n)', 'm.missing(n)'):
+        assert issues(base.replace('m.isqrt(n)', call)), call
+    assert issues(base.replace('f(n: int)', 'f(n: int, m: int)'))
+    assert issues(base.replace('return m.isqrt', 'm = n\n    return m.isqrt'))
+    assert issues(base.replace('import math as m', 'import other as m'))
+    (directory / 'math.py').write_text('def isqrt(n): return 42\n')
+    assert any('shadows the modeled standard library' in issue.reason for issue in issues(base))
+
+print(f'Math module imports: {len(equations)} Python comparisons, heap calls, argument effects, and binding checks passed')

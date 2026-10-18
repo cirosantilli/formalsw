@@ -25,6 +25,24 @@ theorem Extends.trans (first : Extends middle source) (second : Extends target m
     rcases first.libraries name values result absent found with ⟨absent, found⟩
     exact second.libraries name values result absent found
 
+theorem Extends.libraryFunction_eq (extension : Extends target source)
+    {implementation : List Constant → Except ExceptionObject Constant}
+    (absent : findFunctionIn source.body name = none)
+    (found : libraryFunction source name = some implementation) :
+    findFunctionIn target.body name = none ∧ libraryFunction target name = some implementation := by
+  have sourceCall (values) : libraryCall source name values = some (implementation values) := by
+    simp [libraryCall, found]
+  obtain ⟨noFunction, initial⟩ := extension.libraries name [] _ absent (sourceCall [])
+  refine ⟨noFunction, ?_⟩
+  cases targetFunction : libraryFunction target name with
+  | none => simp [libraryCall, targetFunction] at initial
+  | some other =>
+      have same : other = implementation := by
+        funext values
+        have preserved := (extension.libraries name values _ absent (sourceCall values)).2
+        simpa [libraryCall, targetFunction] using preserved
+      simp [same]
+
 def functionNames : List Stmt → List String
   | [] => []
   | .functionDef name _ _ _ :: rest => name :: functionNames rest
@@ -33,6 +51,7 @@ def functionNames : List Stmt → List String
 def importNames : List Stmt → List String
   | [] => []
   | .importFrom _ names :: rest => names.map Prod.snd ++ importNames rest
+  | .importModules names :: rest => (moduleImports names).map Prod.snd ++ importNames rest
   | _ :: rest => importNames rest
 
 private theorem findFunctionIn_append (prelude suffix : List Stmt) (name : String) :
@@ -61,6 +80,23 @@ private theorem importedFunction_append (prelude suffix : List Stmt) (name : Str
       cases head <;> simp only [List.cons_append, importedFunction]
       all_goals first | exact ih | split <;> simp_all
 
+private theorem find_binding {α : Type} (names : List (α × String)) (name : String) :
+    (names.find? (fun entry => entry.2 == name)).isSome = true ↔ name ∈ names.map Prod.snd := by
+  cases found : names.find? (fun entry => entry.2 == name) with
+  | none =>
+      have absent : name ∉ names.map Prod.snd := by
+        intro member
+        rcases List.mem_map.mp member with ⟨entry, member, equal⟩
+        have rejected := List.find?_eq_none.mp found entry member
+        simp [equal] at rejected
+      simp [absent]
+  | some entry =>
+      have member := List.mem_of_find?_eq_some found
+      have equal := List.find?_some found
+      have present : name ∈ names.map Prod.snd :=
+        List.mem_map.mpr ⟨entry, member, by simpa using equal⟩
+      simp [present]
+
 private theorem import_found (body : List Stmt) (name : String) :
     (importedFunction body name).isSome = true ↔ name ∈ importNames body := by
   induction body with
@@ -68,21 +104,12 @@ private theorem import_found (body : List Stmt) (name : String) :
   | cons head tail ih =>
       cases head <;> simp only [importedFunction, importNames]
       all_goals try exact ih
-      rename_i library names
-      cases found : names.find? (fun entry => entry.2 == name) with
-      | none =>
-          have absent : name ∉ names.map Prod.snd := by
-            intro member
-            rcases List.mem_map.mp member with ⟨entry, member, equal⟩
-            have rejected := List.find?_eq_none.mp found entry member
-            simp [equal] at rejected
-          simp [ih, absent]
-      | some entry =>
-          have member := List.mem_of_find?_eq_some found
-          have equal := List.find?_some found
-          have present : name ∈ names.map Prod.snd := by
-            exact List.mem_map.mpr ⟨entry, member, by simpa using equal⟩
-          simp [present]
+      · rename_i library names
+        have binding := find_binding names name
+        split <;> simp_all
+      · rename_i names
+        have binding := find_binding (moduleImports names) name
+        split <;> simp_all
 
 /-- Linking a fresh prelude preserves completed executions from the suffix.
 The conditions mention finite name lists, so clients can discharge them by
@@ -102,7 +129,7 @@ theorem Extends.prepend (prelude : List Stmt) (source : Module)
     simp [findFunctionIn_append, absent, found]
   · intro name values result absent found
     have member : name ∈ importNames source.body := by
-      unfold libraryCall at found
+      unfold libraryCall libraryFunction at found
       split at found <;> simp_all [← import_found]
     have noFunction : findFunctionIn prelude name = none := by
       cases h : findFunctionIn prelude name with
@@ -114,7 +141,7 @@ theorem Extends.prepend (prelude : List Stmt) (source : Module)
       | some _ => exact False.elim (freshImports (name := name) ((import_found prelude name).mp (by simp [h])) member)
     constructor
     · simp [findFunctionIn_append, noFunction, absent]
-    · simpa [libraryCall, importedFunction_append, noImport] using found
+    · simpa [libraryCall, libraryFunction, importedFunction_append, noImport] using found
 
 theorem Extends.step_eq (extension : Extends target source) (state : State)
     (supported : step source state ≠ .unsupported) :

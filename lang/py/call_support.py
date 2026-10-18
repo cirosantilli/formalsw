@@ -52,10 +52,26 @@ def reversed_list(node):
 
 def library_functions(module):
     """Supported standard-library functions, preserving their import bindings."""
-    return {alias.asname or alias.name: (node.module, alias.name, node)
+    functions = {alias.asname or alias.name: (node.module, alias.name, node)
             for node in module.body if isinstance(node, ast.ImportFrom)
             and node.level == 0 and node.module == 'math'
             for alias in node.names if alias.name in ('isqrt', 'gcd')}
+    for node in module.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == 'math':
+                    for name in ('isqrt', 'gcd'):
+                        functions[f'{alias.asname or alias.name}.{name}'] = ('math', name, node)
+    return functions
+
+
+def library_name(node):
+    """Names of directly imported functions or attributes of imported modules."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        return f'{node.value.id}.{node.attr}'
+    return None
 
 
 def uses_builtin(module, function, name):
@@ -167,7 +183,7 @@ def uses_calls_model(module, function):
         or general_division(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names | {'str', 'max'}
+        or isinstance(node, ast.Call) and library_name(node.func) in names | {'str', 'max'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -305,12 +321,18 @@ def check_calls(module, function, reject, *, heap=False):
                 for item in node.args:
                     recurse(item)
                 visit(target)
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in libraries:
-                target = node.func.id
-                if heap:
-                    reject(node, "standard-library calls are not yet supported by heap call execution")
-                if target in scope or bindings(module, target) != [libraries[target][2]]:
+            elif isinstance(node, ast.Call) and library_name(node.func) in libraries:
+                target = library_name(node.func)
+                binding = target.split('.')[0]
+                if binding in scope or bindings(module, binding) != [libraries[target][2]]:
                     reject(node, 'standard-library call targets must not be rebound or shadowed')
+                # A write through any alias changes the shared module, including
+                # writes in other functions that may run before this call.
+                aliases = {name.split('.')[0] for name in libraries if '.' in name}
+                if any(isinstance(part, ast.Attribute) and isinstance(part.ctx, (ast.Store, ast.Del))
+                       and isinstance(part.value, ast.Name) and part.value.id in aliases
+                       for part in ast.walk(module)):
+                    reject(node, 'modeled standard-library modules must not be mutated')
                 primitive = libraries[target][1]
                 if primitive == 'isqrt' and (node.keywords or len(node.args) != 1):
                     reject(node, 'math.isqrt requires exactly one positional argument')

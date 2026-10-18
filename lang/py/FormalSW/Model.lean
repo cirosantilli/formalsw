@@ -188,6 +188,8 @@ inductive Stmt where
   | unsupported : (description : String) -> Stmt
   /-- Absolute imports retain both the original and bound names. -/
   | importFrom : (module : String) -> (names : List (String × String)) -> Stmt
+  /-- Module imports retain their absolute names and local aliases. -/
+  | importModules : (names : List (String × String)) → Stmt
 deriving Repr, BEq, Lean.ToExpr
 
 /-- A Python module represented as a list of top-level statements. -/
@@ -371,6 +373,9 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
       return .importFrom (← jsonString json "module")
         (← jsonArray json "names" fun item => do
           return (← jsonString item "name", ← jsonString item "binding"))
+  | "Import" =>
+      return .importModules (← jsonArray json "names" fun item => do
+        return (← jsonString item "name", ← jsonString item "binding"))
   | "Return" => return .return (← Expr.fromJson? (← jsonField json "value"))
   | "Assign" =>
       return .assign
@@ -861,6 +866,7 @@ mutual
     | .expr expression => 1 + expression.operationCount
     | .unsupported _ => 0
     | .importFrom _ _ => 0
+    | .importModules _ => 0
 end
 
 /-- Whether a statement is a `for` loop. -/

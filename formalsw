@@ -1118,6 +1118,10 @@ class AstJsonEmitter:
     def supported_stmt(self, stmt: ast.stmt) -> dict[str, object]:
         """Encode one represented Python statement."""
         match stmt:
+            case ast.Import(names=names):
+                return {"type": "Import", "names": [
+                    {"name": alias.name, "binding": alias.asname or alias.name.split('.')[0]}
+                    for alias in names]}
             case ast.ImportFrom(module=module, names=names, level=0) if module is not None:
                 return {
                     "type": "ImportFrom",

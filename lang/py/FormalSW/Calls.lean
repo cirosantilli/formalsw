@@ -239,6 +239,8 @@ def step (module : Module) (state : State) : Step State Constant :=
       | .call (.name name) [] => .next ⟨.invoke name [], stack⟩
       | .call (.name name) (first :: rest) =>
           .next ⟨.expr first env, .arguments name [] rest env :: stack⟩
+      | .call (.attribute (.name name) field) args =>
+          .next ⟨.expr (.call (.name (name ++ "." ++ field)) args) env, stack⟩
       | _ => .unsupported
   | .block body env =>
       match body with
@@ -507,6 +509,12 @@ theorem library_call (arguments : Arguments module env expressions values)
   apply call arguments
   intro stack
   exact .next (by simp [step, absent, outcome, result]) .refl
+
+theorem qualified_call
+    (evaluated : Evaluates module env (.call (.name (alias ++ "." ++ field)) expressions) value) :
+    Evaluates module env (.call (.attribute (.name alias) field) expressions) value := by
+  intro stack
+  exact .next rfl (evaluated stack)
 
 private theorem primitive_arguments_reach
     (h : Arguments module env expressions values) (done : List Constant) (stack : List Frame) :

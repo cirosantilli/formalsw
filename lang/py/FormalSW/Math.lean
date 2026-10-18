@@ -74,6 +74,14 @@ end FormalSW.PyAst.Math
 
 namespace FormalSW.PyAst
 
+/-- Module members with executable standard-library models. The bound name
+includes the module alias, keeping it distinct from Python function names. -/
+def moduleImports (names : List (String × String)) : List ((String × String) × String) :=
+  names.flatMap fun (library, alias) =>
+    if library = "math" then [((library, "isqrt"), alias ++ ".isqrt"),
+      ((library, "gcd"), alias ++ ".gcd")]
+    else []
+
 /-- Source import bindings are retained in the AST, including aliases. -/
 def importedFunction (body : List Stmt) (binding : String) : Option (String × String) :=
   match body with
@@ -82,13 +90,21 @@ def importedFunction (body : List Stmt) (binding : String) : Option (String × S
       match names.find? (fun name => name.2 == binding) with
       | some (name, _) => some (library, name)
       | none => importedFunction rest binding
+  | .importModules names :: rest =>
+      match (moduleImports names).find? (fun name => name.2 == binding) with
+      | some (function, _) => some function
+      | none => importedFunction rest binding
   | _ :: rest => importedFunction rest binding
+
+def libraryFunction (module : Module) (name : String) :
+    Option (List Constant → Except ExceptionObject Constant) :=
+  match importedFunction module.body name with
+  | some ("math", "isqrt") => some Math.isqrtCall
+  | some ("math", "gcd") => some Math.gcdCall
+  | _ => none
 
 def libraryCall (module : Module) (name : String) (values : List Constant) :
     Option (Except ExceptionObject Constant) :=
-  match importedFunction module.body name with
-  | some ("math", "isqrt") => some (Math.isqrtCall values)
-  | some ("math", "gcd") => some (Math.gcdCall values)
-  | _ => none
+  (libraryFunction module name).map (fun function => function values)
 
 end FormalSW.PyAst

@@ -249,6 +249,13 @@ def primitive : Operation → List Value → Eval Value
       scalarResult (Calls.positionalMaximum values)
   | _, _ => Mutable.unsupported
 
+def library (module : Module) (name : String) (values : List Value) : Eval Value := do
+  let some function := libraryFunction module name | Mutable.unsupported
+  let scalars ← values.mapM fun value => match value with
+    | .scalar scalar => pure scalar
+    | .ref _ => Mutable.error "TypeError"
+  scalarResult (some (function scalars))
+
 def step (module : Module) (anchors : Nat) (state : State) : Step State Completion :=
   let ⟨work, stack, heap⟩ := state
   match work with
@@ -263,7 +270,7 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
           match completeArguments args values with
           | some values => .next ⟨.block (executableBody body) (argumentEnv args values), stack, heap⟩
           | none => done anchors heap (.error { typeName := "TypeError", args := [] })
-      | none => .unsupported
+      | none => result anchors heap (library module name values) stack
   | .operation operation values => result anchors heap (primitive operation values) stack
   | .expr expression env =>
       match expression with
@@ -282,6 +289,8 @@ def step (module : Module) (anchors : Nat) (state : State) : Step State Completi
       | .builtinCall name expressions => .next (argumentsState (.builtin name) env [] expressions stack heap)
       | .call (.name name) expressions => .next (argumentsState (.call name) env [] expressions stack heap)
       | .call (.attribute base "append") [item] => .next ⟨.expr base env, .appendReceiver item env :: stack, heap⟩
+      | .call (.attribute (.name name) field) args =>
+          .next (argumentsState (.call (name ++ "." ++ field)) env [] args stack heap)
       | _ => .unsupported
   | .block body env =>
       match body with
@@ -432,7 +441,12 @@ theorem step_extend (extension : Calls.Extends target source) (state : State)
       cases operation with
       | call name =>
           cases found : findFunctionIn source.body name with
-          | none => simp [step, found] at supported
+          | none =>
+              cases imported : libraryFunction source name with
+              | none => simp [step, found, library, imported, result, run, Mutable.unsupported] at supported
+              | some function =>
+                  obtain ⟨absent, same⟩ := extension.libraryFunction_eq found imported
+                  simp only [step, found, absent, library, imported, same]
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
@@ -507,6 +521,23 @@ theorem call (arguments : Arguments module env expressions heap values middle)
     Evaluates module env (.call (.name name) expressions) heap value finalHeap := by
   intro anchors stack
   exact .next rfl ((arguments_reach arguments (.call name) [] anchors stack).trans (callee anchors stack))
+
+theorem library_call (arguments : Arguments module env expressions heap values middle)
+    (absent : findFunctionIn module.body name = none)
+    (operation : library module name values middle = some (.ok value, finalHeap)) :
+    Evaluates module env (.call (.name name) expressions) heap value finalHeap := by
+  apply call arguments
+  intro anchors stack
+  exact .next (by simp [step, absent, result, run, operation]) .refl
+
+theorem qualified_call (notAppend : field ≠ "append")
+    (arguments : Arguments module env expressions heap values middle)
+    (callee : ReturnsValue module (alias ++ "." ++ field) values middle value finalHeap) :
+    Evaluates module env (.call (.attribute (.name alias) field) expressions) heap value finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := argumentsState (.call (alias ++ "." ++ field)) env [] expressions stack heap)
+    (by simp [step, notAppend])
+  exact (arguments_reach arguments (.call (alias ++ "." ++ field)) [] anchors stack).trans (callee anchors stack)
 
 theorem list (arguments : Arguments module env expressions heap values finalHeap) :
     Evaluates module env (.list expressions) heap (.ref finalHeap.length) (finalHeap ++ [values]) := by

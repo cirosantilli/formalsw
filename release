@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Bump the minor version, push its Git tag, and build and check the release."""
+
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tomllib
+
+
+REPO = Path(__file__).resolve().parent
+
+
+def run(*command):
+    print('+ ' + ' '.join(command), flush=True)
+    subprocess.run(command, cwd=REPO, check=True)
+
+
+def git_output(*arguments):
+    return subprocess.check_output(['git', *arguments], cwd=REPO, text=True).strip()
+
+
+def main():
+    if len(sys.argv) != 1:
+        raise ValueError('usage: ./release')
+    if git_output('status', '--porcelain', '--untracked-files=all'):
+        raise ValueError('commit or stash working tree changes before releasing')
+
+    project = REPO / 'pyproject.toml'
+    lake = REPO / 'lakefile.toml'
+    version = tomllib.loads(project.read_text())['project']['version']
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+        raise ValueError(f'expected a major.minor.patch version, got {version!r}')
+    if tomllib.loads(lake.read_text())['version'] != version:
+        raise ValueError('pyproject.toml and lakefile.toml versions must match')
+    major, minor, _ = map(int, version.split('.'))
+    new_version = f'{major}.{minor + 1}.0'
+    tag = f'v{new_version}'
+    if git_output('tag', '--list', tag):
+        raise ValueError(f'tag {tag} already exists')
+
+    # Prepare both edits before writing either file; preserve comments and formatting.
+    edits = []
+    for path in (project, lake):
+        text, count = re.subn(
+            rf'(?m)^(version\s*=\s*[\"\']){re.escape(version)}([\"\'])',
+            lambda match: match[1] + new_version + match[2], path.read_text(),
+        )
+        if count != 1:
+            raise ValueError(f'expected one version assignment in {path.name}')
+        edits.append((path, text))
+    for path, text in edits:
+        path.write_text(text)
+
+    run('git', 'add', '--', 'pyproject.toml', 'lakefile.toml')
+    run('git', 'commit', '-m', f'Release {new_version}')
+    run('git', 'tag', '-a', tag, '-m', f'Release {new_version}')
+    run('git', 'push', 'origin', f'refs/tags/{tag}')
+    run(sys.executable, '-m', 'build')
+    source = f'dist/formalsw-{new_version}.tar.gz'
+    wheel = f'dist/formalsw-{new_version}-py3-none-any.whl'
+    run(sys.executable, '-m', 'twine', 'check', '--strict', source, wheel)
+    run(sys.executable, 'tests/package_checks', wheel)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        print(f'error: {error}', file=sys.stderr)
+        sys.exit(1)

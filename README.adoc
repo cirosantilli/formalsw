@@ -49,6 +49,7 @@ Consider the following two alternative implementations of the sum of integers 0 
 
 tmp.py
 
+[source,python]
 ----
 def sum(n: int) -> int:
     if n <= 0:
@@ -83,6 +84,7 @@ This is exactly what formal verification allows you to do.
 
 To specify that we all the above properties to hold, we can add some magic docstring lines with the magic `@formalsw` marker:
 
+[source,python]
 ----
 def sum(n: int) -> int:
     """
@@ -106,10 +108,10 @@ def sum_naive(n: int) -> int:
 Here we are specifying:
 
 * for `sum_naive`
-** `@formalsw: Returns`: the function always halts, no deadlocks, does not throw
-** `@formalsw: ReturnType`: it returns an `int` as specified in its docstring `-> int`
+** `@formalsw: Returns`: the function always halts, no deadlocks, does not throw. See: <<Returns>>.
+** `@formalsw: ReturnType`: it returns an `int` as specified in its docstring `-> int`. See: <<ReturnType>>.
 * for `sum`:
-** `@formalsw: @formalsw: Equiv(sum_naive)`: this function is equivalent to `sum_naive`, i.e. it has the same outcome for every input. Same outcome means that if one return an `int` the other also returns an `int`
+** `@formalsw: @formalsw: Equiv(sum_naive)`: this function is equivalent to `sum_naive`, i.e. it has the same outcome for every input. Same outcome means that if one return an `int` the other also returns an `int`. See: <<Equiv>>.
 
 After this is specified, if you run:
 
@@ -133,6 +135,7 @@ formalsw --stub tmp.py > tmp.py.lean
 
 it generates a file like this:
 
+[source,lean]
 ----
 import «.formalsw».«tmp.py.ast»
 import FormalSW
@@ -224,42 +227,47 @@ formalsw tests/py/range_sum.py
 
 which has a proof at link:tests/py/range_sum.py.lean[].
 
-=== Shared counter: the lost-update race
+=== Another example: concurrency and Python specifications with `py`
 
-link:tests/py/parallel_shared_counter.py[] is a runnable synchronization example with checked proofs in link:tests/py/parallel_shared_counter.py.lean[]. Two workers each increment the same counter once. Starting at zero, the expected final value is two.
+FormalSW has concurrency support built-in. Its usage is so clean and self-evident it brings a tear of joy to our eyes. Check this out.
 
-An increment reads the counter, computes the next value, then writes it back. Without synchronization, one update can overwrite another:
-
-[cols="1,2,2,1",options="header"]
-|===
-|Step |Worker 0 |Worker 1 |Counter
-|1 |Reads 0 | |0
-|2 | |Reads 0 |0
-|3 |Writes 0 + 1 | |1
-|4 | |Writes 0 + 1 |1
-|===
-
-`increment_safe` holds the same shared `threading.Lock` from before the read until after the write. While one worker holds the mutex, the other cannot acquire it. Its read therefore sees the first worker's completed update. Python spells these operations `mutex.acquire()` and `mutex.release()`; see the https://docs.python.org/3/library/threading.html#lock-objects[Python Lock documentation].
-
-The synchronized worker quantifies over generic Python values, with all input restrictions expressed in Python:
+link:tests/py/parallel_shared_counter.py[] contains a simple concurrent Python code example:
 
 [source,python]
 ----
-def increment_safe(counter: list[int], mutex: Lock):
-    """Hold the mutex for the whole increment.
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+from time import sleep
 
+def increment_unsafe(counter: list[int], mutex: Lock) -> None:
+    """Increment using an unprotected read-modify-write operation.
+
+    @formalsw: Returns
+    @formalsw: theorem loses_an_update :
+      ∃ (counter worker_count : PyValue),
+        py("valid_trial_input(counter, worker_count)") ∧
+        Throws(py("run_trial(this_function, counter, worker_count)"))
+    """
+    snapshot = counter[0]
+    sleep(0)
+    counter[0] = snapshot + 1
+
+
+def increment_safe(counter: list[int], mutex: Lock) -> None:
+    """Hold the shared mutex for the whole read-modify-write operation.
+
+    @formalsw: Returns
     @formalsw: theorem preserves_updates :
       ∀ (counter worker_count : PyValue),
         py("valid_trial_input(counter, worker_count)") →
         Returns(py("run_trial(this_function, counter, worker_count)"))
     """
-    # acquire, read, increment, write, release
-----
+    mutex.acquire()
+    snapshot = counter[0]
+    sleep(0)
+    counter[0] = snapshot + 1
+    mutex.release()
 
-The precondition is an ordinary executable helper in the same file:
-
-[source,python]
-----
 def valid_trial_input(counter, worker_count):
     return (
         type(counter) == list
@@ -268,49 +276,64 @@ def valid_trial_input(counter, worker_count):
         and type(worker_count) == int
         and worker_count >= 0
     )
-----
 
-The trial contains the actual setup, submissions, and assertions being proved:
-
-[source,python]
-----
 def run_trial(increment, counter: list[int], worker_count: int):
     assert valid_trial_input(counter, worker_count), "invalid trial input"
     before = counter.copy()
     mutex = Lock()
     with ThreadPoolExecutor(max_workers=max(1, worker_count)) as workers:
         futures = [workers.submit(increment, counter, mutex) for _ in range(worker_count)]
+        # Propagate worker exceptions; joining alone would hide them.
         for future in futures:
             future.result()
     assert counter[0] == before[0] + worker_count, "an increment was lost"
     assert counter[1:] == before[1:], "another counter element changed"
 ----
 
-The proof covers *every nonempty integer list and every nonnegative worker count*, including zero, arbitrary initial integers, and lists longer than one element. It proves that the other elements remain unchanged. `main` runs this same helper with `[0]` and two workers to demonstrate the race.
+Just looking at the Python code, we see that there are two versions of the same dumb increment function which increments the first value of a list:
 
-The unsynchronized worker asks for a concrete counterexample using the same precondition and trial:
+* `increment_safe` is thread safe
+* `increment_unsafe` isn't and might lose updates
 
-[source,lean]
+And additionally, we also have some Python test code:
+
+* `run_trial` would test both `increment_safe` and `increment_unsafe` for thread safety
+* `valid_trial_input` ensures that the input of `run_trial` is valid
+
+Now let's try and understand how the FormalSW specifications above formally prove thread safety of `increment_safe`.
+
+FormalSW natively understands that certain statements create multiple threads. In this example, when it sees:
+
+[source,python]
 ----
-@formalsw: theorem loses_an_update :
-  ∃ (counter worker_count : PyValue),
-    py("valid_trial_input(counter, worker_count)") ∧
-    Throws(py("run_trial(this_function, counter, worker_count)"))
-----
-
-Its witness is `[0]` and two workers, ending at one. The synchronized proof uses induction on the pending worker list, rather than enumerating bounded thread counts. Every body operation is checked against the actual Python worker. Changing the precondition, trial, or worker changes the proof obligation. See <<raw-lean-py>> for the quotation boundary.
-
-Run the real threads, or check the proofs:
-
-[source,sh]
-----
-python3 tests/py/parallel_shared_counter.py
-./formalsw tests/py/parallel_shared_counter.py
+with ThreadPoolExecutor(max_workers=max(1, worker_count)) as workers:
 ----
 
-The executable runs 20 trials of each version. It prints actual failed assertions and the lost-update percentage for the unsafe version, then runs the synchronized version. Expected unsafe assertions are caught so both versions are visible; a synchronized failure is re-raised. Both versions call `sleep(0)` between reading and writing to make a thread switch easy to observe. The safe version holds the mutex during that yield. Failure percentages vary with scheduling; the proofs do not depend on observing a race in a particular run.
+it *knows* that it will have to consider threading for some of the proofs. Conversely, it also knows that certain statements contain synchronization primitives, i.e.:
 
-The model uses one initially unlocked shared mutex and a list shared by all workers. Primitive reads, writes, acquire, and release are atomic steps under sequentially consistent interleaving. The worker count and initial list contents in the synchronized theorem are unbounded. Signals, resource exhaustion, and a scheduler that never runs an enabled worker are outside this model.
+[source,python]
+----
+mutex = Lock()
+mutex.acquire()
+mutex.release()
+----
+
+In this case, the simple <<Returns>> statements:
+
+----
+@formalsw: Returns
+----
+
+already formally imply that each function does not have deadlocks or livelocks. That's already a good bang for our buck isn't it!
+
+Next, let's take a look at the theorem statement which states that `increment_safe` actually preserves each update due to it's synchronization:
+
+----
+@formalsw: theorem preserves_updates :
+  ∀ (counter worker_count : PyValue),
+    py("valid_trial_input(counter, worker_count)") →
+    Returns(py("run_trial(this_function, counter, worker_count)"))
+----
 
 == Specification language
 
@@ -1557,9 +1580,7 @@ Asciidoc: don't wrap lines.
 
 === Publish to Pypi
 
-Releases contain the `formalsw` command, Python compilers, and Lean sources. Elan must be installed separately. Python is currently pinned to 3.14.4 in `pyproject.toml`; `.python-version` records the same development interpreter. The wheel includes `lean-toolchain` and builds its models on first use. Without a local `lakefile.lean` or `lakefile.toml`, it caches a writable Lake workspace under `.formalsw/runtime/`, identified by a hash of the bundled sources. Inside an existing Lake project, that project's dependencies and toolchain apply; add formalsw as a Lake dependency as usual. Build products stay outside the Python installation.
-
-From the repository root, create a release environment and install the https://packaging.python.org/en/latest/tutorials/packaging-projects/[standard build and upload tools]:
+Install the https://packaging.python.org/en/latest/tutorials/packaging-projects/[standard build and upload tools]:
 
 ----
 python3 -m venv .venv-release
@@ -1567,31 +1588,19 @@ python3 -m venv .venv-release
 python -m pip install --upgrade build twine
 ----
 
-Update `version` in `pyproject.toml` and `lakefile.toml` for each release. PyPI versions cannot be reused. Run the tests, then build a source distribution and a wheel from that source distribution:
+Before publishing ensure that all the tests pass:
 
 ----
 ./test
-python -m build
-formalsw_version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-python -m twine check --strict "dist/formalsw-$formalsw_version.tar.gz" "dist/formalsw-$formalsw_version-py3-none-any.whl"
-python tests/package_checks "dist/formalsw-$formalsw_version-py3-none-any.whl"
 ----
 
-The package check installs the wheel in a temporary virtual environment, runs the CLI and real proofs outside the checkout, checks both standalone and existing Lake projects, exercises Python quotations, and verifies that a broken implementation is rejected. Its temporary files live in the system temporary directory. `dist/`, `build/`, package metadata, and `.venv-release/` are gitignored. The package description uses `text/plain` because PyPI does not render AsciiDoc.
-
-First upload these exact artifacts to https://test.pypi.org/[TestPyPI]. Create an account and API token there; TestPyPI credentials are separate from PyPI credentials. Twine prompts for the token as the password:
+From a clean Git checkout, run:
 
 ----
-python -m twine upload --repository testpypi --username __token__ "dist/formalsw-$formalsw_version.tar.gz" "dist/formalsw-$formalsw_version-py3-none-any.whl"
+./release
 ----
 
-Inspect the TestPyPI project page and uploaded files. To publish the same artifacts to https://pypi.org/[PyPI], use a PyPI account with permission to publish `formalsw` and its API token:
-
-----
-python -m twine upload --username __token__ "dist/formalsw-$formalsw_version.tar.gz" "dist/formalsw-$formalsw_version-py3-none-any.whl"
-----
-
-For a new project, the first upload needs an account-wide token; after creation, use a token scoped to `formalsw`. Enter tokens at Twine's prompt. After uploading, users can install with `pipx install --python python3.14 formalsw` or update with `pipx upgrade formalsw`. Keep the release commit and its version tag associated with the artifacts you uploaded.
+This automatically increments the minor version and resets the patch version in `pyproject.toml` and `lakefile.toml` (for example, `0.1.3` becomes `0.2.0`), commits both files, creates an annotated `vVERSION` tag, and pushes that tag to `origin`. Then it builds and publishes the package to Pypi.
 
 == Bibliography
 
