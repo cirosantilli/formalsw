@@ -95,7 +95,8 @@ def print_result(result: TestResult) -> None:
 def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
-        TestCase("sequence lengths and product loops", Path("tests/py/sequences.py"), 0, "All 3 checks passed"),
+        TestCase("shared list inputs and preconditions", Path("tests/py/heap_inputs.py"), 0, "All 8 checks passed"),
+        TestCase("sequence lengths and product loops", Path("tests/py/sequences.py"), 0, "All 5 checks passed"),
         TestCase("shared heap helper calls", Path("tests/py/heap_calls.py"), 0, "All 4 checks passed"),
         TestCase("mutable buffers, initialization, and helper reads", Path("tests/py/buffers.py"), 0, "All 6 checks passed"),
         TestCase("shared heap range loops", Path("tests/py/heap_ranges.py"), 0, "All 2 checks passed"),

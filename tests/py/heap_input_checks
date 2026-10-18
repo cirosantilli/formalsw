@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Check list-input contract domains, aliases, precondition effects, and coverage."""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+source = '''
+def guard(xs: list[int], flag: bool) -> bool:
+    xs.append(7)
+    return flag
+def other(xs: list[int], flag: bool) -> list[int]:
+    return xs
+def f(xs: list[int], flag: bool) -> list[int]:
+    """
+    @formalsw: Requires(guard(xs, flag))
+    @formalsw: MARKER
+    """
+    return xs
+'''
+markers = ('Returns', 'Halts', 'Throws', 'ReturnType', 'Not Returns', 'Not Halts', 'Not Throws',
+           'Equiv(other)', 'Not Equiv(other)', 'EquivReturn(other)',
+           'theorem raw : Returns(this_function(xs, flag))')
+with project_temporary_directory(prefix='heap-inputs-') as temporary:
+    directory = Path(temporary)
+    for index, marker in enumerate(markers):
+        path = directory / f'source_{index}.py'
+        path.write_text(source.replace('MARKER', marker))
+        module = api['source_module'](path)
+        requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        assert requirements and not any(r.unsupported for r in requirements), (marker, requirements)
+        requirement = next(r for r in requirements if r.marker == marker)
+        term = requirement.property_type
+        assert 'HeapCalls.Condition' in term and 'HeapCalls.call' in term, term
+        assert 'Mutable.Heap.Valid' in term and 'Value.HasType' in term, term
+        assert '(«xs» : Nat)' in term or '(xs : Nat)' in term, term
+        if marker in ('Throws', 'Not Throws'):
+            assert '∃ («_formalsw_heap»' in term and ') ∧ (' in term, term
+        coverage = next(r for r in requirements if r.marker == 'execution model coverage')
+        assert 'HeapCalls.Condition' in coverage.property_type
+        predicate = [r for r in requirements if r.theorem_name.endswith('requires_f_0_supported')]
+        assert len(predicate) == 1 and 'HeapCalls.evaluate' in predicate[0].property_type
+        assert 'HeapCalls.Condition' not in predicate[0].property_type  # Cannot assume the predicate being checked.
+
+    # Addresses are independent, including when their values are equal.
+    path = directory / 'aliases.py'
+    path.write_text('def f(left: list[int], right: list[int], _formalsw_heap: int) -> list[int]:\n'
+                    '    """\n    @formalsw: Returns\n    """\n    return right\n')
+    module = api['source_module'](path)
+    requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+    term = requirements[0].property_type
+    assert '(«_formalsw_heap_» : FormalSW.PyAst.Mutable.Heap)' in term, term
+    assert '(«_formalsw_heap» : Int)' in term and '≠' not in term, term
+    assert '[.ref «left», .ref «right», .scalar (.int «_formalsw_heap»)]' in term, term
+
+    path = directory / 'query_name.py'
+    path.write_text('def f(_arg: list[int]) -> list[int]:\n'
+                    '    """\n    @formalsw: Requires(len(_arg) >= 0)\n    @formalsw: Returns\n    """\n    return _arg\n')
+    module = api['source_module'](path)
+    term = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')[0].property_type
+    assert 'fun _arg_ =>' in term and '.ref «_arg»' in term, term
+
+    reference = directory / 'reference.py'
+    reference.write_text('def naive(xs: list[int]) -> list[int]: return xs\n')
+    path = directory / 'imported.py'
+    path.write_text('def f(xs: list[int]) -> list[int]:\n'
+                    '    """\n    @formalsw: Py from reference import naive\n'
+                    '    @formalsw: Equiv(naive)\n    """\n    return xs\n')
+    module = api['source_module'](path)
+    requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+    assert not any(r.unsupported for r in requirements), requirements
+    assert requirements[0].dependencies == (reference.resolve(),), requirements
+    assert requirements[0].property_type.count('HeapCalls.call') == 2, requirements[0].property_type
+
+    # The predicate's mutation is private; the actual call starts in the initial heap.
+    path = directory / 'effects.py'
+    path.write_text(source.replace('MARKER', 'Returns'))
+    module = api['source_module'](path)
+    api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    equations = []
+    for flag in (True, False):
+        boolean = str(flag).lower()
+        env = f'(fun name => if name = "xs" then some (.ref 0) else if name = "flag" then some (.scalar (.bool {boolean})) else none)'
+        evaluation = f'HeapCalls.evaluate ProbeAst.module {env} ProbeAst.requires_f_0 [.list []]'
+        completion = f'{{outcome := .ok (.scalar (.bool {boolean})), globals := [], heap := [.list [.scalar (.int 7)]], anchors := 1}}'
+        equations.append(f'example : ({evaluation}).execution.observe 100 = .done (.ok {completion}) := by decide')
+        if flag:
+            equations.append(f'example : HeapCalls.Condition ProbeAst.module {env} ProbeAst.requires_f_0 [.list []] := ⟨[.list [.scalar (.int 7)]], Mutable.Call.finishes_of_observe (fuel := 100) (by decide)⟩')
+        else:
+            equations.append(f'''
+example : ¬ HeapCalls.Condition ProbeAst.module {env} ProbeAst.requires_f_0 [.list []] := by
+  intro ⟨finalHeap, condition⟩
+  have finished : ({evaluation}).Finishes {completion} := Mutable.Call.finishes_of_observe (fuel := 100) (by decide)
+  have impossible := finished.unique condition
+  cases impossible''')
+        equations.append(f'example : (HeapCalls.call ProbeAst.module "f" [.ref 0, .scalar (.bool {boolean})] [.list []]).execution.observe 20 = '
+                         '.done (.ok {outcome := .ok (.ref 0), globals := [], heap := [.list []], anchors := 1}) := by decide')
+    equations.append('''
+example : ¬ HeapCalls.Condition ProbeAst.module (fun _ => none) (.constant (.int 1)) [] := by
+  rw [HeapCalls.Evaluates.condition_iff (value := .scalar (.int 1)) HeapCalls.Evaluates.constant]
+  decide''')
+    proof = directory / 'Checks.lean' 
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
+                     + 'open FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+program = ast.parse('def f(xs: list[int]) -> list[int]: return xs\n')
+assert not SupportChecker(program).requirement('f', 'theorem raw : (HeapCalls.call Probe.module "f" [.ref xs] heap).Returns')
+assert SupportChecker(program).requirement('f', 'theorem raw : (HeapCalls.scalarFunction Probe.module "f" []).Returns')
+print('Heap input contracts: all property guards, shared addresses, predicate effects, raw calls and coverage passed')

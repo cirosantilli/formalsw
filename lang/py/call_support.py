@@ -1,10 +1,12 @@
 """Coverage checks for scalar functions with ordinary recursive calls."""
 import ast
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from lang.py.global_inputs import GlobalInputError, function_globals, annotation_kind
 from lang.py.imports import bindings
 from lang.py.defaults import literal_default
+from lang.py.sorting_support import uses_sort_model
 
 
 @dataclass(frozen=True)
@@ -222,9 +224,16 @@ def uses_heap_calls(module, function):
     return False
 
 
+def uses_parallel_model(function: ast.FunctionDef) -> bool:
+    """Select the concurrent interpreter without imposing a particular signature."""
+    return (any(isinstance(arg.annotation, ast.Name) and arg.annotation.id == 'Lock'
+                for arg in function.args.args)
+            or bool(re.search(r'\bParallel\(', ast.get_docstring(function, clean=False) or '')))
+
+
 def uses_calls_model(module, function):
-    if not all(isinstance(arg.annotation, ast.Name) and arg.annotation.id in ('int', 'str', 'bool')
-               for arg in function.args.args):
+    if (uses_parallel_model(function) or uses_sort_model(module, function)
+            or any(annotation_kind(arg.annotation) is None for arg in function.args.args)):
         return False
     try:
         if function_globals(module, function):
@@ -233,7 +242,11 @@ def uses_calls_model(module, function):
         return False
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
     names.update(library_functions(module))
-    return bool(function.args.defaults) or uses_heap_calls(module, function) or uses_method(module, function, "bit_length") or any(
+    if (any(annotation_kind(arg.annotation) == 'bytes' for arg in function.args.args)
+            or function.args.defaults or uses_heap_calls(module, function)
+            or uses_method(module, function, "bit_length")):
+        return True
+    return any(
         isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript, ast.Assert))
         or isinstance(node, ast.Constant) and type(node.value) is bytes
         or range_sum(node) is not None
@@ -295,7 +308,7 @@ def check_calls(module, function, reject, *, heap=False):
             reject(function, 'local bindings must not shadow module-level call targets')
         for arg in function.args.args:
             kind = annotation_kind(arg.annotation)
-            if kind not in ('int', 'str', 'bool') and not (heap and kind and (kind.startswith('list[') or kind in ('bytes', 'bytearray'))):
+            if kind not in ('int', 'str', 'bytes', 'bool') and not (heap and kind and (kind.startswith('list[') or kind in ('bytes', 'bytearray'))):
                 reject(arg, 'call arguments require scalar annotations or supported heap list annotations' if heap
                        else 'call arguments require scalar int, str, or bool annotations')
 

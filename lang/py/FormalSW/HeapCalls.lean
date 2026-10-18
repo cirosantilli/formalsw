@@ -463,6 +463,16 @@ become roots in the completion's alias-preserving graph. -/
 def call (module : Module) (name : String) (values : List Value) (heap : Heap) : Mutable.Call :=
   ⟨⟨State, ⟨.operation (.call name) values, [], heap⟩, step module heap.length⟩⟩
 
+/-- Preconditions run from the same initial heap as the specified call. Their
+private evaluation may allocate or mutate without changing the call's inputs. -/
+def evaluate (module : Module) (env : Env) (expression : Expr) (heap : Heap) : Mutable.Call :=
+  ⟨⟨State, ⟨.expr expression env, [], heap⟩, step module heap.length⟩⟩
+
+/-- Only Boolean True satisfies a precondition; other truthy values do not. -/
+def Condition (module : Module) (env : Env) (expression : Expr) (heap : Heap) : Prop :=
+  ∃ finalHeap, (evaluate module env expression heap).Finishes
+    ⟨.ok (.scalar (.bool true)), [], finalHeap, heap.length⟩
+
 /-- Scalar entry points can compare with existing scalar interpreters. A list
 result is outside this adapter, and must use `call` instead. -/
 def scalarStep (module : Module) (state : State) : Step State Constant :=
@@ -498,6 +508,21 @@ theorem Reaches.finishes (h : Reaches module anchors a b)
 def Evaluates (module : Module) (env : Env) (expression : Expr)
     (heap : Heap) (value : Value) (finalHeap : Heap) : Prop :=
   ∀ anchors stack, Reaches module anchors ⟨.expr expression env, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
+
+theorem Evaluates.finishes (h : Evaluates module env expression heap value finalHeap) :
+    (evaluate module env expression heap).Finishes ⟨.ok value, [], finalHeap, heap.length⟩ :=
+  (h heap.length []).finishes (.done rfl)
+
+theorem Evaluates.condition_iff (h : Evaluates module env expression heap value finalHeap) :
+    Condition module env expression heap ↔ value = .scalar (.bool true) := by
+  constructor
+  · rintro ⟨otherHeap, finished⟩
+    have same := h.finishes.unique finished
+    cases same
+    rfl
+  · intro same
+    subst value
+    exact ⟨finalHeap, h.finishes⟩
 
 def ReturnsValue (module : Module) (name : String) (values : List Value)
     (heap : Heap) (value : Value) (finalHeap : Heap) : Prop :=

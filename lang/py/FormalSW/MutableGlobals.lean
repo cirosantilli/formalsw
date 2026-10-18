@@ -42,6 +42,29 @@ def Value.HasType (heap : Heap) (value : Value) (kind : String) : Prop :=
           | .scalar (.bool _) => elementKind = "bool"
           | _ => False)
 
+/-- Recover mathematical integer contents without changing the object's address. -/
+theorem Value.ints_of_hasType (typed : Value.HasType heap (.ref address) "list[int]") :
+    ∃ xs : List Int, heap[address]? = some (.list (xs.map fun n => .scalar (.int n))) := by
+  obtain ⟨items, found, kinds⟩ := typed
+  have elements : ∀ item ∈ items, ∃ n, item = .scalar (.int n) := by
+    rcases kinds with impossible | ⟨kind, domain, kinds⟩
+    · simp at impossible
+    · intro item member
+      have typed := kinds item member
+      cases item with
+      | ref address => contradiction
+      | scalar value => cases value <;> simp_all
+  have contents : ∃ xs : List Int, items = xs.map (fun n => Value.scalar (.int n)) := by
+    clear found kinds
+    induction items with
+    | nil => exact ⟨[], rfl⟩
+    | cons item items ih =>
+        obtain ⟨n, rfl⟩ := elements item (by simp)
+        obtain ⟨xs, same⟩ := ih (by intro value member; exact elements value (by simp [member]))
+        exact ⟨n :: xs, by simp [same]⟩
+  obtain ⟨xs, rfl⟩ := contents
+  exact ⟨xs, found⟩
+
 /-- Every reference points into the heap; cycles and sharing are permitted. -/
 def Heap.Valid (heap : Heap) : Prop :=
   ∀ object ∈ heap, match object with

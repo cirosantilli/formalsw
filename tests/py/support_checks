@@ -308,7 +308,7 @@ def twice_wrapped(values: list[int]) -> list[int]:
 ''')
     result = stub(path)
     assert result.returncode == 1, result.stdout
-    assert 'only one delegation directly to a sorting implementation' in result.stderr, result.stderr
+    assert 'call arguments require scalar annotations or supported heap list annotations' in result.stderr, result.stderr
 
     # Changing a previously recognized sorting body must invalidate its contracts.
     path.write_text(source.replace('middle = len(values) // 2', 'print(values)\n    middle = len(values) // 2'))

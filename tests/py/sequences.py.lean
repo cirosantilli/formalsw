@@ -52,6 +52,17 @@ private theorem product.result (xs : List Int) (heap : Mutable.Heap) (address : 
         [.ref address]) "p" (.scalar (.int 1))
     simpa using product.loop xs [] heap address (by simpa using found) env 1 rfl
 
+theorem product.«Returns» (heap : Mutable.Heap) (xs : Nat)
+    (_valid : Mutable.Heap.Valid heap) (typed : Mutable.Value.HasType heap (.ref xs) "list[int]") :
+    (HeapCalls.call program "product" [.ref xs] heap).Returns := by
+  obtain ⟨values, found⟩ := Mutable.Value.ints_of_hasType typed
+  exact (product.result values heap xs found).returns
+
+theorem product.«Supported» (heap : Mutable.Heap) (xs : Nat)
+    (valid : Mutable.Heap.Valid heap) (typed : Mutable.Value.HasType heap (.ref xs) "list[int]") :
+    (HeapCalls.call program "product" [.ref xs] heap).Supported :=
+  (product.«Returns» heap xs valid typed).supported
+
 private theorem square.result (n : Int) :
     HeapCalls.ReturnsValue program "square" [.scalar (.int n)] [] (.scalar (.int (n * n)))
       [.list (ints [n, n])] := by

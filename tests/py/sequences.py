@@ -1,4 +1,7 @@
 def product(xs: list[int]) -> int:
+    """
+    @formalsw: Returns
+    """
     p = 1
     for x in xs:
         p *= x

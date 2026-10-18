@@ -13,10 +13,11 @@ from lang.py.contracts import ContractError, input_condition
 module = ast.parse('def f(n: int, flag: bool): pass\ndef predicate(n: int, bound: int) -> bool: return n >= bound')
 function = module.body[0]
 for condition in ('0 <= n < 10 and n % 2 == 0', 'not (n < 0 or n > 10)',
-                  'predicate(n, 0)', 'n % 0 == 0', 'n % -2 == 0', 'flag > 0', 'n'):
+                  'predicate(n, 0)', 'n % 0 == 0', 'n % -2 == 0', 'flag > 0', 'n', 'n > len([])'):
     assert not input_condition(condition, function, module).unsupported, condition
-for condition in ('n / 0 > 1', 'missing > 0', 'n > len([])', '__import__("os").system("false")'):
+for condition in ('n / 0 > 1', 'missing > 0', '__import__("os").system("false")'):
     assert input_condition(condition, function, module).unsupported, condition
+assert input_condition('n > len([])', function, module).needs_coverage
 try:
     input_condition('n >=', function, module)
 except ContractError:

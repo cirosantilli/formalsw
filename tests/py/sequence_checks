@@ -32,7 +32,8 @@ def values(items):
     return '[' + ', '.join(f'.scalar ({constant(item)})' for item in items) + ']'
 
 
-source = '''def length(s: str) -> int: return len(s)
+source = '''
+def length(s: str) -> int: return len(s)
 def scalar_sequence(s: str) -> int:
     count = 0
     for item in s:

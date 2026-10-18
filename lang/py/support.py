@@ -12,7 +12,8 @@ import re
 from dataclasses import dataclass
 from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind
 from lang.py.mutable_support import check_mutable
-from lang.py.call_support import check_calls, uses_calls_model, uses_heap_calls, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
+from lang.py.sorting_support import MERGE_SORT, QUICK_SORT, body_of, matches_sort
+from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
 
 
 @dataclass(frozen=True)
@@ -21,60 +22,6 @@ class UnsupportedConstruct:
     line: int
     reason: str
     dependency: tuple[str, ...] = ()
-
-
-MERGE_SORT = '''
-def FUNCTION(ARG):
-    if len(ARG) <= 1:
-        return ARG
-    middle = len(ARG) // 2
-    left = FUNCTION(ARG[:middle])
-    right = FUNCTION(ARG[middle:])
-    merged = []
-    left_index = 0
-    right_index = 0
-    while left_index < len(left) and right_index < len(right):
-        if left[left_index] <= right[right_index]:
-            merged += [left[left_index]]
-            left_index += 1
-        else:
-            merged += [right[right_index]]
-            right_index += 1
-    return merged + left[left_index:] + right[right_index:]
-'''
-QUICK_SORT = '''
-def FUNCTION(ARG):
-    if len(ARG) <= 1:
-        return ARG
-    pivot = ARG[0]
-    less = []
-    equal = []
-    greater = []
-    for value in ARG:
-        if value < pivot:
-            less += [value]
-        else:
-            if value > pivot:
-                greater += [value]
-            else:
-                equal += [value]
-    return FUNCTION(less) + equal + FUNCTION(greater)
-'''
-
-
-def body_of(function: ast.FunctionDef) -> list[ast.stmt]:
-    body = function.body
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-        if isinstance(body[0].value.value, str):
-            return body[1:]
-    return body
-
-
-def matches_sort(function: ast.FunctionDef, template: str) -> bool:
-    if len(function.args.args) != 1:
-        return False
-    expected = ast.parse(template.replace('FUNCTION', function.name).replace('ARG', function.args.args[0].arg)).body[0]
-    return [ast.dump(s) for s in body_of(function)] == [ast.dump(s) for s in expected.body]
 
 
 def binary_comparison(function: ast.FunctionDef) -> bool:
@@ -86,13 +33,6 @@ def binary_comparison(function: ast.FunctionDef) -> bool:
             and isinstance(body[0].value.left, ast.Name) and body[0].value.left.id == arguments[0].arg
             and isinstance(body[0].value.comparators[0], ast.Name)
             and body[0].value.comparators[0].id == arguments[1].arg)
-
-
-def uses_parallel_model(function: ast.FunctionDef) -> bool:
-    """Select the concurrent interpreter without imposing a particular signature."""
-    return (any(isinstance(arg.annotation, ast.Name) and arg.annotation.id == 'Lock'
-                for arg in function.args.args)
-            or bool(re.search(r'\bParallel\(', ast.get_docstring(function, clean=False) or '')))
 
 
 class SupportChecker:
@@ -627,7 +567,9 @@ class SupportChecker:
                           for item in function_globals(self.module, self.functions[target]))
         except GlobalInputError:
             pass
-        issues = list(self.check(name, mutable=mutable)) if name else []
+        explicit_heap = any(model == "HeapCalls.call" and target == name
+                            for model, target in self.execution_targets(marker))
+        issues = list(self.check(name, mutable=mutable, heap_calls=explicit_heap)) if name else []
         if name:
             function = self.functions[name]
             if uses_parallel_model(function) and (
@@ -679,7 +621,7 @@ class SupportChecker:
                 issues.append(UnsupportedConstruct(name, function.lineno,
                     'ReturnType with globals requires a supported scalar, scalar-list, or None return annotation'))
             wants_execution = property_name in ('Returns', 'Halts') or bool(re.search(r'\b(?:Returns|Halts|Throws|diverges)\(', marker))
-            if unary_list and not stateful and (wants_execution or property_name == 'Throws') and not matches_sort(function, MERGE_SORT):
+            if unary_list and not stateful and not explicit_heap and not uses_calls_model(self.module, function) and (wants_execution or property_name == 'Throws') and not matches_sort(function, MERGE_SORT):
                 issues.append(UnsupportedConstruct(name, function.lineno, 'list execution currently supports only the exact merge-sort body'))
         targets = re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)', marker)
         # Explicit low-level calls in raw requirements are checked too.
@@ -729,7 +671,7 @@ class SupportChecker:
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'list helper calls require the heap call interpreter'))
             if model in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
-                if any(annotation_kind(arg.annotation) not in ('int', 'str', 'bool') for arg in function.args.args):
+                if model == 'HeapCalls.scalarFunction' and any(annotation_kind(arg.annotation) not in ('int', 'str', 'bytes', 'bool') for arg in function.args.args):
                     issues.append(UnsupportedConstruct(target, function.lineno,
                         'heap-call specifications currently require scalar entry arguments'))
                 kind = annotation_kind(function.returns)

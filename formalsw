@@ -20,7 +20,7 @@ from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
 from lang.py.call_support import range_sum, reversed_list, uses_calls_model, has_partial_primitives, uses_heap_calls
-from lang.py.contracts import ContractError, input_condition
+from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
 from lang.py.imports import bindings, resolve_function, resolve_python_function
 from lang.py.linking import link_imports
@@ -153,11 +153,11 @@ def proof_name_for_short_requirement(
 
 
 def scalar_lean_type(kind: str) -> str:
-    return {"int": "Int", "str": "String", "bool": "Bool"}[kind]
+    return {"int": "Int", "str": "String", "bytes": "List UInt8", "bool": "Bool"}[kind]
 
 
 def scalar_term(name: str, kind: str) -> str:
-    constructor = {"int": "int", "str": "string", "bool": "bool"}[kind]
+    constructor = {"int": "int", "str": "string", "bytes": "bytes", "bool": "bool"}[kind]
     return f'.{constructor} {name}'
 
 
@@ -429,6 +429,8 @@ def guard_raw_requirement(requirement, function, conditions):
     if not conditions:
         return requirement, bound
     inputs = [arg.arg for arg in function.args.args]
+    if heap_input_name(function):
+        inputs.append(heap_input_name(function))
     captures = [name for name in inputs if any(f"«{name}»" in condition for condition in conditions)]
     try:
         guarded = guard_proposition(requirement.property_type,
@@ -446,9 +448,14 @@ def raw_theorem_type_for_function(
     conditions=(),
 ) -> str:
     """Infer referenced, unbound Python arguments in a function-level theorem."""
+    raw_heap = heap_input_name(function) if module is not None and uses_calls_model(module, function) else None
+    if raw_heap:
+        conditions = [*contract_domain(function)[1], *conditions]
     requirement, bound = guard_raw_requirement(requirement, function, conditions)
     referenced_text = f"{requirement.params}\n{requirement.property_type}"
     inferred = []
+    if raw_heap and raw_heap not in bound:
+        inferred.append(f'(«{raw_heap}» : FormalSW.PyAst.Mutable.Heap)')
     global_args = function_globals(module, function) if module is not None and re.search(r"\bthis_function\b", referenced_text) else ()
     mutable = any(item.kind.startswith('list[') for item in global_args)
     heap = "heap"
@@ -462,7 +469,7 @@ def raw_theorem_type_for_function(
             continue
         if re.search(rf"\b{re.escape(argument.arg)}\b", referenced_text) is None:
             continue
-        lean_type = ("Nat" if mutable and (annotation_kind(argument.annotation) or "").startswith('list[')
+        lean_type = ("Nat" if (mutable or raw_heap) and reference_kind(annotation_kind(argument.annotation))
                      else lean_type_for_python_annotation(argument.annotation))
         if lean_type is None:
             raise InvalidRequirement(
@@ -476,7 +483,7 @@ def raw_theorem_type_for_function(
             inferred.append(f"({item.name} : {kind})")
     params = " ".join([*inferred, requirement.params]).strip()
     property_type = requirement.property_type
-    if params and not global_args:
+    if params and not global_args and not raw_heap:
         property_type = f"∀ {params},\n{property_type}"
     if re.search(r"\bthis_function\b", referenced_text):
         arguments = [*function.args.posonlyargs, *function.args.args]
@@ -489,7 +496,16 @@ def raw_theorem_type_for_function(
                 f"{function.name}: this_function supports positional arguments without variadics"
             )
         annotations = [argument.annotation for argument in arguments]
-        if mutable:
+        if raw_heap:
+            names = [f"input_{index}" for index in range(len(arguments))]
+            kinds = [annotation_kind(arg.annotation) for arg in arguments]
+            lambda_params = " ".join(f"({name} : {'Nat' if reference_kind(kind) else scalar_lean_type(kind)})"
+                                     for name, kind in zip(names, kinds))
+            values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))
+            binding = f'FormalSW.PyAst.HeapCalls.call {ast_namespace}.module {lean_string(function.name)} [{values}] «{raw_heap}»'
+            if names:
+                binding = f"fun {lambda_params} => {binding}"
+        elif mutable:
             names = [f"input_{index}" for index in range(len(arguments))]
             kinds = [annotation_kind(arg.annotation) for arg in arguments]
             lambda_params = " ".join(f"({name} : {'Nat' if kind.startswith('list[') else scalar_lean_type(kind)})"
@@ -526,7 +542,7 @@ def raw_theorem_type_for_function(
                 f"{function.name}: this_function supports scalar int/str/bool arguments or one bare list"
             )
         property_type = f"let this_function := {binding};\n{property_type}"
-    if params and global_args:
+    if params and (global_args or raw_heap):
         property_type = f"∀ {params},\n{property_type}"
     # Always supply the module: Lean parses nested comparison expressions itself.
     property_type = f"let _this_module := {ast_namespace}.module;\n{property_type}"
@@ -705,6 +721,30 @@ def guarded_type(body, conditions, *, existential=False):
     return " → ".join(f"({condition})" for condition in conditions) + f" →\n({body})"
 
 
+def heap_term(name, kind):
+    return f'.ref {name}' if reference_kind(kind) else f'.scalar ({scalar_term(name, kind)})'
+
+
+def contract_domain(function):
+    """Quantify one valid heap and independent addresses, allowing argument aliases."""
+    arguments = function.args.args if function else ()
+    binders, guards = [], []
+    heap_name = heap_input_name(function)
+    heap = f'«{heap_name}»' if heap_name else '[]'
+    if heap_name:
+        binders.append(f'({heap} : FormalSW.PyAst.Mutable.Heap)')
+        guards.append(f'FormalSW.PyAst.Mutable.Heap.Valid {heap}')
+    for arg in arguments:
+        kind = annotation_kind(arg.annotation)
+        if kind is None:
+            raise InvalidRequirement(f'{function.name}: contracts need supported argument annotations')
+        name = f'«{arg.arg}»'
+        binders.append(f'({name} : {"Nat" if reference_kind(kind) else scalar_lean_type(kind)})')
+        if reference_kind(kind):
+            guards.append(f'FormalSW.PyAst.Mutable.Value.HasType {heap} (.ref {name}) {lean_string(kind)}')
+    return binders, guards, heap
+
+
 def collect_conditions(markers, function, module, namespace, prior_conditions=()):
     conditions, properties, unsupported = [], [], []
     for marker in markers:
@@ -725,29 +765,38 @@ def collect_conditions(markers, function, module, namespace, prior_conditions=()
             continue
         module.formalsw_conditions[name] = predicate.expression
         env = "none"
+        query = "_arg"
+        names = {arg.arg for arg in function.args.args} if function else set()
+        while query in names:
+            query += "_"
         for arg in reversed(predicate.arguments):
             kind = annotation_kind(arg.annotation)
-            env = f"if _arg = {lean_string(arg.arg)} then some ({scalar_term('«' + arg.arg + '»', kind)}) else {env}"
+            value = (heap_term if predicate.heap else scalar_term)('«' + arg.arg + '»', kind)
+            env = f"if {query} = {lean_string(arg.arg)} then some ({value}) else {env}"
+        binders, domain, heap = contract_domain(function)
+        runtime = 'HeapCalls' if predicate.heap else 'Calls'
+        inputs = f'{namespace}.module (fun {query} => {env}) {namespace}.{name}'
+        if predicate.heap:
+            inputs += f' {heap}'
         if predicate.needs_coverage:
-            covered = f"(FormalSW.PyAst.Calls.evaluate {namespace}.module (fun _arg => {env}) {namespace}.{name}).Supported"
-            covered = guarded_type(covered, [*prior_conditions, *conditions])
-            arguments = function.args.args if function else ()
-            if arguments:
-                binders = " ".join(f"(«{arg.arg}» : {scalar_lean_type(annotation_kind(arg.annotation))})" for arg in arguments)
-                covered = f"∀ {binders},\n{covered}"
+            covered = f"(FormalSW.PyAst.{runtime}.evaluate {inputs}).Supported"
+            covered = guarded_type(covered, [*domain, *prior_conditions, *conditions])
+            if binders:
+                covered = f"∀ {' '.join(binders)},\n{covered}"
             module.formalsw_condition_coverage.append((name + '_supported', covered, marker.line))
-        conditions.append(f"FormalSW.PyAst.Calls.Condition {namespace}.module (fun _arg => {env}) {namespace}.{name}")
+        conditions.append(f"FormalSW.PyAst.{runtime}.Condition {inputs}")
     if function is not None and conditions and not properties:
         raise InvalidRequirement("Requires needs a property obligation")
     return conditions, properties, tuple(dict.fromkeys(unsupported))
 
 
 def scalar_contract_type(module, function, namespace, property_name, conditions, negations, target=None, input_function=None):
-    """Quantify scalar inputs and keep any explicit domain inside the quantifier."""
-    arguments = (input_function or function).args.args
+    """Keep typing and Requires guards inside the universal or existential domain."""
+    inputs = input_function or function
+    arguments = inputs.args.args
     kinds = [annotation_kind(arg.annotation) for arg in arguments]
-    if any(kind not in ('int', 'str', 'bool') for kind in kinds):
-        raise InvalidRequirement(f"{function.name}: this contract requires scalar argument annotations")
+    binders, domain, heap = contract_domain(inputs)
+    heap_inputs = heap_input_name(inputs) is not None
     names = [f"«{arg.arg}»" for arg in arguments]
 
     def call(program, func, ns):
@@ -757,6 +806,9 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
             raise InvalidRequirement(f"{func.name}: constrained or imported contracts with globals are unsupported")
         if [annotation_kind(arg.annotation) for arg in func.args.args] != kinds:
             raise InvalidRequirement("Equiv requires matching supported argument domains")
+        if heap_inputs:
+            values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))
+            return f'FormalSW.PyAst.HeapCalls.call {ns}.module {lean_string(func.name)} [{values}] {heap}'
         if uses_heap_calls(program, func):
             kind = annotation_kind(func.returns)
             if kind == 'bytearray' or kind and kind.startswith('list['):
@@ -778,14 +830,13 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
         kind = annotation_kind(function.returns)
         if kind is None and isinstance(function.returns, ast.Constant) and function.returns.value is None:
             kind = "None"
-        if kind not in ("int", "bool", "str", "None") and not (uses_heap_calls(module, function) and kind and (kind.startswith("list[") or kind == "bytearray")):
+        if kind not in ("int", "bool", "str", "bytes", "None") and not (uses_heap_calls(module, function) and kind and (kind.startswith("list[") or kind == "bytearray")):
             raise InvalidRequirement("ReturnType needs a supported return annotation")
         body += f" {lean_string(kind)}"
-    body = guarded_type(body, conditions, existential=property_name == "Throws")
-    if names:
-        binders = " ".join(f"({name} : {scalar_lean_type(kind)})" for name, kind in zip(names, kinds))
+    body = guarded_type(body, [*domain, *conditions], existential=property_name == "Throws")
+    if binders:
         quantifier = "∃" if property_name == "Throws" else "∀"
-        body = f"{quantifier} {binders},\n{body}"
+        body = f"{quantifier} {' '.join(binders)},\n{body}"
     for _ in range(negations):
         body = f"Not ({body})"
     return body
@@ -843,14 +894,14 @@ def collect_requirements(
                             (marker.reference is not None or uses_calls_model(module, stmt) or parsed[1][0] not in support.functions
                              or uses_calls_model(module, support.functions[parsed[1][0]])))
             scalar_property = (parsed and parsed[0] in ("Returns", "Halts", "Throws", "ReturnType", "Equiv", "EquivReturn")
-                               and all(annotation_kind(arg.annotation) in ("int", "str", "bool") for arg in stmt.args.args)
+                               and all(annotation_kind(arg.annotation) is not None for arg in stmt.args.args)
                                and not support.check(stmt.name)
                                and not function_globals(module, stmt))
             if scalar_equiv or scalar_property and (conditions or uses_calls_model(module, stmt)):
                 property_name, args, negations = parsed
                 theorem_name = proof_name_for_short_requirement(
                     proof_namespace, stmt.name, property_name, args, marker.text)
-                unsupported = list(support.check(stmt.name))
+                unsupported = list(support.check(stmt.name, heap_calls=heap_input_name(stmt) is not None))
                 target = None
                 dependencies = ()
                 if property_name in ("Equiv", "EquivReturn"):
@@ -865,10 +916,10 @@ def collect_requirements(
                             raise InvalidRequirement(str(error)) from error
                         target_namespace = namespace_for_source(target_path)
                         dependencies = (target_path,) if target_path != source_path.resolve() else ()
-                        unsupported.extend(SupportChecker(target_module).check(target.name))
+                        unsupported.extend(SupportChecker(target_module).check(target.name, heap_calls=heap_input_name(target) is not None))
                     else:
                         target_module, target_namespace = module, ast_namespace
-                        unsupported.extend(support.check(target.name))
+                        unsupported.extend(support.check(target.name, heap_calls=heap_input_name(target) is not None))
                 property_type = "False" if unsupported else scalar_contract_type(
                     module, stmt, ast_namespace, property_name, conditions, negations,
                     (target_module, target, target_namespace) if target else None)
@@ -943,7 +994,8 @@ def collect_requirements(
                 marker.text,
                 unsupported,
             ))
-        if (properties or stmt.name in raw_targets) and any(has_partial_primitives(program, function) or
+        if (any(not requirement.unsupported for requirement in requirements[first_requirement:])
+                or not properties and stmt.name in raw_targets) and any(has_partial_primitives(program, function) or
                 uses_calls_model(program, function) and uses_heap_calls(program, function)
                 for program, function, _ in coverage_targets):
             covered = []
@@ -953,7 +1005,7 @@ def collect_requirements(
                 if (namespace, function.name) in seen:
                     continue
                 seen.add((namespace, function.name))
-                function_issues = SupportChecker(program).check(function.name)
+                function_issues = SupportChecker(program).check(function.name, heap_calls=heap_input_name(function) is not None)
                 issues.extend(function_issues)
                 if not function_issues:
                     covered.append(scalar_contract_type(program, function, namespace,
