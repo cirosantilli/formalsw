@@ -22,6 +22,7 @@ from lang.py.lean_frontend import parse_imports, parse_theorem, guard_propositio
 from lang.py.call_support import range_sum, sequence_sum, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
+from lang.py.tuple_support import flat_unpacking
 from lang.py.imports import bindings, identify_classes, resolve_function, resolve_python_function
 from lang.py.linking import link_imports
 from lang import spec_setup
@@ -1424,7 +1425,8 @@ class AstJsonEmitter:
             iterable, start = summed
             if isinstance(iterable, ast.GeneratorExp):
                 encoded = self.expr(ast.ListComp(elt=iterable.elt, generators=iterable.generators))
-                return {**encoded, "type": "SumGenerator", "start": self.expr(start)}
+                kind = "SumGeneratorTargets" if encoded["type"] == "ListCompTargets" else "SumGenerator"
+                return {**encoded, "type": kind, "start": self.expr(start)}
             return {"type": "SumSequence", "iter": self.expr(iterable), "start": self.expr(start)}
         match expr:
             case ast.JoinedStr(values=values):
@@ -1458,9 +1460,14 @@ class AstJsonEmitter:
             case ast.List(elts=elts):
                 return {"type": "List", "elts": [self.expr(elt) for elt in elts]}
             case ast.ListComp(elt=elt, generators=generators):
-                if any(generator.is_async or not isinstance(generator.target, ast.Name)
+                if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
                        for generator in generators):
-                    raise UnsupportedSyntax('list comprehensions require synchronous loops with local name targets')
+                    raise UnsupportedSyntax('list comprehensions require synchronous loops with names or flat tuple/list targets')
+                if any(not isinstance(generator.target, ast.Name) for generator in generators):
+                    return {"type": "ListCompTargets", "elt": self.expr(elt), "generators": [
+                        {"target": self.expr(generator.target), "iter": self.expr(generator.iter),
+                         "ifs": [self.expr(condition) for condition in generator.ifs]}
+                        for generator in generators]}
                 return {"type": "ListComp", "elt": self.expr(elt), "generators": [
                     {"name": generator.target.id, "iter": self.expr(generator.iter),
                      "ifs": [self.expr(condition) for condition in generator.ifs]}

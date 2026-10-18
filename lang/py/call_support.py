@@ -399,11 +399,12 @@ def check_calls(module, function, reject, *, heap=False):
             scope = locals_ if scope is None else scope
             recurse = lambda child: expr(child, scope)
             if heap and isinstance(node, ast.ListComp):
-                if any(generator.is_async or not isinstance(generator.target, ast.Name)
+                if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
                        for generator in node.generators):
-                    reject(node, 'comprehensions require synchronous loops with local name targets')
+                    reject(node, 'comprehensions require synchronous loops with names or flat tuple/list targets')
                     return
-                inner_scope = scope | {generator.target.id for generator in node.generators}
+                inner_scope = scope | {target.id for generator in node.generators
+                                       for target in ast.walk(generator.target) if isinstance(target, ast.Name)}
                 for index, generator in enumerate(node.generators):
                     iterable_scope = scope if index == 0 else inner_scope
                     iterable = generator.iter

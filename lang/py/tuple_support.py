@@ -21,7 +21,7 @@ def unpacked_tuple_displays(function):
     parents = {child: parent for parent in parts for child in ast.iter_child_nodes(parent)}
     tables = set()
     for node in parts:
-        if isinstance(node, ast.For) and flat_unpacking(node.target) and isinstance(node.iter, ast.List):
+        if isinstance(node, (ast.For, ast.comprehension)) and flat_unpacking(node.target) and isinstance(node.iter, ast.List):
             tables.add(node.iter)
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name)):
@@ -36,7 +36,7 @@ def unpacked_tuple_displays(function):
             continue
         occurrences = [part for part in parts if isinstance(part, ast.Name) and part.id == target.id]
         if all(part is target or isinstance(part.ctx, ast.Load)
-               and isinstance(parents.get(part), ast.For)
+               and isinstance(parents.get(part), (ast.For, ast.comprehension))
                and parents[part].iter is part and flat_unpacking(parents[part].target)
                for part in occurrences):
             tables.add(value)

@@ -54,6 +54,27 @@ def unsupported(xs: list[int], n: int):
     return [x for x in set()]
 '''
 bodies = {
+    'tuple_targets': 'return [x + y for x, y in [[n, n + 1], [2, 3]]]',
+    'list_targets': 'return [x - y for [x, y] in [[n, n + 1], [2, 3]]]',
+    'constant_tuple_targets': 'return [x + y for x, y in [(1, 2), (3, 4)]]',
+    'repeated_unpack_name': 'return [x for x, x in [[n, n + 1]]]',
+    'unpack_no_leak': 'x = 40\ny = 50\nout = [x + y for x, y in [[n, n + 1]]]\nreturn [out, x, y]',
+    'unpack_first_scope': 'return [xs for xs, y in [[xs, n]]]',
+    'unpack_later_target': 'y = 42\nreturn [x for x in [n] if y for x, y in [[1, 2]]]',
+    'unpack_outer_scope': 'x = 42\nreturn [[x, y] for x, y in [[x, n]]]',
+    'unpack_inner_range': 'return [z for x, y in [[n, n + 1]] for z in range(x)]',
+    'unpack_inner_target': 'return [x + y + z for x in range(n) for y, z in [[x, x + 1]]]',
+    'unpack_range_type': 'return [x for x, y in range(n) if touch(xs, 9)]',
+    'unpack_nested_range_type': 'return [x for i in range(n) for x, y in range(1) if touch(xs, 9)]',
+    'unpack_before_filter': 'return [touch(xs, x) for x, y in [[n]] if touch(xs, 9)]',
+    'unpack_too_many': 'return [x for x, y in [[n, n, n]]]',
+    'unpack_type': 'return [x for x, y in [n]]',
+    'unpack_unicode': 'return [x + y for x, y in ["λ😀", "ab"]]',
+    'unpack_bytes': 'return [x + y for x, y in [b"az", b"xy"]]',
+    'unpack_empty': 'return [n for () in [[]]]',
+    'unpack_empty_failure': 'return [n for [] in [[n]]]',
+    'unpack_once': 'row = [n, n + 1]\nout = [x + y for x, y in [row] if replace(row, 99)]\nreturn [out, row]',
+    'unpack_shared': 'return [touch(x, n) for x, y in [[xs, xs]] if len(y) >= 0]',
     'range_values': 'return [x * x for x in range(n)]',
     'stepped': 'return [x for x in range(n, -4, -2)]',
     'filtered': 'return [10 // x for x in range(n) if x != 0 if x % 2 == 0]',
@@ -118,7 +139,8 @@ for name, initial, n in itertools.product(bodies, ([], [0, 2]), (-2, 3)):
 
 lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
 for expression in ('[x for x in range()]', '[x for x in range(1, 2, 3, 4)]',
-                   '[x for x in range(stop=2)]', '[x for x, y in xs]',
+                   '[x for x in range(stop=2)]', '[x for x, (y, z) in xs]',
+                   '[x for x, *ys in xs]',
                    '[x for xs[0] in xs]', '[x async for x in xs]',
                    '[x for x in xs for range in range(n)]',
                    '[len(xs) for len in xs]', '[touch(xs, n) for touch in xs]',

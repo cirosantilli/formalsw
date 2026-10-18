@@ -274,6 +274,8 @@ inductive Operation where
   | sumSequence
   | sumGenerator (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env) (start : Expr)
   | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
+  | comprehensionTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
+  | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
 
 inductive Frame where
   | dictionaryKey (value : Expr) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
@@ -411,6 +413,52 @@ def comprehensionStart (anchors : Nat) (element : Expr)
                 .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩
           | _ => .unsupported
 
+/-- Mask every bound name, including unpacked names in later generators. -/
+def comprehensionTargetsEnv (env : Env) (generators : List (Expr × Expr × List Expr)) : Env :=
+  fun name => if generators.any (fun generator => (targetLocals generator.1).contains name) then none else env name
+
+/-- This internal iterator binding is inaccessible to Python source. -/
+def comprehensionTargetName : Expr → String
+  | .name name => name
+  | _ => "$formalsw.unpack"
+
+/-- Unpacking occurs once per iteration, before any filter or nested loop. -/
+def comprehensionTargetBody (target : Expr) (body : List Stmt) : List Stmt :=
+  match target with
+  | .name _ => body
+  | .tuple targets | .list targets =>
+      .assign [.tuple targets] (.name "$formalsw.unpack") :: body
+  | _ => [.unsupported "unsupported comprehension target"]
+
+/-- Subsequent iterables use the existing for-loop and unpacking semantics. -/
+def comprehensionTargetsBody (terminal : List Stmt) : List (Expr × Expr × List Expr) → List Stmt
+  | [] => terminal
+  | (target, iterable, filters) :: rest =>
+      [.forIn (.name (comprehensionTargetName target)) iterable
+        (comprehensionTargetBody target
+          (comprehensionFilters filters (comprehensionTargetsBody terminal rest))) []]
+
+/-- Capture the first iterator in the outer scope, before allocating the result. -/
+def comprehensionTargetsStart (anchors : Nat) (element : Expr)
+    (generators : List (Expr × Expr × List Expr)) (env : Env)
+    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  match generators with
+  | [] => .unsupported
+  | (target, iterable, filters) :: rest =>
+      let body := comprehensionTargetBody target
+        (comprehensionFilters filters (comprehensionTargetsBody [.comprehensionAppend heap.length element] rest))
+      let name := comprehensionTargetName target
+      let enter := fun loop heap => Step.next
+        ⟨.block [loop] env, .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩
+      match iterable with
+      | .call (.name "range") _ => match rangeBounds values with
+          | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
+          | .error error => done (globals := globals) anchors heap (.error error)
+      | _ => match values with
+          | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
+              enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
+          | _ => .unsupported
+
 /-- These internal names cannot collide with Python identifiers. -/
 def sumAccumulator : String := "$formalsw.sum"
 def sumItem : String := "$formalsw.item"
@@ -456,6 +504,27 @@ def sumGeneratorStart (anchors : Nat) (element : Expr)
       let body := comprehensionFilters filters (sumBody element rest)
       let enter := fun loop heap => Step.next
         ⟨.expr start env, .sumStart loop (comprehensionEnv env generators) :: stack, heap⟩
+      match iterable with
+      | .call (.name "range") _ => match rangeBounds values with
+          | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
+          | .error error => done (globals := globals) anchors heap (.error error)
+      | _ => match values with
+          | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
+              enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
+          | _ => .unsupported
+
+/-- Generator sums bind unpacked targets only when iteration begins, after the start argument. -/
+def sumGeneratorTargetsStart (anchors : Nat) (element : Expr)
+    (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
+    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  match generators with
+  | [] => .unsupported
+  | (target, iterable, filters) :: rest =>
+      let body := comprehensionTargetBody target
+        (comprehensionFilters filters (comprehensionTargetsBody (sumBody element []) rest))
+      let name := comprehensionTargetName target
+      let enter := fun loop heap => Step.next
+        ⟨.expr start env, .sumStart loop (comprehensionTargetsEnv env generators) :: stack, heap⟩
       match iterable with
       | .call (.name "range") _ => match rangeBounds values with
           | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
@@ -681,6 +750,10 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       sumGeneratorStart (globals := globals) anchors element generators env start values stack heap
   | .operation (.comprehension element generators env) values =>
       comprehensionStart (globals := globals) anchors element generators env values stack heap
+  | .operation (.comprehensionTargets element generators env) values =>
+      comprehensionTargetsStart (globals := globals) anchors element generators env values stack heap
+  | .operation (.sumGeneratorTargets element generators env start) values =>
+      sumGeneratorTargetsStart (globals := globals) anchors element generators env start values stack heap
   | .operation operation values => result (globals := globals) anchors heap (primitive operation values) stack
   | .expr expression env =>
       match expression with
@@ -714,6 +787,17 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             | _ => [iterable]
           .next (argumentsState (.comprehension element generators (comprehensionEnv env generators))
             env [] expressions stack heap)
+      | .listCompTargets element (generators@((_, iterable, _) :: _)) =>
+          let expressions := match iterable with
+            | .call (.name "range") expressions => expressions
+            | _ => [iterable]
+          .next (argumentsState (.comprehensionTargets element generators (comprehensionTargetsEnv env generators))
+            env [] expressions stack heap)
+      | .sumGeneratorTargets element (generators@((_, iterable, _) :: _)) start =>
+          let expressions := match iterable with
+            | .call (.name "range") expressions => expressions
+            | _ => [iterable]
+          .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
       | .reversedList expression => .next (argumentsState .reversedList env [] [expression] stack heap)
       | .subscript base (.slice lower upper stride) =>
           .next (argumentsState .slice env [] [base, lower.getD (.constant .none),
@@ -1139,7 +1223,7 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | sumGeneratorTargets _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>

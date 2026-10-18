@@ -61,6 +61,18 @@ def start_alias(xs: list[int], n: int) -> list[int]:
     return xs
 '''
 bodies = {
+    'unpacked': 'return sum(x + y for x, y in [[n, n + 1], [2, 3]])',
+    'unpacked_lists': 'return sum(x - y for [x, y] in [[n, n + 1]])',
+    'unpacked_start': 'return sum((touch(xs, x + y) for x, y in [[n, n + 1]]), touch(xs, 50))',
+    'unpack_after_start': 'return sum((x for x, y in [[n]]), touch(xs, 50))',
+    'reject_start_before_unpack': 'return sum((x for x, y in [[n]]), "")',
+    'unpacked_range': 'return sum((x for x, y in range(n)), touch(xs, 50))',
+    'unpacked_nested': 'return sum(x + y + z for x, y in [[n, n + 1]] for z in range(y))',
+    'unpacked_inner': 'return sum(x + y + z for x in range(n) for y, z in [[x, x + 1]])',
+    'unpacked_later_local': 'y = 42\nreturn sum(x for x in [n] if y for x, y in [[1, 2]])',
+    'unpacked_no_leak': 'x = 42\ny = 43\nout = sum(x + y for x, y in [[n, n + 1]])\nreturn [out, x, y]',
+    'unpacked_shared': 'return sum((x for x, y in [[xs, xs]]), [])',
+    'unpacked_start_mutation': 'return sum((x + y for x, y in [xs]), len(start_alias(xs, n)))',
     'plain': 'return sum(xs)',
     'positional_start': 'return sum(xs, n)',
     'keyword_start': 'return sum(xs, start=n)',
@@ -138,7 +150,7 @@ for name, initial, n in itertools.product((name for name in bodies if name != 'u
     count += 1
 lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
 for expression in ('sum()', 'sum(xs, n, n)', 'sum(xs, other=n)', 'sum(xs, n, start=n)',
-                   'sum(x for x, y in xs)', 'sum(x async for x in xs)',
+                   'sum(x for x, (y, z) in xs)', 'sum(x async for x in xs)',
                    'sum(x for x in xs for range in range(n))',
                    'sum(len(xs) for len in xs)', '(x for x in xs)',
                    'sum(x for x in xs) + x', 'sum(range(), n)'):

@@ -124,6 +124,10 @@ inductive Expr where
   | reversedList : Expr → Expr
   /-- Eager list comprehension: local target, iterable, and ordered filters. -/
   | listComp : Expr → List (String × Expr × List Expr) → Expr
+  /-- Comprehensions with flat tuple/list targets, retaining explicit binding syntax. -/
+  | listCompTargets : Expr → List (Expr × Expr × List Expr) → Expr
+  /-- Immediately consumed generator sum with explicit unpacking targets. -/
+  | sumGeneratorTargets : Expr → List (Expr × Expr × List Expr) → Expr → Expr
   /-- A Python subscription such as `values[i]`. -/
   | subscript : Expr -> Expr -> Expr
   /-- A Python slice used inside a subscription. -/
@@ -319,6 +323,19 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
           return (← jsonString generator "name",
             ← Expr.fromJson? (← jsonField generator "iter"),
             ← jsonArray generator "ifs" Expr.fromJson?))
+  | "ListCompTargets" =>
+      return .listCompTargets (← Expr.fromJson? (← jsonField json "elt"))
+        (← jsonArray json "generators" fun generator => do
+          return (← Expr.fromJson? (← jsonField generator "target"),
+            ← Expr.fromJson? (← jsonField generator "iter"),
+            ← jsonArray generator "ifs" Expr.fromJson?))
+  | "SumGeneratorTargets" =>
+      return .sumGeneratorTargets (← Expr.fromJson? (← jsonField json "elt"))
+        (← jsonArray json "generators" fun generator => do
+          return (← Expr.fromJson? (← jsonField generator "target"),
+            ← Expr.fromJson? (← jsonField generator "iter"),
+            ← jsonArray generator "ifs" Expr.fromJson?))
+        (← Expr.fromJson? (← jsonField json "start"))
   | "Tuple" => return .tuple (← jsonArray json "elts" Expr.fromJson?)
   | "Dict" => return .dict (← jsonArray json "entries" fun entry => do
       return (← Expr.fromJson? (← jsonField entry "key"),
@@ -915,6 +932,12 @@ mutual
     | .listComp element generators =>
         1 + element.operationCount + (generators.map fun (_, iterable, filters) =>
           1 + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
+    | .listCompTargets element generators =>
+        1 + element.operationCount + (generators.map fun (target, iterable, filters) =>
+          target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
+    | .sumGeneratorTargets element generators start =>
+        2 + element.operationCount + start.operationCount + (generators.map fun (target, iterable, filters) =>
+          target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
     | .sumRange _ element bounds conditions =>
         5 + element.operationCount + (bounds.map Expr.operationCount).sum +
           (conditions.map Expr.operationCount).sum
@@ -1367,7 +1390,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
   | Expr.reversedList _ => none
-  | Expr.listComp _ _ => none
+  | Expr.listComp _ _ | Expr.listCompTargets _ _ | Expr.sumGeneratorTargets _ _ _ => none
   | Expr.tuple _ | Expr.dict _ => none
   | Expr.binOp
       (Expr.binOp

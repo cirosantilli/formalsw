@@ -19,7 +19,7 @@ private theorem loop.result (heap : Mutable.Heap) (position : Nat) (stop : Int)
     have emitted : HeapCalls.BlockContinues program boundEnv (body heap.length)
         (heap ++ [.list (values items)]) boundEnv (heap ++ [.list (values (items ++ [(position : Int)]))]) := by
       have write := HeapCalls.BlockContinues.comprehension_append
-        (module := program) (env := boundEnv) (address := heap.length)
+        (globals := []) (module := program) (env := boundEnv) (address := heap.length)
         (heap := heap ++ [.list (values items)])
         (HeapCalls.Evaluates.lookup (name := "x") rfl)
         (by simp : (heap ++ [.list (values items)])[heap.length]? = some (.list (values items)))
