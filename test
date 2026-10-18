@@ -114,6 +114,7 @@ def main() -> int:
         ),
         TestCase("termination and divergence", Path("tests/py/termination.py"), 0),
         TestCase("recursive scalar calls and short circuiting", Path("tests/py/recursive_calls.py"), 0),
+        TestCase("simultaneous tuple assignment and evaluation order", Path("tests/py/tuple_assignments.py"), 0),
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
         TestCase("typed, object, and return sort equivalence", Path("tests/py/sort.py"), 0),
         TestCase("equivalent throws pass", Path("tests/py/equiv_throw.py"), 0),

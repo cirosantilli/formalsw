@@ -904,6 +904,8 @@ class AstJsonEmitter:
                 }
             case ast.List(elts=elts):
                 return {"type": "List", "elts": [self.expr(elt) for elt in elts]}
+            case ast.Tuple(elts=elts):
+                return {"type": "Tuple", "elts": [self.expr(elt) for elt in elts]}
             case ast.BinOp(left=left, op=op, right=right):
                 return {
                     "type": "BinOp",

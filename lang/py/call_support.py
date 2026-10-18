@@ -15,6 +15,7 @@ def uses_calls_model(module, function):
     names = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
     return any(
         isinstance(node, ast.IfExp)
+        or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names
         for node in ast.walk(function)
     )
@@ -93,6 +94,12 @@ def check_calls(module, function, reject):
                         expr(node.value)
                 elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                     expr(node.value)
+                elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+                      and isinstance(node.targets[0], ast.Tuple) and isinstance(node.value, ast.Tuple)
+                      and all(isinstance(target, ast.Name) for target in node.targets[0].elts)
+                      and len(node.targets[0].elts) == len(node.value.elts)):
+                    for value in node.value.elts:
+                        expr(value)
                 elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
                     expr(ast.BinOp(node.target, node.op, node.value))
                 elif isinstance(node, (ast.If, ast.While)):

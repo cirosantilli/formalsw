@@ -18,6 +18,8 @@ inductive Frame where
   | assign (name : String) (rest : List Stmt) (env : ScalarEnv)
   | branch (yes no rest : List Stmt) (env : ScalarEnv)
   | discard (rest : List Stmt) (env : ScalarEnv)
+  | unpack (names : List String) (done : List Constant) (rest : List Expr)
+      (body : List Stmt) (env : ScalarEnv)
 
 inductive Work where
   | expr (expression : Expr) (env : ScalarEnv)
@@ -35,6 +37,18 @@ def outcome (result : Option (Except ExceptionObject Constant)) (stack : List Fr
   | some (.ok value) => .next ⟨.value value, stack⟩
   | some (.error exception) => .done (.error exception)
   | none => .unsupported
+
+def targetNames (targets : List Expr) : Option (List String) :=
+  targets.mapM fun target => match target with
+    | .name name => some name
+    | _ => none
+
+/-- Bind after all right-hand sides have been evaluated in the old environment. -/
+def assignNames (env : ScalarEnv) (names : List String) : List Constant → ScalarEnv
+  | [] => env
+  | value :: values => match names with
+    | [] => env
+    | name :: names => assignNames (env.set name value) names values
 
 def step (module : Module) (state : State) : Step State Constant :=
   let ⟨work, stack⟩ := state
@@ -69,6 +83,16 @@ def step (module : Module) (state : State) : Step State Constant :=
       | .return expr :: _ => .next ⟨.expr expr env, stack⟩
       | .assign [.name name] expr :: rest =>
           .next ⟨.expr expr env, .assign name rest env :: stack⟩
+      | .assign [.tuple targets] (.tuple expressions) :: rest =>
+          match targetNames targets with
+          | none => .unsupported
+          | some names =>
+              if names.length = expressions.length then
+                match expressions with
+                | [] => .next ⟨.block rest env, stack⟩
+                | first :: tail =>
+                    .next ⟨.expr first env, .unpack names [] tail rest env :: stack⟩
+              else .unsupported
       | .augAssign (.name name) op expr :: rest =>
           .next ⟨.expr (.binOp (.name name) op expr) env, .assign name rest env :: stack⟩
       | .ifThen condition yes no :: rest =>
@@ -106,6 +130,11 @@ def step (module : Module) (state : State) : Step State Constant :=
           | .branch yes no rest env =>
               .next ⟨.block ((if scalarTruth value then yes else no) ++ rest) env, stack⟩
           | .discard rest env => .next ⟨.block rest env, stack⟩
+          | .unpack names done rest body env =>
+              match rest with
+              | [] => .next ⟨.block body (assignNames env names (done ++ [value])), stack⟩
+              | first :: tail =>
+                  .next ⟨.expr first env, .unpack names (done ++ [value]) tail body env :: stack⟩
 
 def function (module : Module) (name : String) (args : List Constant) : Execution Constant :=
   ⟨State, ⟨.invoke name args, []⟩, step module⟩
@@ -268,6 +297,43 @@ theorem branch (h : Evaluates module env condition value)
     BlockReturns module env (.ifThen condition yes no :: body) result := by
   intro stack
   exact .next rfl ((h _).trans (.next rfl (rest stack)))
+
+theorem while_loop (h : Evaluates module env condition value)
+    (rest : BlockReturns module env
+      ((if scalarTruth value then loop ++ [.whileDo condition loop otherwise] else otherwise)
+        ++ body) result) :
+    BlockReturns module env (.whileDo condition loop otherwise :: body) result := by
+  intro stack
+  exact .next rfl ((h _).trans (.next rfl (rest stack)))
+
+private def unpackState (names : List String) (env : ScalarEnv) (done : List Constant)
+    (expressions : List Expr) (body : List Stmt) (stack : List Frame) : State :=
+  match expressions with
+  | [] => ⟨.block body (assignNames env names done), stack⟩
+  | first :: tail => ⟨.expr first env, .unpack names done tail body env :: stack⟩
+
+private theorem unpack_reach
+    (h : Evaluates.Arguments module env expressions values) (done : List Constant)
+    (stack : List Frame) :
+    Reaches module (unpackState names env done expressions body stack)
+      ⟨.block body (assignNames env names (done ++ values)), stack⟩ := by
+  induction h generalizing done with
+  | nil => simp [unpackState]; exact .refl
+  | @cons expression value expressions values head tail ih =>
+      apply (head _).trans
+      refine .next (following := unpackState names env (done ++ [value]) expressions body stack) ?_ ?_
+      · cases expressions <;> rfl
+      · simpa [List.append_assoc] using ih (done ++ [value])
+
+theorem unpack (targets : targetNames expressions = some names)
+    (arity : names.length = values.length)
+    (h : Evaluates.Arguments module env values results)
+    (rest : BlockReturns module (assignNames env names results) body result) :
+    BlockReturns module env (.assign [.tuple expressions] (.tuple values) :: body) result := by
+  intro stack
+  refine .next (following := unpackState names env [] values body stack) ?_ ?_
+  · cases values <;> simp [step, targets, arity, unpackState, assignNames]
+  · exact (unpack_reach h [] stack).trans (rest stack)
 
 theorem function (found : findFunctionIn module.body name = some (args, body))
     (arity : args.length = values.length)
