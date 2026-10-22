@@ -22,6 +22,7 @@ from lang.py.lean_frontend import parse_imports, parse_theorem, guard_propositio
 from lang.py.call_support import range_sum, uses_calls_model
 from lang.py.contracts import ContractError, input_condition
 from lang.py.imports import bindings, resolve_function, resolve_python_function
+from lang.py.linking import link_imports
 from lang import spec_setup
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind
 
@@ -616,29 +617,53 @@ def prepare_specification(source, module):
 
 
 _source_modules = {}
+_source_loading = []
 
 
 def validate_source_snapshots(source, module):
     snapshots = [(source, module)]
-    for node in (module, *module.body):
-        for marker in getattr(node, 'formalsw_markers', ()):
-            if marker.reference:
-                snapshots.append(marker.reference[:2])
-    for path, program in snapshots:
+    visited = set()
+    while snapshots:
+        path, program = snapshots.pop()
+        key = (path.resolve(), id(program))
+        if key in visited:
+            continue
+        visited.add(key)
         original = getattr(program, 'formalsw_source_text', None)
         if original is not None and (not path.is_file() or path.read_text() != original):
             raise InvalidRequirement(f'{path}: source changed after specification loading; rerun the checker')
+        for node in (program, *program.body):
+            for marker in getattr(node, 'formalsw_markers', ()):
+                if marker.reference:
+                    snapshots.append(marker.reference[:2])
+        for dependency in (path.resolve(), *getattr(program, 'formalsw_link_dependencies', ())):
+            if dependency in _source_modules:
+                snapshots.append((dependency, _source_modules[dependency]))
 
 
 def source_module(source):
     """Share preparation between dependency discovery and obligation emission."""
     path = source.resolve()
     if path not in _source_modules:
-        text = source.read_text()
-        module = ast.parse(text, filename=str(source))
-        module.formalsw_source_text = text
-        prepare_specification(source, module)
-        _source_modules[path] = module
+        if path in _source_loading:
+            raise InvalidRequirement('cyclic local Python imports: ' + ' -> '.join(map(str, [*_source_loading, path])))
+        _source_loading.append(path)
+        try:
+            text = source.read_text()
+            module = ast.parse(text, filename=str(source))
+            module.formalsw_source = path
+            module.formalsw_source_text = text
+            prepare_specification(source, module)
+            if proof_path_for_source(path).is_file() or any(
+                    getattr(node, 'formalsw_markers', ()) for node in (module, *module.body)):
+                link_imports(path, module, source_module)
+            else:
+                module.formalsw_link_dependencies = ()
+            _source_modules[path] = module
+        except ContractError as error:
+            raise InvalidRequirement(str(error)) from error
+        finally:
+            _source_loading.pop()
     validate_source_snapshots(source, _source_modules[path])
     return _source_modules[path]
 
@@ -767,6 +792,8 @@ def collect_requirements(
     for stmt in module.body:
         if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
+        if getattr(stmt, 'formalsw_imported', False):
+            continue
         markers = stmt.formalsw_markers
         conditions, properties, condition_unsupported = collect_conditions(markers, stmt, module, ast_namespace)
         conditions = [*module_conditions, *conditions]
@@ -793,6 +820,9 @@ def collect_requirements(
                     if target is None:
                         try:
                             target_path, target_module, target = marker.reference or resolve_function(source_path, module, args[0])
+                            target_module = source_module(target_path)
+                            target = next(node for node in target_module.body
+                                          if isinstance(node, ast.FunctionDef) and node.name == target.name)
                         except ContractError as error:
                             raise InvalidRequirement(str(error)) from error
                         target_namespace = namespace_for_source(target_path)
@@ -912,6 +942,10 @@ def collect_requirements(
             ))
     if module_conditions and not requirements:
         raise InvalidRequirement("Requires needs a property obligation")
+    linked = getattr(module, 'formalsw_link_dependencies', ())
+    if linked:
+        requirements = [replace(requirement, dependencies=tuple(dict.fromkeys(
+            (*linked, *requirement.dependencies)))) for requirement in requirements]
     return requirements
 
 
@@ -1753,11 +1787,13 @@ def proof_dependencies(source: Path) -> list[Path]:
     proof = proof_path_for_source(source)
     module = source_module(source)
     functions = {stmt.name for stmt in module.body if isinstance(stmt, ast.FunctionDef)}
-    dependencies = []
+    dependencies = list(module.formalsw_link_dependencies)
     # Dependency discovery needs only the imported binding. Do not compile raw
     # Python quotations or elaborate requirements twice for every source file.
     for function in module.body:
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if getattr(function, 'formalsw_imported', False):
             continue
         for marker in function.formalsw_markers:
             parsed = parse_short_marker(marker.text)

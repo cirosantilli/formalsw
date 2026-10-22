@@ -118,6 +118,7 @@ def main() -> int:
         TestCase("stepped range iteration with calls and early returns", Path("tests/py/stepped_ranges.py"), 0),
         TestCase("module and multiple preconditions", Path("tests/py/requires_module.py"), 0),
         TestCase("execution preconditions across short and raw specifications", Path("tests/py/requires.py"), 0),
+        TestCase("local helper calls and reused source proofs", Path("tests/py/linked_calls.py"), 0, "All 2 checks passed"),
         TestCase("generator sum scoping, filters, ranges and exceptions", Path("tests/py/generator_sums.py"), 0),
         TestCase("integer square root and imported builtin aliases", Path("tests/py/math_isqrt.py"), 0),
         TestCase("range_sum passes", Path("tests/py/range_sum.py"), 0),
@@ -392,6 +393,14 @@ def main() -> int:
     print(f"{'PASS' if setup_checks_passed else 'FAIL'} Python specification setup", flush=True)
     if not setup_checks_passed:
         print(textwrap.indent((setup_checks.stdout + setup_checks.stderr).rstrip(), "  "))
+    link_checks = subprocess.run(
+        [sys.executable, "tests/py/link_checks"],
+        cwd=REPO, text=True, capture_output=True,
+    )
+    link_checks_passed = link_checks.returncode == 0
+    print(f"{'PASS' if link_checks_passed else 'FAIL'} local helper dependencies", flush=True)
+    if not link_checks_passed:
+        print(textwrap.indent((link_checks.stdout + link_checks.stderr).rstrip(), "  "))
     raw_docs = (REPO / "README.adoc").read_text().split("=== Raw Lean specification\n", 1)[1].split("\n== How it works", 1)[0]
     raw_headers = re.findall(r"^==== (.+)$", raw_docs, re.MULTILINE)
     raw_ids = re.findall(r"^\[\[(raw-lean-[^\]]+)\]\]\n==== ", raw_docs, re.MULTILINE)
@@ -416,6 +425,7 @@ def main() -> int:
         and project_checks_passed
         and contract_checks_passed
         and setup_checks_passed
+        and link_checks_passed
         and call_checks_passed
     ) else 1
 

@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Check helper dependency validation and lexical scope preservation."""
+from pathlib import Path
+import subprocess
+import tempfile
+
+REPO = Path(__file__).resolve().parents[2]
+
+with tempfile.TemporaryDirectory(prefix='formalsw-link-') as temporary:
+    project = Path(temporary)
+    subprocess.run(['git', 'init', '-q', str(project)], check=True)
+    (project / 'lean-toolchain').write_text((REPO / 'lean-toolchain').read_text())
+    (project / 'lakefile.toml').write_text(
+        f'name = "link_checks"\n[[require]]\nname = "formalsw"\npath = "{REPO}"\n')
+    for name in ('link_reference', 'linked_calls'):
+        for suffix in ('.py', '.py.lean'):
+            text = (REPO / 'tests/py' / (name + suffix)).read_text()
+            if suffix.endswith('.lean'):
+                text = text.replace('tests.py.', '')
+            (project / (name + suffix)).write_text(text)
+    source = project / 'linked_calls.py'
+    reference = project / 'link_reference.py'
+    original_source = source.read_text()
+    original_reference = reference.read_text()
+
+    def check(expected, message, stub=False):
+        result = subprocess.run([str(REPO / 'formalsw'), *(['--stub'] if stub else []), str(source)],
+                                cwd=project, text=True, capture_output=True)
+        output = result.stdout + result.stderr
+        assert (result.returncode == 0) == (expected == 0), output
+        assert message in output, output
+        return output
+
+    check(0, 'All 2 checks passed')
+    check(0, 'import «link_reference.py»', stub=True)
+    reference.write_text(original_reference.replace('n + n', 'n + n + 1'))
+    check(1, 'imported Python proof failed')
+    reference.write_text(original_reference)
+    proof = reference.with_suffix('.py.lean')
+    original_proof = proof.read_text()
+    proof.unlink()
+    check(1, 'adjacent proof is missing')
+    proof.write_text(original_proof)
+
+    source.write_text(original_source + '\ndef double(n: int) -> int: return 0\n')
+    check(1, 'conflicting module bindings', stub=True)
+
+    # An unresolved reference in a helper must not capture a caller's function.
+    source.write_text(original_source + '\ndef missing(n: int) -> int: return n\n')
+    reference.write_text(original_reference.replace('n + n', 'missing(n)'))
+    check(1, 'local helper', stub=True)
+
+    source.write_text(original_source)
+    reference.write_text(original_reference + '\ndouble = lambda n: n\n')
+    check(1, 'unmodified module-level function', stub=True)
+    reference.write_text(original_reference)
+
+    source.write_text('from cyclic_helper import helper\n'
+        'def caller(n: int) -> int:\n'
+        '    """\n    @formalsw: Returns\n    """\n'
+        '    return helper(n)\n')
+    (project / 'cyclic_helper.py').write_text('from linked_calls import caller\n'
+        'def helper(n: int) -> int:\n'
+        '    """\n    @formalsw: Returns\n    """\n'
+        '    return caller(n)\n')
+    check(1, 'cyclic local Python imports', stub=True)
+
+print('Local helper dependency and scope checks passed')
