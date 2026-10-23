@@ -54,6 +54,10 @@ def link_imports(source, module, load):
     for name in imported_calls(module):
         path, _, function = resolve_function(source, module, name)
         selections.append((name, path, function.name))
+    for name, (path, captured, function) in getattr(module, 'formalsw_predicate_references', ()):
+        if path.read_text() != captured.formalsw_source_text:
+            raise ContractError(f'{path}: source changed after specification loading; rerun the checker')
+        selections.append((name, path, function.name))
     module.formalsw_link_dependencies = tuple(dict.fromkeys(path for _, path, _ in selections))
     if not selections:
         return

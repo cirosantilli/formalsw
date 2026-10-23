@@ -590,14 +590,34 @@ def docstring_markers(docstring: str | None, start_line: int | None) -> list[Mar
     return markers
 
 
-def setup_predicate(text, environment, function):
-    """Capture scalar setup values without evaluating symbolic function inputs."""
+def setup_predicate(text, environment, function, module):
+    """Capture setup values and source call targets without evaluating inputs."""
     expression = ast.parse(text, mode='eval')
     inputs = {arg.arg for arg in function.args.args} if function else set()
     inputs.update(node.id for node in ast.walk(expression)
                   if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
 
     class Capture(ast.NodeTransformer):
+        def visit_Call(self, node):
+            if (isinstance(node.func, ast.Name) and node.func.id not in inputs
+                    and node.func.id in environment and callable(environment[node.func.id])):
+                reference = resolve_python_function(environment[node.func.id])
+                references = getattr(module, 'formalsw_predicate_references', [])
+                used = {part.id for part in ast.walk(module) if isinstance(part, ast.Name)}
+                used.update(part.id for part in ast.walk(expression) if isinstance(part, ast.Name))
+                used.update(part.name for part in module.body
+                            if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+                used.update(name for name, _ in references)
+                name = '_formalsw_requires_target'
+                while name in used:
+                    name += '_'
+                references.append((name, reference))
+                module.formalsw_predicate_references = references
+                return ast.copy_location(ast.Call(func=ast.Name(id=name, ctx=ast.Load()),
+                    args=[self.visit(argument) for argument in node.args],
+                    keywords=[self.visit(keyword) for keyword in node.keywords]), node)
+            return self.generic_visit(node)
+
         def visit_Name(self, node):
             if node.id in inputs or node.id not in environment:
                 return node
@@ -633,7 +653,7 @@ def prepare_specification(source, module):
                         marker = replace(marker, reference=resolve_python_function(value))
                 elif parsed[0] == 'Requires':
                     marker = replace(marker, predicate=setup_predicate(expression, environment,
-                        node if isinstance(node, ast.FunctionDef) else None))
+                        node if isinstance(node, ast.FunctionDef) else None, module))
             result.append(marker)
         node.formalsw_markers = result
 
@@ -663,6 +683,8 @@ def validate_source_snapshots(source, module):
         original = getattr(program, 'formalsw_source_text', None)
         if original is not None and (not path.is_file() or path.read_text() != original):
             raise InvalidRequirement(f'{path}: source changed after specification loading; rerun the checker')
+        for _, reference in getattr(program, 'formalsw_predicate_references', ()):
+            snapshots.append(reference[:2])
         for node in (program, *program.body):
             for marker in getattr(node, 'formalsw_markers', ()):
                 if marker.reference:

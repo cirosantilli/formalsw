@@ -87,6 +87,42 @@ def f(n: int) -> int:
     assert late.body[0].formalsw_markers[0].reference is None
     assert late.body[0].formalsw_markers[1].reference[2].name == 'first'
 
+    # Calls in predicates capture the selected source definition at each marker,
+    # including a later rebinding of the same setup name.
+    predicate_source = directory / 'predicate.py'
+    predicate_source.write_text('''
+def checked(n: int) -> int:
+    """
+    @formalsw: Py from setup_reference import first as target
+    @formalsw: Requires(target(n) >= 0)
+    @formalsw: Py from setup_reference import second as target
+    @formalsw: Requires(target(n) >= 0)
+    @formalsw: Returns
+    """
+    return n
+''')
+    predicate_program = api['source_module'](predicate_source)
+    captures = predicate_program.formalsw_predicate_references
+    assert [reference[2].name for _, reference in captures] == ['first', 'second']
+    assert captures[0][0] != captures[1][0]
+    predicates = predicate_program.body[0].formalsw_markers[:2]
+    assert predicates[0].predicate == captures[0][0] + '(n) >= 0'
+    assert predicates[1].predicate == captures[1][0] + '(n) >= 0'
+    assert predicate_program.formalsw_link_dependencies == (reference.resolve(),)
+    obligations = api['collect_requirements'](predicate_source, predicate_program, 'Probe', 'ProbeAst')
+    assert all(reference.resolve() in item.dependencies for item in obligations)
+    assert all(not item.unsupported for item in obligations)
+
+    # Appending a predicate helper must not resolve an unbound runtime call.
+    collision = directory / 'collision.py'
+    collision.write_text(predicate_source.read_text().replace('return n', 'return first(n)'))
+    try:
+        api['source_module'](collision)
+    except api['InvalidRequirement'] as error:
+        assert 'conflicting module bindings' in str(error)
+    else:
+        raise AssertionError('predicate imports changed runtime name resolution')
+
     # Failed imports and syntax errors carry source coordinates, and paths are
     # restored even when arbitrary setup code raises or tries to exit.
     for code in ('import nonexistent_formalsw_module', 'if', 'raise SystemExit(2)'):
@@ -112,6 +148,12 @@ def f(n: int) -> int:
     imported = sys.modules.pop('setup_reference')
     imported.first.__code__ = imported.second.__code__
     reference.write_text('def second(n: int) -> int: return n + 2\n')
+    try:
+        api['source_module'](predicate_source)
+    except api['InvalidRequirement'] as error:
+        assert 'source changed after specification loading' in str(error)
+    else:
+        raise AssertionError('stale predicate source accepted')
     try:
         api['resolve_python_function'](imported.first)
     except api['ContractError'] as error:

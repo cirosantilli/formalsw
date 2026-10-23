@@ -141,6 +141,27 @@ end solver
     solver.write_text(setup.replace('        lower = sum([0, 0])',
         '        naive.__code__ = (lambda n: n + 1).__code__'))
     check(1, 'Equiv setup target')
+    # A setup helper used only by Requires is still a checked source dependency.
+    previous_proof = solver.with_suffix('.py.lean').read_text()
+    solver.write_text('def solve(n: int) -> int:\n'
+        '    """\n    @formalsw: Py from named import f as predicate\n'
+        '    @formalsw: Requires(predicate(n) >= 0)\n    @formalsw: Returns\n    """\n'
+        '    return n\n')
+    solver.with_suffix('.py.lean').write_text('''import «.formalsw».«solver.py.ast»
+import FormalSW
+open FormalSW.PyAst
+namespace solver
+theorem solve.«Returns» (n : Int)
+    (_hp : Calls.Condition SolverAst.module
+      (fun name => if name = "n" then some (.int n) else none) SolverAst.requires_solve_0) :
+    (scalarFunction SolverAst.module "solve" [.int n]).Returns := ⟨.int n, .done rfl⟩
+end solver
+''')
+    check(message='All 2 checks passed')
+    reference.write_text(original_reference.replace('return n', 'return n + 1'))
+    check(1, 'imported Python proof failed')
+    reference.write_text(original_reference)
+    solver.with_suffix('.py.lean').write_text(previous_proof)
     solver.write_text(original)
     (project / 'reference.py').write_text('')
     check(1, 'shadowed by a Python module')

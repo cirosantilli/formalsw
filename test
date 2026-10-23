@@ -128,6 +128,7 @@ def main() -> int:
         TestCase("stepped range iteration with calls and early returns", Path("tests/py/stepped_ranges.py"), 0),
         TestCase("module and multiple preconditions", Path("tests/py/requires_module.py"), 0),
         TestCase("execution preconditions across short and raw specifications", Path("tests/py/requires.py"), 0),
+        TestCase("setup imports in preconditions", Path("tests/py/requires_imported.py"), 0, "All 3 checks passed"),
         TestCase("local helper calls and reused source proofs", Path("tests/py/linked_calls.py"), 0, "All 2 checks passed"),
         TestCase("variable and signed integer division", Path("tests/py/division.py"), 0, "All 4 checks passed"),
         TestCase("nested break, continue, and loop else scopes", Path("tests/py/loop_control.py"), 0, "All 10 checks passed"),
