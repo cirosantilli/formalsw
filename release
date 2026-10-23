@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bump the minor version, push its Git tag, and build and check the release."""
+"""Bump the minor version, push the branch and tag, and publish to PyPI."""
 
 from pathlib import Path
 import re
@@ -25,6 +25,7 @@ def main():
         raise ValueError('usage: ./release')
     if git_output('status', '--porcelain', '--untracked-files=all'):
         raise ValueError('commit or stash working tree changes before releasing')
+    branch = git_output('symbolic-ref', '--quiet', '--short', 'HEAD')
 
     project = REPO / 'pyproject.toml'
     lake = REPO / 'lakefile.toml'
@@ -55,12 +56,13 @@ def main():
     run('git', 'add', '--', 'pyproject.toml', 'lakefile.toml')
     run('git', 'commit', '-m', f'Release {new_version}')
     run('git', 'tag', '-a', tag, '-m', f'Release {new_version}')
-    run('git', 'push', 'origin', f'refs/tags/{tag}')
+    run('git', 'push', '--atomic', 'origin', f'HEAD:refs/heads/{branch}', f'refs/tags/{tag}')
     run(sys.executable, '-m', 'build')
     source = f'dist/formalsw-{new_version}.tar.gz'
     wheel = f'dist/formalsw-{new_version}-py3-none-any.whl'
     run(sys.executable, '-m', 'twine', 'check', '--strict', source, wheel)
     run(sys.executable, 'tests/package_checks', wheel)
+    run(sys.executable, '-m', 'twine', 'upload', '--username', '__token__', source, wheel)
 
 
 if __name__ == '__main__':

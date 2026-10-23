@@ -1602,7 +1602,9 @@ From a clean Git checkout, run:
 ./release
 ----
 
-This automatically increments the minor version and resets the patch version in `pyproject.toml` and `lakefile.toml` (for example, `0.1.3` becomes `0.2.0`), commits both files, creates an annotated `vVERSION` tag, and pushes that tag to `origin`. Then it builds and publishes the package to Pypi.
+This automatically increments the minor version and resets the patch version in `pyproject.toml` and `lakefile.toml` (for example, `0.1.3` becomes `0.2.0`), commits both files, creates an annotated `vVERSION` tag, and pushes the current branch and tag together to `origin`. Then it runs `python -m build`, `twine check --strict`, and `tests/package_checks` before uploading the source distribution and wheel to PyPI with Twine. It stops on the first failure.
+
+Enter your PyPI API token at Twine's password prompt, or set `TWINE_PASSWORD` in your environment. The script supplies `__token__` as the username.
 
 == Bibliography
 
