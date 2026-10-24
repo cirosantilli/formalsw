@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""
+Check standalone Boolean expressions select short-circuit call execution.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_calls_model
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+bodies = {
+    'and_value': 'return n and 9',
+    'or_value': 'return n or "fallback"',
+    'nested': 'return (n and 0) or (n or "fallback")',
+    'many': 'return n and True and 7 and "last"',
+    'negated': 'return not (n or 0)',
+    'comparison': 'return (n or 5) == 5',
+    'arithmetic': 'return (n or 5) + (n and 7)',
+    'and_error': 'return n and n // 0',
+    'or_error': 'return n or n // 0',
+    'assignment': 'value = n or 5\nreturn value',
+    'branch': 'if n and n > 0:\n    return 1\nreturn 0',
+    'loop': 'while n and n > 0:\n    n -= 1\nreturn n',
+}
+source = ''.join(f'def {name}(n: int):\n'
+                 + ''.join(f'    {line}\n' for line in body.splitlines())
+                 for name, body in bodies.items())
+source += 'def text(value: str):\n    return value or "fallback"\n'
+source += 'def flag(value: bool):\n    return value and 7\n'
+module = ast.parse(source)
+namespace = {}
+exec(source, namespace)
+
+
+def constant(value):
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is str:
+        return '.string ' + json.dumps(value, ensure_ascii=False)
+    raise AssertionError(value)
+
+
+equations = []
+for function in module.body:
+    assert uses_calls_model(module, function), function.name
+    assert not SupportChecker(module).check(function.name), function.name
+    values = ('', 'hello', 'é') if function.name == 'text' else (
+        (False, True) if function.name == 'flag' else (-3, 0, 7))
+    for value in values:
+        try:
+            expected = '.ok (' + constant(namespace[function.name](value)) + ')'
+        except ZeroDivisionError:
+            expected = '.error {typeName := "ZeroDivisionError", args := []}'
+        equations.append(f'example : (Calls.function Probe.module "{function.name}" '
+                         f'[{constant(value)}]).observe 300 = .done ({expected}) := by decide')
+
+# Functions without Boolean operators keep their existing scalar backend.
+scalar = ast.parse('def f(n: int):\n    if n > 0:\n        return n\n    return 0\n')
+assert not uses_calls_model(scalar, scalar.body[0])
+assert not SupportChecker(scalar).check('f')
+
+with project_temporary_directory(prefix='booleans-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+                     + 'open FormalSW.PyAst\nset_option maxRecDepth 4096\n' + '\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+    path = directory / 'contract.py'
+    path.write_text('def f(n: int):\n    """\n    @formalsw: Returns\n    """\n    return n or 7\n')
+    contract = api['source_module'](path)
+    requirements = api['collect_requirements'](path, contract, 'Probe', 'ProbeAst')
+    assert any('Calls.function' in requirement.property_type and requirement.marker == 'Returns'
+               for requirement in requirements)
+
+print(f'Boolean expressions: {len(equations)} Python comparisons and contract/backend checks passed')

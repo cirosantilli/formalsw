@@ -313,7 +313,7 @@ def uses_calls_model(module, function):
             or uses_method(module, function, "bit_length")):
         return True
     return any(
-        isinstance(node, (ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript, ast.Assert, ast.JoinedStr, ast.AnnAssign))
+        isinstance(node, (ast.BoolOp, ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript, ast.Assert, ast.JoinedStr, ast.AnnAssign))
         or isinstance(node, ast.Constant) and type(node.value) is bytes
         or range_sum(node) is not None
         or general_division(node)
