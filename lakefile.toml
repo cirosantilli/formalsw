@@ -21,6 +21,7 @@ roots = [
   "lang.py.FormalSW.Runtime",
   "lang.py.FormalSW.Math",
   "lang.py.FormalSW.Strings",
+  "lang.py.FormalSW.StringReplace",
   "lang.py.FormalSW.IntegerParsing",
   "lang.py.FormalSW.Calls",
   "lang.py.FormalSW.MemoCalls",

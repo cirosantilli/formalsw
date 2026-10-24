@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+Compare replacement with Python, including argument effects and Unicode text.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def replace(text: str, old: str, new: str, count: int):
+    return text.replace(old, new, count)
+def default_count(text: str, old: str, new: str):
+    return text.replace(old, new)
+def receiver(log: list[str]):
+    log.append("receiver")
+    return "aba"
+def old(log: list[str]):
+    log.append("old")
+    return "a"
+def new(log: list[str]):
+    log.append("new")
+    return "λ"
+def count(log: list[str]):
+    log.append("count")
+    return 1
+def ordered(log: list[str]):
+    return receiver(log).replace(old(log), new(log), count(log))
+def fail(log: list[str]):
+    log.append("failure")
+    raise ValueError()
+def argument_failure(log: list[str]):
+    return receiver(log).replace(old(log), fail(log), count(log))
+def missing_method(log: list[str]):
+    return 1 .replace(old(log), new(log), count(log))
+def list_receiver(log: list[str]):
+    return log.replace(old(log), new(log), count(log))
+def invalid_argument(log: list[str]):
+    return receiver(log).replace(3, new(log), count(log))
+def excessive_arguments(log: list[str]):
+    return receiver(log).replace(old(log), new(log), count(log), count(log))
+def missing_argument(log: list[str]):
+    return receiver(log).replace(old(log))
+def alter(holder: list[str]):
+    holder[0] = "changed"
+    return "a"
+def capture(holder: list[str]):
+    return holder[0].replace(alter(holder), "X", 1)
+def invalid_reference(log: list[str]):
+    return "a".replace(log, "b")
+def invalid_count(log: list[str]):
+    return "a".replace("a", "b", log)
+def bytes_receiver():
+    return b"a".replace(b"a", b"b")
+def buffer_receiver():
+    return bytearray([97]).replace(b"a", b"b")
+'''
+program = ast.parse(source)
+for function in program.body:
+    issues = SupportChecker(program).check(function.name, heap_calls=True)
+    assert not issues, (function.name, issues)
+assert uses_heap_calls(program, program.body[0])
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'set_option Elab.async false',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+comparisons = 0
+
+
+def primitive(text, arguments):
+    global comparisons
+    try:
+        expected = '.ok (' + constant(text.replace(*arguments)) + ')'
+    except (TypeError, OverflowError) as error:
+        expected = '.error { typeName := "' + type(error).__name__ + '", args := [] }'
+    actual = ', '.join('(' + constant(value) + ')' for value in arguments)
+    lines.append(f'example : Strings.replaceCall {json.dumps(text, ensure_ascii=False)} [{actual}] = {expected} := by decide')
+    comparisons += 1
+
+
+for text, old, new, count in itertools.product(
+        ('', 'aaaaa', 'ababa', 'Aé😺é', 'e\u0301e'),
+        ('', 'a', 'aa', 'aba', 'é'), ('', 'xy'), (-5, -1, 0, 1, 2, 20, True)):
+    primitive(text, [old, new, count])
+for text in ('', 'aaaa', '😺😺'):
+    for old, new in (('', ''), ('', '😺'), ('aa', 'aaa'), ('😺', 'é')):
+        primitive(text, [old, new])
+# Counts in this range fit both 32-bit and 64-bit CPython. Platform conversion
+# overflow is deliberately excluded, as in the existing sequence-index model.
+for count in (-2147483648, 2147483647):
+    for text, old, new in (('aaaa', 'a', 'b'), ('abc', '', 'X'), ('', 'a', 'b'), ('a', 'a', 'a')):
+        primitive(text, [old, new, count])
+for arguments in ([], ['a'], ['a', 'b', 1, 2], [None, ''], ['a', True],
+                  ['a', 'b', None], ['a', 'b', '1'], [b'a', 'b'],
+                  ['a', b'b'], ['a', 'b', False]):
+    primitive('a', arguments)
+
+
+def compare(name, arguments, heap, actual, anchors):
+    global comparisons
+    try:
+        result = world[name](*actual)
+        error = None
+    except (TypeError, ValueError, AttributeError, OverflowError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [{arguments}] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {comparisons}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    comparisons += 1
+
+
+for name in ('ordered', 'argument_failure', 'missing_method', 'list_receiver',
+             'invalid_argument', 'excessive_arguments', 'missing_argument',
+             'invalid_reference', 'invalid_count'):
+    log = []
+    compare(name, '.ref 0', '[.list []]', [log], [log])
+holder = ['aba']
+compare('capture', '.ref 0', '[.list [.scalar (.string "aba")]]', [holder], [holder])
+for name in ('bytes_receiver', 'buffer_receiver'):
+    lines.append(f'example : (HeapCalls.call source "{name}" [] []).execution.observe 100 = .unsupported := by decide')
+lines.append('example : HeapCalls.primitive (.replace "a") [.scalar (.string "a"), '
+             '.scalar (.string "b"), .ref 0] [.instance "source" "Index" []] = none := by decide')
+# Record the CPython behavior outside the model's platform-independent domain.
+for count in (-10 ** 100, 10 ** 100):
+    try:
+        'a'.replace('a', 'b', count)
+    except OverflowError:
+        pass
+    else:
+        raise AssertionError('expected platform count-conversion overflow')
+with project_temporary_directory(prefix='string-replace-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{comparisons} replacement comparisons passed, including argument effects and Unicode')

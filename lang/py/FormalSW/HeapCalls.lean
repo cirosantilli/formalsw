@@ -3,6 +3,7 @@ import lang.py.FormalSW.Linking
 import lang.py.FormalSW.ScalarSort
 import lang.py.FormalSW.HeapSort
 import lang.py.FormalSW.Permutations
+import lang.py.FormalSW.StringReplace
 
 /-! Function calls with shared lists. Locals and continuations carry references;
 all frames use one heap, including when a helper raises after mutating a list. -/
@@ -333,6 +334,7 @@ inductive Operation where
   | setSlice (replacement : Value)
   | append (address : Nat)
   | pop (address : Nat)
+  | replace (text : String)
   | join (separator : String)
   | add (address : Nat)
   | dictionaryGet (address : Nat)
@@ -829,6 +831,16 @@ def primitive : Operation → List Value → Eval Value
   | .pop address, [] => Mutable.popItem address (.scalar (.int (-1)))
   | .pop address, [index] => Mutable.popItem address index
   | .pop _, _ => Mutable.error "TypeError"
+  | .replace text, [.scalar old, .scalar new] =>
+      scalarResult (some (Strings.replaceCall text [old, new]))
+  | .replace text, [.scalar old, .scalar new, .scalar count] =>
+      scalarResult (some (Strings.replaceCall text [old, new, count]))
+  | .replace _, [.scalar (.string _), .scalar (.string _), .ref address] => do
+      -- User-defined __index__ protocols are outside the primitive model.
+      match (← get)[address]? with
+      | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
+      | _ => Mutable.error "TypeError"
+  | .replace _, _ => Mutable.error "TypeError"
   | .join separator, [value] => do
       if let .ref address := value then
         match (← get)[address]? with
@@ -1019,22 +1031,30 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
       | some (.list _) | some (.bytearray _) =>
           if name = "append" then pure (.append address)
           else if name = "pop" then pure (.pop address)
-          else if name = "get" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "get" then Mutable.error "AttributeError"
+          else if name = "replace" then match (← get)[address]? with
+            | some (.bytearray _) => Mutable.unsupported
+            | _ => Mutable.error "AttributeError"
+          else Mutable.unsupported
       | some (.set _) =>
           if name = "add" then pure (.add address)
-          else if name = "append" ∨ name = "get" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "append" ∨ name = "get" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.dict _) =>
           if name = "get" then pure (.dictionaryGet address)
-          else if name = "append" ∨ name = "add" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "append" ∨ name = "add" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.tuple _) =>
-          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" then Mutable.error "AttributeError" else Mutable.unsupported
+          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
       | none => Mutable.unsupported
   | .scalar value =>
-      if name = "join" then match value with
+      if name = "replace" then match value with
+        | .string text => pure (.replace text)
+        | .bytes _ => Mutable.unsupported
+        | _ => Mutable.error "AttributeError"
+      else if name = "join" then match value with
         | .string separator => pure (.join separator)
         | .bytes _ => Mutable.unsupported
         | _ => Mutable.error "AttributeError"
-      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" then Mutable.error "AttributeError" else Mutable.unsupported
+      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
 
 /-- Stored fields are values; first-class bound methods are outside this model. -/
 def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
@@ -1704,7 +1724,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | join _ | add _ | dictionaryGet _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | replace _ | join _ | add _ | dictionaryGet _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
   | value value =>
@@ -2006,6 +2026,22 @@ theorem join (receiver : Evaluates (globals := globals) module env base heap (.s
   apply Reaches.next (following := argumentsState (.join separator) env [] expressions stack middle)
     (by simp [step, run, bindMethod])
   apply (arguments_reach arguments (.join separator) [] anchors stack).trans
+  exact .next (by simp [step, result, run, operation]) .refl
+
+/-- Replacement captures the string before evaluating arguments left to right.
+Argument effects and exceptions use the ordinary call rules. -/
+theorem replace (receiver : Evaluates (globals := globals) module env base heap (.scalar (.string text)) middle)
+    (arguments : Arguments (globals := globals) module env expressions middle values afterArguments)
+    (operation : primitive (.replace text) values afterArguments = some (.ok value, finalHeap))
+    (localName : ∀ name, base = .name name → (env name).isSome = true) :
+    Evaluates (globals := globals) module env (.call (.attribute base "replace") expressions) heap value finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr base env, .methodReceiver "replace" expressions env :: stack, heap⟩)
+    (by cases base <;> simp_all [step])
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := argumentsState (.replace text) env [] expressions stack middle)
+    (by simp [step, run, bindMethod])
+  apply (arguments_reach arguments (.replace text) [] anchors stack).trans
   exact .next (by simp [step, result, run, operation]) .refl
 
 /-- The receiver is bound before arguments run; removal reads the resulting live heap. -/
