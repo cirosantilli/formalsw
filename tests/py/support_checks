@@ -238,7 +238,7 @@ CASES = [
         """
         def f(n: int):
             return abs(n)
-    ''', "call to 'abs' is unsupported"),
+    ''', 'absolute value requires a call interpreter'),
     ('unknown object', '''
         def f(n: int):
             """@formalsw: theorem invalid :
@@ -267,7 +267,7 @@ CASES = [
         """
         def f(n: int):
             return abs(n)
-    ''', "call to 'abs' is unsupported"),
+    ''', 'legacy abstract properties do not model calls'),
     ('raw list model mismatch', '''
         """@formalsw: theorem invalid :
           Not (listFunction ProbeAst.module "f" []).Halts

@@ -7,7 +7,7 @@ def unsupported_call(n: int) -> int:
     @formalsw: Not Throws
     @formalsw: theorem irrelevant : True
     """
-    return abs(n)
+    return round(n)
 
 
 def unreachable(n: int) -> int:

@@ -2,8 +2,10 @@
 
 
 def unsupported_call(n: int) -> int:
-    """@formalsw: Not Halts"""
-    return abs(n)
+    """
+    @formalsw: Not Halts
+    """
+    return round(n)
 
 
 def unsupported_statement(n: int) -> int:
