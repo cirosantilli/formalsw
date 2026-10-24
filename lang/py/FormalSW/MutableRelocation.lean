@@ -135,9 +135,9 @@ private theorem result_layout (original physical : List Graph.Node) (roots : Lis
 
 /-- The tuple and selected list may occupy different fresh addresses. The
 caller's objects, aliases, cycles, globals, and scalar results remain observable. -/
-theorem equivalent_tuple_list (original left right : Heap) (globals : Globals)
+theorem equivalent_tuple_list_of_closed (original left right : Heap) (globals : Globals)
     (total : Constant) (values : List Constant) (leftTuple leftList rightTuple rightList : Nat)
-    (valid : original.Valid)
+    (closedOriginal : ∀ node ∈ original.map graphNode, ∀ edge ∈ node.edges, edge.Within original.length)
     (globalsWithin : ∀ entry ∈ globals, entry.2.edge.Within original.length)
     (leftPrefix : original <+: left) (rightPrefix : original <+: right)
     (leftTupleFresh : original.length ≤ leftTuple) (leftListFresh : original.length ≤ leftList)
@@ -160,7 +160,7 @@ theorem equivalent_tuple_list (original left right : Heap) (globals : Globals)
   let rightGraph : Graph.Heap := ⟨(List.range original.length).map Graph.Edge.ref ++
     globals.map (fun entry => entry.2.edge) ++ [.ref rightTuple], right.map graphNode⟩
   have closed : ∀ node ∈ nodes, ∀ edge ∈ node.edges, edge.Within nodes.length := by
-    simpa only [nodes, List.length_map] using graphNodes_closed valid
+    simpa only [nodes, List.length_map] using closedOriginal
   have leftLayout : Layout (nodes ++ tail) leftGraph leftMap := by
     apply result_layout nodes (left.map graphNode) leftGraph.roots total values leftTuple leftList
     · exact List.IsPrefix.map graphNode leftPrefix
@@ -248,5 +248,25 @@ theorem equivalent_tuple_list (original left right : Heap) (globals : Globals)
     (by simpa only [leftGraph, leftMap, nodes, List.length_map, List.append_assoc] using roots leftTuple leftList)
     (by simpa only [rightGraph, rightMap, nodes, List.length_map, List.append_assoc] using roots rightTuple rightList)
   exact equivalent
+
+/-- Valid mutable heaps supply the closed graph required by the general result. -/
+theorem equivalent_tuple_list (original left right : Heap) (globals : Globals)
+    (total : Constant) (values : List Constant) (leftTuple leftList rightTuple rightList : Nat)
+    (valid : original.Valid)
+    (globalsWithin : ∀ entry ∈ globals, entry.2.edge.Within original.length)
+    (leftPrefix : original <+: left) (rightPrefix : original <+: right)
+    (leftTupleFresh : original.length ≤ leftTuple) (leftListFresh : original.length ≤ leftList)
+    (rightTupleFresh : original.length ≤ rightTuple) (rightListFresh : original.length ≤ rightList)
+    (leftDifferent : leftTuple ≠ leftList) (rightDifferent : rightTuple ≠ rightList)
+    (leftTupleFound : left[leftTuple]? = some (.tuple [.scalar total, .ref leftList]))
+    (rightTupleFound : right[rightTuple]? = some (.tuple [.scalar total, .ref rightList]))
+    (leftListFound : left[leftList]? = some (.list (values.map Value.scalar)))
+    (rightListFound : right[rightList]? = some (.list (values.map Value.scalar))) :
+    Completion.Equivalent ⟨.ok (.ref leftTuple), globals, left, original.length⟩
+      ⟨.ok (.ref rightTuple), globals, right, original.length⟩ := by
+  exact equivalent_tuple_list_of_closed original left right globals total values
+    leftTuple leftList rightTuple rightList (graphNodes_closed valid) globalsWithin
+    leftPrefix rightPrefix leftTupleFresh leftListFresh rightTupleFresh rightListFresh
+    leftDifferent rightDifferent leftTupleFound rightTupleFound leftListFound rightListFound
 
 end FormalSW.PyAst.Mutable.Relocation
