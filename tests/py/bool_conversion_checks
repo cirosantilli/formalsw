@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""
+Compare Boolean conversion, argument effects, and bindings with Python.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_calls_model
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+def inputs(arguments):
+    objects, addresses = [], {}
+
+    def edge(value):
+        if type(value) in (list, tuple, dict, set, bytearray):
+            if id(value) not in addresses:
+                addresses[id(value)] = len(objects)
+                objects.append(value)
+            return f'.ref {addresses[id(value)]}'
+        return '.scalar (' + constant(value) + ')'
+
+    terms = ', '.join(map(edge, arguments))
+    nodes = []
+    cursor = 0
+    while cursor < len(objects):
+        value = objects[cursor]
+        if type(value) is dict:
+            entries = ', '.join('(' + constant(key) + ', ' + edge(item) + ')' for key, item in value.items())
+            nodes.append('.dict [' + entries + ']')
+        elif type(value) is bytearray:
+            nodes.append('.bytearray [' + ', '.join(map(str, value)) + ']')
+        elif type(value) is set:
+            nodes.append('.set [' + ', '.join(map(constant, sorted(value))) + ']')
+        else:
+            nodes.append('.' + type(value).__name__ + ' [' + ', '.join(map(edge, value)) + ']')
+        cursor += 1
+    return terms, '[' + ', '.join(nodes) + ']', objects
+
+
+source = '''
+def empty():
+    return bool()
+def integer(value: int):
+    return bool(value)
+def text(value: str):
+    return bool(value)
+def binary(value: bytes):
+    return bool(value)
+def flag(value: bool):
+    return bool(value)
+def sequence(value: list[int]):
+    return bool(value)
+def mapping(value: dict[int, int]):
+    return bool(value)
+def fixed(value: tuple[int, int]):
+    return bool(value)
+def unique(value: set[int]):
+    return bool(value)
+def buffer(value: bytearray):
+    return bool(value)
+def literal():
+    return bool(None)
+def nested(value: list[int]):
+    return bool([value])
+def touch(log: list[int], value: int):
+    log.append(value)
+    return value
+def effect(log: list[int], value: int):
+    return [bool(touch(log, value)), log]
+def touched_list(log: list[int]):
+    log.append(0)
+    return log
+def alias(log: list[int]):
+    return bool(touched_list(log))
+def fail(log: list[int]):
+    log.append(9)
+    raise ValueError(9)
+def error(log: list[int]):
+    return bool(fail(log))
+'''
+module = ast.parse(source)
+checker = SupportChecker(module)
+for function in module.body:
+    assert uses_calls_model(module, function), function.name
+    assert not checker.check(function.name), (function.name, checker.check(function.name))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option Elab.async false',
+         'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+comparisons = 0
+
+
+def compare(name, arguments):
+    global comparisons
+    terms, heap, anchors = inputs(arguments)
+    try:
+        answer = world[name](*arguments)
+        error = None
+    except ValueError as exception:
+        answer, error = None, exception
+    expected = data(snapshot_roots(anchors + ([] if error else [answer])))
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               'match c.outcome with | .error e => decide (e = ⟨"ValueError", [.int 9]⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {comparisons}',
+        f'example : (match (HeapCalls.call source "{name}" [{terms}] {heap}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    comparisons += 1
+
+
+for name, values in {
+    'integer': [-10**100, -1, 0, 1, 10**100],
+    'text': ['', '\0', 'False', 'λ 😀'],
+    'binary': [b'', b'\0', b'False'],
+    'flag': [False, True],
+    'sequence': [[], [0], [False], [1, 2]],
+    'mapping': [{}, {0: 0}, {1: 2, 3: 4}],
+    'fixed': [(), (0,), (0, 0)],
+    'unique': [set(), {0}, {1, 2}],
+    'buffer': [bytearray(), bytearray([0]), bytearray([1, 2])],
+    'nested': [[], [0]],
+}.items():
+    for value in values:
+        compare(name, [value])
+compare('empty', [])
+compare('literal', [])
+for initial in ([], [0], [7, 8]):
+    for value in (0, 1, -2):
+        compare('effect', [initial.copy(), value])
+    compare('alias', [initial.copy()])
+    compare('error', [initial.copy()])
+cycle = []
+cycle.append(cycle)
+compare('sequence', [cycle])
+
+# A module function named bool keeps ordinary call semantics.
+shadow = ast.parse('def bool(n: int):\n    return n + 10\ndef f(n: int):\n    return bool(n)\n')
+assert not SupportChecker(shadow).check('f')
+encoded_shadow = api['AstJsonEmitter'](shadow).emit()
+assert 'UnaryOp' not in encoded_shadow
+lines.append('def shadow : Module := pyast_from_json% (include_str "shadow.json")')
+for value in (-1, 0, 7):
+    lines.append(f'example : (Calls.function shadow "f" [.int ({value})]).observe 100 = '
+                 f'.done (.ok (.int ({value + 10}))) := by decide')
+
+for expression in ('bool(1, 2)', 'bool(value=1)', 'bool(*xs)', 'bool(**xs)'):
+    invalid = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
+    assert SupportChecker(invalid).check('f'), expression
+for binding in ('bool = 1\n', 'from somewhere import bool\n'):
+    invalid = ast.parse(binding + 'def f(n: int):\n    return bool(n)\n')
+    assert SupportChecker(invalid).check('f'), binding
+for definition in ('def f(n: int, bool: int):\n    return bool(n)\n',
+                   'def f(n: int):\n    x = bool(n)\n    bool = n\n    return x\n'):
+    invalid = ast.parse(definition)
+    assert SupportChecker(invalid).check('f'), definition
+invalid = ast.parse('def f(xs: list[int]):\n    return [bool(1) for bool in xs]\n')
+assert SupportChecker(invalid).check('f')
+for method in ('__bool__', '__len__'):
+    invalid = ast.parse(f'class Custom:\n    def {method}(self):\n        return 1\n'
+                        'def f():\n    return bool(Custom())\n')
+    assert SupportChecker(invalid).check('f'), method
+
+with project_temporary_directory(prefix='bool-conversion-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    (directory / 'shadow.json').write_text(encoded_shadow)
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{comparisons} Boolean conversion comparisons passed, including cycles, effects, and exceptions; binding checks passed')

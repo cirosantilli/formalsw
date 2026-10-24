@@ -1636,6 +1636,14 @@ class AstJsonEmitter:
                     "comparators": [self.expr(comparator) for comparator in comparators],
                 }
             case ast.Call(func=func, args=args, keywords=[]):
+                if (isinstance(func, ast.Name) and func.id == 'bool' and len(args) <= 1
+                        and not bindings(self.bindings_module, 'bool')):
+                    if not args:
+                        return self.constant(False)
+                    # Evaluate the argument once. The second truth test is on
+                    # the builtin Boolean produced by the first negation.
+                    return {"type": "UnaryOp", "op": "Not", "operand":
+                            {"type": "UnaryOp", "op": "Not", "operand": self.expr(args[0])}}
                 if isinstance(func, ast.Attribute) and func.attr in ('bit_length', 'bit_count') and not args:
                     return {"type": "BuiltinCall", "name": f"int.{func.attr}", "args": [self.expr(func.value)]}
                 reversed_value = reversed_list(expr)
