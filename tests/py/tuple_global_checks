@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""
+Check tuple global domains, arbitrary entry values, aliases, and contract paths.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.global_inputs import function_globals, GlobalInputError, needs_heap_globals
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def domain(declaration):
+    module = ast.parse(declaration + '\ndef read():\n    return TABLE\n')
+    function = module.body[-1]
+    result, = function_globals(module, function, heap_calls=True)
+    assert needs_heap_globals(module, function), declaration
+    assert not SupportChecker(module).check('read'), declaration
+    return result.kind
+
+
+for declaration, expected in (
+    ('TABLE = (99, 100)', 'tuple[int,int]'),
+    ('TABLE = ()', 'tuple[()]'),
+    ('TABLE = (True, 1, "a", b"b", None)', 'tuple[bool,int,str,bytes,None]'),
+    ('TABLE = ((1, 2), ())', 'tuple[tuple[int,int],tuple[()]]'),
+    ('TABLE: tuple[int, ...] = (99, 100)', 'tuple[int,...]'),
+    ('TABLE: tuple[int, ...] = ()', 'tuple[int,...]'),
+    ('TABLE: tuple[tuple[int, ...], ...] = ((1,), (2, 3), ())', 'tuple[tuple[int,...],...]'),
+    ('OTHER = (1, 2)\nTABLE: tuple[int, ...] = OTHER', 'tuple[int,...]'),
+    ('OTHER: tuple[int, ...] = (1,)\nTABLE = OTHER', 'tuple[int,...]'),
+):
+    assert domain(declaration) == expected, declaration
+
+for declaration in (
+    'TABLE = ([1],)', 'TABLE = ({1: 2},)', 'TABLE = ({1},)', 'TABLE = (1.0,)',
+    'TABLE: tuple[int, ...] = (True,)', 'TABLE: tuple[int] = ()',
+    'TABLE: tuple[int] = (1, 2)', 'TABLE: tuple[bytes, ...] = ("a",)',
+    'TABLE: tuple[list[int]] = ([1],)', 'TABLE: list[tuple[int]] = [(1,)]',
+    'OTHER: tuple[int, ...] = (1,)\nTABLE: tuple[int] = OTHER',
+    'TABLE = OTHER\nOTHER = TABLE',
+):
+    try:
+        domain(declaration)
+    except GlobalInputError:
+        pass
+    else:
+        raise AssertionError(declaration)
+
+source = '''
+TABLE: tuple[int, ...] = (99, 100)
+
+def guard(n: int) -> bool:
+    return n >= len(TABLE)
+
+def helper(n: int) -> int:
+    return len(TABLE) + n
+
+def f(n: int) -> int:
+    """
+    @formalsw: Requires(guard(n))
+    @formalsw: MARKER
+    """
+    return helper(n)
+'''
+markers = ('Returns', 'Halts', 'Throws', 'ReturnType', 'Not Returns', 'Not Halts',
+           'Not Throws', 'Not ReturnType', 'Equiv(helper)', 'Not Equiv(helper)',
+           'EquivReturn(helper)', 'Not EquivReturn(helper)',
+           'theorem raw : Returns(this_function(n))',
+           'theorem raw_bound (n : Int) : Returns(this_function(n))')
+
+with project_temporary_directory(prefix='tuple-globals-') as temporary:
+    directory = Path(temporary)
+    properties = []
+    for index, marker in enumerate(markers):
+        path = directory / f'source_{index}.py'
+        path.write_text(source.replace('MARKER', marker))
+        module = api['source_module'](path)
+        requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        assert not any(item.unsupported for item in requirements), requirements
+        for item in requirements:
+            term = item.property_type
+            assert '(«TABLE» : Nat)' in term and 'Mutable.Heap.Valid' in term, term
+            assert 'HasContainerType' in term and '.tupleOf (.scalar "int")' in term, term
+            assert 'HasType' not in term and '99' not in term and '100' not in term, term
+            assert '[("TABLE", .ref «TABLE»)]' in term, term
+            properties.append(term)
+        selected = next(item for item in requirements if item.marker == marker)
+        assert 'HeapCalls.Condition' in selected.property_type, selected
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    bridge = 'import FormalSW\n' + api['AstLeanBridgeEmitter'](
+        document, 'ProbeAst', module, module.formalsw_conditions).emit()
+    lines = [bridge, 'open FormalSW.PyAst']
+    lines.extend(f'#check ({term})' for term in properties)
+    # Call-entry tuples deliberately differ from the module initializer, including arity.
+    for values in ((), (-8,), (3, 4, 5)):
+        items = '[' + ', '.join(f'.scalar (.int ({n}))' for n in values) + ']'
+        world = {'__builtins__': __builtins__}
+        exec(source.replace('MARKER', 'Returns'), world)
+        world['TABLE'] = values
+        for n in (-1, 0, 4):
+            accepted, returned = world['guard'](n), world['f'](n)
+            context = '[("TABLE", .ref 0)]'
+            env = f'(fun name => if name = "n" then some (.scalar (.int ({n}))) else ({context} : Mutable.Globals).lookup name)'
+            lines.append(f'''example : (HeapCalls.evaluate ProbeAst.module {env} ProbeAst.requires_f_0 [.tuple {items}] {context}).execution.observe 200 =
+  .done (.ok ⟨.ok (.scalar (.bool {str(accepted).lower()})), {context}, [.tuple {items}], 1⟩) := by native_decide
+example : (HeapCalls.call ProbeAst.module "f" [.scalar (.int ({n}))] [.tuple {items}] {context}).execution.observe 200 =
+  .done (.ok ⟨.ok (.scalar (.int ({returned}))), {context}, [.tuple {items}], 1⟩) := by native_decide''')
+        # This explicitly witnesses that the generated structural domain is inhabited.
+        membership_proof = ('simp at member' if not values else
+            'simp only [List.mem_cons, List.not_mem_nil, or_false] at member\n'
+            + '  rcases member with ' + ' | '.join('rfl' for _ in values) + ' <;> exact .scalar rfl')
+        lines.append(f'''example : Mutable.Value.HasContainerType [.tuple {items}] (.ref 0) (.tupleOf (.scalar "int")) := by
+  apply Mutable.Value.HasContainerType.variadicTuple rfl
+  intro item member
+  {membership_proof}''')
+    fixture = ROOT / 'tests/py/tuple_globals.py'
+    fixture_module = api['source_module'](fixture)
+    document = directory / 'fixture.json'
+    document.write_text(api['AstJsonEmitter'](fixture_module).emit())
+    fixture_bridge = api['AstLeanBridgeEmitter'](document, 'FixtureAst', fixture_module).emit()
+    lines.append('\n'.join(line for line in fixture_bridge.splitlines() if not line.startswith('import ')))
+    for alias in (0, 1):
+        world = {}
+        exec(fixture.read_text(), world)
+        table = tuple([3, 4])
+        world['TABLE'] = table
+        world['ALIAS'] = table if alias == 0 else tuple([3, 4])
+        expected = str(world['same']()).lower()
+        context = f'[("ALIAS", .ref {alias}), ("TABLE", .ref 0)]'
+        heap = '[.tuple [.scalar (.int 3), .scalar (.int 4)], .tuple [.scalar (.int 3), .scalar (.int 4)]]'
+        lines.append(f'''example : (HeapCalls.call FixtureAst.module "same" [] {heap} {context}).execution.observe 200 =
+  .done (.ok ⟨.ok (.scalar (.bool {expected})), {context}, {heap}, 2⟩) := by native_decide''')
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    checked = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)],
+                             cwd=ROOT, text=True, capture_output=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+
+    # Unseeded incoming aliases to compiler-pooled literals remain unsupported.
+    path = directory / 'pooled.py'
+    path.write_text('TABLE = (99, 100)\ndef f() -> bool:\n    return TABLE is (99, 100)\n')
+    module = api['source_module'](path)
+    assert any('incoming reference globals' in item.reason for item in SupportChecker(module).check('f'))
+    # A helper's table belongs to its defining module, not the importing caller.
+    (directory / 'foreign.py').write_text('TABLE = (1, 2)\ndef helper() -> int:\n    return len(TABLE)\n')
+    path = directory / 'importing.py'
+    path.write_text('from foreign import helper\ndef f() -> int:\n    """\n    @formalsw: Returns\n    """\n    return helper()\n')
+    try:
+        module = api['source_module'](path)
+        api['collect_requirements'](path, module, 'Foreign', 'ForeignAst')
+    except api['InvalidRequirement'] as error:
+        assert 'imported helper globals need separate module contexts' in str(error)
+    else:
+        raise AssertionError('foreign tuple globals lost their module context')
+
+print('Tuple global contracts, arbitrary entry contents/arity, aliases, and module boundaries passed')

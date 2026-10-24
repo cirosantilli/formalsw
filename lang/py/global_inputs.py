@@ -159,6 +159,52 @@ def integer_expression_kind(node, resolve):
     return None
 
 
+def immutable_literal_kind(value):
+    """
+    Infer immutable tuple fields without copying their runtime object identities.
+    Mutable contents and scalar kinds outside the heap model remain unsupported.
+    """
+    scalar = {int: 'int', bool: 'bool', str: 'str', bytes: 'bytes', type(None): 'None'}
+    if type(value) is not tuple:
+        return scalar.get(type(value))
+    fields = [immutable_literal_kind(item) for item in value]
+    if any(field is None for field in fields):
+        return None
+    return 'tuple[' + (','.join(fields) if fields else '()') + ']'
+
+
+def immutable_domain_fits(actual, expected):
+    """
+    Check immutable declaration shapes, including variadic tuple annotations.
+    This establishes only a domain; literal field values never enter contracts.
+    """
+    if actual == expected:
+        return True
+    if not (actual and expected and actual.startswith('tuple[') and expected.startswith('tuple[')):
+        return False
+    if any(token in expected for token in ('list[', 'dict[')):
+        return False
+
+    def fields(node):
+        return node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+
+    def fits(left, right):
+        if ast.dump(left) == ast.dump(right):
+            return True
+        if not (isinstance(left, ast.Subscript) and isinstance(right, ast.Subscript)):
+            return False
+        left_fields, right_fields = fields(left), fields(right)
+        variadic = lambda items: (len(items) == 2 and isinstance(items[1], ast.Constant)
+                                  and items[1].value is Ellipsis)
+        if variadic(right_fields):
+            candidates = left_fields[:1] if variadic(left_fields) else left_fields
+            return all(fits(field, right_fields[0]) for field in candidates)
+        return (not variadic(left_fields) and len(left_fields) == len(right_fields)
+                and all(fits(a, b) for a, b in zip(left_fields, right_fields)))
+
+    return fits(ast.parse(actual, mode='eval').body, ast.parse(expected, mode='eval').body)
+
+
 def function_globals(module, function, *, heap_calls=False):
     """Use Python's scope analysis; infer domains without fixing entry values.
 
@@ -199,8 +245,9 @@ def function_globals(module, function, *, heap_calls=False):
             if isinstance(stmt, ast.Assign) and (len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name)):
                 raise GlobalInputError(stmt, f'global {name!r} needs a simple declaration')
             expected = annotation_kind(annotation)
-            if structured_kind(expected):
-                raise GlobalInputError(stmt, 'tuple-containing globals are not yet supported; pass the container as an argument')
+            if structured_kind(expected) and not (heap_calls and expected.startswith('tuple[')
+                    and not any(token in expected for token in ('list[', 'dict['))):
+                raise GlobalInputError(stmt, 'structured globals require immutable tuples and heap call execution')
             if expected and expected.startswith('list[list['):
                 raise GlobalInputError(stmt, 'nested list globals are not yet supported; pass the list as an argument')
             if expected and expected.startswith('set['):
@@ -223,6 +270,8 @@ def function_globals(module, function, *, heap_calls=False):
                 if heap_calls:
                     scalar[bytes] = 'bytes'
                 kind = scalar.get(type(literal))
+                if heap_calls and type(literal) is tuple:
+                    kind = immutable_literal_kind(literal)
                 if type(literal) is list:
                     elements = {{int: 'int', bool: 'bool', str: 'str'}.get(type(item)) for item in literal}
                     if not elements and expected and expected.startswith('list['):
@@ -238,7 +287,9 @@ def function_globals(module, function, *, heap_calls=False):
                     elif len(keys) == len(values) == 1 and None not in keys | values:
                         kind = f'dict[{keys.pop()},{values.pop()}]'
                 if kind is None:
-                    raise GlobalInputError(stmt, f'global {name!r}: supported state is int, str, bool, or homogeneous scalar lists; empty lists need list[int], list[str], or list[bool] annotations')
+                    raise GlobalInputError(stmt, f'global {name!r}: supported state is int, str, bool, or homogeneous scalar lists; heap calls also support scalar dictionaries and immutable tuples')
+            if expected and expected.startswith('tuple[') and immutable_domain_fits(kind, expected):
+                kind = expected
             if annotation is not None and expected != kind:
                 raise GlobalInputError(stmt, f'global {name!r}: annotation must match its initializer')
             kinds.add(kind)
@@ -284,7 +335,7 @@ def call_globals(module, function):
 
 
 def needs_heap_globals(module, function):
-    """Keep legacy global models for simple bodies; calls and dictionaries need a context."""
+    """Keep legacy global models for simple bodies; calls and structured state need a context."""
     if getattr(function, 'formalsw_globals', ()):
         return True
     try:
@@ -293,7 +344,7 @@ def needs_heap_globals(module, function):
         return False
     if not inputs:
         return False
-    if any(item.kind.startswith('dict[') or item.kind == 'bytes' for item in inputs):
+    if any(structured_kind(item.kind) or item.kind.startswith('dict[') or item.kind == 'bytes' for item in inputs):
         return True
     targets = {node.name for node in module.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
     return (bool(function.args.defaults)

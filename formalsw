@@ -838,7 +838,7 @@ def contract_domain(function):
         name = f'«{global_names[item.name]}»'
         binders.append(f'({name} : {"Nat" if reference_kind(item.kind) else scalar_lean_type(item.kind)})')
         if reference_kind(item.kind):
-            guards.append(f'FormalSW.PyAst.Mutable.Value.HasType {heap} (.ref {name}) {lean_string(item.kind)}')
+            guards.append(mutable_domain(name, item.kind, heap))
     return binders, guards, heap
 
 
