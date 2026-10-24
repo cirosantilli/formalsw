@@ -105,7 +105,7 @@ mutual
   /-- Scope declarations apply to the whole function, including dead branches. -/
   def declaredGlobals : Stmt → List String
     | .globalDecl names => names
-    | .ifThen _ yes no | .whileDo _ yes no | .forIn _ _ yes no | .forZip _ _ yes no =>
+    | .ifThen _ yes no | .whileDo _ yes no | .forIn _ _ yes no | .forZip _ _ yes no | .forReversed _ _ yes no =>
         blockGlobals yes ++ blockGlobals no
     | _ => []
   def blockGlobals : List Stmt → List String
@@ -122,7 +122,7 @@ def targetLocals : Expr → List String
 mutual
   def assignedLocals : Stmt → List String
     | .assign [.name name] _ | .annAssign (.name name) _ _ | .augAssign (.name name) _ _ => [name]
-    | .forIn (.name name) _ body otherwise => name :: (blockLocals body ++ blockLocals otherwise)
+    | .forIn (.name name) _ body otherwise | .forReversed name _ body otherwise => name :: (blockLocals body ++ blockLocals otherwise)
     | .assign targets _ => targets.flatMap targetLocals
     | .annAssign target _ _ | .augAssign target _ _ => targetLocals target
     | .forIn target _ body otherwise | .forZip target _ body otherwise => targetLocals target ++ blockLocals body ++ blockLocals otherwise

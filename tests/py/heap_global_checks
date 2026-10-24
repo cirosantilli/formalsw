@@ -83,6 +83,8 @@ bodies = {
     'dead_assignment': 'if False:\n    TABLE = {}\nreturn TABLE[n]',
     'dead_unpack': 'if False:\n    TABLE, other = (n, n + 1)\nreturn TABLE[n]',
     'annotation_local': 'TABLE: dict[int, int]\nreturn TABLE[n]',
+    'reverse_loop_local': 'for TABLE in reversed([]):\n    pass\nreturn TABLE[n]',
+    'reverse_body_local': 'for k in reversed([]):\n    TABLE = {}\nreturn TABLE[n]',
     'loop_local': 'for TABLE in range(0):\n    pass\nreturn TABLE[n]',
     'loop_unpack_local': 'for TABLE, other in []:\n    pass\nreturn TABLE[n]',
     'augmented_local': 'N += n\nreturn N',

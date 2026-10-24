@@ -10,6 +10,7 @@ import lang.py.FormalSW.SumCalls
 import lang.py.FormalSW.MembershipCalls
 import lang.py.FormalSW.ComprehensionCalls
 import lang.py.FormalSW.ZipCalls
+import lang.py.FormalSW.ReverseCalls
 import lang.py.FormalSW.IntegerParsing
 import lang.py.FormalSW.ClassCalls
 import Lean

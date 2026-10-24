@@ -34,6 +34,7 @@ roots = [
   "lang.py.FormalSW.MembershipCalls",
   "lang.py.FormalSW.ComprehensionCalls",
   "lang.py.FormalSW.ZipCalls",
+  "lang.py.FormalSW.ReverseCalls",
   "lang.py.FormalSW.ClassCalls",
   "lang.py.FormalSW.DataRuntime",
   "lang.py.FormalSW.GraphEquivalence",

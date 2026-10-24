@@ -215,6 +215,10 @@ inductive Stmt where
   | forIn : Expr -> Expr -> List Stmt -> List Stmt -> Stmt
   /-- A loop consuming a fresh builtin zip over supported sequences. -/
   | forZip : Expr → List Expr → List Stmt → List Stmt → Stmt
+  /-- A loop consuming a fresh builtin reversed iterator. -/
+  | forReversed : String → Expr → List Stmt → List Stmt → Stmt
+  /-- A reverse iterator keeps its original object and a signed private cursor. -/
+  | reverseSequenceStepLoop : String → SequenceSource → Int → List Stmt → List Stmt → Stmt
   /-- Private zip cursors retain every original sequence reference. -/
   | zipStepLoop : String → List SequenceSource → Nat → List Stmt → List Stmt → Stmt
   /-- Internal state of an evaluated `range(stop)` iterator, not source syntax. -/
@@ -510,6 +514,10 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
         (← Expr.fromJson? (← jsonField json "target"))
         (← BinOp.fromJson? (← jsonField json "op"))
         (← Expr.fromJson? (← jsonField json "value"))
+  | "ForReversed" =>
+      return .forReversed (← jsonString json "name")
+        (← Expr.fromJson? (← jsonField json "iter"))
+        (← jsonArray json "body" Stmt.fromJson?) (← jsonArray json "orelse" Stmt.fromJson?)
   | "ForZip" =>
       return .forZip (← Expr.fromJson? (← jsonField json "target"))
         (← jsonArray json "args" Expr.fromJson?)
@@ -1008,7 +1016,7 @@ mutual
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .rangeStepLoop _ _ _ _ body otherwise | .sequenceStepLoop _ _ _ body otherwise
       | .enumerateStepLoop _ _ _ _ _ body otherwise | .unpackStepLoop _ _ _ body otherwise
-      | .zipStepLoop _ _ _ body otherwise =>
+      | .zipStepLoop _ _ _ body otherwise | .reverseSequenceStepLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
     | .dataclassFields _ fields => 1 + fields.length
@@ -1023,6 +1031,8 @@ mutual
         1 + target.operationCount + annotation.operationCount + (value.map Expr.operationCount).getD 0
     | .globalDecl _ => 0
     | .augAssign target _ value => 1 + target.operationCount + value.operationCount
+    | .forReversed _ iterable body orelse =>
+        2 + iterable.operationCount + (body.map Stmt.operationCount).sum + (orelse.map Stmt.operationCount).sum
     | .forZip target arguments body orelse =>
         1 + target.operationCount + (arguments.map Expr.operationCount).sum +
           (body.map Stmt.operationCount).sum + (orelse.map Stmt.operationCount).sum
@@ -1042,7 +1052,7 @@ end
 
 /-- Whether a statement is a `for` loop. -/
 def Stmt.hasFor : Stmt → Bool
-  | .forIn _ _ _ _ | .forZip _ _ _ _ => true
+  | .forIn _ _ _ _ | .forZip _ _ _ _ | .forReversed _ _ _ _ => true
   | _ => false
 
 /-- Whether a statement is a `while` loop. -/
@@ -1070,6 +1080,7 @@ def Stmt.callsFunction (name : String) : Stmt → Bool
   | .assign _ value => value.callsFunction name
   | .augAssign target _ value => target.callsFunction name || value.callsFunction name
   | .forIn target iter _ _ => target.callsFunction name || iter.callsFunction name
+  | .forReversed _ value _ _ => name == "reversed" || value.callsFunction name
   | .forZip target values _ _ =>
       name == "zip" || target.callsFunction name || values.any (fun value => value.callsFunction name)
   | .ifThen test _ _ | .whileDo test _ _ => test.callsFunction name

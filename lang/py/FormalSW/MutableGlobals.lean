@@ -717,6 +717,17 @@ def sequence : Value → Eval (List Value)
       | none => unsupported
   | _ => error "TypeError"
 
+/-- Reverse iteration handles builtin sequences; dictionaries and custom
+`__reversed__`/`__getitem__` protocols need separate execution semantics. -/
+def reversibleSequence (value : Value) : Eval (List Value) := do
+  match value with
+  | .ref address =>
+      match (← get)[address]? with
+      | some (.list _) | some (.tuple _) | some (.bytearray _) => sequence value
+      | some (.set _) => error "TypeError"
+      | _ => unsupported
+  | .scalar _ => sequence value
+
 /-- Reading a length never copies or changes the referenced object. -/
 def length : Value → Eval Value
   | .scalar (.string text) => pure (.scalar (.int text.length))

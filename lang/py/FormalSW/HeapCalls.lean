@@ -346,6 +346,7 @@ inductive Frame where
   | discard (rest : List Stmt) (env : Env)
   | assertion (message : Option Expr) (rest : List Stmt) (env : Env)
   | assertionMessage
+  | reverseSequence (name : String) (body otherwise following : List Stmt) (env : Env)
   | sequence (name : String) (body otherwise following : List Stmt) (env : Env)
   | unpackSequence (names : List String) (body otherwise following : List Stmt) (env : Env)
   | enumerateSource (index name : String) (start : Expr) (body otherwise following : List Stmt) (env : Env)
@@ -932,6 +933,16 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       | .whileDo condition body otherwise :: rest =>
           .next ⟨.expr condition env,
             .branch (body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)]) otherwise rest env :: stack, heap⟩
+      | .forReversed name iterable body otherwise :: rest =>
+          .next ⟨.expr iterable env, .reverseSequence name body otherwise rest env :: stack, heap⟩
+      | .reverseSequenceStepLoop name source position body otherwise :: rest =>
+          if position < 0 then .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
+          else run (globals := globals) anchors heap (Mutable.reversibleSequence (sequenceValue source)) fun items heap =>
+            match items[position.toNat]? with
+            | none => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
+            | some value => .next ⟨.block (body ++ [Calls.loopContinuation body
+                (.reverseSequenceStepLoop name source (position - 1) body otherwise)] ++ rest)
+                (setLocal env name value), stack, heap⟩
       | .forZip target expressions body otherwise :: rest =>
           .next (argumentsState (.zipStart target body otherwise rest env) env [] expressions stack heap)
       | .zipStepLoop name sources position body otherwise :: rest =>
@@ -1083,6 +1094,10 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
               else match message with
                 | none => done (globals := globals) anchors heap (.error { typeName := "AssertionError", args := [] })
                 | some expression => .next ⟨.expr expression env, .assertionMessage :: stack, heap⟩
+          | .reverseSequence name body otherwise following env =>
+              run (globals := globals) anchors heap (Mutable.reversibleSequence value) fun items heap =>
+                .next ⟨.block (.reverseSequenceStepLoop name (sequenceSource value)
+                  ((items.length : Int) - 1) body otherwise :: following) env, stack, heap⟩
           | .sequence name body otherwise following env =>
               run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
                 .next ⟨.block (.sequenceStepLoop name (sequenceSource value) 0 body otherwise :: following) env,

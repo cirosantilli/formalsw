@@ -92,6 +92,12 @@ def zip_iterable(node, module):
             and node.func.id == 'zip' and not bindings(module, 'zip'))
 
 
+def reversed_sequence(node, module):
+    """Recognize a fresh reverse iterator consumed directly by a for loop."""
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'reversed' and not bindings(module, 'reversed'))
+
+
 def sequence_sum(node):
     """Recognize a consumed iterable or generator, retaining the optional start."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -789,6 +795,19 @@ def check_calls(module, function, reject, *, heap=False):
                     if not 1 <= len(node.iter.args) <= 2 or node.iter.keywords:
                         reject(node, 'enumerate loops support an iterable and optional positional start')
                     for argument in node.iter.args:
+                        expr(argument)
+                    block(node.body, loop_depth + 1)
+                    block(node.orelse, loop_depth)
+                elif heap and isinstance(node, ast.For) and reversed_sequence(node.iter, module):
+                    if 'reversed' in locals_:
+                        reject(node.iter, 'reverse iteration requires the unshadowed builtin reversed')
+                    if not isinstance(node.target, ast.Name):
+                        reject(node, 'reverse loops currently require a local name target')
+                    if len(node.iter.args) != 1 or node.iter.keywords:
+                        reject(node.iter, 'reversed requires one positional sequence argument')
+                    for argument in node.iter.args:
+                        if isinstance(argument, ast.Tuple):
+                            hidden_tuples.add(argument)
                         expr(argument)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)

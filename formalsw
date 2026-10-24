@@ -19,7 +19,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
-from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
+from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
@@ -1376,6 +1376,11 @@ class AstJsonEmitter:
                     "value": self.expr(value),
                 }
             case ast.For(target=target, iter=iter_expr, body=body, orelse=orelse):
+                if (reversed_sequence(iter_expr, self.bindings_module)
+                        and isinstance(target, ast.Name) and len(iter_expr.args) == 1 and not iter_expr.keywords):
+                    return {"type": "ForReversed", "name": target.id, "iter": self.expr(iter_expr.args[0]),
+                            "body": [self.stmt(child) for child in body],
+                            "orelse": [self.stmt(child) for child in orelse]}
                 if zip_iterable(iter_expr, self.bindings_module):
                     encoded = self.iterator_expr(iter_expr)
                     return {"type": "ForZip", "target": self.expr(target), "args": encoded["args"],
