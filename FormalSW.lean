@@ -32,6 +32,7 @@ import lang.py.FormalSW.ClassCalls
 import Lean
 import lang.py.FormalSW.Model
 import lang.py.FormalSW.Calls
+import lang.py.FormalSW.ScalarComparisons
 import lang.py.FormalSW.MemoCallRules
 import lang.py.FormalSW.MemoHeapCalls
 import lang.py.FormalSW.HeapMemoCalls

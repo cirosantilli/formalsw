@@ -96,6 +96,7 @@ def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
         TestCase("typed scalar short markers", Path("tests/py/scalar_contracts.py"), 0, "All 4 checks passed"),
+        TestCase("scalar comparison short circuit", Path("tests/py/scalar_chains.py"), 0, "All 1 checks passed"),
         TestCase("fresh list construction", Path("tests/py/list_calls.py"), 0, "All 5 checks passed"),
         TestCase("tuple construction from lists", Path("tests/py/tuple_constructor.py"), 0, "All 4 checks passed"),
         TestCase("integer tuple ordering", Path("tests/py/tuple_order.py"), 0, "All 6 checks passed"),
