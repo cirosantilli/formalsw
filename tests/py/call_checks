@@ -107,6 +107,8 @@ subprocess.run([sys.executable, str(Path(__file__).with_name('power_checks'))], 
 subprocess.run([sys.executable, str(Path(__file__).with_name('bitwise_and_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("default_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("heap_call_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("local_function_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("augmented_item_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("heap_comparison_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("identity_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("set_checks"))], check=True)

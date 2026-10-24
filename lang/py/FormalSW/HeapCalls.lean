@@ -358,6 +358,9 @@ inductive Frame where
   | unpackSequence (names : List String) (body otherwise following : List Stmt) (env : Env)
   | enumerateSource (index name : String) (start : Expr) (body otherwise following : List Stmt) (env : Env)
   | enumerateStart (index name : String) (source : Value) (body otherwise following : List Stmt) (env : Env)
+  | augmentItemReceiver (index : Expr) (op : BinOp) (right : Expr) (rest : List Stmt) (env : Env)
+  | augmentItemIndex (receiver : Value) (op : BinOp) (right : Expr) (rest : List Stmt) (env : Env)
+  | writeItem (receiver index : Value) (rest : List Stmt) (env : Env)
   | assignItem (base index : Expr) (rest : List Stmt) (env : Env)
   | assignSlice (base lower upper stride : Expr) (rest : List Stmt) (env : Env)
   | rangeArguments (name : String) (done : List Value) (rest : List Expr)
@@ -931,6 +934,9 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           match Calls.targetNames targets with
           | some names => .next ⟨.expr expression env, .unpack names rest env :: stack, heap⟩
           | none => .unsupported
+      | .augAssign (.subscript _ (.slice _ _ _)) _ _ :: _ => .unsupported
+      | .augAssign (.subscript base index) op expression :: rest =>
+          .next ⟨.expr base env, .augmentItemReceiver index op expression rest env :: stack, heap⟩
       | .augAssign (.name name) op expression :: rest =>
           .next ⟨.expr (.name name) env, .binaryLeft op expression env true :: .assign name rest env :: stack, heap⟩
       | .augAssign (.attribute base name) op expression :: rest =>
@@ -1084,6 +1090,14 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
                       .next (argumentsState method env [] [item] stack heap)
                   | _ => run (globals := globals) anchors heap (Mutable.appendReceiver value) fun _ heap =>
                       .next (argumentsState (.append address) env [] [item] stack heap)
+          | .augmentItemReceiver index op right rest env =>
+              .next ⟨.expr index env, .augmentItemIndex value op right rest env :: stack, heap⟩
+          | .augmentItemIndex receiver op right rest env =>
+              run (globals := globals) anchors heap (Mutable.getItem receiver value) fun previous heap =>
+                .next ⟨.expr right env, .binaryRight op previous true ::
+                  .writeItem receiver value rest env :: stack, heap⟩
+          | .writeItem receiver index rest env =>
+              result (globals := globals) anchors heap (Mutable.setItem receiver index value) (.discard rest env :: stack)
           | .assignItem base index rest env =>
               .next (argumentsState (.setItem value) env [] [base, index] (.discard rest env :: stack) heap)
           | .assignSlice base lower upper stride rest env =>
@@ -1935,6 +1949,37 @@ theorem setItem
   apply (Evaluates.arguments_reach target (.setItem value) [] anchors _).trans
   exact .next (following := ⟨.value (.scalar .none), .discard body env :: stack, afterWrite⟩)
     (by simp [step, result, run, primitive, write]) (.next rfl .refl)
+
+/-- Augmented subscription saves the receiver and index, reads before the RHS,
+and writes the in-place result back through the saved target. -/
+theorem augItem
+    (ordinary : ∀ a b c, index ≠ .slice a b c)
+    (receiver : Evaluates (globals := globals) module env base heap target afterReceiver)
+    (subscript : Evaluates (globals := globals) module env index afterReceiver key afterIndex)
+    (read : Mutable.getItem target key afterIndex = some (.ok previous, afterRead))
+    (rhs : Evaluates (globals := globals) module env expression afterRead right afterRhs)
+    (operation : inplace op previous right afterRhs = some (.ok updated, afterOperation))
+    (write : Mutable.setItem target key updated afterOperation = some (.ok (.scalar .none), finalHeap)) :
+    BlockContinues (globals := globals) module env [.augAssign (.subscript base index) op expression]
+      heap env finalHeap := by
+  intro following anchors stack
+  have start : step (globals := globals) module anchors
+      ⟨.block (.augAssign (.subscript base index) op expression :: following) env, stack, heap⟩ =
+      .next ⟨.expr base env, .augmentItemReceiver index op expression following env :: stack, heap⟩ := by
+    cases index <;> simp_all [step]
+  apply Reaches.next start
+  apply (receiver anchors _).trans
+  apply Reaches.next rfl
+  apply (subscript anchors _).trans
+  apply Reaches.next (following := ⟨.expr expression env,
+    .binaryRight op previous true :: .writeItem target key following env :: stack, afterRead⟩)
+    (by simp [step, run, read])
+  apply (rhs anchors _).trans
+  apply Reaches.next (following := ⟨.value updated, .writeItem target key following env :: stack, afterOperation⟩)
+    (by simp [step, result, run, operation])
+  apply Reaches.next (following := ⟨.value (.scalar .none), .discard following env :: stack, finalHeap⟩)
+    (by simp [step, result, run, write])
+  exact .next rfl .refl
 
 /-- Slice bounds run left to right after the RHS and receiver; conversion follows. -/
 theorem setSlice

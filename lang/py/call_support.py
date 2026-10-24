@@ -771,6 +771,9 @@ def check_calls(module, function, reject, *, heap=False):
                 elif heap and isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript):
                     expr(node.value)
                     expr(node.targets[0])
+                elif (heap and isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Subscript)
+                      and not isinstance(node.target.slice, ast.Slice)):
+                    expr(ast.BinOp(node.target, node.op, node.value))
                 elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
                     expr(ast.BinOp(node.target, node.op, node.value))
                 elif heap and isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Attribute):

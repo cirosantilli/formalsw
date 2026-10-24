@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""
+Compare augmented subscriptions with Python's read/RHS/write order and failures.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+source = (REPO / 'tests/py/augmented_items.py').read_text()
+module = ast.parse(source)
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+
+
+def integer(n):
+    return f'(.scalar (.int ({n})))'
+
+
+def list_object(items):
+    return '.list [' + ', '.join(map(integer, items)) + ']'
+
+
+def outcome(function, *args):
+    try:
+        return '.ok ' + integer(function(*args))
+    except (IndexError, ZeroDivisionError, TypeError, KeyError) as error:
+        arguments = f', args := [.int ({error.args[0]})]' if isinstance(error, KeyError) else ', args := []'
+        return f'.error {{ typeName := "{type(error).__name__}"{arguments} }}'
+
+
+count = 0
+for name in ('ordered', 'negative_index', 'failing_rhs'):
+    assert not SupportChecker(module).check(name), SupportChecker(module).check(name)
+    for initial in ([], [3], [-4, 8]):
+        items, log = initial.copy(), []
+        args = (items,) if name == 'negative_index' else (items, log)
+        result = outcome(world[name], *args)
+        values = '[.ref 0]' if name == 'negative_index' else '[.ref 0, .ref 1]'
+        initial_heap = '[' + list_object(initial) + ', .list []]'
+        final_heap = '[' + list_object(items) + ', ' + list_object(log) + ']'
+        lines.append(f'example : (HeapCalls.call source "{name}" {values} {initial_heap}).execution.observe 500 = '
+                     f'.done (.ok ⟨{result}, [], {final_heap}, 2⟩) := by native_decide')
+        count += 1
+for key in (-1, 0, 1):
+    items, log = {0: 5}, []
+    result = outcome(world['dictionary'], items, key, log)
+    final_dict = '.dict [' + ', '.join(f'(.int ({k}), {integer(v)})' for k, v in items.items()) + ']'
+    lines.append(f'example : (HeapCalls.call source "dictionary" [.ref 0, {integer(key)}, .ref 1] '
+                 f'[.dict [(.int 0, {integer(5)})], .list []]).execution.observe 300 = '
+                 f'.done (.ok ⟨{result}, [], [{final_dict}, {list_object(log)}], 2⟩) := by native_decide')
+    count += 1
+for n in (-5, 0, 6):
+    assert outcome(world['tuple_failure'], n).startswith('.error')
+    lines.append(f'example : (HeapCalls.call source "tuple_failure" [{integer(n)}] []).execution.observe 200 = '
+                 f'.done (.ok ⟨.error {{ typeName := "TypeError", args := [] }}, [], '
+                 f'[{list_object([n, n + 1])}, .tuple [.ref 0], {list_object([n + 1])}], 0⟩) := by native_decide')
+    count += 1
+for text in ('items[:] += [n]', 'items[::2] *= n'):
+    candidate = ast.parse(f'def bad(items: list[int], n: int) -> int:\n    {text}\n    return n\n')
+    assert SupportChecker(candidate).check('bad')
+with project_temporary_directory(prefix='augmented-items-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+subprocess.run([str(REPO / 'formalsw'), 'tests/py/augmented_items.py'], cwd=REPO, check=True)
+print(f'Augmented subscriptions: {count} Python/Lean comparisons and arbitrary-input Returns passed')
