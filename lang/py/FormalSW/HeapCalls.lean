@@ -503,6 +503,7 @@ inductive Operation where
   | add (address : Nat)
   | dictionaryGet (address : Nat)
   | dictionarySetDefault (address : Nat)
+  | dictionaryClear (address : Nat)
   | builtin (name : Builtin)
   | reversedList
   | sumSequence
@@ -1148,6 +1149,18 @@ def extremumGeneratorStart (anchors : Nat) (maximum : Bool) (fallback : Option E
               enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
           | _ => .unsupported
 
+/-- Clear the captured dictionary object in place, retaining all aliases and unrelated objects. -/
+def clearDictionary (address : Nat) : Eval Value := do
+  match (← get)[address]? with
+  | some (.dict _) =>
+      modify fun heap => heap.set address (.dict [])
+      return .scalar .none
+  | some (.keyDict _) =>
+      modify fun heap => heap.set address (.keyDict [])
+      return .scalar .none
+  | some _ => Mutable.error "TypeError"
+  | none => Mutable.unsupported
+
 def primitive : Operation → List Value → Eval Value
   | .membership negated, [needle, container] => membership needle container negated
   | .notCallable, _ => Mutable.error "TypeError"
@@ -1171,6 +1184,8 @@ def primitive : Operation → List Value → Eval Value
   | .dictionarySetDefault address, [key] => Mutable.dictionarySetDefault address key (.scalar .none)
   | .dictionarySetDefault address, [key, defaultValue] => Mutable.dictionarySetDefault address key defaultValue
   | .dictionarySetDefault _, _ => Mutable.error "TypeError"
+  | .dictionaryClear address, [] => clearDictionary address
+  | .dictionaryClear _, _ => Mutable.error "TypeError"
   | .append address, [value] => Mutable.appendItem address value
   | .pop address, [] => Mutable.popItem address (.scalar (.int (-1)))
   | .pop address, [index] => Mutable.popItem address index
@@ -1537,6 +1552,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
         | some (.dict _) | some (.keyDict _) =>
             if name = "get" then pure (.dictionaryGet address)
             else if name = "setdefault" then pure (.dictionarySetDefault address)
+            else if name = "clear" then pure (.dictionaryClear address)
             else if name = "count" ∨ name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
         | some (.tuple _) =>
             if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
@@ -2352,7 +2368,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>

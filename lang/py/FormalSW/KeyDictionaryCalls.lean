@@ -51,8 +51,42 @@ theorem dictionaryGet_keyed (heap : Heap) (address : Nat) (entries : List (HashD
   simp [dictionaryGet, found, hash, Except.map]
 end Mutable
 
+namespace HeapCalls
+theorem clearDictionary_scalar (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (found : heap[address]? = some (.dict entries)) :
+    clearDictionary address heap = some (.ok (.scalar .none), heap.set address (.dict [])) := by
+  simp [clearDictionary, found, Except.map]
+
+theorem clearDictionary_keyed (heap : Mutable.Heap) (address : Nat) (entries : List (HashDict.Entry Mutable.Value))
+    (found : heap[address]? = some (.keyDict entries)) :
+    clearDictionary address heap = some (.ok (.scalar .none), heap.set address (.keyDict [])) := by
+  simp [clearDictionary, found, Except.map]
+
+theorem clearDictionary_other (heap : Mutable.Heap) (address other : Nat) (different : other ≠ address)
+    (entries : List (HashDict.Entry Mutable.Value)) (found : heap[address]? = some (.keyDict entries)) :
+    ∃ finalHeap, clearDictionary address heap = some (.ok (.scalar .none), finalHeap) ∧ finalHeap[other]? = heap[other]? := by
+  refine ⟨heap.set address (.keyDict []), clearDictionary_keyed heap address entries found, ?_⟩
+  simp [Ne.symm different]
+end HeapCalls
+
 namespace HeapCalls.Evaluates
 variable {globals : Mutable.Globals}
+
+/-- The source binds the receiver before executing the zero-argument in-place clear. -/
+theorem dictionary_clear
+    (localName : ∀ name, base = .name name → env name ≠ none)
+    (receiver : Evaluates (globals := globals) module env base heap (.ref address) middle)
+    (bound : bindMethod module (.ref address) "clear" middle = some (.ok (.dictionaryClear address), middle))
+    (operation : clearDictionary address middle = some (.ok value, finalHeap)) :
+    Evaluates (globals := globals) module env (.call (.attribute base "clear") []) heap value finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr base env, .methodReceiver "clear" [] env :: stack, heap⟩)
+    (by cases base <;> simp_all [step, Option.isSome_iff_ne_none])
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := argumentsState (.dictionaryClear address) env [] [] stack middle)
+    (by simp [step, run, bound])
+  apply (arguments_reach Arguments.nil (.dictionaryClear address) [] anchors stack).trans
+  exact .next (by simp [step, result, run, primitive, operation]) .refl
 
 /-- Binding captures the dictionary address before any key or default argument runs. -/
 theorem dictionary_setdefault

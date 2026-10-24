@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""
+Compare dictionary clearing, shared aliases, refilling, and argument effects with Python.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = '''
+def scalar_alias():
+    bucket = [7]
+    table = {1: bucket}
+    alias = table
+    result = table.clear()
+    return (table, alias, bucket, result)
+
+def tuple_alias(n: int):
+    saved = (n, 2)
+    bucket = [7]
+    table = {}
+    alias = table
+    table[saved] = bucket
+    result = table.clear()
+    return (table, alias, saved, bucket, result)
+
+def refill(n: int):
+    saved = (n, 2)
+    bucket = [7]
+    table = {}
+    alias = table
+    table[saved] = bucket
+    table.clear()
+    table[(n, 3)] = [9]
+    return (table, alias, saved, bucket)
+
+def empty_twice():
+    table = {}
+    alias = table
+    table.clear()
+    result = alias.clear()
+    return (table, alias, result)
+
+def note(log: list[int]):
+    log.append(9)
+    return 0
+
+def bad_arguments(log: list[int]):
+    table = {1: [7]}
+    log.append(table)
+    return table.clear(note(log))
+'''
+program = ast.parse(source)
+world = {}
+exec(source, world)
+cases = [('scalar_alias', [], False), ('empty_twice', [], False), ('bad_arguments', [], True)]
+for n in (-3, 0, 10**30):
+    cases.extend([('tuple_alias', [n], False), ('refill', [n], False)])
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+lines = ['import FormalSW', 'open FormalSW.PyAst',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+for name, arguments, logged in cases:
+    rejected = SupportChecker(program).check(name)
+    assert not rejected, (name, rejected)
+    log = []
+    try:
+        result = world[name](*([log] if logged else arguments))
+        expected = snapshot_roots(([log] if logged else []) + [result])
+        compared = f'Graph.observedBool ((Graph.compare c.snapshot ({data(expected)})).observe 2000) == some true'
+    except TypeError:
+        expected = snapshot_roots([log])
+        compared = ('(match c.outcome with | .error e => e.typeName == "TypeError" | _ => false) && '
+                    f'Graph.observedBool ((Graph.compare c.snapshot ({data(expected)})).observe 2000) == some true')
+    values = '[.ref 0]' if logged else '[' + ', '.join('.scalar (' + constant(x) + ')' for x in arguments) + ']'
+    heap = '[.list []]' if logged else '[]'
+    lines += [f'#eval (match (HeapCalls.call source "{name}" {values} {heap}).execution.observe 2000 with',
+              f'  | .done (.ok c) => {compared}', '  | _ => false)']
+
+with project_temporary_directory(prefix='dictionary-clear-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    checked = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)],
+                             cwd=ROOT, check=True, capture_output=True, text=True)
+    assert checked.stdout.splitlines() == ['true'] * len(cases), checked.stdout + checked.stderr
+print(f'Dictionary clearing, shared aliases, and argument effects: {len(cases)} Python comparisons passed.')
