@@ -459,7 +459,7 @@ def uses_heap_calls(module, function):
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
-                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "list", "set", "sorted", "all", "any"}
+                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "list", "tuple", "set", "sorted", "all", "any"}
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "divmod" and not bindings(module, "divmod")
                     or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get', 'setdefault', 'pop', 'join', 'replace', 'zfill', 'sort')):
@@ -882,11 +882,11 @@ def check_calls(module, function, reject, *, heap=False):
                 recurse(node.func.value)
                 for item in node.args:
                     recurse(item)
-            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'list':
+            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ('list', 'tuple'):
                 if node.func.id in scope or bindings(module, node.func.id):
-                    reject(node, 'list construction requires the unshadowed builtin list')
+                    reject(node, f'{node.func.id} construction requires the unshadowed builtin {node.func.id}')
                 if len(node.args) > 1 or node.keywords:
-                    reject(node, 'list supports zero or one positional argument')
+                    reject(node, f'{node.func.id} supports zero or one positional argument')
                 for item in node.args:
                     recurse(item)
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'sorted':

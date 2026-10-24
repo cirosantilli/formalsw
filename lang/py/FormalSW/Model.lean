@@ -143,6 +143,7 @@ inductive Builtin where
   | len
   | bytearray
   | list
+  | tuple
   | set
   /-- Small set displays evaluate their elements before inserting them. This
   intrinsic does not resolve through the Python name `set`. -/
@@ -531,6 +532,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "divmod" => pure Builtin.divmod
         | "bytearray" => pure Builtin.bytearray
         | "list" => pure Builtin.list
+        | "tuple" => pure Builtin.tuple
         | "set" => pure Builtin.set
         | "sorted" => pure Builtin.sorted
         | "int.bit_length" => pure Builtin.intBitLength

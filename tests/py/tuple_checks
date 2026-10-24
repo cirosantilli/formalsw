@@ -55,8 +55,16 @@ def formatted(n: int):
     return "%s" % (n,)
 '''
 bodies = {
+    'constructor_list': 'return tuple(xs)',
+    'constructor_empty': 'return [tuple(), tuple([]), ()]',
+    'constructor_identity': 'a = (n, xs)\nreturn [a, tuple(a)]',
+    'constructor_shallow': 'a = tuple([xs, xs])\nxs.append(n)\nreturn a',
+    'constructor_text': 'return tuple("λ😀")',
+    'constructor_bytes': 'return tuple(b"abc")',
+    'constructor_buffer': 'return tuple(bytearray([3, 9]))',
+    'constructor_failure': 'return tuple(touch(xs, n))',
     'hashed': 'values = set()\nvalues.add((n,))\nreturn values',
-    'tuple': 'return (n, xs)',
+    'display': 'return (n, xs)',
     'empty': 'return [(), ()]',
     'new_identity': 'a = (n,)\nb = (n,)\nreturn [a, b]',
     'alias': 'a = (xs, xs)\nxs.append(n)\nreturn a',
@@ -165,6 +173,16 @@ assert SupportChecker(class_comparison).check('f')
 for target in ('a, (b, c)', 'a, *rest', 'a, xs[0]'):
     module = ast.parse(f'def f(n: int, xs: list[int]) -> int:\n    {target} = (n, xs)\n    return a\n')
     assert SupportChecker(module).check('f'), target
+
+# Builtin constructors cannot silently bypass a local binding or invalid arity.
+for text in (
+    'def f(tuple: int) -> int:\n    return tuple()\n',
+    'def f(n: int):\n    return tuple(n, n)\n',
+    'def f(n: int):\n    return tuple(iterable=[n])\n',
+):
+    module = ast.parse(text)
+    assert uses_heap_calls(module, module.body[0])
+    assert SupportChecker(module).check('f', heap_calls=True), text
 
 with project_temporary_directory(prefix='tuple-checks-') as directory:
     directory = Path(directory)

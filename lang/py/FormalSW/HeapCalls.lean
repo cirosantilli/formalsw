@@ -989,6 +989,16 @@ def primitive : Operation → List Value → Eval Value
         | _ => pure ()
       Mutable.allocate (← Mutable.sequence value)
   | .builtin .list, _ => Mutable.error "TypeError"
+  | .builtin .tuple, [] => Mutable.allocateTuple []
+  | .builtin .tuple, [value] => do
+      match value with
+      | .ref address =>
+          match (← get)[address]? with
+          | some (.tuple _) => pure value
+          | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
+          | _ => Mutable.allocateTuple (← Mutable.sequence value)
+      | _ => Mutable.allocateTuple (← Mutable.sequence value)
+  | .builtin .tuple, _ => Mutable.error "TypeError"
   | .builtin .set, [] => Mutable.allocateSet []
   | .builtin .setDisplay, values => Mutable.allocateSetValues values
   | .builtin .set, [source] => Mutable.setFrom source
@@ -1076,6 +1086,18 @@ private theorem mapM_identity (items : List Constant) :
 private theorem mapM_strings (items : List String) :
     (items.mapM (fun value => pure value) : Eval (List String)) = pure items := by
   simpa using (List.mapM_pure (m := Eval) (l := items) (f := id))
+
+/-- Tuple construction copies a list's outer sequence while retaining every element reference. -/
+theorem primitive_tuple_list (heap : Heap) (address : Nat) (items : List Value)
+    (found : heap[address]? = some (.list items)) :
+    primitive (.builtin .tuple) [.ref address] heap = Mutable.allocateTuple items heap := by
+  simp [primitive, Mutable.sequence, found]
+
+/-- Constructing a tuple from an existing tuple returns that same object. -/
+theorem primitive_tuple_tuple (heap : Heap) (address : Nat) (items : List Value)
+    (found : heap[address]? = some (.tuple items)) :
+    primitive (.builtin .tuple) [.ref address] heap = some (.ok (.ref address), heap) := by
+  simp [primitive, found]
 
 /-- Joining reads strings in order without modifying the input list. -/
 theorem primitive_join_list (heap : Heap) (address : Nat) (separator : String) (items : List String)
