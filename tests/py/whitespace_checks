@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Compare Unicode whitespace methods, heap effects, and receiver binding with Python."""
+import ast
+import itertools
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    characters = ', '.join(f'Char.ofNat {ord(character)}' for character in value)
+    return f'.string (String.ofList [{characters}])'
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def trimmed(text: str):
+    return text.strip()
+def words(text: str):
+    return text.split()
+def normalized(text: str):
+    return text.strip().split()
+def receiver(log: list[str]):
+    log.append("receiver")
+    return "  λ 😀  "
+def effects(log: list[str]):
+    return receiver(log).strip().split()
+def bad_receiver(log: list[str]):
+    return log.strip()
+def bad_scalar(log: list[str]):
+    return 1 .split()
+def retained(holder: list[str]):
+    return holder[0].strip().split()
+def untouched(text: str, log: list[str]):
+    log.append(text)
+    return text.strip()
+def bytes_receiver():
+    return b" x ".strip()
+def buffer_receiver():
+    return bytearray([32, 120, 32]).split()
+def explicit_separator():
+    return "a,b".split(",")
+def explicit_chars():
+    return "aaa".strip("a")
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    assert not checker.check(function.name, heap_calls=True), (function.name, checker.check(function.name, heap_calls=True))
+    assert uses_heap_calls(program, function), function.name
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option Elab.async false',
+         'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+spaces = [code for code in range(0x110000) if chr(code).isspace()]
+# The expected classification comes from the running CPython, independently of the Lean table.
+expected = '[' + ', '.join(map(str, spaces)) + ']'
+lines.append(f'example : (List.range 0x110000).all (fun code => '
+             f'Strings.isWhitespace (Char.ofNat code) == ({expected} : List Nat).contains code) = true := by native_decide')
+comparisons = 0
+
+
+def compare(name, terms, heap, arguments, anchors):
+    global comparisons
+    try:
+        result = world[name](*arguments)
+        error = None
+    except (TypeError, AttributeError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [{terms}] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {comparisons}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    comparisons += 1
+
+
+cases = {'', 'a', 'λ 😀', '\0 x\0', '\u180e a\u200b', '\ufeff x\ufeff', '\u2060x'}
+for code in spaces:
+    whitespace = chr(code)
+    cases.update((whitespace, whitespace * 4, whitespace+'λ😀'+whitespace,
+                  'a'+whitespace+'b', whitespace+' a '+whitespace+'b\t'))
+for chars in itertools.product(('a', ' ', '\t', '\u2003'), repeat=3):
+    cases.add(''.join(chars))
+for text in sorted(cases):
+    for name in ('trimmed', 'words', 'normalized'):
+        compare(name, '.scalar (' + constant(text) + ')', '[]', [text], [])
+for name in ('effects', 'bad_receiver', 'bad_scalar'):
+    log = []
+    compare(name, '.ref 0', '[.list []]', [log], [log])
+holder = [' \u2003λ\t😀\u3000 ']
+compare('retained', '.ref 0', '[.list [.scalar ('+constant(holder[0])+')]]', [holder], [holder])
+log = []
+compare('untouched', '.scalar ('+constant(' x ')+'), .ref 0', '[.list []]', [' x ', log], [log])
+for name in ('bytes_receiver', 'buffer_receiver', 'explicit_separator', 'explicit_chars'):
+    lines.append(f'example : (HeapCalls.call source "{name}" [] []).execution.observe 100 = .unsupported := by decide')
+
+with project_temporary_directory(prefix='whitespace-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines)+'\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{comparisons} whitespace Python comparisons passed; all 0x110000 code points match isspace().')

@@ -398,6 +398,8 @@ inductive Operation where
   | sort (address : Nat)
   | replace (text : String)
   | zfill (text : String)
+  | strip (text : String)
+  | splitWhitespace (text : String)
   | join (separator : String)
   | add (address : Nat)
   | dictionaryGet (address : Nat)
@@ -911,6 +913,10 @@ def primitive : Operation → List Value → Eval Value
         -- A failed Python sort may partially reorder the list.
         | _ => Mutable.unsupported
   | .sort _, _ => Mutable.error "TypeError"
+  | .strip text, [] => pure (.scalar (.string (Strings.stripWhitespace text)))
+  | .strip _, _ => Mutable.unsupported
+  | .splitWhitespace text, [] => Mutable.allocate ((Strings.splitWhitespace text).map fun word => .scalar (.string word))
+  | .splitWhitespace _, _ => Mutable.unsupported
   | .replace text, [.scalar old, .scalar new] =>
       scalarResult (some (Strings.replaceCall text [old, new]))
   | .replace text, [.scalar old, .scalar new, .scalar count] =>
@@ -1177,6 +1183,9 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
           else if name = "append" then pure (.append address)
           else if name = "pop" then pure (.pop address)
           else if name = "get" ∨ name = "setdefault" then Mutable.error "AttributeError"
+          else if name = "strip" ∨ name = "split" then match (← get)[address]? with
+            | some (.bytearray _) => Mutable.unsupported
+            | _ => Mutable.error "AttributeError"
           else if name = "zfill" then match (← get)[address]? with
             | some (.bytearray _) => Mutable.unsupported
             | _ => Mutable.error "AttributeError"
@@ -1186,16 +1195,24 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
           else Mutable.unsupported
       | some (.set _) | some (.keySet _) =>
           if name = "add" then pure (.add address)
-          else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.dict _) | some (.keyDict _) =>
           if name = "get" then pure (.dictionaryGet address)
           else if name = "setdefault" then pure (.dictionarySetDefault address)
-          else if name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.tuple _) =>
-          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" then Mutable.error "AttributeError" else Mutable.unsupported
+          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
       | none => Mutable.unsupported
   | .scalar value =>
-      if name = "replace" then match value with
+      if name = "strip" then match value with
+        | .string text => pure (.strip text)
+        | .bytes _ => Mutable.unsupported
+        | _ => Mutable.error "AttributeError"
+      else if name = "split" then match value with
+        | .string text => pure (.splitWhitespace text)
+        | .bytes _ => Mutable.unsupported
+        | _ => Mutable.error "AttributeError"
+      else if name = "replace" then match value with
         | .string text => pure (.replace text)
         | .bytes _ => Mutable.unsupported
         | _ => Mutable.error "AttributeError"
@@ -1207,7 +1224,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
         | .string separator => pure (.join separator)
         | .bytes _ => Mutable.unsupported
         | _ => Mutable.error "AttributeError"
-      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" then Mutable.error "AttributeError" else Mutable.unsupported
+      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
 
 /-- Stored fields are values; first-class bound methods are outside this model. -/
 def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
@@ -1930,7 +1947,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | sort _ | replace _ | zfill _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | sort _ | replace _ | zfill _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
   | value value =>
@@ -2264,6 +2281,32 @@ theorem zfill (receiver : Evaluates (globals := globals) module env base heap (.
     (by simp [step, run, bindMethod])
   apply (arguments_reach arguments (.zfill text) [] anchors stack).trans
   exact .next (by simp [step, result, run, operation]) .refl
+
+/-- Whitespace stripping evaluates its receiver once and leaves the heap unchanged afterward. -/
+theorem strip (receiver : Evaluates (globals := globals) module env base heap (.scalar (.string text)) middle)
+    (localName : ∀ name, base = .name name → (env name).isSome = true) :
+    Evaluates (globals := globals) module env (.call (.attribute base "strip") []) heap
+      (.scalar (.string (Strings.stripWhitespace text))) middle := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr base env, .methodReceiver "strip" [] env :: stack, heap⟩)
+    (by cases base <;> simp_all [step])
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := argumentsState (.strip text) env [] [] stack middle)
+    (by simp [step, run, bindMethod])
+  exact .next (by simp [argumentsState, step, result, run, primitive]) .refl
+
+/-- Whitespace splitting allocates a fresh outer list, preserving the evaluated receiver's heap. -/
+theorem split_whitespace (receiver : Evaluates (globals := globals) module env base heap (.scalar (.string text)) middle)
+    (localName : ∀ name, base = .name name → (env name).isSome = true) :
+    Evaluates (globals := globals) module env (.call (.attribute base "split") []) heap (.ref middle.length)
+      (middle ++ [.list ((Strings.splitWhitespace text).map fun word => .scalar (.string word))]) := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr base env, .methodReceiver "split" [] env :: stack, heap⟩)
+    (by cases base <;> simp_all [step])
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := argumentsState (.splitWhitespace text) env [] [] stack middle)
+    (by simp [step, run, bindMethod])
+  exact .next (by simp [argumentsState, step, result, run, primitive, Mutable.allocate, Except.map]) .refl
 
 /-- Successful scalar sorting mutates the captured receiver and returns None. -/
 theorem sort (receiver : Evaluates (globals := globals) module env base heap (.ref address) middle)
