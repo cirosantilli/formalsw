@@ -126,7 +126,7 @@ def main():
         pass
 
     check(CustomType(), CustomType(), True)
-    for value in (WithProperty(), WithSlots(), CustomAccess(), {(1, 2)}, {1.5}, 1.5, object()):
+    for value in (WithProperty(), WithSlots(), CustomAccess(), {(1, 1.5)}, {1.5}, 1.5, object()):
         try:
             snapshot(value)
         except TypeError as error:

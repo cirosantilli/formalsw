@@ -55,9 +55,9 @@ bodies = {
 }
 bodies['dict_container'] = 'return n in {n: 0}'
 bodies['set_container'] = 'return n in set([n])'
+bodies['string_container'] = 'return "a" in "abc"'
 unsupported = {
     'unknown_equality': 'a = [[n]]\nreturn a in [[[n + 1]], a]',
-    'string_container': 'return "a" in "abc"',
 }
 for name, body in (bodies | unsupported).items():
     source += f'\ndef {name}(n: int, xs: list[int]) -> bool:\n'

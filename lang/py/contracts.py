@@ -71,7 +71,7 @@ def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Mod
 
 
 def reference_kind(kind):
-    return bool(kind and (kind.startswith(('list[', 'set[', 'dict[')) or kind in ('bytearray', 'record')))
+    return bool(kind and (kind.startswith(('list[', 'tuple[', 'set[', 'dict[')) or kind in ('bytearray', 'record')))
 
 
 def heap_input_name(function):

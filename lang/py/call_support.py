@@ -10,7 +10,7 @@ from lang.py.defaults import literal_default
 from lang.py.memo_support import cache_decorator, uses_memoized
 from lang.py.call_graph import call_targets
 from lang.py.sorting_support import uses_sort_model
-from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays, unpacked_return_tuple_displays
+from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays, unpacked_return_tuple_displays, compared_set_tuple_displays, runtime_tuple_element
 from lang.py.class_support import ordinary_attribute, plain_class_methods
 
 
@@ -405,7 +405,7 @@ def uses_heap_calls(module, function):
         visited.add(current.name)
         kinds = [annotation_kind(arg.annotation) for arg in current.args.args]
         kinds.append(annotation_kind(current.returns))
-        if any(kind and (kind.startswith(('list[', 'set[', 'dict[')) or kind in ('bytearray', 'record')) for kind in kinds):
+        if any(kind and (kind.startswith(('list[', 'tuple[', 'set[', 'dict[')) or kind in ('bytearray', 'record')) for kind in kinds):
             return True
         # Defaults are evaluated at definition time, outside the modeled body.
         # Their validation must not select a different execution backend.
@@ -418,7 +418,7 @@ def uses_heap_calls(module, function):
                            and len(node.targets[0].elts) == len(node.value.elts)
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
-            if (isinstance(node, (ast.List, ast.ListComp, ast.SetComp, ast.Dict)) or reversed_list(node) is not None
+            if (isinstance(node, (ast.List, ast.Set, ast.ListComp, ast.SetComp, ast.Dict)) or reversed_list(node) is not None
                     or sequence_extremum(node) is not None
                     or sequence_sum(node) is not None and not bindings(module, "sum")
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
@@ -554,7 +554,8 @@ def check_calls(module, function, reject, *, heap=False):
             globals_.update(item.name for item in global_inputs)
         except GlobalInputError as error:
             reject(function, str(error))
-        hidden_tuples = (unpacked_tuple_displays(function) | return_tuples) if heap else set()
+        hidden_tuples = (unpacked_tuple_displays(function) | return_tuples
+                         | compared_set_tuple_displays(function)) if heap else set()
         # A local may reuse a function/class name as data. Each call site below
         # separately rejects invoking a shadowed module-level target.
         for index, arg in enumerate(function.args.args):
@@ -566,7 +567,7 @@ def check_calls(module, function, reject, *, heap=False):
                 visit_class(classes[arg.annotation.id])
                 continue
             kind = annotation_kind(arg.annotation)
-            if kind not in ('int', 'str', 'bytes', 'bool') and not (heap and kind and (kind.startswith(('list[', 'set[', 'dict[')) or kind in ('bytes', 'bytearray'))):
+            if kind not in ('int', 'str', 'bytes', 'bool') and not (heap and kind and (kind.startswith(('list[', 'tuple[', 'set[', 'dict[')) or kind in ('bytes', 'bytearray'))):
                 reject(arg, 'call arguments require scalar annotations or supported heap list annotations' if heap
                        else 'call arguments require scalar int, str, or bool annotations')
 
@@ -724,10 +725,15 @@ def check_calls(module, function, reject, *, heap=False):
                         recurse(key)
                     recurse(value)
                 return
+            if heap and isinstance(node, ast.Set):
+                if len(node.elts) > 30 or any(isinstance(item, ast.Starred) for item in node.elts):
+                    reject(node, 'set displays support at most 30 elements without unpacking')
+                for item in node.elts:
+                    recurse(item)
+                return
             if heap and isinstance(node, (ast.List, ast.Tuple)):
                 if (isinstance(node, ast.Tuple) and node.elts and node not in hidden_tuples
-                        and not any(isinstance(item, (ast.Name, ast.Call, ast.Subscript, ast.List, ast.Attribute))
-                                    for item in node.elts)):
+                        and not any(runtime_tuple_element(item) for item in node.elts)):
                     reject(node, 'nonempty tuple displays need a runtime element; constant-tuple pooling is not modeled')
                 for item in node.elts:
                     recurse(item)

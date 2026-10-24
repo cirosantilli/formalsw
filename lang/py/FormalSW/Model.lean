@@ -123,6 +123,9 @@ inductive Builtin where
   | bytearray
   | list
   | set
+  /-- Small set displays evaluate their elements before inserting them. This
+  intrinsic does not resolve through the Python name `set`. -/
+  | setDisplay
   | sorted
 deriving Repr, BEq, Lean.ToExpr
 
@@ -423,6 +426,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
             ← Expr.fromJson? (← jsonField generator "iter"),
             ← jsonArray generator "ifs" Expr.fromJson?))
   | "Tuple" => return .tuple (← jsonArray json "elts" Expr.fromJson?)
+  | "Set" => return .builtinCall .setDisplay (← jsonArray json "elts" Expr.fromJson?)
   | "Dict" => return .dict (← jsonArray json "entries" fun entry => do
       return (← Expr.fromJson? (← jsonField entry "key"),
         ← Expr.fromJson? (← jsonField entry "value")))

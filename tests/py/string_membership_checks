@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+Check Unicode substring membership and operand effects against Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def left(events: list[str]):
+    events.append("needle")
+    return "é😺"
+def right(events: list[str]):
+    events.append("container")
+    return "aé😺b"
+def invalid(events: list[str]):
+    events.append("invalid")
+    return 3
+def fail(events: list[str]):
+    events.append("failure")
+    raise ValueError()
+def order(events: list[str]):
+    return left(events) in right(events)
+def order_not(events: list[str]):
+    return left(events) not in right(events)
+def failed_needle(events: list[str]):
+    return fail(events) in right(events)
+def failed_container(events: list[str]):
+    return left(events) in fail(events)
+def bad_needle(events: list[str]):
+    return invalid(events) in right(events)
+def bad_container(events: list[str]):
+    return left(events) in invalid(events)
+def list_needle(events: list[str]):
+    return events in right(events)
+def tuple_needle(events: list[str]):
+    return (left(events),) in right(events)
+'''
+program = ast.parse(source)
+for function in program.body:
+    issues = SupportChecker(program).check(function.name, heap_calls=True)
+    assert not issues, (function.name, issues)
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option Elab.async false',
+         'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+comparisons = 0
+for text, needle, negated in itertools.product(
+        ('', 'aaaa', 'ababa', 'Aé😺Z', 'e\u0301'),
+        ('', 'a', 'aa', 'aba', 'é😺', '😺', 'é', 'e\u0301', 'longer than text', 0, True, None, b'a'),
+        (False, True)):
+    try:
+        answer = needle not in text if negated else needle in text
+        expected = '.ok (.scalar (' + constant(answer) + '))'
+    except TypeError:
+        expected = '.error { typeName := "TypeError", args := [] }'
+    lines.append(f'example : HeapCalls.membership (.scalar ({constant(needle)})) '
+                 f'(.scalar ({constant(text)})) {str(negated).lower()} [] = some ({expected}, []) := by decide')
+    comparisons += 1
+for name in ('order', 'order_not', 'failed_needle', 'failed_container',
+             'bad_needle', 'bad_container', 'list_needle', 'tuple_needle'):
+    events = []
+    try:
+        result = world[name](events)
+        error = None
+    except (ValueError, TypeError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots([events] + ([result] if error is None else [])))
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}',
+        f'example : (match (HeapCalls.call source "{name}" [.ref 0] [.list []]).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    comparisons += 1
+with project_temporary_directory(prefix='string-membership-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{comparisons} string-membership comparisons passed, including Unicode and operand effects')

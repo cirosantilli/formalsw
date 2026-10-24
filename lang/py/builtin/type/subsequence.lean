@@ -37,6 +37,32 @@ def rfind? [BEq α] (values needle : List α) : Option Nat :=
 
 def contains [BEq α] (values needle : List α) : Bool := (find? values needle).isSome
 
+theorem startsWith_eq_isPrefixOf [BEq α] [LawfulBEq α] (values needle : List α) :
+    startsWith values needle = needle.isPrefixOf values := by
+  apply Bool.eq_iff_iff.mpr
+  simp only [startsWith, beq_iff_eq, List.isPrefixOf_iff_prefix, List.prefix_iff_eq_take]
+  exact eq_comm
+
+private theorem findFromFuel_isSome [BEq α] [LawfulBEq α]
+    (needle values : List α) (position : Nat) :
+    (findFromFuel needle (values.length + 1) position values).isSome =
+      needle.isInfixOf_internal values := by
+  induction values generalizing position with
+  | nil =>
+      cases hasPrefix : startsWith [] needle <;>
+        simp [findFromFuel, List.isInfixOf_internal, ← startsWith_eq_isPrefixOf, hasPrefix]
+  | cons head tail ih =>
+      rw [List.length_cons, findFromFuel, List.isInfixOf_internal,
+        ← startsWith_eq_isPrefixOf]
+      cases hasPrefix : startsWith (head :: tail) needle with
+      | false => simpa only [Bool.false_eq_true, if_false, Bool.false_or] using ih (position + 1)
+      | true => rfl
+
+/-- The existing search algorithm computes contiguous list membership. -/
+theorem contains_eq_isInfix [BEq α] [LawfulBEq α] (values needle : List α) :
+    contains values needle = needle.isInfixOf_internal values :=
+  findFromFuel_isSome needle values 0
+
 private def countFuel [BEq α] (needle : List α) : Nat → List α → Nat
   | 0, _ => 0
   | fuel + 1, remaining =>

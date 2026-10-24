@@ -35,11 +35,68 @@ def annotation_domain(annotation):
     return annotation_record(annotation) or annotation_kind(annotation) or ast.dump(annotation or ast.Constant(None))
 
 
+def structured_kind(kind):
+    """Select the recursive heap domain without changing existing flat domains."""
+    return bool(kind and 'tuple[' in kind)
+
+
+def _structured_annotation_kind(annotation):
+    if isinstance(annotation, ast.Constant) and annotation.value is None:
+        return 'None'
+    if isinstance(annotation, ast.Name) and annotation.id in ('int', 'str', 'bytes', 'bool'):
+        return annotation.id
+    if not isinstance(annotation, ast.Subscript) or getattr(annotation.value, 'formalsw_typing_invalid', False):
+        return None
+    container = getattr(annotation.value, 'formalsw_typing_container', None)
+    if container is None and isinstance(annotation.value, ast.Name):
+        container = annotation.value.id
+    if container == 'list':
+        element = _structured_annotation_kind(annotation.slice)
+        return f'list[{element}]' if element is not None else None
+    if container != 'tuple':
+        return None
+    fields = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
+    if not fields:
+        return 'tuple[()]'
+    if len(fields) == 2 and isinstance(fields[1], ast.Constant) and fields[1].value is Ellipsis:
+        element = _structured_annotation_kind(fields[0])
+        return f'tuple[{element},...]' if element is not None else None
+    kinds = [_structured_annotation_kind(field) for field in fields]
+    return 'tuple[' + ','.join(kinds) + ']' if all(kind is not None for kind in kinds) else None
+
+
+def container_type_term(kind):
+    """Render a validated canonical annotation as a Lean structural domain."""
+    try:
+        annotation = ast.parse(kind, mode='eval').body
+    except (SyntaxError, TypeError) as error:
+        raise ValueError('invalid structural container domain') from error
+    if not structured_kind(kind) or _structured_annotation_kind(annotation) != kind:
+        raise ValueError('invalid structural container domain')
+
+    def render(node):
+        if isinstance(node, ast.Name):
+            return f'.scalar "{node.id}"'
+        if isinstance(node, ast.Constant):
+            return '.scalar "None"'
+        if node.value.id == 'list':
+            return f'.list ({render(node.slice)})'
+        fields = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+        if len(fields) == 2 and isinstance(fields[1], ast.Constant) and fields[1].value is Ellipsis:
+            return f'.tupleOf ({render(fields[0])})'
+        return '.tuple [' + ', '.join(render(field) for field in fields) + ']'
+
+    return render(annotation)
+
+
 def annotation_kind(annotation):
     if annotation_record(annotation) is not None:
         return 'record'
     if isinstance(annotation, ast.Name) and annotation.id in ('int', 'str', 'bytes', 'bytearray', 'bool'):
         return annotation.id
+    structured = _structured_annotation_kind(annotation)
+    if structured_kind(structured):
+        return structured
     if isinstance(annotation, ast.Subscript):
         container = getattr(annotation.value, 'formalsw_typing_container', None)
         if container is None and isinstance(annotation.value, ast.Name):
@@ -127,6 +184,8 @@ def function_globals(module, function, *, heap_calls=False):
             if isinstance(stmt, ast.Assign) and (len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name)):
                 raise GlobalInputError(stmt, f'global {name!r} needs a simple declaration')
             expected = annotation_kind(annotation)
+            if structured_kind(expected):
+                raise GlobalInputError(stmt, 'tuple-containing globals are not yet supported; pass the container as an argument')
             if expected and expected.startswith('list[list['):
                 raise GlobalInputError(stmt, 'nested list globals are not yet supported; pass the list as an argument')
             if expected and expected.startswith('set['):

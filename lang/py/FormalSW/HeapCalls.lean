@@ -136,6 +136,12 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
       match (← get)[a]?, (← get)[b]? with
       | some (.bytearray xs), some (.bytearray ys) => compareScalars op (.bytes xs) (.bytes ys)
       | some (.set xs), some (.set ys) => return .scalar (.bool (ScalarSet.compare op xs ys))
+      | some (.set xs), some (.keySet ys) =>
+          return .scalar (.bool (Mutable.compareKeySets op (xs.map fun x => (.scalar x, .scalar x)) ys))
+      | some (.keySet xs), some other =>
+          match Mutable.keyEntries other with
+          | some ys => return .scalar (.bool (Mutable.compareKeySets op xs ys))
+          | none => compareDifferent op
       | some (.instance _ _ _), some (.instance _ _ _) =>
           match op with
           | .eq => return .scalar (.bool (a == b))
@@ -199,6 +205,15 @@ def sequenceContains (needle : Value) : List Value → Eval Bool
       if ← Mutable.truth equal then return true
       sequenceContains needle rest
 
+/-- Python membership can convert a mutable set needle to a frozenset. That
+protocol remains unsupported; ordinary tuple and scalar keys use builtin hashing. -/
+def membershipKey (needle : Value) : Eval HashKey := do
+  match needle with
+  | .ref address => match (← get)[address]? with
+      | some (.set _) | some (.keySet _) => Mutable.unsupported
+      | _ => Mutable.hashKey needle
+  | _ => Mutable.hashKey needle
+
 /-- Membership covers shared sequences, sets and dictionary keys. Other iterable
 protocols remain partial; a known non-iterable scalar raises Python's TypeError. -/
 def membership (needle container : Value) (negated : Bool) : Eval Value := do
@@ -210,11 +225,26 @@ def membership (needle container : Value) (negated : Bool) : Eval Value := do
             pure (ScalarDict.lookup entries key).isSome
         | some (.set items) => match needle with
             | .scalar value => pure (ScalarSet.contains items value)
-            | .ref _ => Mutable.unsupported
+            | .ref _ => do
+                let key ← membershipKey needle
+                pure (Mutable.keyContains (items.map fun x => (.scalar x, .scalar x)) key)
+        | some (.keySet items) => do
+            let key ← membershipKey needle
+            pure (Mutable.keyContains items key)
         | _ => Mutable.unsupported
+    | .scalar (.string text) => match needle with
+        | .scalar (.string substring) => pure (Strings.contains text substring)
+        | _ => Mutable.error "TypeError"
     | .scalar (.int _) | .scalar (.bool _) | .scalar .none => Mutable.error "TypeError"
     | _ => Mutable.unsupported
   return .scalar (.bool (if negated then !found else found))
+
+/-- Substring membership changes no heap objects; operand effects have already run. -/
+theorem membership_string (heap : Heap) (text substring : String) (negated : Bool) :
+    membership (.scalar (.string substring)) (.scalar (.string text)) negated heap =
+      some (.ok (.scalar (.bool (if negated then !Strings.contains text substring
+        else Strings.contains text substring))), heap) := by
+  simp [membership]
 
 /-- Dictionary membership checks normalized scalar keys without reading their values. -/
 theorem membership_dictionary (key : Constant) (negated : Bool)
@@ -283,7 +313,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
       match (← get)[address]? with
       | none => Mutable.unsupported
       | some (.list _) => listInplace op left right
-      | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.binary op left right
+      | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.binary op left right
       | some (.bytearray bytes) =>
           match op with
           | .mult =>
@@ -298,7 +328,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
                     | some (.bytearray more) =>
                         if other = address ∧ !more.isEmpty then Mutable.error "BufferError"
                         else pure more
-                    | some (.list _) | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
+                    | some (.list _) | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
                     | none => Mutable.unsupported
                 | _ => Mutable.error "TypeError"
               modify fun heap => heap.set address (.bytearray (bytes ++ more))
@@ -888,6 +918,7 @@ def primitive : Operation → List Value → Eval Value
       Mutable.allocate (← Mutable.sequence value)
   | .builtin .list, _ => Mutable.error "TypeError"
   | .builtin .set, [] => Mutable.allocateSet []
+  | .builtin .setDisplay, values => Mutable.allocateSetValues values
   | .builtin .set, [source] => Mutable.setFrom source
   | .builtin .set, _ => Mutable.error "TypeError"
   | .builtin .sorted, [value] => do
@@ -906,7 +937,7 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .int, [.ref address] => do
       match (← get)[address]? with
       | some (.bytearray bytes) => scalarResult (Calls.integerConversion [.bytes bytes])
-      | some (.list _) | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
+      | some (.list _) | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
       | _ => Mutable.unsupported
   | .builtin .int, values => do
       let values ← values.mapM fun value => match value with
@@ -1036,7 +1067,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
             | some (.bytearray _) => Mutable.unsupported
             | _ => Mutable.error "AttributeError"
           else Mutable.unsupported
-      | some (.set _) =>
+      | some (.set _) | some (.keySet _) =>
           if name = "add" then pure (.add address)
           else if name = "append" ∨ name = "get" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.dict _) =>
@@ -1652,7 +1683,7 @@ private theorem bindMethod_extend (extension : Extends target source)
       | none => simp [bindMethod, found]
       | some object =>
           cases object with
-          | list items | tuple items | bytearray items | set items | dict items => simp [bindMethod, found]
+          | list items | tuple items | bytearray items | set items | keySet items | dict items => simp [bindMethod, found]
           | «instance» origin className fields | dataInstance origin className frozen declared fields =>
               cases defined : source.findClass className with
               | none => simp [bindMethod, found, instanceClass, defined, Mutable.unsupported] at supported
@@ -1671,7 +1702,7 @@ private theorem attribute_extend (extension : Extends target source)
       | none => simp [getAttribute, found]
       | some object =>
           cases object with
-          | list items | tuple items | bytearray items | set items | dict items =>
+          | list items | tuple items | bytearray items | set items | keySet items | dict items =>
               simp [getAttribute, found]
           | «instance» origin className fields | dataInstance origin className frozen declared fields =>
               cases defined : source.findClass className with
@@ -1749,7 +1780,7 @@ theorem step_extend (extension : Extends target source) (state : State)
                   | none => simp [step, found]
                   | some object =>
                       cases object with
-                      | list items | tuple items | bytearray items | set items | dict items => simp [step, found]
+                      | list items | tuple items | bytearray items | set items | keySet items | dict items => simp [step, found]
                       | «instance» origin className fields | dataInstance origin className frozen declared fields =>
                           simp only [step, found] at supported ⊢
                           exact protected_run_extend _ _ (bindMethod_extend extension) supported

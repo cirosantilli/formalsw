@@ -25,6 +25,14 @@ def str : List Constant → Except ExceptionObject Constant
   | [value] => .ok (.string (convert value))
   | _ => .error typeError
 
+/-- Unicode substring membership, including the empty substring. -/
+def contains (text substring : String) : Bool :=
+  Py.Builtin.Subsequence.contains text.toList substring.toList
+
+theorem contains_eq_isInfix (text substring : String) :
+    contains text substring = substring.toList.isInfixOf_internal text.toList :=
+  Py.Builtin.Subsequence.contains_eq_isInfix _ _
+
 /-- A Unicode character or a single byte has an ordinal; other lengths and types fail. -/
 def ord : Constant → Except ExceptionObject Constant
   | .string text => match text.toList with

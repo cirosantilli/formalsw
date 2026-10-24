@@ -137,14 +137,15 @@ for name, initial, n, shared in itertools.product(bodies, ([], [1, -2]), (-2, 0,
 for name in ('iterate', 'difference'):
     lines.append(f'example : (HeapCalls.call source "{name}" [.ref 0] [.set [.int 1]]).execution.observe 100 = .unsupported := by decide')
 for source, heap in (
-    ('.ref 0', '[.list [.ref 1], .tuple [.scalar (.int 1)]]'),
+    ('.ref 0', '[.list [.ref 1], .tuple [.ref 1]]'),
     ('.ref 0', '[.instance "probe" "Custom" []]'),
     ('.ref 0', '[.list [.ref 1], .instance "probe" "Custom" []]'),
     ('.ref 99', '[]'),
 ):
     lines.append(f'example : Mutable.setFrom ({source}) {heap} = none := by decide')
 
-lines.append('example : HeapCalls.membership (.ref 1) (.ref 0) false [.set [.int 1], .list []] = none := by decide')
+lines.append('example : HeapCalls.membership (.ref 1) (.ref 0) false [.set [.int 1], .list []] = '
+             'some (.error { typeName := "TypeError", args := [] }, [.set [.int 1], .list []]) := by decide')
 
 # Binding validation must not silently substitute the builtin for user code.
 plain = 'def f(n: int) -> set[int]:\n    out = set()\n    out.add(n)\n    return out\n'

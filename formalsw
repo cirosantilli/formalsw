@@ -33,6 +33,7 @@ from lang.py.typing_support import resolve_typing_annotations
 from lang.py.linking import link_imports
 from lang import spec_setup
 from lang.lean_cache import CompilationCache
+from lang.py.global_inputs import structured_kind, container_type_term
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind, annotation_record, annotation_domain, call_globals, needs_heap_globals, global_input_names, GlobalInputError
 
 
@@ -185,6 +186,8 @@ def mutable_global_call(ast_namespace, function_name, arguments, globals, heap="
 
 
 def mutable_domain(name, kind, heap):
+    if structured_kind(kind):
+        return f'FormalSW.PyAst.Mutable.Value.HasContainerType {heap} (.ref {name}) ({container_type_term(kind)})'
     return f'FormalSW.PyAst.Mutable.Value.HasType {heap} (.ref {name}) {lean_string(kind)}'
 
 
@@ -823,7 +826,7 @@ def contract_domain(function):
                           f'{lean_string(record.origin)} {lean_string(record.name)} '
                           f'{str(record.frozen).lower()} {fields}')
         elif reference_kind(kind):
-            guards.append(f'FormalSW.PyAst.Mutable.Value.HasType {heap} (.ref {name}) {lean_string(kind)}')
+            guards.append(mutable_domain(name, kind, heap))
     globals_ = getattr(function, 'formalsw_globals', ())
     global_names = global_input_names(function, globals_)
     for item in globals_:
@@ -981,7 +984,10 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
             kind = "None"
         if kind not in ("int", "bool", "str", "bytes", "None") and not (uses_heap_calls(module, function) and kind and reference_kind(kind)):
             raise InvalidRequirement("ReturnType needs a supported return annotation")
-        body += f" {lean_string(kind)}"
+        if structured_kind(kind):
+            body = f"({left}).ReturnContainerType ({container_type_term(kind)})"
+        else:
+            body += f" {lean_string(kind)}"
     body = guarded_type(body, [*domain, *conditions], existential=property_name == "Throws")
     if binders:
         quantifier = "∃" if property_name == "Throws" else "∀"
@@ -1543,6 +1549,10 @@ class AstJsonEmitter:
                     for key, value in zip(keys, values)]}
             case ast.List(elts=elts):
                 return {"type": "List", "elts": [self.expr(elt) for elt in elts]}
+            case ast.Set(elts=elts):
+                if len(elts) > 30 or any(isinstance(elt, ast.Starred) for elt in elts):
+                    raise UnsupportedSyntax("set displays support at most 30 elements without unpacking")
+                return {"type": "Set", "elts": [self.expr(elt) for elt in elts]}
             case ast.ListComp(elt=elt, generators=generators) | ast.SetComp(elt=elt, generators=generators):
                 if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
                        for generator in generators):

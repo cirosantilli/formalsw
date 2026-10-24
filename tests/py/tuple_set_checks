@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""
+Compare builtin tuple sets with Python, including representatives and aliases.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots, same_snapshot
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def construct(n: int):
+    a = (n, n + 1)
+    b = (n, n + 1)
+    return [a, b, set([a, b])]
+def numeric(n: int):
+    a = (True, n)
+    b = (1, n)
+    return [a, b, set([a, b]), set([b, a])]
+def nested(n: int):
+    a = (n,)
+    b = (a, a)
+    c = ((n,), (n,))
+    return [a, b, c, set([b, c]), set([c, b])]
+def promote(n: int):
+    out = set([True])
+    a = (n, n + 1)
+    out.add(a)
+    out.add((n, n + 1))
+    out.add(1)
+    return [a, out]
+def mixed(n: int):
+    a = (n, None, "λ", b"x")
+    b = ((n,), True)
+    return [a, b, set([None, True, "é", b"b", n, a, b])]
+def copy(n: int):
+    a = (n, n + 1)
+    first = set([a])
+    second = set(first)
+    second.add((n, n))
+    return [a, first, second]
+def contains(n: int):
+    out = set([(n, n + 1)])
+    return [(n, n + 1) in out, (n, n) not in out, len(out), n if out else 0]
+def compare(n: int):
+    left = set([(n, n + 1)])
+    equal = set([(n, n + 1), (n, n + 1)])
+    larger = set([(n, n + 1), n])
+    scalar = set([n])
+    return [left == equal, left != larger, left < larger, left <= equal,
+            larger > left, larger >= equal, scalar < larger, larger > scalar,
+            scalar == left, left == scalar]
+def display(n: int):
+    a = (n, n + 1)
+    out = {a, (n, n + 1), n}
+    return [a, out]
+def literal_assertion(n: int):
+    fracs = [(n, 64), (n + 3, 95), (n + 10, 65), (n + 33, 98)]
+    assert set(fracs) == {(16, 64), (19, 95), (26, 65), (49, 98)}
+    return n
+def bad_nested(n: int):
+    return set([(n, [n])])
+def bad_add(n: int, items: set[int], events: list[int]):
+    events.append(n)
+    items.add((n, n + 1))
+    items.add((n, events))
+    return items
+def self_add(n: int, items: set[int], events: list[int]):
+    items.add((n, n + 1))
+    items.add(items)
+    return items
+def touch(events: list[int], n: int):
+    events.append(n)
+    return (n,)
+def bad(events: list[int], n: int):
+    events.append(n)
+    return [n]
+def display_failure(n: int, items: set[int], events: list[int]):
+    return {bad(events, n), touch(events, n + 1)}
+def display_success(n: int, items: set[int], events: list[int]):
+    return {touch(events, n), touch(events, n + 1)}
+def unsupported_iteration(n: int):
+    for item in set([(n,)]):
+        return item
+    return n
+def unsupported_index(n: int):
+    return set([(n,)])[0]
+'''
+# CPython <=30-element displays evaluate all operands before BUILD_SET hashes.
+source += '\ndef display_thirty(n: int, items: set[int], events: list[int]):\n    return {'
+source += ', '.join(['bad(events, n)'] + [f'touch(events, n + {i})' for i in range(1, 30)]) + '}\n'
+program = ast.parse(source)
+for function in program.body:
+    issues = SupportChecker(program).check(function.name, heap_calls=True)
+    assert not issues, (function.name, issues)
+world = {}
+exec(source, world)
+
+# Runtime fields can be nested or arithmetic. A name hidden in a discarded
+# branch does not prevent constant pooling, and escaped constants stay rejected.
+for expression, accepted in (
+        ('((n,), (n + 1,))', True), ('(n * 0,)', True), ('("abc"[n],)', True),
+        ('("abc"[0],)', False), ('((1, 2),)', False),
+        ('(True if True else n,)', False), ('(False and n,)', False),
+        ('{(1, 2)}', False), ('set([(1, 2)])', False),
+        ('set([(n, 2)]) == {(1, 2)}', True)):
+    candidate = ast.parse(f'def f(n: int):\n    return {expression}\n')
+    issues = SupportChecker(candidate).check('f', heap_calls=True)
+    assert bool(issues) != accepted, (expression, issues)
+
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 16384',
+         'set_option Elab.async false',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+comparisons = 0
+
+
+def compare(name, arguments, heap, actual, anchors):
+    global comparisons
+    try:
+        result = world[name](*actual)
+        error = None
+    except (TypeError, ValueError, AttributeError, AssertionError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [{arguments}] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {comparisons}',
+        f'example : (match ({call}).execution.observe 10000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 20000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    comparisons += 1
+
+
+for n in (0, 1, -3, 16):
+    for name in ('construct', 'numeric', 'nested', 'promote', 'mixed', 'copy', 'contains',
+                 'compare', 'display', 'literal_assertion', 'bad_nested', 'unsupported_index'):
+        compare(name, f'.scalar (.int ({n}))', '[]', [n], [])
+    for name in ('bad_add', 'self_add', 'display_failure', 'display_success', 'display_thirty'):
+        items, events = {0}, []
+        compare(name, f'.scalar (.int ({n})), .ref 0, .ref 1',
+                '[.set [.int 0], .list []]', [n, items, events], [items, events])
+lines.append('example : (HeapCalls.call source "unsupported_iteration" [.scalar (.int 2)] []).execution.observe 500 = .unsupported := by decide')
+lines.append('example : Mutable.keyOf [.tuple [.ref 0]] (.ref 0) = none := by decide')
+lines.append('example : Mutable.keyOf [.instance "source" "Custom" []] (.ref 0) = none := by decide')
+lines.append('example : HeapCalls.membership (.ref 1) (.ref 0) false [.set [.int 1], .set []] = none := by decide')
+
+# Snapshot ordering must not erase reference sharing or choose a new representative.
+a = tuple([1, 2])
+b = tuple([1, 2])
+assert a is not b
+assert not same_snapshot(snapshot_roots([a, b, {a}]), snapshot_roots([a, b, {b}]))
+assert same_snapshot(snapshot_roots([{a, (3,)}]), snapshot_roots([{(3,), a}]))
+class Custom:
+    pass
+try:
+    snapshot_roots([{Custom()}])
+except TypeError:
+    pass
+else:
+    raise AssertionError('custom keys must remain unsupported')
+
+# Larger and starred displays cannot silently use the <=30-element execution rule.
+for expression in ('{' + ', '.join(f'n + {i}' for i in range(31)) + '}', '{*xs}'):
+    module = ast.parse(f'def f(n: int, xs: list[int]):\n    return {expression}\n')
+    assert SupportChecker(module).check('f', heap_calls=True), expression
+with project_temporary_directory(prefix='tuple-set-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{comparisons} tuple-set comparisons passed, including aliases and display effects')

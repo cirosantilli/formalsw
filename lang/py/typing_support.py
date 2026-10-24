@@ -14,11 +14,17 @@ def resolve_typing_annotations(module):
     for node in ast.walk(module):
         if hasattr(node, 'formalsw_typing_container'):
             del node.formalsw_typing_container
+        if hasattr(node, 'formalsw_typing_invalid'):
+            del node.formalsw_typing_invalid
+    shadowed_containers = {name for name in ('tuple', 'list') if bindings(module, name)}
+    for node in ast.walk(module):
+        if isinstance(node, ast.Name) and node.id in shadowed_containers:
+            node.formalsw_typing_invalid = True
     source = getattr(module, 'formalsw_source', None)
     roots = (Path(source).parent, Path.cwd()) if source is not None else (Path.cwd(),)
     if any((root / 'typing.py').exists() or (root / 'typing').is_dir() for root in roots):
         return
-    containers = {'List': 'list', 'Dict': 'dict', 'Set': 'set'}
+    containers = {'List': 'list', 'Dict': 'dict', 'Set': 'set', 'Tuple': 'tuple'}
     direct, qualified = {}, set()
     for statement in module.body:
         if isinstance(statement, ast.ImportFrom) and statement.module == 'typing' and statement.level == 0:
@@ -73,6 +79,11 @@ def resolve_typing_annotations(module):
         for node in ast.walk(annotation):
             if isinstance(node, ast.Name) and node.id in direct:
                 node.formalsw_typing_container = direct[node.id]
+                if hasattr(node, 'formalsw_typing_invalid'):
+                    del node.formalsw_typing_invalid
+            elif (isinstance(node, ast.Name) and node.id in ('tuple', 'list')
+                  and bindings(module, node.id)):
+                node.formalsw_typing_invalid = True
             elif (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                   and node.value.id in qualified and node.attr in containers):
                 node.formalsw_typing_container = containers[node.attr]

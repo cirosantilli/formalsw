@@ -10,6 +10,54 @@ def flat_unpacking(target):
             and all(isinstance(item, ast.Name) for item in target.elts))
 
 
+def runtime_tuple_element(node):
+    """
+    Recognize fields that prevent constant folding of a tuple display.
+
+    Arithmetic and nested tuple construction evaluate their operands. Do not
+    search arbitrary descendants: a conditional or short-circuit expression
+    can discard a runtime name and fold to a constant.
+    """
+    if isinstance(node, (ast.Name, ast.Call, ast.List, ast.Attribute)):
+        return True
+    if isinstance(node, ast.Tuple):
+        return any(runtime_tuple_element(item) for item in node.elts)
+    if isinstance(node, ast.BinOp):
+        return runtime_tuple_element(node.left) or runtime_tuple_element(node.right)
+    if isinstance(node, ast.UnaryOp):
+        return runtime_tuple_element(node.operand)
+    if isinstance(node, ast.Subscript):
+        return runtime_tuple_element(node.value) or runtime_tuple_element(node.slice)
+    return False
+
+
+def compared_set_tuple_displays(function):
+    """
+    A set display consumed directly by comparison cannot expose the identities
+    of tuple constants it contains. Do not extend this through calls or other
+    expressions that could retain a tuple or inspect its identity.
+    """
+    hidden = set()
+
+    def tuple_elements(node):
+        if isinstance(node, ast.Tuple):
+            hidden.add(node)
+            for item in node.elts:
+                tuple_elements(item)
+
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Compare):
+            continue
+        if not all(isinstance(op, (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+                                   ast.In, ast.NotIn)) for op in node.ops):
+            continue
+        for operand in (node.left, *node.comparators):
+            if isinstance(operand, ast.Set):
+                for item in operand.elts:
+                    tuple_elements(item)
+    return hidden
+
+
 def unpacked_return_tuple_displays(module, entry):
     """
     Hide returned tuple wrappers only when every reachable use immediately

@@ -1,6 +1,6 @@
 """Explicit observation boundary for graph_equivalence.same_snapshot.
 
-Exact int/bool/str/bytes/None, list/tuple/dict/bytearray, scalar sets, and ordinary instances are supported.
+Exact int/bool/str/bytes/None, list/tuple/dict/bytearray, builtin-key sets, and ordinary instances are supported.
 Never invoke user equality or getters. Unsupported objects raise TypeError.
 The adapter is executable Python; it is not a model of arbitrary CPython heaps.
 """
@@ -34,6 +34,15 @@ def _scalar(value):
     return cls is int or cls is bool or cls is str or cls is bytes or cls is type(None)
 
 
+def _set_key(value):
+    """Order immutable builtin keys without invoking user comparison methods."""
+    if _scalar(value):
+        return type(value).__name__, value
+    if type(value) is tuple:
+        return "tuple", tuple(_set_key(item) for item in value)
+    raise TypeError("unsupported snapshot: custom set element")
+
+
 def snapshot_roots(roots):
     """Observe roots together, preserving cross-root aliases and dictionary order."""
     nodes = []
@@ -57,11 +66,10 @@ def snapshot_roots(roots):
         if cls is list or cls is tuple or cls is bytearray:
             node = [cls.__name__, [], [edge(item) for item in value]]
         elif cls is set:
-            if any(not _scalar(item) for item in value):
-                raise TypeError("unsupported snapshot: non-scalar set element")
             # Set iteration order is not part of stored-state observation.
-            # Equal numeric keys retain their actual representative type.
-            children = sorted(value, key=lambda item: (type(item).__name__, item))
+            # The sort key never replaces the original reference edge: aliases
+            # and first representatives remain visible, including inside tuples.
+            children = sorted(value, key=_set_key)
             node = ["set", [], [edge(item) for item in children]]
         elif cls is dict:
             children = []

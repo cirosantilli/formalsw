@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""
+Check recursive tuple annotation domains and their shared-heap contracts.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.global_inputs import annotation_kind, container_type_term, structured_kind
+from lang.py.support import SupportChecker
+from lang.py.typing_support import resolve_typing_annotations
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def kind_of(annotation, prefix='', suffix=''):
+    module = ast.parse(prefix + f'\ndef f(value: {annotation}) -> {annotation}:\n    return value\n' + suffix)
+    before = ast.dump(module)
+    resolve_typing_annotations(module)
+    assert ast.dump(module) == before, 'annotation resolution changed source syntax'
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    return annotation_kind(function.args.args[0].annotation), module
+
+
+cases = {
+    'list[tuple[int, int]]': ('list[tuple[int,int]]', '.list (.tuple [.scalar "int", .scalar "int"])'),
+    'tuple[int, str, bool]': ('tuple[int,str,bool]', '.tuple [.scalar "int", .scalar "str", .scalar "bool"]'),
+    'tuple[()]': ('tuple[()]', '.tuple []'),
+    'tuple[int]': ('tuple[int]', '.tuple [.scalar "int"]'),
+    'tuple[bytes, ...]': ('tuple[bytes,...]', '.tupleOf (.scalar "bytes")'),
+    'tuple[int, list[tuple[str, bool]]]': ('tuple[int,list[tuple[str,bool]]]',
+        '.tuple [.scalar "int", .list (.tuple [.scalar "str", .scalar "bool"])]'),
+    'list[list[tuple[int, None]]]': ('list[list[tuple[int,None]]]',
+        '.list (.list (.tuple [.scalar "int", .scalar "None"]))'),
+    'tuple[tuple[int, int], ...]': ('tuple[tuple[int,int],...]',
+        '.tupleOf (.tuple [.scalar "int", .scalar "int"])'),
+}
+for annotation, (kind, term) in cases.items():
+    actual, module = kind_of(annotation)
+    assert actual == kind, (annotation, actual)
+    assert structured_kind(actual)
+    assert container_type_term(actual) == term
+    assert not SupportChecker(module).check('f'), annotation
+
+for prefix, annotation in (
+    ('from typing import List, Tuple', 'List[Tuple[int, int]]'),
+    ('from typing import Tuple as Pair', 'list[Pair[int, int]]'),
+    ('import typing as t', 't.List[t.Tuple[int, int]]'),
+    ('from typing import Tuple as tuple', 'list[tuple[int, int]]'),
+):
+    kind, module = kind_of(annotation, prefix)
+    assert kind == 'list[tuple[int,int]]', (prefix, annotation, kind)
+    assert not SupportChecker(module).check('f'), (prefix, annotation)
+
+for annotation in ('tuple[int, ..., str]', 'tuple[...]', 'tuple[float]',
+                   'list[tuple[int, object]]', 'tuple[set[int]]', 'dict[str, tuple[int, int]]'):
+    kind, _ = kind_of(annotation)
+    assert kind is None, (annotation, kind)
+
+for prefix, annotation, suffix in (
+    ('', 'tuple[int, int]', '\ntuple = list\n'),
+    ('', 'tuple[list[int]]', '\nlist = tuple\n'),
+    ('from other import Tuple', 'Tuple[int, int]', ''),
+    ('from typing import Tuple', 'Tuple[int, int]', '\nTuple = tuple\n'),
+    ('from typing import Tuple', 'Tuple[int, int]', '\nescaped = Tuple\n'),
+    ('import typing as t', 't.Tuple[int, int]', '\nt.Tuple = tuple\n'),
+):
+    kind, _ = kind_of(annotation, prefix, suffix)
+    assert kind is None, (prefix, annotation, suffix, kind)
+
+for invalid in ('list[int]', 'tuple[int, str]', 'tuple[int,__import__("os")]', 'tuple[int,...,str]'):
+    try:
+        container_type_term(invalid)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'invalid canonical domain accepted: {invalid}')
+
+source = ROOT / 'tests/py/container_types.py'
+module = api['source_module'](source)
+requirements = api['collect_requirements'](source, module, 'Fixture', 'FixtureAst')
+assert not any(requirement.unsupported for requirement in requirements), requirements
+for requirement in requirements:
+    assert 'HasContainerType' in requirement.property_type, requirement
+    assert '.list (.tuple [.scalar "int", .scalar "int"])' in requirement.property_type, requirement
+returned = next(requirement for requirement in requirements if requirement.marker == 'ReturnType')
+assert '.ReturnContainerType ' in returned.property_type, returned
+
+subprocess.run([sys.executable, str(ROOT / 'formalsw'), str(source)], cwd=ROOT, check=True)
+print('Recursive tuple domains, annotation aliases, heap sharing, and source contracts passed')

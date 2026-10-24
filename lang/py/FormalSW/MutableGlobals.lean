@@ -3,6 +3,7 @@ import lang.py.FormalSW.GraphPreservation
 import lang.py.builtin.type.bytearray
 import lang.py.FormalSW.Strings
 import lang.py.FormalSW.ScalarDicts
+import lang.py.FormalSW.HashKeys
 
 namespace FormalSW.PyAst.Mutable
 
@@ -18,6 +19,8 @@ inductive Object where
   | tuple (items : List Value)
   | bytearray (bytes : List UInt8)
   | set (items : List Constant)
+  /-- Tuple-containing sets retain their original representatives and references. -/
+  | keySet (items : List (HashKey × Value))
   | dict (entries : List (Constant × Value))
   /-- Plain instances have ordered fields and no custom special methods. -/
   | instance (origin name : String) (fields : List (String × Value))
@@ -267,11 +270,68 @@ theorem Value.strings_of_hasType (typed : Value.HasType heap (.ref address) "lis
   obtain ⟨xs, rfl⟩ := contents
   exact ⟨xs, found⟩
 
+/-- Resolve keys without invoking user-defined hashing or equality. -/
+private def collectKeys (resolve : Value → Option (Except ExceptionObject HashKey)) :
+    List Value → Option (Except ExceptionObject (List HashKey))
+  | [] => some (.ok [])
+  | value :: rest => do
+      match ← resolve value with
+      | .error exception => return .error exception
+      | .ok key => return (← collectKeys resolve rest).map (key :: ·)
+
+/-- A tuple path contains at most heap.length distinct addresses. Exhaustion
+rejects malformed cyclic tuple heaps; ordinary immutable tuples form a DAG. -/
+def keyOfFuel (heap : Heap) : Nat → Value → Option (Except ExceptionObject HashKey)
+  | _, .scalar value => some (.ok (.scalar value))
+  | 0, .ref _ => none
+  | fuel + 1, .ref address => match heap[address]? with
+      | some (.tuple items) => (collectKeys (keyOfFuel heap fuel) items).map (Except.map HashKey.tuple)
+      | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => none
+      | some _ => some (.error { typeName := "TypeError", args := [] })
+
+def keyOf (heap : Heap) (value : Value) : Option (Except ExceptionObject HashKey) :=
+  keyOfFuel heap (heap.length + 1) value
+
+def keyContains (items : List (HashKey × Value)) (key : HashKey) : Bool :=
+  items.any fun item => HashKey.equal item.1 key
+
+/-- Preserve the original representative and tuple reference on duplicate insertion. -/
+def insertKey (items : List (HashKey × Value)) (entry : HashKey × Value) : List (HashKey × Value) :=
+  if keyContains items entry.1 then items else items ++ [entry]
+
+def keyEntries : Object → Option (List (HashKey × Value))
+  | .set items => some (items.map fun item => (.scalar item, .scalar item))
+  | .keySet items => some items
+  | _ => none
+
+def compareKeySets (op : CmpOp) (left right : List (HashKey × Value)) : Bool :=
+  let subset := fun xs ys => xs.all fun item => keyContains ys item.1
+  match op with
+  | .eq => subset left right && subset right left
+  | .notEq => !(subset left right && subset right left)
+  | .lt => subset left right && !subset right left
+  | .ltE => subset left right
+  | .gt => subset right left && !subset left right
+  | .gtE => subset right left
+
+def canonicalKeys (items : List (HashKey × Value)) : List (HashKey × Value) :=
+  items.mergeSort fun left right => HashKey.before left.1 right.1
+
+/-- Cached keys match their immutable representatives; all stored references
+remain ordinary heap edges, including aliases to entry objects. -/
+def KeySetValid (heap : Heap) (items : List (HashKey × Value)) : Prop :=
+  items.Pairwise (fun left right => HashKey.equal left.1 right.1 = false) ∧
+    ∀ entry ∈ items, keyOf heap entry.2 = some (.ok entry.1) ∧
+      match entry.2 with
+      | .scalar _ => True
+      | .ref address => address < heap.length
+
 /-- Every reference points into the heap; cycles and sharing are permitted. -/
 def Heap.Valid (heap : Heap) : Prop :=
   ∀ object ∈ heap, match object with
     | .bytearray _ => True
     | .set items => ScalarSet.Valid items
+    | .keySet items => KeySetValid heap items
     | .dict entries => ScalarDict.Valid entries ∧
         ∀ entry ∈ entries, match entry.2 with
           | .scalar _ => True
@@ -303,6 +363,7 @@ def Completion.snapshot (c : Completion) : Data :=
       | .tuple items => ⟨.tuple, [], items.map Value.edge⟩
       | .dict entries => ⟨.dict, [], entries.flatMap (fun (key, value) => [.scalar key, value.edge])⟩
       | .set items => ⟨.set, [], (ScalarSet.canonical items).map Graph.Edge.scalar⟩
+      | .keySet items => ⟨.set, [], (canonicalKeys items).map (fun entry => entry.2.edge)⟩
       | .bytearray bytes => ⟨.bytearray, [], bytes.map (fun byte => .scalar (.int byte.toNat))⟩)).encode
 
 /-- Exact identical states are a fast path. Otherwise compare the rooted object
@@ -330,6 +391,7 @@ theorem Completion.equivalent_allocations (heap leftExtra rightExtra : Heap) (re
     | .tuple items => ⟨.tuple, [], items.map Value.edge⟩
     | .dict entries => ⟨.dict, [], entries.flatMap (fun (key, value) => [.scalar key, value.edge])⟩
     | .set items => ⟨.set, [], (ScalarSet.canonical items).map Graph.Edge.scalar⟩
+    | .keySet items => ⟨.set, [], (canonicalKeys items).map (fun entry => entry.2.edge)⟩
     | .bytearray bytes => ⟨.bytearray, [], bytes.map (fun byte => .scalar (.int byte.toNat))⟩
   have closed : ∀ node ∈ heap.map encode, ∀ edge ∈ node.edges, edge.Within heap.length := by
     intro node member edge edgeMember
@@ -364,6 +426,13 @@ theorem Completion.equivalent_allocations (heap leftExtra rightExtra : Heap) (re
     | set items =>
         obtain ⟨item, _, rfl⟩ := List.mem_map.mp edgeMember
         trivial
+    | keySet items =>
+        obtain ⟨entry, member, rfl⟩ := List.mem_map.mp edgeMember
+        have original : entry ∈ items := by simpa [canonicalKeys] using member
+        have within := (objectValid.2 entry original).2
+        cases value : entry.2 with
+        | scalar _ => trivial
+        | ref _ => simpa only [value] using within
   have rootsClosed : ∀ edge ∈ globals.map (fun entry => entry.2.edge) ++ [result.edge], edge.Within heap.length := by
     intro edge member
     rcases List.mem_append.mp member with global | returned
@@ -564,10 +633,30 @@ def addReceiver (value : Value) : Eval Nat := do
   match value with
   | .ref address =>
       match (← get)[address]? with
-      | some (.set _) => return address
+      | some (.set _) | some (.keySet _) => return address
       | some _ => error "AttributeError"
       | none => unsupported
   | .scalar _ => error "AttributeError"
+
+/-- Extract the immutable builtin key while retaining the original heap. -/
+def hashKey (value : Value) : Eval HashKey := fun heap =>
+  (keyOf heap value).map fun outcome => (outcome, heap)
+
+@[simp] theorem hashKey_scalar (heap : Heap) (item : Constant) :
+    hashKey (.scalar item) heap = some (.ok (.scalar item), heap) := rfl
+
+private theorem collectKeys_scalars (heap : Heap) (fuel : Nat) (items : List Constant) :
+    collectKeys (keyOfFuel heap fuel) (items.map Value.scalar) =
+      some (.ok (items.map HashKey.scalar)) := by
+  induction items with
+  | nil => rfl
+  | cons item rest ih => simp [collectKeys, keyOfFuel, ih, Except.map]
+
+/-- Reading a tuple key preserves its address and all aliases. -/
+theorem hashKey_tuple_scalars (heap : Heap) (address : Nat) (items : List Constant)
+    (found : heap[address]? = some (.tuple (items.map Value.scalar))) :
+    hashKey (.ref address) heap = some (.ok (.tuple (items.map HashKey.scalar)), heap) := by
+  simp [hashKey, keyOf, keyOfFuel, found, collectKeys_scalars, Except.map]
 
 /-- Duplicate insertion preserves the existing representative, including its type. -/
 def addItem (address : Nat) (value : Value) : Eval Value := do
@@ -577,11 +666,15 @@ def addItem (address : Nat) (value : Value) : Eval Value := do
       | .scalar item =>
           modify fun heap => heap.set address (.set (ScalarSet.insert items item))
           return .scalar .none
-      | .ref other =>
-          match (← get)[other]? with
-          | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => unsupported
-          | some _ => error "TypeError"
-          | none => unsupported
+      | .ref other => do
+          let key ← hashKey (.ref other)
+          let entries := items.map fun item => (HashKey.scalar item, Value.scalar item)
+          modify fun heap => heap.set address (.keySet (insertKey entries (key, .ref other)))
+          return .scalar .none
+  | some (.keySet items) =>
+      let key ← hashKey value
+      modify fun heap => heap.set address (.keySet (insertKey items (key, value)))
+      return .scalar .none
   | some _ => error "AttributeError"
   | none => unsupported
 
@@ -602,7 +695,7 @@ def byteValues : Value → Eval (List UInt8)
       match (← get)[address]? with
       | some (.bytearray bytes) => return bytes
       | some (.list items) | some (.tuple items) => items.mapM byte
-      | some (.set _) | some (.dict _) => unsupported
+      | some (.set _) | some (.keySet _) | some (.dict _) => unsupported
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
@@ -622,7 +715,7 @@ def array (value : Value) : Eval (Nat × List Value) := do
       | some (.list items) => return (address, items)
       | some (.bytearray _) => error "TypeError"
       | some (.tuple _) => error "TypeError"
-      | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+      | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
 
@@ -642,6 +735,7 @@ def truth (value : Value) : Eval Bool := do
       | some (.list items) | some (.tuple items) => return !items.isEmpty
       | some (.bytearray bytes) => return !bytes.isEmpty
       | some (.set items) => return !items.isEmpty
+      | some (.keySet items) => return !items.isEmpty
       | some (.dict entries) => return !entries.isEmpty
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => return true
       | none => unsupported
@@ -651,7 +745,7 @@ def invalidBinary (op : BinOp) (left : Value) : Eval Value := do
   if op == .sub then
     match left with
     | .ref address => match (← get)[address]? with
-        | some (.set _) | none => unsupported
+        | some (.set _) | some (.keySet _) | none => unsupported
         | some _ => error "TypeError"
     | _ => error "TypeError"
   else if op == .mod then
@@ -661,7 +755,7 @@ def invalidBinary (op : BinOp) (left : Value) : Eval Value := do
         match (← get)[address]? with
         | some (.bytearray _) => unsupported
         | some (.list _) | some (.tuple _) => error "TypeError"
-        | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+        | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
         | none => unsupported
     | _ => error "TypeError"
   else error "TypeError"
@@ -712,7 +806,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           | some (.tuple items) =>
               if n = 1 ∨ items.isEmpty then return .ref address
               else allocateTuple (List.replicate n.toNat items).flatten
-          | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+          | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
           | none => unsupported
         else invalidBinary op a
     | .ref address, .scalar (.bytes bytes) =>
@@ -720,7 +814,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           match (← get)[address]? with
           | some (.bytearray left) => allocateBuffer (left ++ bytes)
           | some (.list _) | some (.tuple _) => error "TypeError"
-          | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+          | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
           | none => unsupported
         else invalidBinary op a
     | .scalar (.bytes bytes), .ref address =>
@@ -728,7 +822,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           match (← get)[address]? with
           | some (.bytearray right) => return .scalar (.bytes (bytes ++ right))
           | some (.list _) | some (.tuple _) => error "TypeError"
-          | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+          | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
           | none => unsupported
         else invalidBinary op a
     | .scalar (.string s), .scalar (.int n) | .scalar (.int n), .scalar (.string s) =>
@@ -754,13 +848,13 @@ def sequence : Value → Eval (List Value)
       match (← get)[address]? with
       | some (.list items) | some (.tuple items) => pure items
       | some (.bytearray bytes) => pure (bytes.map (fun byte => .scalar (.int byte.toNat)))
-      | some (.set _) | some (.dict _) => unsupported
+      | some (.set _) | some (.keySet _) | some (.dict _) => unsupported
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
 
-/-- Set constructors keep the first scalar representative. Tuple and custom
-hashing require additional semantics; known mutable keys are unhashable. -/
+/-- Scalar-only key extraction for the set-construction fast path.
+Tuple keys use `hashKey`; known mutable keys are unhashable. -/
 def setKey : Value → Eval Constant
   | .scalar item => pure item
   | .ref address => do
@@ -768,18 +862,35 @@ def setKey : Value → Eval Constant
       | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => unsupported
       | some _ => error "TypeError"
 
-/-- Construct a fresh scalar set from builtin sequences, sets, or dictionary keys.
+private def allScalars : List Value → Bool
+  | [] => true
+  | .scalar _ :: rest => allScalars rest
+  | .ref _ :: _ => false
+
+/-- Set construction preserves the scalar fast path. Tuple-containing input is
+inserted in order into a fresh set, retaining the partial heap on errors. -/
+def allocateSetValues (items : List Value) : Eval Value := do
+  if allScalars items then
+    let keys ← items.mapM setKey
+    allocateSet (keys.foldl ScalarSet.insert [])
+  else
+    let address := (← get).length
+    let _ ← allocateSet []
+    let _ ← items.mapM (addItem address)
+    return .ref address
+
+/-- Construct a fresh set from builtin sequences, sets, or dictionary keys.
 Custom iteration stays unsupported, including on an otherwise empty object. -/
 def setFrom (source : Value) : Eval Value := do
   let items ← match source with
     | .ref address => match (← get)[address]? with
         | some (.set items) => pure (items.map Value.scalar)
+        | some (.keySet items) => pure (items.map Prod.snd)
         | some (.dict entries) => pure (entries.map fun entry => Value.scalar entry.1)
         | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => unsupported
         | _ => sequence source
     | _ => sequence source
-  let keys ← items.mapM setKey
-  allocateSet (keys.foldl ScalarSet.insert [])
+  allocateSetValues items
 
 /-- Scalar-list construction deduplicates without changing any input object. -/
 theorem setFrom_list (heap : Heap) (address : Nat) (items : List Constant)
@@ -791,7 +902,12 @@ theorem setFrom_list (heap : Heap) (address : Nat) (items : List Constant)
     induction items with
     | nil => rfl
     | cons item rest ih => simp only [List.map_cons, List.mapM_cons, setKey, ih]; rfl
-  simp [setFrom, sequence, found, keys, allocateSet, Except.map]
+  have scalars : allScalars (items.map Value.scalar) = true := by
+    clear found keys
+    induction items with
+    | nil => rfl
+    | cons item rest ih => simpa [allScalars] using ih
+  simp [setFrom, sequence, found, allocateSetValues, scalars, keys, allocateSet, Except.map]
 
 /-- Reverse iteration handles builtin sequences; dictionaries and custom
 `__reversed__`/`__getitem__` protocols need separate execution semantics. -/
@@ -800,7 +916,7 @@ def reversibleSequence (value : Value) : Eval (List Value) := do
   | .ref address =>
       match (← get)[address]? with
       | some (.list _) | some (.tuple _) | some (.bytearray _) => sequence value
-      | some (.set _) => error "TypeError"
+      | some (.set _) | some (.keySet _) => error "TypeError"
       | _ => unsupported
   | .scalar _ => sequence value
 
@@ -814,6 +930,7 @@ def length : Value → Eval Value
       | some (.list items) | some (.tuple items) => return .scalar (.int items.length)
       | some (.bytearray bytes) => return .scalar (.int bytes.length)
       | some (.set items) => return .scalar (.int items.length)
+      | some (.keySet items) => return .scalar (.int items.length)
       | some (.dict entries) => return .scalar (.int entries.length)
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
@@ -853,7 +970,7 @@ def getItem (value subscript : Value) : Eval Value := do
           match ScalarDict.lookup entries key with
           | some value => return value
           | none => throw { typeName := "KeyError", args := [key] }
-      | some (.set _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+      | some (.set _) | some (.keySet _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
   | _, _ => error "TypeError"
 
@@ -885,7 +1002,7 @@ def setItem (value subscript replacement : Value) : Eval Value := do
           let key ← dictionaryKey subscript
           modify fun heap => heap.set address (.dict (ScalarDict.insert entries key replacement))
           return .scalar .none
-      | some (.set _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+      | some (.set _) | some (.keySet _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | some (.tuple _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
@@ -952,7 +1069,7 @@ def getSlice (value lower upper stride : Value) : Eval Value := do
           let bounds ← sliceBounds lower upper stride
           allocateBuffer (← sequenceResult (Py.Builtin.Sequence.slice bytes bounds))
       | some (.dict _) => unsupported
-      | some (.set _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+      | some (.set _) | some (.keySet _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
 
 /-- A list prefix is a fresh object; all existing references keep their contents. -/
@@ -996,7 +1113,7 @@ def setSlice (value lower upper stride replacement : Value) : Eval Value := do
           modify fun heap => heap.set address (.bytearray result)
           return .scalar .none
       | some (.dict _) => unsupported
-      | some (.set _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+      | some (.set _) | some (.keySet _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | some (.tuple _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
@@ -1017,7 +1134,7 @@ def appendReceiver (value : Value) : Eval Nat := do
   | .ref address =>
       match (← get)[address]? with
       | some (.list _) | some (.bytearray _) => return address
-      | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "AttributeError"
+      | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "AttributeError"
       | none => unsupported
   | .scalar _ => error "AttributeError"
 
@@ -1030,7 +1147,7 @@ def appendItem (address : Nat) (value : Value) : Eval Value := do
       let byte ← byte value
       modify fun heap => heap.set address (.bytearray (bytes ++ [byte]))
       return .scalar .none
-  | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "AttributeError"
+  | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "AttributeError"
   | none => unsupported
 
 /-- Remove an element from the live sequence, retaining all remaining references.
