@@ -1,7 +1,7 @@
 import lang.py.FormalSW.MutableGlobals
 import lang.py.FormalSW.ScalarSort
 
-/-! Stable sorting retains heap references. List comparisons inspect equal
+/-! Stable sorting retains heap references. List and tuple comparisons inspect equal
 prefixes before ordering the first unequal elements, as Python does. -/
 namespace FormalSW.PyAst.HeapSort
 abbrev Value := Mutable.Value
@@ -25,7 +25,7 @@ def lex (equal less : Value → Value → Result Bool) (equality : Bool) :
       | some (.ok true) => lex equal less equality as bs
       | some (.ok false) => if equality then some (.ok false) else less a b
 
-/-- Acyclic list nesting uses at most one level per heap object. Exhausting this
+/-- Acyclic sequence nesting uses at most one level per heap object. Exhausting this
 heap-derived bound leaves recursive comparisons unsupported. -/
 def compare : Nat → Heap → Bool → Value → Value → Result Bool
   | 0, _, _, _, _ => none
@@ -37,14 +37,17 @@ def compare : Nat → Heap → Bool → Value → Value → Result Bool
           | none => typeError
       | .ref a, .ref b =>
           match heap[a]?, heap[b]? with
-          | some (.list xs), some (.list ys) =>
+          | some (.list xs), some (.list ys) | some (.tuple xs), some (.tuple ys) =>
               if equality && a == b then some (.ok true)
               else if equality && xs.length != ys.length then some (.ok false)
               else lex (compare depth heap true) (compare depth heap false) equality xs ys
+          | some (.list _), some (.tuple _) | some (.tuple _), some (.list _) =>
+              if equality then some (.ok false) else typeError
+          | some _, some _ => if equality && a == b then some (.ok true) else none
           | _, _ => none
       | .ref address, .scalar _ | .scalar _, .ref address =>
           match heap[address]? with
-          | some (.list _) => if equality then some (.ok false) else typeError
+          | some (.list _) | some (.tuple _) => if equality then some (.ok false) else typeError
           | _ => none
 
 def insert (heap : Heap) (value : Value) : List Value → Result (List Value)
@@ -111,6 +114,13 @@ theorem lex_ints (heap : Heap) (depth : Nat) (xs ys : List Int) :
 theorem compare_int_lists (heap : Heap) (a b depth : Nat) (xs ys : List Int)
     (left : heap[a]? = some (.list (xs.map fun n => .scalar (.int n))))
     (right : heap[b]? = some (.list (ys.map fun n => .scalar (.int n)))) :
+    compare (depth + 2) heap false (.ref a) (.ref b) = some (.ok (lexInt xs ys)) := by
+  simpa [compare, left, right] using lex_ints heap depth xs ys
+
+/-- Integer tuples use the same lexicographic order as integer lists. -/
+theorem compare_int_tuples (heap : Heap) (a b depth : Nat) (xs ys : List Int)
+    (left : heap[a]? = some (.tuple (xs.map fun n => .scalar (.int n))))
+    (right : heap[b]? = some (.tuple (ys.map fun n => .scalar (.int n)))) :
     compare (depth + 2) heap false (.ref a) (.ref b) = some (.ok (lexInt xs ys)) := by
   simpa [compare, left, right] using lex_ints heap depth xs ys
 

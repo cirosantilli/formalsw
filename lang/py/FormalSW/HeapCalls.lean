@@ -140,6 +140,15 @@ private def equalKeyDictionaries (left right : List (HashDict.Entry Value)) : Op
   | .notEq => pure (.scalar (.bool true))
   | _ => Mutable.error "TypeError"
 
+/-- Nested builtin sequences have no comparison effects. Comparisons exceeding
+the heap-derived depth bound or needing unmodeled element protocols remain unsupported. -/
+def sequenceCompare (equality : Bool) (left right : Value) : Eval Value := do
+  let heap ← get
+  match HeapSort.compare (heap.length+1) heap equality left right with
+  | none => Mutable.unsupported
+  | some (.error exception) => throw exception
+  | some (.ok answer) => return .scalar (.bool answer)
+
 def compare (op : CmpOp) (left right : Value) : Eval Value := do
   match left, right with
   | .scalar a, .scalar b => compareScalars op a b
@@ -196,16 +205,28 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
       | some (.tuple xs), some (.tuple ys) =>
           match op with
           | .eq | .notEq =>
-              let some equal := if a = b then some true else equalLists xs ys | Mutable.unsupported
+              let some equal := if a = b then some true else equalLists xs ys |
+                let result ← sequenceCompare true left right
+                match op with
+                | .eq => pure result
+                | _ => unary .not result
               return .scalar (.bool (if op == .eq then equal else !equal))
+          | .lt => sequenceCompare false left right
+          | .gt => sequenceCompare false right left
           | _ => Mutable.unsupported
       | some (.list _), some (.list _) =>
           let (_, xs) ← Mutable.array left
           let (_, ys) ← Mutable.array right
           match op with
           | .eq | .notEq =>
-              let some equal := if a = b then some true else equalLists xs ys | Mutable.unsupported
+              let some equal := if a = b then some true else equalLists xs ys |
+                let result ← sequenceCompare true left right
+                match op with
+                | .eq => pure result
+                | _ => unary .not result
               return .scalar (.bool (if op == .eq then equal else !equal))
+          | .lt => sequenceCompare false left right
+          | .gt => sequenceCompare false right left
           | _ => Mutable.unsupported
       | none, _ | _, none => Mutable.unsupported
       | _, _ => compareDifferent op

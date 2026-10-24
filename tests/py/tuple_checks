@@ -49,12 +49,11 @@ def fail(xs: list[int], n: int) -> int:
 def sliced(n: int):
     pair = (n, n + 1)
     return pair[:]
-def ordered(n: int):
-    return (n,) < (n + 1, n)
 def formatted(n: int):
     return "%s" % (n,)
 '''
 bodies = {
+    'ordered': 'return (n,) < (n + 1, n)',
     'constructor_list': 'return tuple(xs)',
     'constructor_empty': 'return [tuple(), tuple([]), ()]',
     'constructor_identity': 'a = (n, xs)\nreturn [a, tuple(a)]',
@@ -142,7 +141,7 @@ for name, initial, n in itertools.product(bodies, ([], [4]), (-1, 0, 1, 2)):
     ])
     count += 1
 
-for name in ('sliced', 'ordered', 'formatted'):
+for name in ('sliced', 'formatted'):
     lines.append(f'example : (HeapCalls.call source "{name}" [.scalar (.int 2)] []).execution.observe 100 = .unsupported := by decide')
 
 # Preserve existing scalar tuple swaps, and require heap execution for tuples

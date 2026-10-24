@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+Compare nested sequence ordering and stable tuple sorting with Python.
+"""
+import ast
+import itertools
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    characters = ', '.join(f'Char.ofNat {ord(character)}' for character in value)
+    return f'.string (String.ofList [{characters}])'
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+class Empty:
+    def __init__(self):
+        self.value = 0
+def touch(log: list[int], value: int):
+    log.append(value)
+    return value
+def fail(log: list[int], value: int):
+    log.append(value)
+    return value // 0
+def recursive():
+    a = []
+    a.append(a)
+    b = []
+    b.append(b)
+    return (a, 0) < (b, 0)
+def at_most(n: int):
+    return (n,) <= (n + 1,)
+def at_least(n: int):
+    return (n,) >= (n + 1,)
+'''
+templates = {
+    'flat': 'return (n, m) {op} (m, n)',
+    'empty': 'return () {op} (n,)',
+    'prefix': 'return (n,) {op} (n, m)',
+    'numeric': 'return (n, True) {op} (m, 1)',
+    'nested': 'return (0, (n, n + 1)) {op} (0, (m, m + 1))',
+    'list_inside': 'return ([n, m],) {op} ([m, n],)',
+    'tuple_inside': 'return [(n, m)] {op} [(m, n)]',
+    'different_sequence': 'return (n, [m]) {op} (n, (m,))',
+    'skipped_error': 'return ((n,), None) {op} ((m,), "x")',
+    'bad_element': 'return (n, None) {op} (n, True)',
+    'shared_list': 'return (log, n) {op} (log, m)',
+    'shared_dict': 'x = {{n: m}}\nreturn (x, n) {op} (x, m)',
+    'shared_set': 'x = set([n])\nreturn (x, n) {op} (x, m)',
+    'shared_instance': 'x = Empty()\nreturn (x, n) {op} (x, m)',
+    'shared_cycle': 'x = []\nx.append(x)\nreturn (x, n) {op} (x, m)',
+    'effects': 'return ((touch(log, n),), touch(log, m)) {op} ((touch(log, m),), touch(log, n))',
+    'failure': 'return (touch(log, n), fail(log, m)) {op} (touch(log, m), touch(log, n))',
+    'incompatible': 'return (n,) {op} n',
+}
+bodies = {}
+for template, operator in itertools.product(templates, ('<', '>', '==', '!=')):
+    name = template + {'<': '_lt', '>': '_gt', '==': '_eq', '!=': '_ne'}[operator]
+    bodies[name] = templates[template].format(op=operator)
+bodies.update({
+    'sorted_pairs': 'return sorted([(n, False), (m, 0), (n, True)])',
+    'sorted_nested': 'return sorted([(0, (n,)), (0, (m,)), (0, (n, m))])',
+    'sorted_prefix': 'return sorted([(n, m), (n,), (), (m,)])',
+    'sorted_shared': 'return sorted([(log, n), (log, m), (log, n)])',
+    'sorted_error': 'return sorted([(n, None), (n, True)])',
+})
+for name, body in bodies.items():
+    source += f'def {name}(n: int, m: int, log: list[int]):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+for node in program.body:
+    if isinstance(node, ast.ClassDef):
+        node.formalsw_origin = str(Path(__file__).resolve())
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name, heap_calls=True), (name, checker.check(name, heap_calls=True))
+    assert uses_heap_calls(program, next(node for node in program.body if getattr(node, 'name', None) == name)), name
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option Elab.async false',
+         'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+comparisons = 0
+for name, n, m in itertools.product(bodies, (-1, 0, 2), (-2, 0, 1)):
+    log = [4]
+    try:
+        result = world[name](n, m, log)
+        error = None
+    except (TypeError, ZeroDivisionError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots([log] + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [.scalar (.int ({n})), .scalar (.int ({m})), .ref 0] [.list [.scalar (.int 4)]]'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, n={n}, m={m}',
+        f'example : (match ({call}).execution.observe 2000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    comparisons += 1
+for name, arguments in (('recursive', ''), ('at_most', '.scalar (.int 1)'), ('at_least', '.scalar (.int 1)')):
+    lines.append(f'example : (HeapCalls.call source "{name}" [{arguments}] []).execution.observe 1000 = .unsupported := by decide')
+
+with project_temporary_directory(prefix='tuple-order-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines)+'\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{comparisons} sequence ordering and tuple sorting comparisons passed, including sharing and effects.')

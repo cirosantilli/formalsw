@@ -38,6 +38,7 @@ roots = [
   "lang.py.FormalSW.ScalarDicts",
   "lang.py.FormalSW.ScalarSort",
   "lang.py.FormalSW.HeapSort",
+  "lang.py.FormalSW.TupleComparisons",
   "lang.py.FormalSW.MutableGlobals",
   "lang.py.FormalSW.ContainerTypes",
   "lang.py.FormalSW.Permutations",
