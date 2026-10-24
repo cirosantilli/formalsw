@@ -690,6 +690,9 @@ class SupportChecker:
             if uses_builtin(self.module, function, 'int') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'integer conversion requires a call interpreter'))
+            if uses_builtin(self.module, function, 'isinstance') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'integer type tests require a call interpreter'))
             if uses_builtin(self.module, function, 'ord') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'ordinal conversion requires a call interpreter'))
@@ -790,6 +793,10 @@ class SupportChecker:
                        for f in (target, other) if f in self.functions):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
                         'legacy Function properties omit ordinal conversion; use the short DSL or Calls'))
+                if any(uses_builtin(self.module, self.functions[f], 'isinstance')
+                       for f in (target, other) if f in self.functions):
+                    issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
+                        'legacy Function properties omit integer type tests; use the short DSL or Calls'))
                 for method in ('bit_length', 'bit_count'):
                     if any(uses_method(self.module, self.functions[f], method)
                            for f in (target, other) if f in self.functions):

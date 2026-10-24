@@ -131,6 +131,8 @@ inductive Builtin where
   | abs
   | bin
   | int
+  /-- Resolved `isinstance(value, int)`; the builtin type object is not an operand. -/
+  | isinstanceInt
   | str
   | ord
   | max
@@ -521,6 +523,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
   | "BuiltinCall" =>
       let builtin ← match ← jsonString json "name" with
         | "int" => pure Builtin.int
+        | "$formalsw.isinstance.int" => pure Builtin.isinstanceInt
         | "len" => pure Builtin.len
         | "str" => pure Builtin.str
         | "all" => pure Builtin.all

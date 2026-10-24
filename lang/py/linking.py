@@ -40,8 +40,14 @@ def scope_names(module):
 
 def free_calls(module):
     """Names resolved outside this module must not capture linked declarations."""
-    return {node.func.id for node in ast.walk(module)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)} - scope_names(module)
+    from lang.py.call_support import integer_instance
+    names = {node.func.id for node in ast.walk(module)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+    # The classinfo name is a resolved builtin dependency even though it is
+    # lowered away rather than represented as a first-class Python type object.
+    if not bindings(module, 'isinstance') and any(integer_instance(node) for node in ast.walk(module)):
+        names.add('int')
+    return names - scope_names(module)
 
 
 def shared_library_bindings(left, right):

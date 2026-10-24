@@ -65,6 +65,11 @@ def absoluteValue : Constant → Except ExceptionObject Constant
   | .bool value => .ok (.int (if value then 1 else 0))
   | _ => .error { typeName := "TypeError", args := [] }
 
+/-- Booleans are instances of builtin `int`; other modeled scalar types are not. -/
+def isInteger : Constant → Bool
+  | .int _ | .bool _ => true
+  | _ => false
+
 /-- The modulus may be None; otherwise integer and Boolean arguments use exact modular arithmetic. -/
 def modularPower (base exponent modulus : Constant) : Option (Except ExceptionObject Constant) :=
   match modulus with
@@ -82,6 +87,8 @@ def Primitive.apply : Primitive → List Constant → Option (Except ExceptionOb
   | .builtin .identity, [left, right] => (scalarIdentity left right).map (fun value => .ok (.bool value))
   | .builtin .len, [value] => some (length value)
   | .builtin .int, values => integerConversion values
+  | .builtin .isinstanceInt, [value] => some (.ok (.bool (isInteger value)))
+  | .builtin .isinstanceInt, _ => some (.error { typeName := "TypeError", args := [] })
   | .builtin .str, values => some (Strings.str values)
   | .builtin .bin, values => some (Strings.bin values)
   | .builtin .pow, [base, exponent] => scalarBinary .pow base exponent

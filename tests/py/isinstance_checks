@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""
+Compare builtin int type tests, effects, exceptions, and binding resolution with Python.
+"""
+import argparse
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.contracts import ContractError
+from lang.py.linking import link_imports
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--frontend-only', action='store_true', help='skip Lean execution comparisons')
+options = parser.parse_args()
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+source = '''
+def scalar(value: int) -> bool:
+    return isinstance(value, int)
+def heap_scalar(value: int) -> bool:
+    items = [value]
+    return isinstance(items[0], int)
+def list_value(value: int) -> bool:
+    return isinstance([value], int)
+def tuple_value(value: int) -> bool:
+    return isinstance((value,), int)
+def set_value(value: int) -> bool:
+    return isinstance({value}, int)
+def dictionary_value(value: int) -> bool:
+    return isinstance({value: value}, int)
+def buffer_value(value: int) -> bool:
+    return isinstance(bytearray(b"x"), int)
+class Box:
+    def __init__(self, value: int):
+        self.value = value
+def instance_value(value: int) -> bool:
+    return isinstance(Box(value), int)
+def record(items: list[int], value: int) -> int:
+    items.append(value)
+    return value
+def record_list(items: list[int], value: int) -> list[int]:
+    items.append(value)
+    return items
+def fail(items: list[int], value: int) -> int:
+    items.append(value)
+    return value // 0
+def effects(items: list[int], value: int) -> bool:
+    return isinstance(record(items, value), int)
+def reference_effects(items: list[int], value: int) -> bool:
+    return isinstance(record_list(items, value), int)
+def argument_error(items: list[int], value: int) -> bool:
+    return isinstance(fail(items, value), int)
+def skipped_effect(items: list[int], value: int) -> bool:
+    return isinstance(fail(items, value) + record(items, 99), int)
+'''
+program = ast.parse(source)
+for node in program.body:
+    if isinstance(node, ast.ClassDef):
+        node.formalsw_origin = str(Path(__file__).resolve())
+world = {}
+exec(source, world)
+checker = SupportChecker(program)
+for node in program.body:
+    if isinstance(node, ast.FunctionDef):
+        assert not checker.check(node.name), (node.name, checker.check(node.name))
+
+lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst',
+         'set_option maxRecDepth 8192',
+         'def program : Module := pyast_from_json% (include_str "source.json")']
+values = [None, False, True, -1, 0, 1, 2**130, -(10**100), '', 'λ', b'', b'x']
+count = 0
+for value in values:
+    answer = str(isinstance(value, int)).lower()
+    for model in ('Calls.function', 'HeapCalls.scalarFunction'):
+        lines.append(f'example : ({model} program "scalar" [{constant(value)}]).observe 80 = '
+                     f'.done (.ok (.bool {answer})) := by decide')
+        count += 1
+    lines.append(f'example : (HeapCalls.scalarFunction program "heap_scalar" [{constant(value)}]).observe 120 = '
+                 f'.done (.ok (.bool {answer})) := by decide')
+    lines.append(f'example : Calls.Primitive.apply (.builtin .isinstanceInt) [{constant(value)}] = '
+                 f'some (.ok (.bool {answer})) := by decide')
+    count += 2
+
+for name in ('list_value', 'tuple_value', 'set_value', 'dictionary_value', 'buffer_value', 'instance_value'):
+    for value in (-7, 0, 10**100):
+        answer = str(world[name](value)).lower()
+        lines.append(f'example : (HeapCalls.scalarFunction program "{name}" [.int ({value})]).observe 200 = '
+                     f'.done (.ok (.bool {answer})) := by decide')
+        count += 1
+
+for name in ('effects', 'reference_effects', 'argument_error', 'skipped_effect'):
+    for value in (-7, 0, 10**100):
+        items = [42]
+        try:
+            answer = '.ok (.scalar (.bool ' + str(world[name](items, value)).lower() + '))'
+        except ZeroDivisionError as error:
+            answer = f'.error ⟨"{type(error).__name__}", []⟩'
+        contents = ', '.join('.scalar (' + constant(item) + ')' for item in items)
+        lines.append(f'example : (HeapCalls.call program "{name}" [.ref 0, .scalar (.int ({value}))] '
+                     f'[.list [.scalar (.int 42)]]).execution.observe 200 = '
+                     f'.done (.ok ⟨{answer}, [], [.list [{contents}]], 1⟩) := by decide')
+        count += 1
+
+# Every modeled heap object is outside the builtin int/bool hierarchy.
+objects = ['.list []', '.tuple []', '.bytearray []', '.set []', '.keySet []', '.dict []', '.keyDict []',
+           '.instance "origin" "Box" []', '.dataInstance "origin" "Box" false [] []']
+for obj in objects:
+    lines.append(f'example : HeapCalls.primitive (.builtin .isinstanceInt) [.ref 0] [{obj}] = '
+                 f'some (.ok (.scalar (.bool false)), [{obj}]) := by decide')
+    count += 1
+for arguments in ('[]', '[.int 1, .int 2]'):
+    lines.append(f'example : Calls.Primitive.apply (.builtin .isinstanceInt) {arguments} = '
+                 'some (.error ⟨"TypeError", []⟩) := by decide')
+for arguments in ('[]', '[.scalar (.int 1), .scalar (.int 2)]'):
+    lines.append(f'example : HeapCalls.primitive (.builtin .isinstanceInt) {arguments} [] = '
+                 'some (.error ⟨"TypeError", []⟩, []) := by decide')
+count += 4
+
+base = 'def f(value: int) -> bool:\n    return isinstance(value, int)\n'
+base_module = ast.parse(base)
+assert not SupportChecker(base_module).check('f')
+lowered = api['AstJsonEmitter'](base_module).expr(base_module.body[0].body[0].value)
+assert lowered == {'type': 'BuiltinCall', 'name': '$formalsw.isinstance.int',
+                   'args': [{'type': 'Name', 'id': 'value'}]}
+assert api['uses_calls_model'](base_module, base_module.body[0])
+for call in ('isinstance()', 'isinstance(value)', 'isinstance(value, int, int)',
+             'isinstance(value, str)', 'isinstance(value, bool)', 'isinstance(value, (int,))',
+             'isinstance(value, int | str)', 'isinstance(value, 1)', 'isinstance(value, int())',
+             'isinstance(value, classinfo=int)', 'isinstance(object=value, classinfo=int)',
+             'isinstance(*value)', 'isinstance(value, *value)', 'isinstance(value, **value)'):
+    changed = base.replace('isinstance(value, int)', call)
+    assert SupportChecker(ast.parse(changed)).check('f'), changed
+for name in ('isinstance', 'int'):
+    for binding in (f'{name} = 0\n', f'from other import {name}\n', 'from other import *\n',
+                    f'if True:\n    {name} = 0\n', f'def rebind():\n    global {name}\n    {name} = 0\n'):
+        assert SupportChecker(ast.parse(binding + base)).check('f'), binding
+    for changed in (base.replace('f(value: int)', f'f(value: int, {name}: int)'),
+                    base.replace('return isinstance', f'{name} = value\n    return isinstance'),
+                    base + f'    {name} = value\n',
+                    f'def f(value: int) -> list[bool]:\n    return [isinstance(value, int) for {name} in [1]]\n'):
+        assert SupportChecker(ast.parse(changed)).check('f'), changed
+custom_type = 'class Other:\n    pass\ndef f(value: int) -> bool:\n    return isinstance(value, Other)\n'
+assert SupportChecker(ast.parse(custom_type)).check('f')
+assert SupportChecker(ast.parse('def int(value: int) -> int: return value\n' + base)).check('f')
+
+# A module-level function with this spelling keeps normal call semantics,
+# including ordinary data bindings in the position called classinfo by Python.
+ordinary_source = '''
+def isinstance(value: int, tag: int) -> bool:
+    return value == tag
+def f(value: int) -> bool:
+    int = 7
+    return isinstance(value, int)
+'''
+ordinary = ast.parse(ordinary_source)
+assert not SupportChecker(ordinary).check('f')
+assert api['AstJsonEmitter'](ordinary).expr(ordinary.body[-1].body[-1].value)['type'] == 'Call'
+for model in ('scalarFunction', 'scalarFunctionWithGlobals'):
+    marker = f'theorem wrong : ({model} Probe.module "f" [.int value]).Returns'
+    assert SupportChecker(ast.parse(base)).requirement('f', marker)
+assert SupportChecker(ast.parse(base)).requirement('f', 'theorem wrong : FormalSW.Property.Function.Throws Probe.module "f"')
+
+with project_temporary_directory(prefix='isinstance-check-') as temporary:
+    directory = Path(temporary)
+    # Preserve both the callee binding and the classinfo binding when linking.
+    main = directory / 'main.py'
+    helper = directory / 'helper.py'
+    for name in ('isinstance', 'int'):
+        for source_text, helper_text in (
+            ('from helper import g\n' + base.replace('isinstance(value, int)', 'isinstance(g(value), int)'),
+             f'def g(value: int) -> int: return value\ndef {name}(value: int) -> int: return value\n'),
+            (f'from helper import g\ndef f(value: int) -> bool: return g(value)\ndef {name}(value: int) -> int: return value\n',
+             'def g(value: int) -> bool: return isinstance(value, int)\n'),
+        ):
+            main.write_text(source_text)
+            helper.write_text(helper_text)
+            try:
+                link_imports(main, ast.parse(source_text), lambda path: ast.parse(path.read_text()))
+            except ContractError as error:
+                assert 'conflicting module bindings' in str(error), error
+            else:
+                raise AssertionError(f'linking captured builtin {name}')
+    if not options.frontend_only:
+        (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+        (directory / 'ordinary.json').write_text(api['AstJsonEmitter'](ordinary).emit())
+        lines.extend(['def ordinary : Module := pyast_from_json% (include_str "ordinary.json")',
+                      'example : (Calls.function ordinary "f" [.int 7]).observe 80 = .done (.ok (.bool true)) := by decide',
+                      'example : (Calls.function ordinary "f" [.int 8]).observe 80 = .done (.ok (.bool false)) := by decide'])
+        proof = directory / 'Checks.lean'
+        proof.write_text('\n'.join(lines) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+print(f'isinstance(int): frontend/binding checks passed; {count} execution comparisons '
+      + ('prepared (frontend-only)' if options.frontend_only else 'passed'))

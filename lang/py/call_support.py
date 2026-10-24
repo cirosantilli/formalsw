@@ -34,6 +34,13 @@ def plain_fstring(node):
         for part in node.values)
 
 
+def integer_instance(node):
+    """Recognize the restricted builtin type test without evaluating classinfo."""
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'isinstance' and len(node.args) == 2 and not node.keywords
+            and isinstance(node.args[1], ast.Name) and node.args[1].id == 'int')
+
+
 @dataclass(frozen=True)
 class RangeSum:
     name: str
@@ -515,7 +522,7 @@ def uses_calls_model(module, function):
         or identity_comparison(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and library_name(node.func) in names | {'bool', 'int', 'str', 'bin', 'ord', 'abs', 'pow', 'max', 'min', 'len'}
+        or isinstance(node, ast.Call) and library_name(node.func) in names | {'bool', 'int', 'str', 'bin', 'ord', 'abs', 'pow', 'max', 'min', 'len', 'isinstance'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -959,6 +966,14 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'abs requires exactly one positional argument')
                 for item in node.args:
                     recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'isinstance':
+                for builtin in ('isinstance', 'int'):
+                    if builtin in scope or bindings(module, builtin):
+                        reject(node, f'integer type tests require the unshadowed builtin {builtin}')
+                if not integer_instance(node):
+                    reject(node, 'isinstance supports exactly two positional arguments with builtin int as classinfo')
+                if node.args:
+                    recurse(node.args[0])
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'bin':
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, 'binary conversion requires the unshadowed builtin bin')

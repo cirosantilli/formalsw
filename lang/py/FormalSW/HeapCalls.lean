@@ -1009,6 +1009,9 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .pow, _ => Mutable.error "TypeError"
   | .builtin .abs, [.scalar value] => scalarResult (some (Calls.absoluteValue value))
   | .builtin .abs, _ => Mutable.error "TypeError"
+  | .builtin .isinstanceInt, [.scalar value] => pure (.scalar (.bool (Calls.isInteger value)))
+  | .builtin .isinstanceInt, [.ref _] => pure (.scalar (.bool false))
+  | .builtin .isinstanceInt, _ => Mutable.error "TypeError"
   | .builtin .bin, [.scalar value] => scalarResult (some (Strings.bin [value]))
   | .builtin .bin, [.ref address] => do
       match (← get)[address]? with
