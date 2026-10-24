@@ -397,6 +397,8 @@ def check_calls(module, function, reject, *, heap=False):
         if id(function) in visited:
             return
         visited.add(id(function))
+        if hasattr(function, "formalsw_local_function_error"):
+            reject(function, function.formalsw_local_function_error)
         if owner is None and sum(isinstance(node, ast.FunctionDef) and node.name == function.name
                for node in module.body) != 1:
             reject(function, 'call targets must have one module-level definition')
@@ -448,6 +450,8 @@ def check_calls(module, function, reject, *, heap=False):
         if locals_ & (functions.keys() | classes.keys()):
             reject(function, 'local bindings must not shadow module-level call targets')
         for index, arg in enumerate(function.args.args):
+            if getattr(arg, "formalsw_capture", False):
+                continue
             if owner is not None and index == 0:
                 continue
             if heap and isinstance(arg.annotation, ast.Name) and arg.annotation.id in classes:

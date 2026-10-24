@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""
+Compare lexical lifting with Python and Lean, including late binding and aliases.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.local_functions import lower_local_functions
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+source = (REPO / 'tests/py/local_functions.py').read_text()
+original = {}
+exec(source, original)
+module = ast.parse(source)
+lower_local_functions(module)
+translated = {}
+exec(compile(module, '<lowered>', 'exec'), translated)
+lines = ['import FormalSW', 'open FormalSW.PyAst',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name in ('shifted', 'shared'):
+    assert not SupportChecker(module).check(name), SupportChecker(module).check(name)
+    for n in (*range(-6, 7), -(2**90), 2**90):
+        expected = original[name](n)
+        assert translated[name](n) == expected
+        execution = 'Calls.function' if name == 'shifted' else 'HeapCalls.scalarFunction'
+        lines.append(f'example : ({execution} source "{name}" [.int ({n})]).observe 400 = '
+                     f'.done (.ok (.int ({expected}))) := by native_decide')
+        count += 1
+
+base = '''
+from __future__ import annotations
+
+def outer(n: int) -> int:
+    offset = n
+    def inner(x: int) -> int:
+        return x + offset
+    return inner(n)
+'''
+bad = [
+    base.replace('return inner(n)', 'return inner'),
+    base.replace('return inner(n)', 'alias = inner\n    return alias(n)'),
+    base.replace('return inner(n)', 'inner = n\n    return inner(n)'),
+    base.replace('return inner(n)', 'return inner(x=n)'),
+    base.replace('return x + offset', 'return inner(x - 1)'),
+    base.replace('return x + offset', 'nonlocal offset\n        offset += x\n        return offset'),
+    base.replace('def inner(x: int)', 'def inner(x: int = offset)'),
+    base.replace('    def inner', '    @unknown\n    def inner'),
+    base.replace('    offset = n\n', '').replace('    return inner(n)', '    offset = n\n    return inner(n)'),
+    base.replace('    offset = n\n', '    return inner(n)\n    offset = n\n'),
+    base.replace('    return inner(n)', '    del offset\n    return inner(n)'),
+    base.replace('from __future__ import annotations\n', ''),
+    base.replace('    def inner', '    if n:\n        def inner').replace('        return x + offset', '            return x + offset'),
+    base.replace('    return inner(n)', '    return [inner(n) for inner in [n]][0]'),
+    base.replace('    return inner(n)', '    def other(x: int) -> int:\n        return inner(x)\n    return other(n)'),
+]
+for text in bad:
+    candidate = ast.parse(text)
+    before = ast.dump(candidate)
+    lower_local_functions(candidate)
+    assert ast.dump(candidate) == before, text
+    assert SupportChecker(candidate).check('outer'), text
+
+# A parameter capture and comprehension-bound name share a spelling correctly.
+extra = base.replace('return x + offset', 'return sum(offset for offset in range(x)) + offset')
+module_extra = ast.parse(extra)
+lower_local_functions(module_extra)
+left, right = {}, {}
+exec(extra, left)
+exec(compile(module_extra, '<comprehension>', 'exec'), right)
+for n in range(-3, 9):
+    assert left['outer'](n) == right['outer'](n)
+
+with project_temporary_directory(prefix='local-functions-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+subprocess.run([str(REPO / 'formalsw'), 'tests/py/local_functions.py'], cwd=REPO, check=True)
+print(f'Local functions: {count} Python/Lean comparisons and {len(bad)} rejections passed')

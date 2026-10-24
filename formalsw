@@ -19,6 +19,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
+from lang.py.local_functions import lower_local_functions
 from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
@@ -745,6 +746,7 @@ def source_module(source):
             module.formalsw_source_text = text
             identify_classes(module, path)
             prepare_specification(source, module)
+            lower_local_functions(module)
             if proof_path_for_source(path).is_file() or any(
                     getattr(node, 'formalsw_markers', ()) for node in (module, *module.body)):
                 link_imports(path, module, source_module)
