@@ -498,6 +498,14 @@ def uses_set_iteration(module, function):
     return False
 
 
+def dictionary_values_receiver(node):
+    """Recognize a zero-argument values call in an immediate iterator context."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'values' and not node.args and not node.keywords):
+        return node.func.value
+    return None
+
+
 def uses_heap_calls(module, function):
     """Find list allocation or use in the transitive local call graph."""
     if needs_heap_globals(module, function):

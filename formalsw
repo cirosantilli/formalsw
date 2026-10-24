@@ -22,7 +22,7 @@ from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
 from lang.py.named_callbacks import lower_named_callbacks
-from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, generator_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration, uses_heap_memoized, memo_heap_runtime, heap_pool_functions, observable_pool_tuples
+from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, generator_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration, uses_heap_memoized, memo_heap_runtime, heap_pool_functions, observable_pool_tuples, dictionary_values_receiver
 from lang.py.permutation_support import permutation_arguments
 from lang.py.call_support import reverse_keyword, integer_instance
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
@@ -1442,6 +1442,7 @@ class AstJsonEmitter:
                     "target": self.expr(target),
                     "iter": (self.iterator_expr(iter_expr)
                              if permutation_arguments(iter_expr, self.bindings_module) is not None
+                             or dictionary_values_receiver(iter_expr) is not None
                              or isinstance(iter_expr, ast.Call) and iter_expr.keywords
                              else self.expr(iter_expr)),
                     "body": [self.stmt(child) for child in body],
@@ -1544,7 +1545,7 @@ class AstJsonEmitter:
                     "reverse": self.expr(sorting.reverse)}
         maximum = generator_extremum(expr)
         if maximum is not None and not bindings(self.bindings_module, expr.func.id):
-            encoded = self.expr(ast.ListComp(elt=maximum.generator.elt, generators=maximum.generator.generators))
+            encoded = self.generator_comprehension(maximum.generator)
             generators = encoded['generators']
             if encoded['type'] == 'ListComp':
                 generators = [{'target': {'type': 'Name', 'id': item['name']},
@@ -1568,7 +1569,7 @@ class AstJsonEmitter:
         if summed is not None and not bindings(self.bindings_module, "sum"):
             iterable, start = summed
             if isinstance(iterable, ast.GeneratorExp):
-                encoded = self.expr(ast.ListComp(elt=iterable.elt, generators=iterable.generators))
+                encoded = self.generator_comprehension(iterable)
                 kind = "SumGeneratorTargets" if encoded["type"] == "ListCompTargets" else "SumGenerator"
                 return {**encoded, "type": kind, "start": self.expr(start)}
             return {"type": "SumSequence", "iter": self.expr(iterable), "start": self.expr(start)}
@@ -1583,7 +1584,7 @@ class AstJsonEmitter:
         if consumed is not None:
             consumer, generator = consumed
             if not isinstance(consumer, ast.Name) or not bindings(self.bindings_module, consumer.id):
-                encoded = self.expr(ast.ListComp(elt=generator.elt, generators=generator.generators))
+                encoded = self.generator_comprehension(generator)
                 generators = encoded["generators"]
                 if encoded["type"] == "ListComp":
                     generators = [{"target": {"type": "Name", "id": item["name"]},
@@ -1655,9 +1656,12 @@ class AstJsonEmitter:
                     raise UnsupportedSyntax('comprehensions require synchronous loops with names or flat tuple/list targets')
                 if isinstance(expr, ast.SetComp) or any(not isinstance(generator.target, ast.Name)
                        or zip_iterable(generator.iter, self.bindings_module)
+                       or (not getattr(expr, 'formalsw_generator_context', False)
+                           and dictionary_values_receiver(generator.iter) is not None)
                        or permutation_arguments(generator.iter, self.bindings_module) is not None for generator in generators):
                     return {"type": "SetComp" if isinstance(expr, ast.SetComp) else "ListCompTargets", "elt": self.expr(elt), "generators": [
-                        {"target": self.expr(generator.target), "iter": self.iterator_expr(generator.iter),
+                        {"target": self.expr(generator.target), "iter": self.iterator_expr(generator.iter,
+                             dictionary_values=not getattr(expr, 'formalsw_generator_context', False)),
                          "ifs": [self.expr(condition) for condition in generator.ifs]}
                         for generator in generators]}
                 return {"type": "ListComp", "elt": self.expr(elt), "generators": [
@@ -1748,7 +1752,7 @@ class AstJsonEmitter:
             case _:
                 raise UnsupportedSyntax(f"unsupported expression: {ast.dump(expr)}")
 
-    def iterator_expr(self, node: ast.expr) -> dict[str, object]:
+    def iterator_expr(self, node: ast.expr, *, dictionary_values: bool = True) -> dict[str, object]:
         """Retain fresh iterators without admitting escaping iterator objects."""
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == 'enumerate' and not bindings(self.bindings_module, 'enumerate')):
@@ -1757,6 +1761,9 @@ class AstJsonEmitter:
                 raise UnsupportedSyntax('enumerate supports an iterable and optional positional or keyword start')
             return {"type": "Call", "func": {"type": "Name", "id": "enumerate"},
                     "args": [self.expr(arg) for arg in arguments]}
+        values_receiver = dictionary_values_receiver(node)
+        if dictionary_values and values_receiver is not None:
+            return {"type": "DictionaryValuesIterable", "receiver": self.expr(values_receiver)}
         permutation = permutation_arguments(node, self.bindings_module)
         if permutation is not None:
             return {"type": "PermutationsIterable", "args": [self.expr(arg) for arg in permutation]}
@@ -1765,6 +1772,12 @@ class AstJsonEmitter:
                 raise UnsupportedSyntax('zip iteration supports positional sequence arguments, without strict')
             return {"type": "ZipIterable", "args": [self.expr(arg) for arg in node.args]}
         return self.expr(node)
+
+    def generator_comprehension(self, node: ast.GeneratorExp) -> dict[str, object]:
+        """Keep ordinary method calls in generator contexts without private view consumers."""
+        collector = ast.ListComp(elt=node.elt, generators=node.generators)
+        collector.formalsw_generator_context = True
+        return self.expr(collector)
 
     def constant(self, value: object) -> dict[str, object]:
         """Encode one Python constant."""

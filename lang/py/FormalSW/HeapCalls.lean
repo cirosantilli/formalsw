@@ -545,6 +545,7 @@ inductive Frame where
   | extremumSource (maximum : Bool) (parameter : String) (key : Expr) (env : Env)
   | extremumKey (cursor : SequenceExtremum) (position : Nat) (candidate : Value) (best : Option (Value × Value))
   | dictionaryItemsReceiver (target : Expr) (body otherwise following : List Stmt) (env : Env)
+  | dictionaryValuesReceiver (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | dictionaryKey (value : Expr) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | dictionaryValue (key : Constant) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | sumStart (loop : Stmt) (env : Env)
@@ -874,6 +875,69 @@ def comprehensionTargetsBody (terminal : List Stmt) : List (Expr × Expr × List
           (comprehensionFilters filters (comprehensionTargetsBody terminal rest)) []]
       | _ => [.forIn (.name (comprehensionTargetName target)) iterable body []]
 
+/-- Preserve the stored key representative and shared value in either dictionary representation. -/
+def dictionaryItemFields : Mutable.Object → Option (List (Value×Value))
+  | .dict entries => some (entries.map fun entry => (.scalar entry.1, entry.2))
+  | .keyDict entries => some (entries.map Prod.snd)
+  | _ => none
+
+/-- Private pair bindings cannot be named by Python source. Only the value is assigned to the original target. -/
+def dictionaryValuesBody (target : Expr) (body : List Stmt) : List Stmt :=
+  [.assign [.tuple [.name "$formalsw.values.key", .name "$formalsw.values.value"]]
+      (.name "$formalsw.values.pair"),
+    .assign [target] (.name "$formalsw.values.value")] ++ body
+
+/-- Immediate values iteration shares the live item cursor, without exposing its temporary pairs. -/
+def dictionaryValuesStart (anchors : Nat) (target : Expr) (body otherwise following : List Stmt)
+    (env : Env) (receiver : Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  let custom := fun () => match target with
+    | .name name => Step.next ⟨.value receiver,
+        .methodReceiver "values" [] env :: .sequence name body otherwise following env :: stack, heap⟩
+    | .tuple targets | .list targets => match Calls.targetNames targets with
+        | some names => .next ⟨.value receiver,
+            .methodReceiver "values" [] env :: .unpackSequence names body otherwise following env :: stack, heap⟩
+        | none => .unsupported
+    | _ => .unsupported
+  match receiver with
+  | .ref address => match heap[address]? with
+      | some object => match dictionaryItemFields object with
+          | some entries => .next ⟨.block
+              (.dictionaryItemsStepLoop "$formalsw.values.pair" address
+                (entries.map fun entry => sequenceSource entry.1) 0
+                (dictionaryValuesBody target body) otherwise :: following) env, stack, heap⟩
+          | none => match object with
+              | .instance _ _ _ | .dataInstance _ _ _ _ _ => custom ()
+              | _ => done (globals := globals) anchors heap (.error { typeName := "AttributeError", args := [] })
+      | none => .unsupported
+  | .scalar _ => done (globals := globals) anchors heap (.error { typeName := "AttributeError", args := [] })
+
+/-- Create the first values iterator before allocating a comprehension result; custom methods retain ordinary dispatch. -/
+def dictionaryValuesCollectionStart (anchors : Nat) (element : Expr) (target : Expr)
+    (filters : List Expr) (rest : List (Expr × Expr × List Expr)) (env : Env) (receiver : Value)
+    (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := [])
+    (isSet : Bool := false) (dictionaryValue : Option Expr := none) : Step State Completion :=
+  let terminal := match dictionaryValue with
+    | some value => Stmt.comprehensionStore heap.length element value
+    | none => if isSet then Stmt.comprehensionAdd heap.length element else .comprehensionAppend heap.length element
+  let body := comprehensionFilters filters (comprehensionTargetsBody [terminal] rest)
+  let generators := (target, .name "$formalsw.values.iterator", filters) :: rest
+  let operation := match dictionaryValue with
+    | some value => Operation.dictionaryComprehension element value generators env
+    | none => if isSet then .setComprehension element generators env else .comprehensionTargets element generators env
+  let custom := fun () => Step.next ⟨.value receiver,
+    .methodReceiver "values" [] env :: .arguments operation [] [] env :: stack, heap⟩
+  match receiver with
+  | .ref address => match heap[address]? with
+      | some object => match dictionaryItemFields object with
+          | some _ => dictionaryValuesStart anchors target body [] [] env receiver
+              (.comprehensionResult heap.length :: stack)
+              (heap ++ [if dictionaryValue.isSome then .dict [] else if isSet then .set [] else .list []]) globals
+          | none => match object with
+              | .instance _ _ _ | .dataInstance _ _ _ _ _ => custom ()
+              | _ => done (globals := globals) anchors heap (.error { typeName := "AttributeError", args := [] })
+      | none => .unsupported
+  | .scalar _ => done (globals := globals) anchors heap (.error { typeName := "AttributeError", args := [] })
+
 /-- Capture the first iterator in the outer scope, before allocating the result. -/
 def comprehensionTargetsStart (anchors : Nat) (element : Expr)
     (generators : List (Expr × Expr × List Expr)) (env : Env)
@@ -892,6 +956,10 @@ def comprehensionTargetsStart (anchors : Nat) (element : Expr)
         ⟨.block [loop] env, .comprehensionResult heap.length :: stack,
           heap ++ [if dictionaryValue.isSome then .dict [] else if isSet then .set [] else .list []]⟩
       match iterable with
+      | .dictionaryValuesIterable _ => match values with
+          | [value] => dictionaryValuesCollectionStart anchors element target filters rest env value stack heap
+              globals isSet dictionaryValue
+          | _ => .unsupported
       | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
           enter (.permutationStepLoop name rows body []) heap
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
@@ -1633,12 +1701,6 @@ def construct (module : Module) (anchors : Nat) (name : String) (values : List V
           invokeMethod (globals := globals) anchors (.ref heap.length) args body values (.initialized heap.length :: stack)
             (heap ++ [.instance origin name []])
 
-/-- Preserve the original key representative and shared value in either dictionary representation. -/
-def dictionaryItemFields : Mutable.Object → Option (List (Value×Value))
-  | .dict entries => some (entries.map fun entry => (.scalar entry.1, entry.2))
-  | .keyDict entries => some (entries.map Prod.snd)
-  | _ => none
-
 /-- Only immediate iteration exposes this cursor; builtin views cannot escape.
 Instances retain ordinary method dispatch and sequence iteration. -/
 def dictionaryItemsStart (anchors : Nat) (target : Expr) (body otherwise following : List Stmt)
@@ -1787,18 +1849,21 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       | .listCompTargets element (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
             | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+            | .dictionaryValuesIterable receiver => [receiver]
             | _ => [iterable]
           .next (argumentsState (.comprehensionTargets element generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .setComp element (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
             | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+            | .dictionaryValuesIterable receiver => [receiver]
             | _ => [iterable]
           .next (argumentsState (.setComprehension element generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .dictComp key value (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
             | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+            | .dictionaryValuesIterable receiver => [receiver]
             | _ => [iterable]
           .next (argumentsState (.dictionaryComprehension key value generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
@@ -1894,6 +1959,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             | some value => .next ⟨.block (body ++ [Calls.loopContinuation body
                 (.reverseSequenceStepLoop name source (position - 1) body otherwise)] ++ rest)
                 (setLocal env name value), stack, heap⟩
+      | .forIn target (.dictionaryValuesIterable receiver) body otherwise :: rest =>
+          .next ⟨.expr receiver env, .dictionaryValuesReceiver target body otherwise rest env :: stack, heap⟩
       | .forIn target (.permutationsIterable expressions) body otherwise :: rest =>
           .next (argumentsState (.permutationStart target body otherwise rest env) env [] expressions stack heap)
       | .permutationStepLoop name rows body otherwise :: rest =>
@@ -1991,6 +2058,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       match stack with
       | [] => done (globals := globals) anchors heap (.ok value)
       | frame :: stack => match frame with
+          | .dictionaryValuesReceiver target body otherwise following env =>
+              dictionaryValuesStart (globals := globals) anchors target body otherwise following env value stack heap
           | .dictionaryItemsReceiver target body otherwise following env =>
               dictionaryItemsStart (globals := globals) anchors target body otherwise following env value stack heap
           | .dictionaryKey expression rest entries env => match value with
@@ -2197,6 +2266,16 @@ def Evaluates (module : Module) (env : Env) (expression : Expr)
 theorem Evaluates.not_permutations
     (evaluated : Evaluates (globals := globals) module env iterable heap value finalHeap)
     (expressions : List Expr) : iterable ≠ .permutationsIterable expressions := by
+  intro equal
+  subst iterable
+  have reached := evaluated 0 []
+  cases reached with
+  | next transition _ => simp [step] at transition
+
+/-- A private values iterator is only meaningful in a consuming loop. -/
+theorem Evaluates.not_dictionary_values
+    (evaluated : Evaluates (globals := globals) module env iterable heap value finalHeap)
+    (receiver : Expr) : iterable ≠ .dictionaryValuesIterable receiver := by
   intro equal
   subst iterable
   have reached := evaluated 0 []
@@ -2978,6 +3057,7 @@ theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "ran
   have start : step (globals := globals) module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
     have notPermutations := evaluated.not_permutations
+    have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
     (.next (by simp [step, run, sequence]) (rest anchors stack)))
@@ -3238,6 +3318,7 @@ theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "ran
   have start : step (globals := globals) module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
     have notPermutations := evaluated.not_permutations
+    have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
     (.next (by simp [step, run, sequence]) (rest following anchors stack)))
@@ -3275,6 +3356,7 @@ theorem for_unpack
       ⟨.block (.forIn (.tuple expressions) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .unpackSequence names body otherwise following env :: stack, heap⟩ := by
     have notPermutations := evaluated.not_permutations
+    have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
     (.next (by simp [step, run, sequence]) (rest following anchors stack)))
@@ -3448,6 +3530,7 @@ theorem Evaluates.list_comp_sequence
           (comprehensionEnv env ((name, iterable, filters) :: generators)))
         env [] [iterable] stack heap) := by
     have notPermutations := evaluated.not_permutations
+    have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   apply Reaches.next first
   apply (arguments_reach (.cons evaluated .nil) _ [] anchors stack).trans

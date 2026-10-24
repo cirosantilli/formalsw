@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""
+Compare immediate values iteration, live aliases, comprehension scope, and method dispatch with Python.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = '''
+def candidates(k: int):
+    table = {}
+    seed = 7
+    table[(seed, 0)] = [1, 17]
+    table[(seed, 1)] = [2, 23]
+    table[(seed, 2)] = [1, 5]
+    return [minimum for count, minimum in table.values() if count == k]
+
+def live(n: int):
+    table = {1: [1], 2: [2]}
+    out = []
+    for value in table.values():
+        out.append(value)
+        table[2] = [n]
+    return (out, table)
+
+def replace(table: dict[int, list[int]], n: int):
+    table[2] = [n]
+    return True
+
+def live_filter(n: int):
+    table = {1: [1], 2: [2]}
+    out = [value for value in table.values() if replace(table, n)]
+    return (out, table)
+
+def shadow_target():
+    values = {1: 3, 2: 4}
+    return [values for values in values.values()]
+
+def nested():
+    outer = {1: 3, 2: 4}
+    inner = {1: 5, 2: 6}
+    return [(x, y) for x in outer.values() for y in inner.values()]
+
+def receiver(log: list[int]):
+    log.append(7)
+    return {1: [1, 2], 2: [3, 4]}
+
+def receiver_once(log: list[int]):
+    return [a + b for a, b in receiver(log).values()]
+
+def loop_else(n: int):
+    table = {1: 3, 2: 4}
+    out = []
+    for value in table.values():
+        if value == n:
+            break
+        out.append(value)
+    else:
+        out.append(99)
+    return out
+
+def grow():
+    table = {1: 7}
+    for value in table.values():
+        table[2] = 8
+    return 0
+
+def shrink():
+    table = {1: 7, 2: 8}
+    for value in table.values():
+        table.clear()
+    return 0
+
+def unpack_error():
+    table = {1: [7]}
+    return [a + b for a, b in table.values()]
+
+def scalar_receiver(n: int):
+    return [value for value in n.values()]
+
+def set_values():
+    table = {1: 3, 2: 4, 3: 3}
+    return {value for value in table.values()}
+
+def dictionary_values():
+    table = {1: [7, 3], 2: [9, 4]}
+    return {a: b for a, b in table.values()}
+
+class Values:
+    def __init__(self, n: int):
+        self.n = n
+    def values(self):
+        return [[self.n, self.n + 1], [0, 1]]
+    def items(self):
+        return [[99, 99]]
+
+def custom(n: int):
+    value = Values(n)
+    return [a + b for a, b in value.values()]
+
+def custom_loop(n: int):
+    value = Values(n)
+    out = []
+    for a, b in value.values():
+        out.append(a + b)
+    return out
+
+def custom_generator(n: int):
+    value = Values(n)
+    return sum(a + b for a, b in value.values())
+
+def custom_named_generator(n: int):
+    value = Values(n)
+    return sum(pair[0] for pair in value.values())
+
+class NotCallable:
+    def __init__(self):
+        self.values = 9
+
+def not_callable():
+    value = NotCallable()
+    return [item for item in value.values()]
+'''
+program = ast.parse(source)
+api['identify_classes'](program, Path(__file__).resolve())
+world = {}
+exec(source, world)
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+cases = [(name, [], False) for name in ('shadow_target', 'nested', 'grow', 'shrink',
+                                      'unpack_error', 'set_values', 'dictionary_values', 'not_callable')]
+cases += [('receiver_once', [], True)]
+cases += [('candidates', [k], False) for k in (-1, 1, 2, 3)]
+for n in (-3, 0, 4, 10**30):
+    cases.extend((name, [n], False) for name in ('live', 'live_filter', 'custom', 'custom_loop',
+                                              'custom_generator', 'custom_named_generator', 'scalar_receiver'))
+cases += [('loop_else', [n], False) for n in (3, 4, 5)]
+lines = ['import FormalSW', 'open FormalSW.PyAst',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+for name, arguments, logged in cases:
+    rejected = SupportChecker(program).check(name)
+    assert not rejected, (name, rejected)
+    log = []
+    try:
+        result = world[name](*([log] if logged else arguments))
+        expected = snapshot_roots(([log] if logged else []) + [result])
+        compared = f'Graph.observedBool ((Graph.compare c.snapshot ({data(expected)})).observe 3000) == some true'
+    except (AttributeError, TypeError, ValueError, RuntimeError) as error:
+        expected = snapshot_roots([log] if logged else [])
+        compared = (f'(match c.outcome with | .error e => e.typeName == {json.dumps(type(error).__name__)} | _ => false) && '
+                    f'Graph.observedBool ((Graph.compare c.snapshot ({data(expected)})).observe 3000) == some true')
+    values = '[.ref 0]' if logged else '[' + ', '.join('.scalar (' + constant(x) + ')' for x in arguments) + ']'
+    heap = '[.list []]' if logged else '[]'
+    lines += [f'#eval (match (HeapCalls.call source "{name}" {values} {heap}).execution.observe 3000 with',
+              f'  | .done (.ok c) => {compared}', '  | _ => false)']
+
+with project_temporary_directory(prefix='dictionary-values-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    checked = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)],
+                             cwd=ROOT, check=True, capture_output=True, text=True)
+    assert checked.stdout.splitlines() == ['true'] * len(cases), checked.stdout + checked.stderr
+print(f'Dictionary values, live aliases, scope, and custom dispatch: {len(cases)} Python comparisons passed.')
