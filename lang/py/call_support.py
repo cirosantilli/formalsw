@@ -127,6 +127,42 @@ def sequence_extremum(node):
     return SequenceExtremum(node.func.id == 'max', node.args[0], parameter, body)
 
 
+
+@dataclass(frozen=True)
+class SequenceSort:
+    iterable: ast.expr
+    parameter: str
+    key: ast.expr
+    reverse: ast.expr
+
+
+def sequence_sort(node):
+    """Recognize stable sorting with an immediately consumed unary key callback."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'sorted' and len(node.args) == 1
+            and 1 <= len(node.keywords) <= 2):
+        return None
+    names = [keyword.arg for keyword in node.keywords]
+    if len(set(names)) != len(names) or 'key' not in names or set(names) - {'key', 'reverse'}:
+        return None
+    key = next(keyword.value for keyword in node.keywords if keyword.arg == 'key')
+    if isinstance(key, ast.Name):
+        parameter = '$formalsw.sorted.item'
+        body = ast.Call(func=key, args=[ast.Name(id=parameter, ctx=ast.Load())], keywords=[])
+        ast.copy_location(body, node)
+        ast.fix_missing_locations(body)
+    elif (isinstance(key, ast.Lambda) and len(key.args.args) == 1
+          and not key.args.posonlyargs and not key.args.kwonlyargs
+          and not key.args.vararg and not key.args.kwarg
+          and not key.args.defaults and not key.args.kw_defaults):
+        parameter, body = key.args.args[0].arg, key.body
+    else:
+        return None
+    reverse = next((keyword.value for keyword in node.keywords if keyword.arg == 'reverse'),
+                   ast.Constant(value=False))
+    return SequenceSort(node.args[0], parameter, body, reverse)
+
+
 def zip_iterable(node, module):
     """Recognize the builtin only where its iterator is immediately consumed."""
     return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -434,7 +470,8 @@ def uses_set_iteration(module, function):
                 if isinstance(node, ast.For):
                     loops |= not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                                   and node.iter.func.id == 'range')
-                loops |= sequence_extremum(node) is not None or sequence_sum(node) is not None
+                loops |= (sequence_extremum(node) is not None or sequence_sort(node) is not None
+                          or sequence_sum(node) is not None)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     sets |= node.func.id == 'set' and not bindings(module, 'set')
                     pending.extend(functions[target] for target in call_targets(node) if target in functions)
@@ -474,7 +511,7 @@ def uses_heap_calls(module, function):
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
             if (isinstance(node, (ast.List, ast.Set, ast.ListComp, ast.SetComp, ast.Dict)) or reversed_list(node) is not None
-                    or sequence_extremum(node) is not None
+                    or sequence_extremum(node) is not None or sequence_sort(node) is not None
                     or sequence_sum(node) is not None and not bindings(module, "sum")
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
@@ -652,6 +689,19 @@ def check_calls(module, function, reject, *, heap=False):
                     if builtin in scope or bindings(module, builtin):
                         reject(node, f'materialized map requires the unshadowed builtin {builtin}')
                 expr(mapped, scope)
+                return
+            sorting = sequence_sort(node)
+            if sorting is not None:
+                if not heap:
+                    reject(node, 'sorting with a key requires heap call execution')
+                if 'sorted' in scope or bindings(module, 'sorted'):
+                    reject(node, 'sorting requires the unshadowed builtin sorted')
+                if isinstance(sorting.iterable, ast.GeneratorExp):
+                    reject(sorting.iterable, 'sorting a generator with a key is unsupported')
+                    return
+                recurse(sorting.iterable)
+                recurse(sorting.reverse)
+                expr(sorting.key, scope | {sorting.parameter})
                 return
             sequence = sequence_extremum(node)
             if sequence is not None:

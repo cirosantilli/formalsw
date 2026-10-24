@@ -73,6 +73,57 @@ def sortWithReverse (heap : Heap) (reverse : Bool) (items : List Value) : Result
   if reverse then (sort heap items.reverse).map (fun result => result.map List.reverse)
   else sort heap items
 
+/-- A cached key is compared directly; equality cannot bypass an invalid ordering. -/
+def keyedInsert (heap : Heap) (value : Value × Value) : List (Value × Value) → Result (List (Value × Value))
+  | [] => some (.ok [value])
+  | first :: rest =>
+      match compare (heap.length + 1) heap false first.2 value.2 with
+      | none => none
+      | some (.error error) => some (.error error)
+      | some (.ok true) => (keyedInsert heap value rest).map (fun result => result.map (first :: ·))
+      | some (.ok false) => some (.ok (value :: first :: rest))
+
+/-- Cached item identities and key references survive the stable sort. -/
+def keyedSort (heap : Heap) : List (Value × Value) → Result (List (Value × Value))
+  | [] => some (.ok [])
+  | first :: rest =>
+      match keyedSort heap rest with
+      | none => none
+      | some (.error error) => some (.error error)
+      | some (.ok sorted) => keyedInsert heap first sorted
+
+/-- Reversing input and output retains the original order of equal-key items. -/
+def keyedSortWithReverse (heap : Heap) (reverse : Bool) (items : List (Value × Value)) :
+    Result (List (Value × Value)) :=
+  if reverse then (keyedSort heap items.reverse).map (fun result => result.map List.reverse)
+  else keyedSort heap items
+
+/-- Pure stable insertion by an integer key, retaining the original payload. -/
+def insertKeyInt (value : Value × Int) : List (Value × Int) → List (Value × Int)
+  | [] => [value]
+  | first :: rest => if first.2 < value.2 then first :: insertKeyInt value rest else value :: first :: rest
+
+def keyInts (items : List (Value × Int)) : List (Value × Int) := items.foldr insertKeyInt []
+
+def intKey (value : Value × Int) : Value × Value := (value.1, .scalar (.int value.2))
+
+theorem keyedInsert_intkeys (heap : Heap) (value : Value × Int) (items : List (Value × Int)) :
+    keyedInsert heap (intKey value) (items.map intKey) =
+      some (.ok ((insertKeyInt value items).map intKey)) := by
+  induction items with
+  | nil => rfl
+  | cons first rest ih =>
+      have compared : compare (heap.length + 1) heap false (intKey first).2 (intKey value).2 =
+          some (.ok (decide (first.2 < value.2))) := rfl
+      simp only [List.map_cons, keyedInsert, compared, insertKeyInt]
+      by_cases smaller : first.2 < value.2 <;> simp [smaller, ih]
+
+theorem keyedSort_intkeys (heap : Heap) (items : List (Value × Int)) :
+    keyedSort heap (items.map intKey) = some (.ok ((keyInts items).map intKey)) := by
+  induction items with
+  | nil => rfl
+  | cons first rest ih => simp [keyedSort, ih, keyInts, keyedInsert_intkeys]
+
 theorem insert_scalars (heap : Heap) (value : Constant) (items : List Constant) :
     insert heap (.scalar value) (items.map Mutable.Value.scalar) =
       some ((ScalarSort.insert value items).map (List.map Mutable.Value.scalar)) := by

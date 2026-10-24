@@ -473,7 +473,18 @@ structure SequenceExtremum where
   key : Expr
   env : Env
 
+/-- The input snapshot survives callback mutation of the original sequence. -/
+structure SequenceSort where
+  parameter : String
+  key : Expr
+  env : Env
+  reverse : Bool
+
 inductive Frame where
+  | sortedSource (parameter : String) (key reverse : Expr) (env : Env)
+  | sortedReverse (source : Value) (parameter : String) (key : Expr) (env : Env)
+  | sortedKey (cursor : SequenceSort) (candidate : Value) (remaining : List Value)
+      (keys : List (Value × Value))
   | extremumSource (maximum : Bool) (parameter : String) (key : Expr) (env : Env)
   | extremumKey (cursor : SequenceExtremum) (position : Nat) (candidate : Value) (best : Option (Value × Value))
   | dictionaryItemsReceiver (target : Expr) (body otherwise following : List Stmt) (env : Env)
@@ -525,6 +536,7 @@ inductive Frame where
       (body otherwise following : List Stmt) (env : Env)
 
 inductive Work where
+  | sortedLoop (cursor : SequenceSort) (remaining : List Value) (keys : List (Value × Value))
   | extremumLoop (cursor : SequenceExtremum) (position : Nat) (best : Option (Value × Value))
   | dictionary (remaining : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | expr (expression : Expr) (env : Env)
@@ -608,6 +620,36 @@ def sequenceValue : SequenceSource → Value
 
 @[simp] theorem sequenceValue_source (value : Value) :
     sequenceValue (sequenceSource value) = value := by cases value <;> rfl
+
+/-- Keyed sorting snapshots sequences and ordered dictionary keys. Set traversal
+requires a choice schedule because equal keys can expose its iteration order. -/
+def sortedItems (source : Value) : Eval (List Value) := do
+  match source with
+  | .ref address =>
+      match (← get)[address]? with
+      | some (.dict entries) => pure (entries.map fun entry => .scalar entry.1)
+      | some (.keyDict entries) => pure (entries.map fun entry => entry.2.1)
+      | some (.set _) | some (.keySet _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) =>
+          Mutable.unsupported
+      | _ => Mutable.sequence source
+  | _ => Mutable.sequence source
+
+/-- The reverse flag is converted after materialization and before callbacks. -/
+def sortedStart (source reverse : Value) : Eval (List Value × Bool) := do
+  let items ← sortedItems source
+  if let .ref address := reverse then
+    match (← get)[address]? with
+    | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
+    | _ => pure ()
+  let direction ← Mutable.truth reverse
+  return (items, direction)
+
+/-- Sorting compares all cached keys in the heap left by the last callback. -/
+def sortedFinish (reverse : Bool) (keys : List (Value × Value)) : Eval Value := do
+  match HeapSort.keyedSortWithReverse (← get) reverse keys.reverse with
+  | none => Mutable.unsupported
+  | some (.error error) => throw error
+  | some (.ok ordered) => Mutable.allocate (ordered.map Prod.fst)
 
 /-- Each iterator advance observes the current shared sequence, including key effects. -/
 def extremumItem (source : Value) (position : Nat) : Eval (Option Value) := do
@@ -1424,6 +1466,11 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
   let ⟨work, stack, heap⟩ := state
   protectGenerator stack <|
   match work with
+  | .sortedLoop cursor remaining keys =>
+      match remaining with
+      | [] => result (globals := globals) anchors heap (sortedFinish cursor.reverse keys) stack
+      | candidate :: following => .next ⟨.expr cursor.key (setLocal cursor.env cursor.parameter candidate),
+          .sortedKey cursor candidate following keys :: stack, heap⟩
   | .extremumLoop cursor position best =>
       run (globals := globals) anchors heap (extremumItem cursor.source position) fun item heap =>
         match item with
@@ -1480,6 +1527,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
   | .operation operation values => result (globals := globals) anchors heap (primitive operation values) stack
   | .expr expression env =>
       match expression with
+      | .sortedSequence iterable parameter key reverse =>
+          .next ⟨.expr iterable env, .sortedSource parameter key reverse env :: stack, heap⟩
       | .extremumSequence maximum iterable parameter key =>
           .next ⟨.expr iterable env, .extremumSource maximum parameter key env :: stack, heap⟩
       | .constant value => .next ⟨.value (.scalar value), stack, heap⟩
@@ -1790,6 +1839,13 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           | .assignSlice base lower upper stride rest env =>
               .next (argumentsState (.setSlice value) env [] [base, lower, upper, stride]
                 (.discard rest env :: stack) heap)
+          | .sortedSource parameter key reverse env =>
+              .next ⟨.expr reverse env, .sortedReverse value parameter key env :: stack, heap⟩
+          | .sortedReverse source parameter key env =>
+              run (globals := globals) anchors heap (sortedStart source value) fun (items, direction) heap =>
+                .next ⟨.sortedLoop ⟨parameter, key, env, direction⟩ items [], stack, heap⟩
+          | .sortedKey cursor candidate remaining keys =>
+              .next ⟨.sortedLoop cursor remaining ((candidate, value) :: keys), stack, heap⟩
           | .extremumSource maximum parameter key env =>
               run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
                 .next ⟨.extremumLoop ⟨maximum, value, parameter, key, env⟩ 0 none, stack, heap⟩
@@ -2066,7 +2122,7 @@ theorem step_extend (extension : Extends target source) (state : State)
       | builtin name => cases name <;> rfl
       | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
-  | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
+  | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>
       cases stack with
       | nil => rfl
@@ -3125,6 +3181,44 @@ theorem Evaluates.list_comp_sequence
     ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
       (.next rfl (.next rfl .refl)))
   cases iterable <;> simp_all [step, comprehensionStart, run]
+
+/-- Key evaluation preserves the snapshot and composes arbitrary callback effects. -/
+def SortedReturns (module : Module) (cursor : SequenceSort) (remaining : List Value)
+    (keys : List (Value × Value)) (heap : Heap) (value : Value) (finalHeap : Heap)
+    (globals : Mutable.Globals := []) : Prop :=
+  ∀ anchors stack, Reaches (globals := globals) module anchors
+    ⟨.sortedLoop cursor remaining keys, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
+
+namespace SortedReturns
+
+theorem done (finished : sortedFinish cursor.reverse keys heap = some (.ok value, finalHeap)) :
+    SortedReturns (globals := globals) module cursor [] keys heap value finalHeap := by
+  intro anchors stack
+  exact .next (by simp [step, result, run, finished]) .refl
+
+theorem next (key : Evaluates (globals := globals) module (setLocal cursor.env cursor.parameter candidate)
+      cursor.key heap score afterKey)
+    (rest : SortedReturns (globals := globals) module cursor remaining ((candidate, score) :: keys)
+      afterKey value finalHeap) :
+    SortedReturns (globals := globals) module cursor (candidate :: remaining) keys heap value finalHeap := by
+  intro anchors stack
+  exact .next rfl ((key anchors (.sortedKey cursor candidate remaining keys :: stack)).trans
+    (.next rfl (rest anchors stack)))
+
+end SortedReturns
+
+theorem Evaluates.sorted_sequence
+    (iterable : Evaluates (globals := globals) module env expression heap source afterIterable)
+    (reverse : Evaluates (globals := globals) module env reverseExpression afterIterable flag afterReverse)
+    (acquired : sortedStart source flag afterReverse = some (.ok (items, direction), middle))
+    (rest : SortedReturns (globals := globals) module ⟨parameter, key, env, direction⟩ items []
+      middle value finalHeap) :
+    Evaluates (globals := globals) module env (.sortedSequence expression parameter key reverseExpression)
+      heap value finalHeap := by
+  intro anchors stack
+  exact .next rfl ((iterable anchors (.sortedSource parameter key reverseExpression env :: stack)).trans
+    (.next rfl ((reverse anchors (.sortedReverse source parameter key env :: stack)).trans
+      (.next (by simp [step, run, acquired]) (rest anchors stack)))))
 
 /-- Sequence extrema preserve both retained item identities and every key's heap effects. -/
 def ExtremumReturns (module : Module) (cursor : SequenceExtremum) (position : Nat)

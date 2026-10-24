@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""
+Compare stable cached-key sorting, evaluation order, aliases, and exceptional heaps.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.support import SupportChecker
+from lang.py.global_inputs import call_globals
+from lang.py.memo_support import uses_memoized
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = """
+from functools import lru_cache
+
+def negate(n: int) -> int:
+    return -n
+
+@lru_cache(None)
+def counted(n: int) -> int:
+    if n <= 0:
+        return 0
+    return 1 + counted(n - 1)
+
+def grow(value: int, items: list[int], log: list[int]) -> int:
+    items.append(value + 10)
+    log.append(value)
+    return value
+
+def shrink(value: int, items: list[int], log: list[int]) -> int:
+    items.pop()
+    log.append(value)
+    return value
+
+def trace(value: int, log: list[int]) -> int:
+    log.append(value)
+    return 0
+
+def change_reverse(value: int, flag: list[int]) -> int:
+    flag.append(value)
+    return value
+
+def argument(items: list[int]) -> bool:
+    items.append(5)
+    return True
+
+def explode(value: int, items: list[int]) -> int:
+    items.append(value)
+    return 10 // value
+
+def mutate_key(value: int, keys: list[list[int]]) -> list[int]:
+    if not keys:
+        first = [value]
+        keys.append(first)
+        return first
+    keys[0][0] = -100
+    return [value]
+
+def stop(value: int) -> int:
+    raise StopIteration(value)
+
+"""
+bodies = {
+    'named': 'values = sorted([n, -n, 0], key=negate)\nreturn 100 * values[0] + 10 * values[1] + values[2]',
+    'reverse': 'values = sorted([n, -n, 0], key=negate, reverse=True)\nreturn 100 * values[0] + 10 * values[1] + values[2]',
+    'reverse_first': 'values = sorted([n, -n, 0], reverse=True, key=negate)\nreturn 100 * values[0] + 10 * values[1] + values[2]',
+    'lambda_key': 'values = sorted([n, -n, 0], key=lambda value: value * n)\nreturn 100 * values[0] + 10 * values[1] + values[2]',
+    'constant_tie': 'values = sorted([(n, 7), (n, 2), (n, 9)], key=lambda value: value[0])\nreturn 100 * values[0][1] + 10 * values[1][1] + values[2][1]',
+    'reverse_tie': 'values = sorted([(n, 7), (n, 2), (n, 9)], key=lambda value: value[0], reverse=True)\nreturn 100 * values[0][1] + 10 * values[1][1] + values[2][1]',
+    'alias': 'items = [[n, 7], [n, 9]]\nvalues = sorted(items, key=lambda value: value[0])\nvalues[0][1] = 3\nreturn 100 * items[0][1] + items[1][1]',
+    'fresh_list_keys': 'values = sorted([n, -n, 0], key=lambda value: [value])\nreturn 100 * values[0] + 10 * values[1] + values[2]',
+    'fresh_tuple_keys': 'values = sorted([(2, n), (1, n + 1), (2, n + 2)], key=lambda value: (-value[0], -value[1]))\nreturn 100 * values[0][1] + 10 * values[1][1] + values[2][1]',
+    'builtin': 'values = sorted([n, -n, 1], key=abs)\nreturn 100 * values[0] + 10 * values[1] + values[2]',
+    'booleans': 'values = sorted([n, -n, 0], key=lambda value: value > 0)\nreturn 100 * values[0] + 10 * values[1] + values[2]',
+    'mixed_equal_keys': 'values = sorted([(1, n + 7), (True, n + 2), (1, n + 9)], key=lambda value: value[0], reverse=True)\nreturn 100 * values[0][1] + 10 * values[1][1] + values[2][1]',
+    'live_append': 'items = [n, n + 1]\nlog = []\nvalues = sorted(items, key=lambda value: grow(value, items, log))\nreturn 1000 * len(items) + 100 * len(values) + 10 * log[0] + log[1]',
+    'live_shrink': 'items = [n, n + 1]\nlog = []\nvalues = sorted(items, key=lambda value: shrink(value, items, log))\nreturn 1000 * len(items) + 100 * len(values) + 10 * log[0] + log[1]',
+    'once_order': 'log = []\nvalues = sorted([n, n + 1, n - 1], key=lambda value: trace(value, log), reverse=True)\nreturn 1000 * len(log) + 100 * log[0] + 10 * log[1] + log[2]',
+    'argument_effects': 'items = [n]\nvalues = sorted(items, key=lambda value: value, reverse=argument(items))\nreturn 100 * len(values) + 10 * values[0] + values[1]',
+    'cached_reverse': 'flag = []\nvalues = sorted([n, n + 1], key=lambda value: change_reverse(value, flag), reverse=flag)\nreturn 100 * len(flag) + 10 * values[0] + values[1]',
+    'truthy_reverse': 'values = sorted([n, -n, 0], key=lambda value: value, reverse=2)\nreturn 100 * values[0] + 10 * values[1] + values[2]',
+    'tuple_source': 'values = sorted((n, -n), key=negate)\nreturn 10 * values[0] + values[1]',
+    'string_source': 'values = sorted("az", key=lambda value: ord(value) * n)\nreturn 100 * ord(values[0]) + ord(values[1])',
+    'bytes_source': 'values = sorted(b"az", key=lambda value: value * n)\nreturn 100 * values[0] + values[1]',
+    'buffer_source': 'values = sorted(bytearray(b"az"), key=lambda value: value * n)\nreturn 100 * values[0] + values[1]',
+    'dictionary_source': 'values = sorted({n: 1, n + 1: 2}, key=negate)\nreturn 100 * values[0] + values[1]',
+    'memoized': 'values = sorted([n, 0, n], key=counted)\nreturn 100 * values[0] + 10 * values[1] + values[2]',
+    'late_key_mutation': 'keys = []\nvalues = sorted([n, n + 1], key=lambda value: mutate_key(value, keys))\nreturn 10 * values[0] + values[1]',
+    'all_keys_before_compare': 'return len(sorted([n, n + 1, 0], key=lambda value: 1 // value if value == 0 else None))',
+    'none_keys': 'return len(sorted([n, -n], key=lambda value: None))',
+    'singleton_none': 'return len(sorted([n], key=lambda value: None))',
+    'empty': 'return len(sorted([], key=lambda value: 1 // 0))',
+    'singleton_key_runs': 'return len(sorted([n], key=lambda value: 1 // 0))',
+    'mixed_keys': 'return len(sorted([n, -n], key=lambda value: value if value > 0 else "text"))',
+    'bad_source': 'return len(sorted(n, key=lambda value: value))',
+    'stop_iteration': 'return len(sorted([n], key=stop))',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int) -> int:\n' + ''.join('    ' + line + '\n' for line in body.splitlines())
+source += """
+def exceptional_heap(items: list[int], n: int) -> int:
+    return len(sorted([n, 0, n + 1], key=lambda value: explode(value, items)))
+
+class Marker:
+    pass
+
+def opaque_key(n: int) -> int:
+    marker = Marker()
+    return len(sorted([n, -n], key=lambda value: marker))
+
+def set_source(n: int) -> int:
+    return len(sorted({n, -n}, key=lambda value: 0))
+"""
+module = ast.parse(source)
+checker = SupportChecker(module)
+for name in (*bodies, 'exceptional_heap', 'opaque_key', 'set_source'):
+    assert not checker.check(name), (name, checker.check(name))
+
+base = 'def f(n: int) -> int:\n    return len(sorted([n, 0], key=lambda item: item))\n'
+for text in (base + 'sorted = f\n', base.replace('n: int', 'n: int, sorted: int'),
+             base.replace('lambda item: item', 'lambda item, other: item'),
+             base.replace('lambda item: item', 'lambda item=0: item'),
+             base.replace('lambda item: item', 'lambda *items: 0'),
+             base.replace('lambda item: item', 'unknown'),
+             base.replace('key=', 'default=0, key='),
+             base.replace('key=', 'reverse=False, reverse=True, key='),
+             base.replace('[n, 0]', '(item for item in [n, 0])')):
+    assert SupportChecker(ast.parse(text)).check('f'), text
+
+global_source = ast.parse('setting: int = 7\ndef key(n: int) -> int: return n + setting\ndef f(n: int) -> int: return len(sorted([n], key=key))\n')
+assert [item.name for item in call_globals(global_source, global_source.body[-1])] == ['setting']
+assert uses_memoized(module, next(item for item in module.body if isinstance(item, ast.FunctionDef) and item.name == 'memoized'))
+
+if '--frontend-only' in sys.argv:
+    print('Sorted key frontend, callbacks, bindings, captures, and rejection checks passed')
+    raise SystemExit(0)
+
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+checks = 0
+for name in bodies:
+    for n in (-3, 0, 1, 4):
+        world = {}
+        exec(source, world)
+        try:
+            value = world[name](n)
+            expected = f'.ok (.int ({value}))'
+        except (ValueError, TypeError, StopIteration, ZeroDivisionError) as error:
+            args = f'[.int ({n})]' if isinstance(error, StopIteration) else '[]'
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := {args} }}'
+        runtime = 'MemoHeapCalls' if name == 'memoized' else 'HeapCalls'
+        lines.append(f'example : ({runtime}.scalarFunction source "{name}" [.int ({n})]).observe 20000 = .done ({expected}) := by native_decide')
+        checks += 1
+for n in (-3, 1, 4):
+    world = {}
+    exec(source, world)
+    items = [7]
+    try:
+        world['exceptional_heap'](items, n)
+        raise AssertionError('expected ZeroDivisionError')
+    except ZeroDivisionError:
+        pass
+    changed = ', '.join(f'.scalar (.int ({item}))' for item in items)
+    lines.append(f'example : (HeapCalls.call source "exceptional_heap" [.ref 0, .scalar (.int ({n}))] [.list [.scalar (.int 7)]]).execution.observe 2000 = .done (.ok ⟨.error {{ typeName := "ZeroDivisionError", args := [] }}, [], [.list [{changed}], .list [.scalar (.int ({n})), .scalar (.int 0), .scalar (.int ({n + 1}))]], 1⟩) := by native_decide')
+    checks += 1
+for name in ('opaque_key', 'set_source'):
+    lines.append(f'example : (HeapCalls.scalarFunction source "{name}" [.int 2]).observe 1000 = .unsupported := by native_decide')
+
+with project_temporary_directory(prefix='sorted-keys-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+subprocess.run([str(ROOT / 'formalsw'), 'tests/py/sorted_keys.py'], cwd=ROOT, check=True)
+print(f'Stable cached-key sorting: {checks} Python comparisons passed')

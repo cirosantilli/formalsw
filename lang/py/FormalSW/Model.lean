@@ -194,6 +194,8 @@ inductive Expr where
   | extremumRange (maximum : Bool) (bounds : List Expr) (key : String)
   /-- Consume a sequence with a nonescaping key expression evaluated for each item. -/
   | extremumSequence (maximum : Bool) (iterable : Expr) (parameter : String) (key : Expr)
+  /-- Materialize an iterable, cache one nonescaping key per item, and sort stably. -/
+  | sortedSequence (iterable : Expr) (parameter : String) (key reverse : Expr)
   /-- Consume an ordinary iterable with an optional evaluated starting value. -/
   | sumSequence : Expr → Expr → Expr
   /-- Immediately consumed generator expression, with lazy element evaluation. -/
@@ -505,6 +507,10 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       return .extremumSequence (← (← jsonField json "maximum").getBool?)
         (← Expr.fromJson? (← jsonField json "iter")) (← jsonString json "parameter")
         (← Expr.fromJson? (← jsonField json "key"))
+  | "SortedSequence" =>
+      return .sortedSequence (← Expr.fromJson? (← jsonField json "iter"))
+        (← jsonString json "parameter") (← Expr.fromJson? (← jsonField json "key"))
+        (← Expr.fromJson? (← jsonField json "reverse"))
   | "SumRange" =>
       return .sumRange (← jsonString json "name")
         (← Expr.fromJson? (← jsonField json "element"))
@@ -1114,6 +1120,7 @@ mutual
           target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
     | .extremumRange _ bounds _ => 3 + (bounds.map Expr.operationCount).sum
     | .extremumSequence _ iterable _ key => 3 + iterable.operationCount + key.operationCount
+    | .sortedSequence iterable _ key reverse => 4 + iterable.operationCount + key.operationCount + reverse.operationCount
     | .sumRange _ element bounds conditions =>
         5 + element.operationCount + (bounds.map Expr.operationCount).sum +
           (conditions.map Expr.operationCount).sum
@@ -1578,7 +1585,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.boolOp _ _ => none
   | Expr.ifExp _ _ _ => none
   | Expr.extremumRange _ _ _ => none
-  | Expr.extremumSequence _ _ _ _ => none
+  | Expr.extremumSequence _ _ _ _ | Expr.sortedSequence _ _ _ _ => none
   | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
   | Expr.reversedList _ | Expr.zipIterable _ | Expr.permutationsIterable _ => none

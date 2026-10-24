@@ -21,7 +21,7 @@ from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
-from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
+from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
 from lang.py.permutation_support import permutation_arguments
 from lang.py.call_support import reverse_keyword, integer_instance
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
@@ -1493,6 +1493,11 @@ class AstJsonEmitter:
                                            for name in (expr.func.id, "range")):
             return {"type": "ExtremumRange", "maximum": extremum.maximum, "key": extremum.key,
                     "bounds": [self.expr(arg) for arg in extremum.bounds]}
+        sorting = sequence_sort(expr)
+        if sorting is not None and not bindings(self.bindings_module, 'sorted'):
+            return {"type": "SortedSequence", "iter": self.expr(sorting.iterable),
+                    "parameter": sorting.parameter, "key": self.expr(sorting.key),
+                    "reverse": self.expr(sorting.reverse)}
         sequence = sequence_extremum(expr)
         if sequence is not None and not bindings(self.bindings_module, expr.func.id):
             return {"type": "ExtremumSequence", "maximum": sequence.maximum,
