@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""
+Check compilation-cache invalidation without launching a Lean compiler.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.lean_cache import CompilationCache
+
+
+def parse_imports(text):
+    imports = []
+    for line in text.splitlines():
+        match = re.match(r'(?:public\s+)?import\s+(?:all\s+)?(.+)$', line.strip())
+        if match:
+            imports.append([quoted or plain for quoted, plain in
+                            re.findall(r'«([^»]+)»|([^.]+)', match[1])])
+    return imports
+
+
+class CacheChecks(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='formalsw-lean-cache-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.project = self.root / 'project'
+        self.objects = self.project / '.lake/build/lib/lean'
+        self.sysroot = self.root / 'toolchain'
+        self.frontend = self.root / 'frontend'
+        self.cache_dir = self.project / '.formalsw/cache'
+        self.source = self.project / 'Proof.lean'
+        self.output = self.objects / 'Proof.olean'
+        self.binary = self.sysroot / 'bin/lean'
+        self.write(self.binary, 'fake compiler identity')
+        self.binary.chmod(0o755)
+        self.write(self.sysroot / 'src/lean/Init.lean', 'prelude\n')
+        self.write(self.sysroot / 'lib/lean/Init.olean', 'checked Init')
+        self.write(self.frontend / 'formalsw', 'frontend launcher')
+        self.write(self.frontend / 'lang/frontend.py', 'frontend implementation')
+        self.write(self.source, 'import Lib.Direct\ntheorem checked : True := True.intro\n')
+        self.module('Lib.Direct', 'import Lib.Transitive\ntheorem direct : True := True.intro\n')
+        self.module('Lib.Transitive', 'theorem transitive : True := True.intro\n')
+        self.environment = {'LEAN_SYSROOT': str(self.sysroot), 'LEAN_PATH': str(self.objects),
+                            'PATH': os.environ.get('PATH', ''), 'SECRET_TEST_VALUE': 'never-store-this-secret'}
+        self.calls = 0
+
+    @staticmethod
+    def write(path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def module(self, name, text, package=None, components=None):
+        package = self.project if package is None else package
+        parts = name.split('.') if components is None else components
+        source = Path(str(package.joinpath(*parts)) + '.lean')
+        artifact = Path(str((package / '.lake/build/lib/lean').joinpath(*parts)) + '.olean')
+        self.write(source, text)
+        self.write(artifact, 'checked ' + name)
+        return source, artifact
+
+    def cache(self, environment=None):
+        cache = CompilationCache(self.environment if environment is None else environment,
+                                 parse_imports, self.cache_dir)
+        cache.frontend = self.frontend
+        return cache
+
+    def compiler(self, command):
+        self.calls += 1
+        self.write(self.output, f'checked output {self.calls}')
+
+    def check(self, cache, source=None, command=None, extra=(), callback=None):
+        source = self.source if source is None else source
+        command = [str(self.binary), '-DwarningAsError=true', '-o', str(self.output), str(source)] if command is None else command
+        return cache.compile(source, self.output, command, self.compiler if callback is None else callback,
+                             extra_dependencies=extra)
+
+    def test_warm_hit_and_new_session(self):
+        cache = self.cache()
+        self.assertFalse(self.check(cache))
+        self.assertTrue(self.check(cache))
+        self.assertTrue(self.check(self.cache()))
+        self.assertEqual(self.calls, 1)
+        for path in self.cache_dir.glob('*.json'):
+            self.assertNotIn('never-store-this-secret', path.read_text())
+
+    def test_source_and_same_size_restored_mtime(self):
+        cache = self.cache()
+        self.check(cache)
+        before = self.source.stat()
+        self.write(self.source, self.source.read_text().replace('checked', 'changed'))
+        os.utime(self.source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertFalse(self.check(self.cache()))
+        self.assertEqual(self.calls, 2)
+
+    def test_transitive_source_and_artifact(self):
+        cache = self.cache()
+        self.check(cache)
+        source = self.project / 'Lib/Transitive.lean'
+        self.write(source, source.read_text() + '-- changed source\n')
+        self.assertFalse(self.check(cache))
+        self.write(self.objects / 'Lib/Transitive.olean', 'changed checked dependency')
+        self.assertFalse(self.check(cache))
+        self.assertEqual(self.calls, 3)
+
+    def test_output_tampering_and_missing(self):
+        cache = self.cache()
+        self.check(cache)
+        self.write(self.output, 'tampered object')
+        self.assertFalse(self.check(cache))
+        self.output.unlink()
+        self.assertFalse(self.check(cache))
+        self.assertEqual(self.calls, 3)
+
+    def test_private_companion_addition_mutation_removal(self):
+        cache = self.cache()
+        self.check(cache)
+        companion = Path(str(self.objects / 'Lib/Transitive.olean') + '.private')
+        self.write(companion, 'private declarations')
+        self.assertFalse(self.check(cache))
+        self.write(companion, 'changed private declarations')
+        self.assertFalse(self.check(cache))
+        companion.unlink()
+        self.assertFalse(self.check(cache))
+
+    def test_output_server_companion(self):
+        cache = self.cache()
+        self.check(cache)
+        companion = Path(str(self.output) + '.server')
+        self.write(companion, 'unexpected replacement companion')
+        self.assertFalse(self.check(cache))
+        self.assertTrue(self.check(cache))
+        self.write(companion, 'tampered companion')
+        self.assertFalse(self.check(cache))
+
+    def test_literal_and_extra_dependencies(self):
+        included = self.project / 'digits.json'
+        extra = self.project / 'ast.json'
+        self.write(included, '[1]')
+        self.write(extra, '{}')
+        self.write(self.source, 'import Lib.Direct\ndef input := include_str "digits.json"\n')
+        cache = self.cache()
+        self.check(cache, extra=[extra])
+        self.assertTrue(self.check(cache, extra=[extra]))
+        self.write(included, '[2]')
+        self.assertFalse(self.check(cache, extra=[extra]))
+        self.write(extra, '{"changed": true}')
+        self.assertFalse(self.check(cache, extra=[extra]))
+        included.unlink()
+        self.assertFalse(self.check(cache, extra=[extra]))
+        self.assertFalse(self.check(cache, extra=[extra]))
+
+    def test_unrecognized_include_bypasses(self):
+        self.write(self.source, 'def input := include_str computedPath\n')
+        cache = self.cache()
+        self.assertFalse(self.check(cache))
+        self.assertFalse(self.check(cache))
+        self.assertEqual(self.calls, 2)
+
+    def test_effectful_source_and_import_bypass(self):
+        for text in ('run_cmd pure ()', 'initialize token : Nat ← pure 1',
+                     '#eval IO.println "test"', 'macro "custom" : term => `(0)',
+                     'theorem t : True := by run_tac pure ()'):
+            self.write(self.source, text + '\n')
+            cache = self.cache()
+            self.assertFalse(self.check(cache))
+            self.assertFalse(self.check(cache))
+        self.write(self.source, 'import Lib.Direct\ntheorem t : True := True.intro\n')
+        self.write(self.project / 'Lib/Transitive.lean', 'initialize custom : Nat ← pure 3\n')
+        self.assertFalse(self.check(self.cache()))
+        self.assertFalse(self.check(self.cache()))
+
+    def test_validated_elaborator_import_is_not_executable_code(self):
+        self.module('Lean.Elab.Tactic.Omega', 'theorem available : True := True.intro\n')
+        harmless = 'import Lean.Elab.Tactic.Omega\ntheorem checked : True := True.intro\n'
+        self.write(self.source, harmless)
+        cache = self.cache()
+        self.assertFalse(self.check(cache))
+        self.assertTrue(self.check(cache))
+        for body in ('elab "custom" : tactic => pure ()',
+                     'theorem custom : True := by run_tac pure ()',
+                     'def custom := Lean.Elab.Command.getEnv'):
+            self.write(self.source, harmless + body + '\n')
+            self.assertFalse(self.check(cache))
+            self.assertIn(str(self.source), cache.last_reason)
+            self.assertFalse(self.check(cache))
+
+    def test_duplicate_imports_collect_each_artifact_once_per_walk(self):
+        self.module('Lib.Alternative', 'import Lib.Transitive\ntheorem alternative : True := True.intro\n')
+        self.write(self.source, 'import Lib.Direct\nimport Lib.Alternative\ntheorem t : True := True.intro\n')
+        cache = self.cache()
+        original = cache._artifact_files
+        collected = []
+
+        def track(artifact, observed, dependencies):
+            collected.append(artifact)
+            return original(artifact, observed, dependencies)
+
+        cache._artifact_files = track
+        self.check(cache)
+        # A miss fingerprints before and after compilation. The shared
+        # transitive import should therefore be collected exactly twice.
+        self.assertEqual(collected.count(self.objects / 'Lib/Transitive.olean'), 2)
+
+    def test_namespace_created_during_compilation_prevents_publication(self):
+        earlier = self.root / 'earlier'
+        earlier_objects = earlier / '.lake/build/lib/lean'
+        env = dict(self.environment, LEAN_PATH=os.pathsep.join((str(earlier_objects), str(self.objects))))
+        cache = self.cache(env)
+
+        def introduce_shadow(command):
+            self.compiler(command)
+            self.module('Lib.Direct', 'theorem replacement : True := True.intro\n', package=earlier)
+
+        self.assertFalse(self.check(cache, callback=introduce_shadow))
+        self.assertFalse(any(path.name != 'digests.json' for path in self.cache_dir.glob('*.json')))
+        self.assertFalse(self.check(cache))
+        self.assertTrue(self.check(cache))
+
+    def test_options_environment_compiler_and_frontend(self):
+        cache = self.cache()
+        self.check(cache)
+        command = [str(self.binary), '-DwarningAsError=true', '-DElab.async=false',
+                   '-o', str(self.output), str(self.source)]
+        self.assertFalse(self.check(cache, command=command))
+        env = dict(self.environment, OTHER_CONTEXT='changed')
+        self.assertFalse(self.check(self.cache(env), command=command))
+        self.write(self.binary, 'different compiler implementation')
+        self.assertFalse(self.check(self.cache(env), command=command))
+        self.write(self.frontend / 'lang/frontend.py', 'changed frontend implementation')
+        self.assertFalse(self.check(self.cache(env), command=command))
+
+    def test_path_order_and_missing_namespace_submodule(self):
+        self.check(self.cache())
+        other = self.root / 'other'
+        self.module('Lib.Direct', 'theorem other : True := True.intro\n', package=other)
+        other_objects = other / '.lake/build/lib/lean'
+        env = dict(self.environment, LEAN_PATH=os.pathsep.join((str(other_objects), str(self.objects))))
+        self.assertFalse(self.check(self.cache(env)))
+        self.assertTrue(self.check(self.cache(env)))
+        (other_objects / 'Lib/Direct.olean').unlink()
+        self.assertFalse(self.check(self.cache(env)))
+        self.assertFalse(self.check(self.cache(env)))
+
+    def test_quoted_dotted_filename(self):
+        self.module('Solvers.33.py', 'theorem other : True := True.intro\n', components=['Solvers', '33.py'])
+        self.write(self.source, 'import Solvers.«33.py»\ntheorem t : True := True.intro\n')
+        cache = self.cache()
+        self.assertFalse(self.check(cache))
+        self.assertTrue(self.check(cache))
+
+    def test_missing_dependency_source_bypasses(self):
+        (self.project / 'Lib/Transitive.lean').unlink()
+        cache = self.cache()
+        self.assertFalse(self.check(cache))
+        self.assertFalse(self.check(cache))
+
+    def test_failed_compile_never_publishes_or_falls_back(self):
+        cache = self.cache()
+        self.check(cache)
+        self.write(self.source, self.source.read_text() + '-- new proof\n')
+
+        def fail(command):
+            raise subprocess.CalledProcessError(1, command)
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.check(cache, callback=fail)
+        self.assertFalse(self.check(self.cache()))
+        self.write(self.source, self.source.read_text() + '-- failing again\n')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.check(cache, callback=lambda command: subprocess.CompletedProcess(command, 1))
+
+    def test_mutation_during_compilation_does_not_publish(self):
+        def mutate(command):
+            self.compiler(command)
+            path = self.project / 'Lib/Transitive.lean'
+            self.write(path, path.read_text() + '-- mutation during compilation\n')
+
+        cache = self.cache()
+        self.assertFalse(self.check(cache, callback=mutate))
+        self.assertFalse(self.check(cache))
+        self.assertTrue(self.check(cache))
+
+    def test_mutation_between_digest_and_parser_cannot_poison_imports(self):
+        original = self.source.read_text()
+        changed = 'import Lib.Alternative\ntheorem changed : True := True.intro\n'
+        self.module('Lib.Alternative', 'theorem alternative : True := True.intro\n')
+        cache = self.cache()
+        original_digest = cache._digest
+        parsed = []
+        mutated = False
+
+        def record_parse(text):
+            parsed.append(text)
+            return parse_imports(text)
+
+        def race(path, observed, *, force=False):
+            nonlocal mutated
+            digest = original_digest(path, observed, force=force)
+            if Path(path) == self.source and not mutated:
+                mutated = True
+                self.write(self.source, changed)
+            return digest
+
+        cache.parse_imports = record_parse
+        cache._digest = race
+        self.assertFalse(self.check(cache))
+        self.assertTrue(mutated)
+        self.assertEqual(parsed, [])
+        self.assertFalse(any(path.name != 'digests.json' for path in self.cache_dir.glob('*.json')))
+
+        cache._digest = original_digest
+        self.assertFalse(self.check(cache))
+        self.assertIn(changed, parsed)
+        self.assertTrue(self.check(cache))
+        self.write(self.objects / 'Lib/Alternative.olean', 'changed alternative dependency')
+        self.assertFalse(self.check(cache))
+
+        # Reverting to the original digest must parse the original imports,
+        # rather than reuse the intervening text under the old digest.
+        self.write(self.source, original)
+        self.assertFalse(self.check(cache))
+        self.assertIn(original, parsed)
+        self.assertTrue(self.check(cache))
+
+    def test_no_cache_and_requirements(self):
+        env = dict(self.environment, FORMALSW_NO_CACHE='1')
+        cache = self.cache(env)
+        self.assertFalse(self.check(cache))
+        self.assertFalse(self.check(cache))
+        requirements = self.project / 'Proof.reqs.lean'
+        self.write(requirements, 'import Lib.Direct\nexample : True := True.intro\n')
+        cache = self.cache()
+        self.assertFalse(self.check(cache, source=requirements))
+        self.assertFalse(self.check(cache, source=requirements))
+
+    def test_corrupt_metadata_and_record(self):
+        cache = self.cache()
+        self.check(cache)
+        for path in self.cache_dir.glob('*.json'):
+            self.write(path, '{invalid JSON')
+        self.assertFalse(self.check(self.cache()))
+        self.assertTrue(self.check(self.cache()))
+
+
+if __name__ == '__main__':
+    unittest.main()

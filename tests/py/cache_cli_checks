@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Exercise successful cache reuse and invalidation through real CLI checking."""
+from contextlib import chdir, redirect_stderr, redirect_stdout
+from io import StringIO
+from pathlib import Path
+import os
+import runpy
+import subprocess
+import sys
+from unittest.mock import patch
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+run = subprocess.run
+compilations = []
+
+
+def record(command, *args, **kwargs):
+    # Observe real compiler invocations; sysroot discovery and Lake setup are
+    # deliberately not counted, and no compiler result is mocked.
+    if not isinstance(command, (str, bytes)) and command:
+        if Path(command[0]).name == 'lean' and '-o' in command:
+            compilations.append(Path(command[-1]).resolve())
+    return run(command, *args, **kwargs)
+
+
+def check(source, expected, *, failure=None):
+    # Each CLI process starts with fresh Python source snapshots.
+    checker = runpy.run_path(str(REPO / 'formalsw'))
+    compilations.clear()
+    output, errors = StringIO(), StringIO()
+    report = checker['CheckReport']()
+    with redirect_stdout(output), redirect_stderr(errors):
+        checker['check_sources']([source], report)
+    diagnostics = output.getvalue() + errors.getvalue()
+    assert compilations == expected, (compilations, expected, diagnostics)
+    assert report.unsupported == 0, diagnostics
+    if failure is None:
+        assert report.passed == 1 and report.failed_files == 0, (report, diagnostics)
+    else:
+        assert report.passed == 0 and report.failed_files == 1, (report, diagnostics)
+        assert failure in diagnostics, diagnostics
+
+
+with chdir(REPO), project_temporary_directory(prefix='cache-cli-') as temporary:
+    source = Path(temporary) / 'identity.py'
+    original = '''
+def identity(n: int) -> int:
+    """
+    @formalsw: Returns
+    """
+    return n
+'''
+    source.write_text(original)
+    ast_path = api['ast_path_for_source'](source)
+    json_path = api['ast_json_path_for_source'](source)
+    proof_path = api['proof_path_for_source'](source)
+    requirements_path = api['requirements_path_for_source'](source)
+    module = api['namespace_for_source'](source)
+    namespace = api['proof_namespace_for_source'](source)
+    proof = (
+        f'import {api["lean_module_for_path"](ast_path)}\n'
+        'import lang.py.FormalSW.Syntax\n'
+        f'namespace {namespace}\n'
+        'open FormalSW.PyAst\n'
+        'theorem identity.«Returns» (n : Int) :\n'
+        f'    (scalarFunction {module}.module "identity" [.int n]).Returns :=\n'
+        '  ⟨.int n, .done rfl⟩\n'
+        f'end {namespace}\n'
+    )
+    proof_path.write_text(proof)
+    generated = [json_path, ast_path, requirements_path]
+
+    # Share only frontend setup. check_sources still creates a fresh
+    # CompilationCache for every invocation and must validate persisted records.
+    with patch.dict(os.environ, {'FORMALSW_NO_CACHE': '0'}), \
+            patch.object(subprocess, 'run', record), api['lean_session']():
+        check(source, [ast_path, proof_path, requirements_path])
+        unchanged = {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in generated}
+        check(source, [requirements_path])
+        assert {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in generated} == unchanged
+
+        # A cached success cannot hide a newly admitted proof.
+        proof_path.write_text(proof.replace('⟨.int n, .done rfl⟩', 'by sorry'))
+        check(source, [proof_path], failure='proof uses `sorry`')
+        proof_path.write_text(proof)
+        check(source, [proof_path, requirements_path])
+
+        # The bridge text is unchanged, but its included JSON must invalidate
+        # both its object and the proof that was checked against the old AST.
+        source.write_text(original.replace('return n', 'return n + 1'))
+        check(source, [ast_path, proof_path], failure='error:')
+        assert json_path.read_bytes() != unchanged[json_path][1]
+        assert ast_path.read_bytes() == unchanged[ast_path][1]
+
+        # Syntax errors must be rejected even with previously successful
+        # objects on disk, whether they are in the proof or the Python source.
+        source.write_text(original)
+        proof_path.write_text(proof + 'def incomplete :\n')
+        check(source, [ast_path, proof_path], failure='error:')
+        proof_path.write_text(proof)
+        source.write_text(original.replace('return n', 'return ('))
+        check(source, [], failure='error:')
+
+print('CLI cache: cold/warm compilation, stable generated files, stale proofs, sorry, and syntax checks passed')

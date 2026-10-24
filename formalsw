@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -31,6 +32,7 @@ from lang.py.class_support import dataclass_fields, resolve_record_inputs
 from lang.py.typing_support import resolve_typing_annotations
 from lang.py.linking import link_imports
 from lang import spec_setup
+from lang.lean_cache import CompilationCache
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind, annotation_record, annotation_domain, call_globals, needs_heap_globals, global_input_names, GlobalInputError
 
 
@@ -2030,7 +2032,24 @@ def source_bindings(source: Path, module: ast.Module, semantic_module: ast.Modul
     return semantic_module if source.resolve().is_relative_to(models) else module
 
 
-def check_source(source: Path, report: CheckReport) -> int:
+def write_generated(path: Path, content: str) -> None:
+    """Preserve unchanged generated files and publish changes atomically."""
+    encoded = content.encode('utf-8')
+    if path.is_file() and path.read_bytes() == encoded:
+        return
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.' + path.name,
+                                         suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(encoded)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def check_source(source: Path, report: CheckReport, *, compilation: dict | None = None) -> int:
     """Compile-check one Python file and its paired Lean proof."""
     ast_path = ast_path_for_source(source)
     ast_json_path = ast_json_path_for_source(source)
@@ -2040,11 +2059,7 @@ def check_source(source: Path, report: CheckReport) -> int:
     proof_namespace = proof_namespace_for_source(source)
     proof_module = lean_module_for_path(proof_path)
 
-    run(
-        [sys.executable, "-m", "py_compile", str(source)],
-        failure_message=f"Python syntax check failed for {source}",
-        failure_hint="Fix the Python syntax error before running Lean proofs.",
-    )
+    compile(source.read_bytes(), str(source), 'exec')
     module = source_module(source)
     rejected_before = report.unsupported
     requirements = collect_requirements(source, module, proof_namespace, namespace)
@@ -2065,9 +2080,9 @@ def check_source(source: Path, report: CheckReport) -> int:
         raise SystemExit(1)
     ast_path.parent.mkdir(parents=True, exist_ok=True)
     requirements_path.parent.mkdir(parents=True, exist_ok=True)
-    ast_json_path.write_text(AstJsonEmitter(semantic_module, bindings_module=bindings_module).emit())
-    ast_path.write_text(AstLeanBridgeEmitter(ast_json_path, namespace, bindings_module, module.formalsw_conditions).emit())
-    requirements_path.write_text(
+    write_generated(ast_json_path, AstJsonEmitter(semantic_module, bindings_module=bindings_module).emit())
+    write_generated(ast_path, AstLeanBridgeEmitter(ast_json_path, namespace, bindings_module, module.formalsw_conditions).emit())
+    write_generated(requirements_path,
         RequirementEmitter(proof_path, proof_module, requirements).emit()
     )
     ast_olean_path = olean_path_for_lean(ast_path)
@@ -2081,26 +2096,33 @@ def check_source(source: Path, report: CheckReport) -> int:
         olean_path.parent.mkdir(parents=True, exist_ok=True)
         lean_path.with_suffix(".olean").unlink(missing_ok=True)
     environment = lean_env()
-    run([
+    if compilation is None:
+        compilation = {}
+    if 'cache' not in compilation:
+        compilation['cache'] = CompilationCache(environment, parse_imports, Path.cwd() / '.formalsw/cache')
+    cache = compilation['cache']
+    ast_command = [
         "lean",
         "-o",
         str(ast_olean_path),
         str(ast_path),
-    ],
+    ]
+    cache.compile(ast_path, ast_olean_path, ast_command, lambda command: run(command,
         env=environment,
         failure_message=f"generated JSON AST failed to import for {source}",
         failure_hint=(
             f"This usually means formalsw generated invalid JSON in {ast_json_path} "
             f"or an invalid Lean import bridge in {ast_path}."
         ),
-    )
-    run([
+    ), extra_dependencies=(ast_json_path,))
+    proof_command = [
         "lean",
         "-DwarningAsError=true",
         "-o",
         str(proof_olean_path),
         str(proof_path),
-    ],
+    ]
+    cache.compile(proof_path, proof_olean_path, proof_command, lambda command: run(command,
         env=environment,
         failure_message=f"proof check failed for {source}",
         failure_hint=(
@@ -2110,7 +2132,7 @@ def check_source(source: Path, report: CheckReport) -> int:
         expected=requirements,
         proof_path=proof_path,
         requirements_path=requirements_path,
-    )
+    ))
     run([
         "lean",
         "-DwarningAsError=true",
@@ -2215,6 +2237,7 @@ def check_sources(sources: list[Path], report: CheckReport) -> None:
     """Check imported Python proofs first, once per invocation, without stale fallbacks."""
     checked: dict[Path, bool] = {}
     visiting: list[Path] = []
+    compilation: dict = {}
 
     def visit(source: Path) -> bool:
         source = source.resolve()
@@ -2231,7 +2254,7 @@ def check_sources(sources: list[Path], report: CheckReport) -> None:
             for dependency in proof_dependencies(source):
                 if not visit(dependency):
                     raise SystemExit(f"error: {source}: imported Python proof failed: {dependency}")
-            report.passed += check_source(source, report)
+            report.passed += check_source(source, report, compilation=compilation)
         except (UnsupportedSyntax, InvalidRequirement, ScenarioError, SyntaxError) as error:
             print_diagnostic(f"error: {source}: {error}", file=sys.stderr)
             report.failed_files += 1
