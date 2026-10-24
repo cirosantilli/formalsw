@@ -399,6 +399,7 @@ theorem inplace_add_lists (heap : Heap) (left right : Nat) (leftItems rightItems
 inductive GeneratorAction where
   | list
   | sorted
+  | sortedReverse (reverse : Bool)
   | join (separator : String)
 
 inductive Operation where
@@ -417,6 +418,7 @@ inductive Operation where
   | append (address : Nat)
   | pop (address : Nat)
   | sort (address : Nat)
+  | sortReverse (address : Nat)
   | replace (text : String)
   | zfill (text : String)
   | strip (text : String)
@@ -934,6 +936,21 @@ def primitive : Operation → List Value → Eval Value
         -- A failed Python sort may partially reorder the list.
         | _ => Mutable.unsupported
   | .sort _, _ => Mutable.error "TypeError"
+  | .sortReverse address, [reverse] => do
+      if let .ref position := reverse then
+        match (← get)[position]? with
+        | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
+        | _ => pure ()
+      let reverse ← Mutable.truth reverse
+      let heap ← get
+      let some (.list items) := heap[address]? | Mutable.unsupported
+      if !(items.all fun | .scalar _ => true | .ref _ => false) then Mutable.unsupported
+      else match HeapSort.sortWithReverse heap reverse items with
+        | some (.ok sorted) =>
+            set (heap.set address (.list sorted))
+            return .scalar .none
+        | _ => Mutable.unsupported
+  | .sortReverse _, _ => Mutable.error "TypeError"
   | .strip text, [] => pure (.scalar (.string (Strings.stripWhitespace text)))
   | .strip _, _ => Mutable.unsupported
   | .splitWhitespace text, [] => Mutable.allocate ((Strings.splitWhitespace text).map fun word => .scalar (.string word))
@@ -1034,6 +1051,9 @@ def primitive : Operation → List Value → Eval Value
       let items ← match value with
         | .ref address => match (← get)[address]? with
             | some (.set items) => pure (items.map Mutable.Value.scalar)
+            | some (.keySet items) => pure (items.map Prod.snd)
+            | some (.dict entries) => pure (entries.map fun entry => .scalar entry.1)
+            | some (.keyDict entries) => pure (entries.map fun entry => entry.2.1)
             | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
             | _ => Mutable.sequence value
         | _ => Mutable.sequence value
@@ -1041,6 +1061,26 @@ def primitive : Operation → List Value → Eval Value
       | none => Mutable.unsupported
       | some (.ok values) => Mutable.allocate values
       | some (.error error) => throw error
+  | .builtin .sortedReverse, [value, reverse] => do
+      let items ← match value with
+        | .ref address => match (← get)[address]? with
+            | some (.set items) => pure (items.map Mutable.Value.scalar)
+            | some (.keySet items) => pure (items.map Prod.snd)
+            | some (.dict entries) => pure (entries.map fun entry => .scalar entry.1)
+            | some (.keyDict entries) => pure (entries.map fun entry => entry.2.1)
+            | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
+            | _ => Mutable.sequence value
+        | _ => Mutable.sequence value
+      if let .ref position := reverse then
+        match (← get)[position]? with
+        | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
+        | _ => pure ()
+      let reverse ← Mutable.truth reverse
+      match HeapSort.sortWithReverse (← get) reverse items with
+      | none => Mutable.unsupported
+      | some (.ok values) => Mutable.allocate values
+      | some (.error error) => throw error
+  | .builtin .sortedReverse, _ => Mutable.error "TypeError"
   | .builtin .intBitLength, [.scalar value] => scalarResult (some (Math.bitLengthCall value))
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
   | .builtin .intBitCount, [.scalar value] => scalarResult (some (Math.bitCountCall value))
@@ -1186,66 +1226,72 @@ def instanceClass (module : Module) (origin name : String) : Eval (List Stmt) :=
 
 /-- Method binding precedes argument evaluation, including failure and shadowing. -/
 def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Operation := do
-  match receiver with
-  | .ref address =>
-      match (← get)[address]? with
-      | some (.instance origin className fields) | some (.dataInstance origin className _ _ fields) =>
-          let body ← instanceClass module origin className
-          if name = "__class__" ∨ name = "__dict__" ∨ name = "__weakref__" then Mutable.unsupported
-          else match fields.lookup name with
-          | some _ => pure .notCallable
-          | none => match findFunctionIn body name with
-              | some (args, body) => pure (.method receiver args body)
-              | none => if name.startsWith "__" then Mutable.unsupported else Mutable.error "AttributeError"
-      | some (.list _) | some (.bytearray _) =>
-          if name = "sort" then match (← get)[address]? with
-            | some (.list _) => pure (.sort address)
-            | _ => Mutable.error "AttributeError"
-          else if name = "append" then pure (.append address)
-          else if name = "pop" then pure (.pop address)
-          else if name = "get" ∨ name = "setdefault" then Mutable.error "AttributeError"
-          else if name = "strip" ∨ name = "split" then match (← get)[address]? with
-            | some (.bytearray _) => Mutable.unsupported
-            | _ => Mutable.error "AttributeError"
-          else if name = "zfill" then match (← get)[address]? with
-            | some (.bytearray _) => Mutable.unsupported
-            | _ => Mutable.error "AttributeError"
-          else if name = "replace" then match (← get)[address]? with
-            | some (.bytearray _) => Mutable.unsupported
-            | _ => Mutable.error "AttributeError"
-          else Mutable.unsupported
-      | some (.set _) | some (.keySet _) =>
-          if name = "add" then pure (.add address)
-          else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
-      | some (.dict _) | some (.keyDict _) =>
-          if name = "get" then pure (.dictionaryGet address)
-          else if name = "setdefault" then pure (.dictionarySetDefault address)
-          else if name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
-      | some (.tuple _) =>
-          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
-      | none => Mutable.unsupported
-  | .scalar value =>
-      if name = "strip" then match value with
-        | .string text => pure (.strip text)
-        | .bytes _ => Mutable.unsupported
-        | _ => Mutable.error "AttributeError"
-      else if name = "split" then match value with
-        | .string text => pure (.splitWhitespace text)
-        | .bytes _ => Mutable.unsupported
-        | _ => Mutable.error "AttributeError"
-      else if name = "replace" then match value with
-        | .string text => pure (.replace text)
-        | .bytes _ => Mutable.unsupported
-        | _ => Mutable.error "AttributeError"
-      else if name = "zfill" then match value with
-        | .string text => pure (.zfill text)
-        | .bytes _ => Mutable.unsupported
-        | _ => Mutable.error "AttributeError"
-      else if name = "join" then match value with
-        | .string separator => pure (.join separator)
-        | .bytes _ => Mutable.unsupported
-        | _ => Mutable.error "AttributeError"
-      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+  let resolve (name : String) : Eval Operation := do
+    match receiver with
+    | .ref address =>
+        match (← get)[address]? with
+        | some (.instance origin className fields) | some (.dataInstance origin className _ _ fields) =>
+            let body ← instanceClass module origin className
+            if name = "__class__" ∨ name = "__dict__" ∨ name = "__weakref__" then Mutable.unsupported
+            else match fields.lookup name with
+            | some _ => pure .notCallable
+            | none => match findFunctionIn body name with
+                | some (args, body) => pure (.method receiver args body)
+                | none => if name.startsWith "__" then Mutable.unsupported else Mutable.error "AttributeError"
+        | some (.list _) | some (.bytearray _) =>
+            if name = "sort" then match (← get)[address]? with
+              | some (.list _) => pure (.sort address)
+              | _ => Mutable.error "AttributeError"
+            else if name = "append" then pure (.append address)
+            else if name = "pop" then pure (.pop address)
+            else if name = "get" ∨ name = "setdefault" then Mutable.error "AttributeError"
+            else if name = "strip" ∨ name = "split" then match (← get)[address]? with
+              | some (.bytearray _) => Mutable.unsupported
+              | _ => Mutable.error "AttributeError"
+            else if name = "zfill" then match (← get)[address]? with
+              | some (.bytearray _) => Mutable.unsupported
+              | _ => Mutable.error "AttributeError"
+            else if name = "replace" then match (← get)[address]? with
+              | some (.bytearray _) => Mutable.unsupported
+              | _ => Mutable.error "AttributeError"
+            else Mutable.unsupported
+        | some (.set _) | some (.keySet _) =>
+            if name = "add" then pure (.add address)
+            else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+        | some (.dict _) | some (.keyDict _) =>
+            if name = "get" then pure (.dictionaryGet address)
+            else if name = "setdefault" then pure (.dictionarySetDefault address)
+            else if name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+        | some (.tuple _) =>
+            if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+        | none => Mutable.unsupported
+    | .scalar value =>
+        if name = "strip" then match value with
+          | .string text => pure (.strip text)
+          | .bytes _ => Mutable.unsupported
+          | _ => Mutable.error "AttributeError"
+        else if name = "split" then match value with
+          | .string text => pure (.splitWhitespace text)
+          | .bytes _ => Mutable.unsupported
+          | _ => Mutable.error "AttributeError"
+        else if name = "replace" then match value with
+          | .string text => pure (.replace text)
+          | .bytes _ => Mutable.unsupported
+          | _ => Mutable.error "AttributeError"
+        else if name = "zfill" then match value with
+          | .string text => pure (.zfill text)
+          | .bytes _ => Mutable.unsupported
+          | _ => Mutable.error "AttributeError"
+        else if name = "join" then match value with
+          | .string separator => pure (.join separator)
+          | .bytes _ => Mutable.unsupported
+          | _ => Mutable.error "AttributeError"
+        else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+  if name = "$formalsw.sort.reverse" then
+    match (← resolve "sort") with
+    | .sort address => pure (.sortReverse address)
+    | _ => Mutable.unsupported
+  else resolve name
 
 /-- Stored fields are values; first-class bound methods are outside this model. -/
 def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
@@ -1447,6 +1493,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           .next (generatorArguments .list element generators env stack heap)
       | .consumeGenerator (.builtinCall .sorted []) element generators =>
           .next (generatorArguments .sorted element generators env stack heap)
+      | .consumeGenerator (.builtinCall .sortedReverse [.constant (.bool reverse)]) element generators =>
+          .next (generatorArguments (.sortedReverse reverse) element generators env stack heap)
       | .consumeGenerator (.attribute receiver "join") element generators =>
           .next ⟨.expr receiver env, .generatorReceiver element generators env :: stack, heap⟩
       | .reversedList expression => .next (argumentsState .reversedList env [] [expression] stack heap)
@@ -1621,6 +1669,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           | .generatorEnd => .next ⟨.value value, stack, heap⟩
           | .generatorConsumer .list => .next ⟨.value value, stack, heap⟩
           | .generatorConsumer .sorted => .next ⟨.operation (.builtin .sorted) [value], stack, heap⟩
+          | .generatorConsumer (.sortedReverse reverse) =>
+              .next ⟨.operation (.builtin .sortedReverse) [value, .scalar (.bool reverse)], stack, heap⟩
           | .generatorConsumer (.join separator) => .next ⟨.operation (.join separator) [value], stack, heap⟩
           | .generatorReceiver element generators env =>
               run (globals := globals) anchors heap (bindMethod module value "join") fun method heap =>
@@ -1889,21 +1939,21 @@ theorem Extends.trans (first : Extends middle source) (second : Extends target m
 private theorem bindMethod_extend (extension : Extends target source)
     (supported : bindMethod source receiver name heap ≠ none) :
     bindMethod target receiver name heap = bindMethod source receiver name heap := by
-  cases receiver with
+  by_cases keyword : name = "$formalsw.sort.reverse" <;> cases receiver with
   | scalar value => rfl
   | ref address =>
       cases found : heap[address]? with
-      | none => simp [bindMethod, found]
+      | none => simp [bindMethod, keyword, found]
       | some object =>
           cases object with
-          | list items | tuple items | bytearray items | set items | keySet items | dict items | keyDict items => simp [bindMethod, found]
+          | list items | tuple items | bytearray items | set items | keySet items | dict items | keyDict items => simp [bindMethod, keyword, found]
           | «instance» origin className fields | dataInstance origin className frozen declared fields =>
               cases defined : source.findClass className with
-              | none => simp [bindMethod, found, instanceClass, defined, Mutable.unsupported] at supported
+              | none => simp [bindMethod, keyword, found, instanceClass, defined, Mutable.unsupported] at supported
               | some definition =>
                   rcases definition with ⟨identity, body⟩
                   have preserved := (extension.classes className identity body defined).1
-                  simp [bindMethod, found, instanceClass, defined, preserved]
+                  simp [bindMethod, keyword, found, instanceClass, defined, preserved]
 
 private theorem attribute_extend (extension : Extends target source)
     (supported : getAttribute source receiver name heap ≠ none) :
@@ -1968,7 +2018,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | sort _ | replace _ | zfill _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | sort _ | sortReverse _ | replace _ | zfill _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
   | value value =>

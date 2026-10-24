@@ -10,6 +10,7 @@ def GeneratorFinishes (action : GeneratorAction) (heap : Heap) (address : Nat)
   match action with
   | .list => value = .ref address ∧ finalHeap = heap
   | .sorted => primitive (.builtin .sorted) [.ref address] heap = some (.ok value, finalHeap)
+  | .sortedReverse reverse => primitive (.builtin .sortedReverse) [.ref address, .scalar (.bool reverse)] heap = some (.ok value, finalHeap)
   | .join separator => primitive (.join separator) [.ref address] heap = some (.ok value, finalHeap)
 
 theorem GeneratorFinishes.reaches
@@ -23,6 +24,9 @@ theorem GeneratorFinishes.reaches
       exact .next rfl .refl
   | sorted =>
       change primitive (.builtin .sorted) [.ref address] heap = some (.ok value, finalHeap) at finished
+      exact .next rfl (.next (by simp [step, result, run, finished]) .refl)
+  | sortedReverse reverse =>
+      change primitive (.builtin .sortedReverse) [.ref address, .scalar (.bool reverse)] heap = some (.ok value, finalHeap) at finished
       exact .next rfl (.next (by simp [step, result, run, finished]) .refl)
   | join separator =>
       change primitive (.join separator) [.ref address] heap = some (.ok value, finalHeap) at finished
@@ -146,6 +150,11 @@ theorem Evaluates.consume_generator_list
 theorem Evaluates.consume_generator_sorted
     (collected : GeneratorCollects (globals := globals) module .sorted element generators env heap value finalHeap) :
     Evaluates (globals := globals) module env (.consumeGenerator (.builtinCall .sorted []) element generators)
+      heap value finalHeap := fun anchors stack => .next rfl (collected anchors stack)
+
+theorem Evaluates.consume_generator_sorted_reverse
+    (collected : GeneratorCollects (globals := globals) module (.sortedReverse reverse) element generators env heap value finalHeap) :
+    Evaluates (globals := globals) module env (.consumeGenerator (.builtinCall .sortedReverse [.constant (.bool reverse)]) element generators)
       heap value finalHeap := fun anchors stack => .next rfl (collected anchors stack)
 
 theorem Evaluates.consume_generator_join

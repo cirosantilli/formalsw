@@ -68,6 +68,11 @@ def sort (heap : Heap) : List Value → Result (List Value)
       | some (.error error) => some (.error error)
       | some (.ok sorted) => insert heap first sorted
 
+/-- Reversing both before and after an ascending stable sort preserves equal-key order. -/
+def sortWithReverse (heap : Heap) (reverse : Bool) (items : List Value) : Result (List Value) :=
+  if reverse then (sort heap items.reverse).map (fun result => result.map List.reverse)
+  else sort heap items
+
 theorem insert_scalars (heap : Heap) (value : Constant) (items : List Constant) :
     insert heap (.scalar value) (items.map Mutable.Value.scalar) =
       some ((ScalarSort.insert value items).map (List.map Mutable.Value.scalar)) := by

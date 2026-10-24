@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""
+Compare reverse sorting, stability, binding, and argument effects with Python.
+"""
+import ast
+import itertools
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    characters = ', '.join(f'Char.ofNat {ord(character)}' for character in value)
+    return f'.string (String.ofList [{characters}])'
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+class CustomTruth:
+    def __init__(self, log: list[int]):
+        self.log = log
+    def __bool__(self):
+        self.log.append(90)
+        return True
+class CustomSort:
+    def sort(self, reverse: bool):
+        return reverse
+def mark(log: list[int], value: int):
+    log.append(value)
+    return value
+def fail(log: list[int]):
+    log.append(99)
+    return 1 // 0
+def mutate(values: list[int], value: int):
+    values.append(value)
+    return values
+def receiver(values: list[int], log: list[int]):
+    log.append(10)
+    return values
+def replace(holder: list[list[int]], value: int):
+    holder[0] = [value]
+    return value
+def copied(values: list[int], reverse: bool):
+    return sorted(values, reverse=reverse)
+def in_place(values: list[int], reverse: bool):
+    values.sort(reverse=reverse)
+    return values
+def generated_down(values: list[int]):
+    return sorted((value for value in values), reverse=True)
+def generated_up(values: list[int]):
+    return sorted((value for value in values), reverse=False)
+def generated_pairs(values: list[int]):
+    return sorted(((value, True) for value in values), reverse=True)
+def generated_nested(values: list[int]):
+    return sorted((first + second for first in values for second in values), reverse=False)
+def generated_filtered(values: list[int]):
+    return sorted((value for value in values if value >= 0), reverse=True)
+def tuple_keys(n: int, m: int, reverse: bool):
+    first = (n, True)
+    mapping = {}
+    mapping[first] = 0
+    mapping[(n, 1)] = 1
+    mapping[(m, False)] = 2
+    return [first, mapping, sorted(mapping, reverse=reverse)]
+def tuple_keys_default(n: int, m: int):
+    first = (n, True)
+    mapping = {}
+    mapping[first] = 0
+    mapping[(n, 1)] = 1
+    mapping[(m, False)] = 2
+    return [first, mapping, sorted(mapping)]
+def tuple_members(n: int, m: int, reverse: bool):
+    first = (n, True)
+    members = set()
+    members.add(first)
+    members.add((n, 1))
+    members.add((m, False))
+    return [first, members, sorted(members, reverse=reverse)]
+def tuple_members_default(n: int, m: int):
+    first = (n, True)
+    members = set()
+    members.add(first)
+    members.add((n, 1))
+    members.add((m, False))
+    return [first, members, sorted(members)]
+def origin(values: list[int], log: list[int]):
+    log.append(8)
+    return values
+def generated_effects(values: list[int], log: list[int]):
+    return sorted((mark(log, value) for value in origin(values, log)), reverse=True)
+def generated_failure(values: list[int], log: list[int]):
+    return sorted((10 // mark(log, value) for value in origin(values, log)), reverse=False)
+def copied_effects(values: list[int], log: list[int], value: int):
+    return sorted(mutate(values, value), reverse=mark(log, value))
+def copied_mutation(values: list[int], log: list[int], value: int):
+    return sorted(values, reverse=mutate(values, value))
+def method_effects(values: list[int], log: list[int], value: int):
+    receiver(values, log).sort(reverse=mark(log, value))
+    return values
+def method_mutation(values: list[int], log: list[int], value: int):
+    receiver(values, log).sort(reverse=mutate(values, value))
+    return values
+def copied_failure(values: list[int], log: list[int], value: int):
+    return sorted(mutate(values, value), reverse=fail(log))
+def method_failure(values: list[int], log: list[int], value: int):
+    receiver(values, log).sort(reverse=fail(log))
+    return values
+def bad_iterable(values: list[int], log: list[int], value: int):
+    return sorted(value, reverse=mark(log, value))
+def bad_receiver(values: list[int], log: list[int], value: int):
+    value.sort(reverse=fail(log))
+def tuple_receiver(values: list[int], log: list[int], value: int):
+    (value,).sort(reverse=fail(log))
+def copied_incompatible(values: list[int], log: list[int], value: int):
+    return sorted([None, value], reverse=mark(log, value))
+def positional(values: list[int], log: list[int], value: int):
+    values.sort(mark(log, value))
+def bound_method(holder: list[list[int]], value: int):
+    holder[0].sort(reverse=replace(holder, value))
+    return holder
+def bound_copy(holder: list[list[int]], value: int):
+    return sorted(holder[0], reverse=replace(holder, value))
+def custom_truth_copy(values: list[int], log: list[int]):
+    return sorted(values, reverse=CustomTruth(log))
+def custom_truth_method(values: list[int], log: list[int]):
+    values.sort(reverse=CustomTruth(log))
+def custom_method():
+    return CustomSort().sort(reverse=True)
+def failed_method(value: int):
+    values = [None, value]
+    values.sort(reverse=True)
+    return values
+def nested_method(value: int):
+    values = [(value,), (value + 1,)]
+    values.sort(reverse=True)
+    return values
+'''
+program = ast.parse(source)
+for node in program.body:
+    if isinstance(node, ast.ClassDef):
+        node.formalsw_origin = str(Path(__file__).resolve())
+checker = SupportChecker(program)
+checked = [node for node in program.body if isinstance(node, ast.FunctionDef)]
+for function in checked:
+    issues = checker.check(function.name, heap_calls=True)
+    if function.name in ('custom_truth_copy', 'custom_truth_method'):
+        assert issues, function.name
+    else:
+        assert not issues, (function.name, issues)
+for name in ('copied', 'in_place', 'generated_down', 'generated_up'):
+    assert uses_heap_calls(program, next(node for node in checked if node.name == name)), name
+encoded = api['AstJsonEmitter'](program).emit()
+assert '$formalsw.sorted.reverse' in encoded
+assert '$formalsw.sort.reverse' in encoded
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option Elab.async false',
+         'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+comparisons = 0
+
+
+def inputs(arguments):
+    objects, addresses = [], {}
+
+    def edge(value):
+        if type(value) in (list, tuple, dict, bytearray):
+            if id(value) not in addresses:
+                addresses[id(value)] = len(objects)
+                objects.append(value)
+            return f'.ref {addresses[id(value)]}'
+        return '.scalar (' + constant(value) + ')'
+
+    terms = ', '.join(map(edge, arguments))
+    nodes = []
+    cursor = 0
+    while cursor < len(objects):
+        value = objects[cursor]
+        if type(value) is dict:
+            entries = ', '.join('(' + constant(key) + ', ' + edge(item) + ')' for key, item in value.items())
+            nodes.append('.dict [' + entries + ']')
+        elif type(value) is bytearray:
+            nodes.append('.bytearray [' + ', '.join(map(str, value)) + ']')
+        else:
+            nodes.append('.' + type(value).__name__ + ' [' + ', '.join(map(edge, value)) + ']')
+        cursor += 1
+    return terms, '[' + ', '.join(nodes) + ']', objects
+
+
+def compare(name, arguments):
+    global comparisons
+    terms, heap, anchors = inputs(arguments)
+    try:
+        result = world[name](*arguments)
+        error = None
+    except (TypeError, AttributeError, ZeroDivisionError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [{terms}] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {comparisons}',
+        f'example : (match ({call}).execution.observe 10000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 10000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    comparisons += 1
+
+
+flags = (False, True, 0, -2, 3, None, '', 'λ😀', '\0\t', [], [0], (), (0,), {}, {0: 0}, b'', b'\0\xff')
+scalar_cases = ([], [0], [3, 1, 2], [-3, 8, -3, 2], [True, 1, False, 0, True, 1],
+                [1, True, True, 1, 0, False], ['😀', '\0', 'λ'], [b'x', b'', b'a'])
+for name, values, reverse in itertools.product(('copied', 'in_place'), scalar_cases, flags):
+    compare(name, [list(values), reverse])
+for values, reverse in itertools.product(((), (3, 1, 2), 'λ😀\0', b'\xff\0a', bytearray([3, 1, 2]), {'b': 2, 'a': 1}),
+                                         (False, True, None, [0])):
+    compare('copied', [values, reverse])
+# Build keyed containers inside the source; retain the first equal key to observe sharing.
+for name, n, m in itertools.product(('tuple_keys', 'tuple_members'), (-1, 0, 2), (-2, 0, 1)):
+    for reverse in (False, True):
+        compare(name, [n, m, reverse])
+    compare(name + '_default', [n, m])
+for reverse in flags:
+    compare('copied', [[(1, True), (1, 1), (0, 0), (1, False), (1, 0)], reverse])
+    compare('copied', [[(0, (3,)), (0, (1,)), (0, (1, 2)), (), (0, ())], reverse])
+    shared = [1]
+    compare('copied', [[(shared, 3), ([1], 2), (shared, 3)], reverse])
+    compare('copied', [[None, 0], reverse])
+for name in ('copied', 'in_place'):
+    for values in ([], [3, 1, 2], [True, 1, False, 0]):
+        for kind in ('list', 'tuple', 'dict'):
+            argument = list(values)
+            reverse = argument if kind == 'list' else (argument,) if kind == 'tuple' else {0: argument}
+            compare(name, [argument, reverse])
+integer_cases = ([], [3, 1, 2], [True, 1, False, 0], [-1, 2, -1], [2, 0, 1])
+for name in ('generated_down', 'generated_up', 'generated_pairs', 'generated_nested', 'generated_filtered'):
+    for values in integer_cases:
+        compare(name, [list(values)])
+for name in ('generated_effects', 'generated_failure'):
+    for values in integer_cases:
+        compare(name, [list(values), []])
+effects = ('copied_effects', 'copied_mutation', 'method_effects', 'method_mutation', 'copied_failure',
+           'method_failure', 'bad_iterable', 'bad_receiver', 'tuple_receiver', 'copied_incompatible', 'positional')
+for name, values, value in itertools.product(effects, integer_cases[:4], (-1, 0, 2)):
+    compare(name, [list(values), [], value])
+for name, values, value in itertools.product(('bound_method', 'bound_copy'), integer_cases[:4], (-1, 0, 2)):
+    compare(name, [[list(values)], value])
+
+unsupported = (('custom_truth_copy', [[3, 1, 2], []]), ('custom_truth_method', [[3, 1, 2], []]),
+               ('custom_method', []), ('failed_method', [1]), ('nested_method', [1]))
+for name, arguments in unsupported:
+    terms, heap, _ = inputs(arguments)
+    lines.append(f'example : (HeapCalls.call source "{name}" [{terms}] {heap}).execution.observe 1000 = .unsupported := by decide')
+
+# Only literal Boolean reverse flags may accompany an immediately consumed generator.
+for reverse in ('flag', '1', 'None', 'not False'):
+    module = ast.parse(f'def f(values: list[int], flag: bool):\n'
+                       f'    return sorted((value for value in values), reverse={reverse})\n')
+    assert SupportChecker(module).check('f', heap_calls=True), reverse
+for text in (
+    'def f(values: list[int]):\n    return sorted(values, key=None, reverse=True)\n',
+    'def f(values: list[int]):\n    values.sort(key=None, reverse=True)\n',
+    'def f(values: list[int], flag: bool):\n    return sorted(values, flag)\n',
+):
+    module = ast.parse(text)
+    assert SupportChecker(module).check('f', heap_calls=True), text
+
+with project_temporary_directory(prefix='reverse-sort-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(encoded)
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines)+'\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{comparisons} reverse sorting Python comparisons passed, including stability, binding, and effects.')

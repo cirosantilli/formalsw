@@ -149,6 +149,8 @@ inductive Builtin where
   intrinsic does not resolve through the Python name `set`. -/
   | setDisplay
   | sorted
+  /-- The keyword-only reverse argument is distinct from a second positional argument. -/
+  | sortedReverse
 deriving Repr, BEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
@@ -535,6 +537,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "tuple" => pure Builtin.tuple
         | "set" => pure Builtin.set
         | "sorted" => pure Builtin.sorted
+        | "$formalsw.sorted.reverse" => pure Builtin.sortedReverse
         | "int.bit_length" => pure Builtin.intBitLength
         | "int.bit_count" => pure Builtin.intBitCount
         | "identity" => pure Builtin.identity

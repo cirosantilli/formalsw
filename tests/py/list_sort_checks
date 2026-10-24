@@ -129,7 +129,7 @@ for heap in ('[.list [.scalar .none, .scalar .none]]',
         f'example : (match (HeapCalls.call source "in_place" [.ref 0] {heap}).execution.observe 1000 with',
         '  | .unsupported => true | _ => false) = true := by native_decide',
     ])
-for expression in ('xs.sort(key=int)', 'xs.sort(reverse=True)'):
+for expression in ('xs.sort(key=int)', 'xs.sort(reverse=True, key=int)'):
     module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
     assert SupportChecker(module).check('f'), expression
 

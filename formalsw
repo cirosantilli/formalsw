@@ -23,6 +23,7 @@ from lang.py.lean_frontend import parse_imports, parse_theorem, guard_propositio
 from lang.py.local_functions import lower_local_functions
 from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
 from lang.py.permutation_support import permutation_arguments
+from lang.py.call_support import reverse_keyword
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
@@ -1529,8 +1530,20 @@ class AstJsonEmitter:
                                    "iter": item["iter"], "ifs": item["ifs"]} for item in generators]
                 target = ({"type": "BuiltinCall", "name": consumer.id, "args": []}
                           if isinstance(consumer, ast.Name) else self.expr(consumer))
+                reverse = reverse_keyword(expr)
+                if reverse is not None:
+                    target = {"type": "BuiltinCall", "name": "$formalsw.sorted.reverse", "args": [self.expr(reverse)]}
                 return {"type": "ConsumeGenerator", "consumer": target,
                         "elt": encoded["elt"], "generators": generators}
+        reverse = reverse_keyword(expr)
+        if reverse is not None:
+            if (isinstance(expr.func, ast.Name) and expr.func.id == 'sorted' and len(expr.args) == 1
+                    and not bindings(self.bindings_module, 'sorted')):
+                return {"type": "BuiltinCall", "name": "$formalsw.sorted.reverse",
+                        "args": [self.expr(expr.args[0]), self.expr(reverse)]}
+            if isinstance(expr.func, ast.Attribute) and expr.func.attr == 'sort' and not expr.args:
+                return {"type": "Call", "func": {"type": "Attribute", "value": self.expr(expr.func.value),
+                        "attr": "$formalsw.sort.reverse"}, "args": [self.expr(reverse)]}
         match expr:
             case ast.JoinedStr(values=values):
                 if not plain_fstring(expr):

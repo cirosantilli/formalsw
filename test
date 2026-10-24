@@ -98,6 +98,7 @@ def main() -> int:
         TestCase("fresh list construction", Path("tests/py/list_calls.py"), 0, "All 5 checks passed"),
         TestCase("tuple construction from lists", Path("tests/py/tuple_constructor.py"), 0, "All 4 checks passed"),
         TestCase("integer tuple ordering", Path("tests/py/tuple_order.py"), 0, "All 6 checks passed"),
+        TestCase("reverse sorting", Path("tests/py/reverse_sort.py"), 0, "All 6 checks passed"),
         TestCase("list removal", Path("tests/py/pop_calls.py"), 0, "All 2 checks passed"),
         TestCase("Unicode whitespace methods", Path("tests/py/whitespace_calls.py"), 0, "All 6 checks passed"),
         TestCase("string joining", Path("tests/py/join_calls.py"), 0, "All 5 checks passed"),
@@ -520,7 +521,7 @@ def main() -> int:
     additional_runtime_checks_passed = True
     for script in ("dictionary_items_checks", "key_dictionary_checks", "bitwise_or_shift_checks", "binary_format_checks", "unpacked_return_checks", "set_sum_checks", "set_generator_sum_checks", "global_expression_checks",
                    "lean_cache_checks", "cache_cli_checks", "string_replace_checks", "whitespace_checks",
-                   "tuple_checks", "tuple_order_checks", "tuple_set_checks", "container_type_checks", "string_membership_checks", "variadic_tuple_checks", "materialized_range_checks"):
+                   "tuple_checks", "tuple_order_checks", "reverse_sort_checks", "tuple_set_checks", "container_type_checks", "string_membership_checks", "variadic_tuple_checks", "materialized_range_checks"):
         checked = subprocess.run([sys.executable, f"tests/py/{script}"], cwd=REPO,
                                  text=True, capture_output=True)
         passed = checked.returncode == 0

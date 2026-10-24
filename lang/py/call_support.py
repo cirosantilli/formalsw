@@ -199,10 +199,23 @@ def mapped_list(node):
     return ast.copy_location(ast.Call(func=node.func, args=[generator], keywords=[]), node)
 
 
+def reverse_keyword(node):
+    """Recognize one explicit keyword without conflating it with positional arguments."""
+    if (isinstance(node, ast.Call) and len(node.keywords) == 1
+            and node.keywords[0].arg == 'reverse'):
+        return node.keywords[0].value
+    return None
+
+
 def consumed_generator(node):
     """Recognize immediate consumers without materializing their lazy input."""
-    if not (isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords):
+    if not (isinstance(node, ast.Call) and len(node.args) == 1):
         return None
+    if node.keywords:
+        reverse = reverse_keyword(node)
+        if not (isinstance(node.func, ast.Name) and node.func.id == 'sorted'
+                and isinstance(reverse, ast.Constant) and type(reverse.value) is bool):
+            return None
     iterable = node.args[0]
     if (isinstance(node.func, ast.Name) and node.func.id in ('all', 'any')
             and isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
@@ -877,11 +890,14 @@ def check_calls(module, function, reject, *, heap=False):
                 visit_class(classes[node.func.id])
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 ordinary_attribute(node.func, reject)
-                if node.keywords:
-                    reject(node, 'method calls require positional arguments')
+                reverse = reverse_keyword(node)
+                if node.keywords and not (node.func.attr == 'sort' and not node.args and reverse is not None):
+                    reject(node, 'method keywords support only sort(reverse=...)')
                 recurse(node.func.value)
                 for item in node.args:
                     recurse(item)
+                if reverse is not None:
+                    recurse(reverse)
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ('list', 'tuple'):
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, f'{node.func.id} construction requires the unshadowed builtin {node.func.id}')
@@ -892,10 +908,13 @@ def check_calls(module, function, reject, *, heap=False):
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'sorted':
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, 'sorting requires the unshadowed builtin sorted')
-                if len(node.args) != 1 or node.keywords:
-                    reject(node, 'sorted supports one positional iterable; key and reverse are not modeled')
+                reverse = reverse_keyword(node)
+                if len(node.args) != 1 or node.keywords and reverse is None:
+                    reject(node, 'sorted supports one positional iterable and optional reverse; key is not modeled')
                 for item in node.args:
                     recurse(item)
+                if reverse is not None:
+                    recurse(reverse)
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'set':
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, 'set construction requires the unshadowed builtin set')

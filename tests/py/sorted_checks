@@ -123,7 +123,7 @@ for name in ('text', 'bytes_value', 'buffer', 'set_value', 'empty_tuple', 'inval
 
 # Keyword options still require separate semantics.
 for expression in ('sorted()', 'sorted(xs, xs)', 'sorted(xs, key=int)',
-                   'sorted(xs, reverse=True)'):
+                   'sorted(xs, reverse=True, key=int)'):
     module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
     assert SupportChecker(module).check('f'), expression
 for binding in ('sorted = 1\n', 'from somewhere import sorted\n'):
