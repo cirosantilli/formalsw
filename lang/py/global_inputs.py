@@ -58,6 +58,35 @@ def annotation_kind(annotation):
     return None
 
 
+def integer_expression_kind(node, resolve):
+    """
+    Infer the type of a pure integer initializer without evaluating its value.
+    Globals remain call-entry inputs; this does not certify module initialization.
+    """
+    if isinstance(node, ast.Constant):
+        return {int: 'int', bool: 'bool'}.get(type(node.value))
+    if isinstance(node, ast.Name):
+        kind = resolve(node.id)
+        return kind if kind in ('int', 'bool') else None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub, ast.Invert)):
+        return 'int' if integer_expression_kind(node.operand, resolve) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (
+            ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod,
+            ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift, ast.Pow)):
+        left = integer_expression_kind(node.left, resolve)
+        right = integer_expression_kind(node.right, resolve)
+        if not left or not right:
+            return None
+        if isinstance(node.op, ast.Pow) and not (
+                isinstance(node.right, ast.Constant) and type(node.right.value) in (int, bool)
+                and node.right.value >= 0):
+            return None
+        if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)) and left == right == 'bool':
+            return 'bool'
+        return 'int'
+    return None
+
+
 def function_globals(module, function, *, heap_calls=False):
     """Use Python's scope analysis; infer domains without fixing entry values.
 
@@ -108,6 +137,9 @@ def function_globals(module, function, *, heap_calls=False):
                 kind = domain(value.id, (*visiting, name))
             elif value is None and expected:
                 kind = expected
+            elif isinstance(value, (ast.UnaryOp, ast.BinOp)) and (computed := integer_expression_kind(
+                    value, lambda alias: domain(alias, (*visiting, name)))) is not None:
+                kind = computed
             else:
                 try:
                     literal = ast.literal_eval(value)

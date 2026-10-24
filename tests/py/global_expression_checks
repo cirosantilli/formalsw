@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""
+Infer integer global domains without running initialization or fixing values.
+"""
+import ast
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.global_inputs import GlobalInputError, function_globals
+
+
+def domain(source):
+    module = ast.parse(source + '\ndef read():\n    return VALUE\n')
+    result, = function_globals(module, module.body[-1], heap_calls=True)
+    assert result.name == 'VALUE'
+    return result.kind
+
+
+expressions = [
+    '(1 << 9) - 1', '1 + 2 * 3', '-(4 // 2)', '~False', '12 % 5',
+    '9 >> 1', '3 & 7', '3 | 8', '7 ^ 3', 'True | False', 'True & False',
+    'True ^ False', 'True + False', 'True << False', 'True | 2',
+    '(-2) ** 4', '3 ** True', '+True',
+]
+for expression in expressions:
+    source = 'VALUE = ' + expression
+    world = {}
+    exec(source, world)
+    assert domain(source) == type(world['VALUE']).__name__, expression
+assert domain('BITS = 9\nVALUE = (1 << BITS) - 1') == 'int'
+assert domain('MASK = 3\nVALUE: int = MASK | 8') == 'int'
+# The inference must not allocate the enormous integer these initializers request.
+assert domain('VALUE = 1 << (10 ** 100)') == 'int'
+assert domain('VALUE = 2 ** 1000000000') == 'int'
+
+for source in [
+        'VALUE = int("1")', 'VALUE = object().field', 'VALUE = [1][0]',
+        'VALUE = 2 ** -1', 'VALUE = 1 / 2', 'VALUE = "a" + "b"',
+        'VALUE: bool = (1 << 9) - 1', 'VALUE: int = True | False',
+        'VALUE = OTHER + 1\nOTHER = VALUE + 1',
+        'VALUE = lambda: 1']:
+    try:
+        domain(source)
+    except GlobalInputError:
+        pass
+    else:
+        raise AssertionError(source)
+print('Integer global-expression inference checks passed')
