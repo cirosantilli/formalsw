@@ -30,6 +30,7 @@ roots = [
   "lang.py.FormalSW.Linking",
   "lang.py.FormalSW.Globals",
   "lang.py.FormalSW.ScalarSets",
+  "lang.py.FormalSW.ScalarSetLemmas",
   "lang.py.FormalSW.HashKeys",
   "lang.py.FormalSW.ScalarDicts",
   "lang.py.FormalSW.ScalarSort",
