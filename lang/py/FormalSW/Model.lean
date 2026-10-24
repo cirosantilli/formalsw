@@ -47,6 +47,8 @@ inductive BinOp where
   | sub
   /-- Python `*`. -/
   | mult
+  /-- Python bitwise conjunction. -/
+  | bitAnd
   /-- Python exponentiation. Float-producing cases require another value model. -/
   | pow
   /-- Python floor division `//`. -/
@@ -54,6 +56,18 @@ inductive BinOp where
   /-- Python remainder `%`. -/
   | mod
 deriving Repr, BEq, Lean.ToExpr
+
+/-- Integer conjunction with Python's unbounded two's-complement sign extension. -/
+def integerBitAnd : Int → Int → Int
+  | .ofNat a, .ofNat b => .ofNat (a &&& b)
+  | .ofNat a, .negSucc b => .ofNat (Nat.bitwise (fun x y => x && !y) a b)
+  | .negSucc a, .ofNat b => .ofNat (Nat.bitwise (fun x y => x && !y) b a)
+  | .negSucc a, .negSucc b => .negSucc (a ||| b)
+
+@[simp] theorem integerBitAnd_nat (a b : Nat) : integerBitAnd a b = (a &&& b : Nat) := rfl
+
+@[simp] theorem integerBitAnd_nat_one (a : Nat) : integerBitAnd a 1 = (a % 2 : Nat) := by
+  simp [integerBitAnd, Nat.and_one_is_mod]
 
 /-- Python comparison operators currently represented by the AST bridge. -/
 inductive CmpOp where
@@ -294,6 +308,7 @@ private def BinOp.fromJson? (json : Lean.Json) : Except String BinOp := do
   | "Add" => return .add
   | "Sub" => return .sub
   | "Mult" => return .mult
+  | "BitAnd" => return .bitAnd
   | "Pow" => return .pow
   | "FloorDiv" => return .floorDiv
   | "Mod" => return .mod
@@ -1465,6 +1480,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
       | BinOp.add => some (leftValue + rightValue)
       | BinOp.sub => some (leftValue - rightValue)
       | BinOp.mult => some (leftValue * rightValue)
+      | BinOp.bitAnd => some (integerBitAnd leftValue rightValue)
       | BinOp.pow => if rightValue < 0 then none else some (leftValue ^ rightValue.toNat)
       | BinOp.floorDiv => none
       | BinOp.mod => if rightValue = 0 then none else some (leftValue % rightValue)

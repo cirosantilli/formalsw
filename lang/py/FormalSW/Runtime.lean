@@ -48,38 +48,50 @@ def scalarCompare (op : CmpOp) (left right : Constant) : Option Bool :=
   | .bool b => some (if b then 1 else 0)
   | _ => none
 
+/-- Boolean conjunction retains bool only when both operands are bool. -/
+def scalarBitAnd (left right : Constant) : Except ExceptionObject Constant :=
+  match left, right with
+  | .bool a, .bool b => .ok (.bool (a && b))
+  | _, _ => match scalarNumber left, scalarNumber right with
+      | some a, some b => .ok (.int (integerBitAnd a b))
+      | _, _ => .error { typeName := "TypeError", args := [] }
+
 def scalarBinary (op : BinOp) (left right : Constant) : Option (Except ExceptionObject Constant) :=
-  match scalarNumber left, scalarNumber right with
-  | some left, some right =>
-      match op with
-      | .add => some (.ok (.int (left + right)))
-      | .sub => some (.ok (.int (left - right)))
-      | .mult => some (.ok (.int (left * right)))
-      | .pow =>
-          if right < 0 then none
-          else some (.ok (.int (left ^ right.toNat)))
-      | .floorDiv | .mod =>
-          if right = 0 then
-            some (.error { typeName := "ZeroDivisionError", args := [] })
-          else if right > 0 then
-            some (.ok (.int (match op with | .mod => left % right | _ => left / right)))
-          else
-            let quotient := (-left) / (-right)
-            some (.ok (.int (match op with | .mod => left - right * quotient | _ => quotient)))
-  | _, _ => match op, left, right with
-      -- Bytes also use % for formatting, which needs a separate format parser.
-      | .mod, .bytes _, _ => none
-      | .add, .string a, .string b => some (.ok (.string (a ++ b)))
-      | .add, .bytes a, .bytes b => some (.ok (.bytes (a ++ b)))
-      | .mult, .bytes text, count | .mult, count, .bytes text =>
-          match scalarNumber count with
-          | some n => some (.ok (.bytes (List.replicate n.toNat text).flatten))
-          | none => some (.error { typeName := "TypeError", args := [] })
-      | .mult, .string text, count | .mult, count, .string text =>
-          match scalarNumber count with
-          | some n => some (.ok (.string (String.join (List.replicate n.toNat text))))
-          | none => some (.error { typeName := "TypeError", args := [] })
-      | _, _, _ => some (.error { typeName := "TypeError", args := [] })
+  match op with
+  | .bitAnd => some (scalarBitAnd left right)
+  | _ =>
+    match scalarNumber left, scalarNumber right with
+    | some left, some right =>
+        match op with
+        | .add => some (.ok (.int (left + right)))
+        | .sub => some (.ok (.int (left - right)))
+        | .mult => some (.ok (.int (left * right)))
+        | .bitAnd => none -- Handled before numeric coercion.
+        | .pow =>
+            if right < 0 then none
+            else some (.ok (.int (left ^ right.toNat)))
+        | .floorDiv | .mod =>
+            if right = 0 then
+              some (.error { typeName := "ZeroDivisionError", args := [] })
+            else if right > 0 then
+              some (.ok (.int (match op with | .mod => left % right | _ => left / right)))
+            else
+              let quotient := (-left) / (-right)
+              some (.ok (.int (match op with | .mod => left - right * quotient | _ => quotient)))
+    | _, _ => match op, left, right with
+        -- Bytes also use % for formatting, which needs a separate format parser.
+        | .mod, .bytes _, _ => none
+        | .add, .string a, .string b => some (.ok (.string (a ++ b)))
+        | .add, .bytes a, .bytes b => some (.ok (.bytes (a ++ b)))
+        | .mult, .bytes text, count | .mult, count, .bytes text =>
+            match scalarNumber count with
+            | some n => some (.ok (.bytes (List.replicate n.toNat text).flatten))
+            | none => some (.error { typeName := "TypeError", args := [] })
+        | .mult, .string text, count | .mult, count, .string text =>
+            match scalarNumber count with
+            | some n => some (.ok (.string (String.join (List.replicate n.toNat text))))
+            | none => some (.error { typeName := "TypeError", args := [] })
+        | _, _, _ => some (.error { typeName := "TypeError", args := [] })
 
 /-- Supported scalar expressions are finite. Calls and unsupported operators are
 rejected; looping Python comparison methods are executed by `comparison` below. -/

@@ -637,64 +637,72 @@ def invalidBinary (op : BinOp) (left : Value) : Eval Value := do
     | _ => error "TypeError"
   else error "TypeError"
 
-def binary (op : BinOp) (a b : Value) : Eval Value := do
-  let number : Value → Value
-    | .scalar (.bool b) => .scalar (.int (if b then 1 else 0))
-    | v => v
-  match number a, number b with
-  | .ref left, .ref right =>
-      if op == .add then
-        match (← get)[left]?, (← get)[right]? with
-        | some (.bytearray xs), some (.bytearray ys) => allocateBuffer (xs ++ ys)
-        | some (.list _), some (.list _) => allocate ((← array a).2 ++ (← array b).2)
-        | some (.tuple xs), some (.tuple ys) =>
-            if xs.isEmpty then return b
-            else if ys.isEmpty then return a
-            else allocateTuple (xs ++ ys)
-        | none, _ | _, none => unsupported
-        | _, _ => error "TypeError"
-      else invalidBinary op a
-  | .ref address, .scalar (.int n) | .scalar (.int n), .ref address =>
-      if op == .mult then
-        match (← get)[address]? with
-        | some (.bytearray bytes) => allocateBuffer (List.replicate n.toNat bytes).flatten
-        | some (.list _) => allocate ((List.replicate n.toNat (← array (.ref address)).2).flatten)
-        | some (.tuple items) =>
-            if n = 1 ∨ items.isEmpty then return .ref address
-            else allocateTuple (List.replicate n.toNat items).flatten
-        | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+def binary (op : BinOp) (a b : Value) : Eval Value :=
+  match op with
+  | .bitAnd => match a, b with
+      | .scalar left, .scalar right =>
+          match scalarBitAnd left right with
+          | .ok value => pure (.scalar value)
+          | .error exception => throw exception
+      | _, _ => unsupported
+  | _ => do
+    let number : Value → Value
+      | .scalar (.bool b) => .scalar (.int (if b then 1 else 0))
+      | v => v
+    match number a, number b with
+    | .ref left, .ref right =>
+        if op == .add then
+          match (← get)[left]?, (← get)[right]? with
+          | some (.bytearray xs), some (.bytearray ys) => allocateBuffer (xs ++ ys)
+          | some (.list _), some (.list _) => allocate ((← array a).2 ++ (← array b).2)
+          | some (.tuple xs), some (.tuple ys) =>
+              if xs.isEmpty then return b
+              else if ys.isEmpty then return a
+              else allocateTuple (xs ++ ys)
+          | none, _ | _, none => unsupported
+          | _, _ => error "TypeError"
+        else invalidBinary op a
+    | .ref address, .scalar (.int n) | .scalar (.int n), .ref address =>
+        if op == .mult then
+          match (← get)[address]? with
+          | some (.bytearray bytes) => allocateBuffer (List.replicate n.toNat bytes).flatten
+          | some (.list _) => allocate ((List.replicate n.toNat (← array (.ref address)).2).flatten)
+          | some (.tuple items) =>
+              if n = 1 ∨ items.isEmpty then return .ref address
+              else allocateTuple (List.replicate n.toNat items).flatten
+          | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+          | none => unsupported
+        else invalidBinary op a
+    | .ref address, .scalar (.bytes bytes) =>
+        if op == .add then
+          match (← get)[address]? with
+          | some (.bytearray left) => allocateBuffer (left ++ bytes)
+          | some (.list _) | some (.tuple _) => error "TypeError"
+          | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+          | none => unsupported
+        else invalidBinary op a
+    | .scalar (.bytes bytes), .ref address =>
+        if op == .add then
+          match (← get)[address]? with
+          | some (.bytearray right) => return .scalar (.bytes (bytes ++ right))
+          | some (.list _) | some (.tuple _) => error "TypeError"
+          | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+          | none => unsupported
+        else invalidBinary op a
+    | .scalar (.string s), .scalar (.int n) | .scalar (.int n), .scalar (.string s) =>
+        if op == .mult then return .scalar (.string (String.join (List.replicate n.toNat s)))
+        else error "TypeError"
+    | .scalar (.string a), .scalar (.string b) =>
+        if op == .add then return .scalar (.string (a ++ b)) else error "TypeError"
+    | .scalar (.string _), .ref _ =>
+        if op == .mod then unsupported else error "TypeError"
+    | .scalar a, .scalar b =>
+        match scalarBinary op a b with
+        | some (.ok v) => return .scalar v
+        | some (.error e) => throw e
         | none => unsupported
-      else invalidBinary op a
-  | .ref address, .scalar (.bytes bytes) =>
-      if op == .add then
-        match (← get)[address]? with
-        | some (.bytearray left) => allocateBuffer (left ++ bytes)
-        | some (.list _) | some (.tuple _) => error "TypeError"
-        | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
-        | none => unsupported
-      else invalidBinary op a
-  | .scalar (.bytes bytes), .ref address =>
-      if op == .add then
-        match (← get)[address]? with
-        | some (.bytearray right) => return .scalar (.bytes (bytes ++ right))
-        | some (.list _) | some (.tuple _) => error "TypeError"
-        | some (.set _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
-        | none => unsupported
-      else invalidBinary op a
-  | .scalar (.string s), .scalar (.int n) | .scalar (.int n), .scalar (.string s) =>
-      if op == .mult then return .scalar (.string (String.join (List.replicate n.toNat s)))
-      else error "TypeError"
-  | .scalar (.string a), .scalar (.string b) =>
-      if op == .add then return .scalar (.string (a ++ b)) else error "TypeError"
-  | .scalar (.string _), .ref _ =>
-      if op == .mod then unsupported else error "TypeError"
-  | .scalar a, .scalar b =>
-      match scalarBinary op a b with
-      | some (.ok v) => return .scalar v
-      | some (.error e) => throw e
-      | none => unsupported
-  | .ref _, _ => invalidBinary op a
-  | _, _ => error "TypeError"
+    | .ref _, _ => invalidBinary op a
+    | _, _ => error "TypeError"
 
 /-- Sequence iteration for the builtin list, text and buffer types. -/
 def sequence : Value → Eval (List Value)

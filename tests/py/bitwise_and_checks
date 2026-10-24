@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""
+Compare conjunction with Python, including signs, result types and operand effects.
+"""
+import ast
+from itertools import product
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    if type(value) is bytes:
+        return '(.bytes [' + ', '.join(map(str, value)) + '])'
+    return f'(.string {json.dumps(value)})'
+
+
+values = [*range(-5, 6), -(2**130 + 3), 2**130 + 7, True, False, None, 'x', b'x']
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192']
+count = 0
+for a, b in product(values, repeat=2):
+    try:
+        outcome = '.ok ' + constant(a & b)
+    except TypeError:
+        outcome = '.error { typeName := "TypeError", args := [] }'
+    lines.append(f'example : scalarBinary .bitAnd {constant(a)} {constant(b)} = some ({outcome}) := by native_decide')
+    lines.append(f'example : Mutable.binary .bitAnd (.scalar {constant(a)}) (.scalar {constant(b)}) [] = '
+                 f'some (({outcome} : Except ExceptionObject Constant).map Mutable.Value.scalar, []) := by native_decide')
+    count += 2
+
+source = """
+def record(items: list[int], n: int) -> int:
+    items.append(n)
+    return n
+
+def effect(items: list[int], a: int, b: int) -> int:
+    return record(items, a) & record(items, b)
+
+def inplace(items: list[int], a: int, b: int) -> int:
+    a &= record(items, b)
+    return a
+
+def raises(items: list[int], a: int, b: int) -> int:
+    return (record(items, a) // 0) & record(items, b)
+"""
+program = ast.parse(source)
+world = {}
+exec(source, world)
+lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
+for name in ('effect', 'inplace', 'raises'):
+    assert not SupportChecker(program).check(name), SupportChecker(program).check(name)
+    for a, b in ((-5, 3), (0, -1), (2**130 + 3, -(2**120)), (True, False)):
+        items = []
+        try:
+            outcome = '.ok (.scalar ' + constant(world[name](items, a, b)) + ')'
+        except ZeroDivisionError:
+            outcome = '.error { typeName := "ZeroDivisionError", args := [] }'
+        contents = ', '.join('.scalar ' + constant(value) for value in items)
+        call = f'HeapCalls.call source "{name}" [.ref 0, .scalar {constant(a)}, .scalar {constant(b)}] [.list []]'
+        lines.append(f'example : ({call}).execution.observe 200 = '
+                     f'.done (.ok ⟨{outcome}, [], [.list [{contents}]], 1⟩) := by native_decide')
+        count += 1
+# Set intersection is not integer conjunction; never turn a valid operation into TypeError.
+lines.append('example : Mutable.binary .bitAnd (.ref 0) (.ref 1) [.set [], .set []] = none := by native_decide')
+
+with project_temporary_directory(prefix='bitwise-and-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+subprocess.run([str(REPO / 'formalsw'), 'tests/py/bitwise_and.py'], cwd=REPO, check=True)
+print(f'Bitwise AND: {count} Python comparisons; arbitrary-input source proofs passed')

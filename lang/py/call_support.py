@@ -349,7 +349,7 @@ def uses_calls_model(module, function):
         or isinstance(node, ast.Constant) and type(node.value) is bytes
         or range_sum(node) is not None
         or general_division(node)
-        or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow)
+        or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'max', 'min', 'len'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
@@ -560,7 +560,7 @@ def check_calls(module, function, reject, *, heap=False):
                 recurse(node.func.value)
                 recurse(node.args[0])
                 return
-            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow)):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow, ast.BitAnd)):
                 recurse(node.left)
                 recurse(node.right)
             elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):

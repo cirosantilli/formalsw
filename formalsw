@@ -1616,6 +1616,8 @@ class AstJsonEmitter:
                 return "Sub"
             case ast.Mult():
                 return "Mult"
+            case ast.BitAnd():
+                return "BitAnd"
             case ast.Pow():
                 return "Pow"
             case ast.FloorDiv():
