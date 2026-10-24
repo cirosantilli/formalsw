@@ -26,6 +26,7 @@ import lang.py.FormalSW.PermutationCalls
 import lang.py.FormalSW.ZipCalls
 import lang.py.FormalSW.ReverseCalls
 import lang.py.FormalSW.LoopCalls
+import lang.py.FormalSW.LoopProgress
 import lang.py.FormalSW.IntegerParsing
 import lang.py.FormalSW.ClassCalls
 import Lean
