@@ -511,7 +511,7 @@ def main() -> int:
     if not link_checks_passed:
         print(textwrap.indent((link_checks.stdout + link_checks.stderr).rstrip(), "  "))
     additional_runtime_checks_passed = True
-    for script in ("bitwise_or_shift_checks", "unpacked_return_checks", "set_sum_checks", "global_expression_checks",
+    for script in ("bitwise_or_shift_checks", "unpacked_return_checks", "set_sum_checks", "set_generator_sum_checks", "global_expression_checks",
                    "lean_cache_checks", "cache_cli_checks", "string_replace_checks",
                    "tuple_set_checks", "container_type_checks", "string_membership_checks"):
         checked = subprocess.run([sys.executable, f"tests/py/{script}"], cwd=REPO,

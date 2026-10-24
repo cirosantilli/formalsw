@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""
+Compare lazy set generator sums with Python across schedules and effects.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = """
+def touch(values: set[int], events: list[int]) -> int:
+    events.append(7)
+    values.add(11)
+    return 5
+
+def duplicate(values: set[int], events: list[int]) -> int:
+    events.append(9)
+    values.add(3)
+    return 1
+
+def stop(events: list[int]) -> int:
+    events.append(4)
+    raise StopIteration
+"""
+bodies = {
+    'identity': 'return sum(x for x in values)',
+    'mapped': 'return sum(2 * x for x in values)',
+    'filtered_count': 'return sum(1 for x in values if x < 4)',
+    'two_filters': 'return sum(x for x in values if x > -3 if x < 8)',
+    'nested': 'return sum(x * y for x in values for y in [1, 2])',
+    'negative_start': 'return sum((x for x in values), -9)',
+    'boolean_start': 'return sum((x for x in values), True)',
+    'none_start': 'return sum((x for x in values), None)',
+    'text_start': 'return sum((touch(values, events) for x in values), "")',
+    'start_mutation': 'return sum((x for x in values), touch(values, events))',
+    'body_mutation': 'return sum(touch(values, events) for x in values)',
+    'filter_mutation': 'return sum(1 for x in values if touch(values, events))',
+    'duplicate_mutation': 'return sum(duplicate(values, events) for x in values)',
+    'body_stop': 'return sum(stop(events) for x in values)',
+    'filter_stop': 'return sum(1 for x in values if stop(events))',
+    'start_stop': 'return sum((x for x in values), stop(events))',
+    'iterable_before_start': 'return sum((x for x in 3), touch(values, events))',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(values: set[int], events: list[int]):\n    {body}\n'
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+
+lines = [
+    'import FormalSW',
+    'import lang.py.FormalSW.SetSumCalls',
+    'open FormalSW.PyAst',
+    'set_option maxRecDepth 8192',
+    'def source : Module := pyast_from_json% (include_str "source.json")',
+]
+inputs = [[], [3], [3, 11], [3, -2, 7], [True, False, -3, 7], ['bad'], [None], [b'bad']]
+schedules = ['fun _ => 0', 'fun _ => 17', 'fun n => n + 1']
+cases = list(itertools.product(bodies, inputs, schedules))
+for order in itertools.permutations(range(3)):
+    remaining, indices = list(range(3)), []
+    for index in order:
+        position = remaining.index(index)
+        indices.append(position)
+        remaining.pop(position)
+    schedule = 'fun n => ([' + ', '.join(map(str, indices)) + '] : List Nat)[n]?.getD 0'
+    cases.extend((name, [3, -2, 7], schedule) for name in ('identity', 'mapped', 'filtered_count', 'two_filters', 'nested'))
+
+count = 0
+for name, initial, schedule in cases:
+    values, events = set(initial), []
+    try:
+        result = world[name](values, events)
+        error = None
+    except (TypeError, RuntimeError, StopIteration) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots([values, events] + ([result] if error is None else [])))
+    heap = '[.set [' + ', '.join(map(constant, initial)) + '], .list []]'
+    call = f'(SetCalls.call source "{name}" [.ref 0, .ref 1] {heap}).run ({schedule})'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e.typeName = "{error}") | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, {schedule}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+with project_temporary_directory(prefix='set-generator-sum-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} set-generator-sum comparisons passed, including scheduling, mutation, and exception order')

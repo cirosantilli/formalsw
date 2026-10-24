@@ -354,11 +354,12 @@ def has_partial_primitives(module, function):
 
 
 def uses_set_iteration(module, function):
-    """Select arbitrary-order execution when a reachable loop may consume a set.
+    """
+    Select arbitrary-order execution when a reachable loop may consume a set.
 
     This is conservative backend selection, not permission to execute unknown
     constructs: the source checker and universal Supported obligation still apply.
-    Comprehensions consuming sets are not yet implemented by the iterator model.
+    Unsupported consumers still require their own execution coverage proof.
     """
     if module is None:
         return False

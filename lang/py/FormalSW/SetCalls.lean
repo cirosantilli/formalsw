@@ -22,6 +22,17 @@ def iteratorStep (choices : ChoiceSchedule) (anchors : Nat) (state : State)
     (globals : Mutable.Globals := []) : Step State Mutable.Completion :=
   let ⟨⟨work, stack, heap⟩, used⟩ := state
   match work, stack with
+  | .operation (.sumGenerator element ((name, iterable, filters) :: generators) env start)
+      [.ref address], stack =>
+      match iterable with
+      | .call (.name "range") _ => .unsupported
+      | _ => match heap[address]? with
+          | some (.set items) => .next ⟨⟨.expr start env,
+              .sumStart (.setStepLoop name address items items
+                (comprehensionFilters filters (sumBody element generators)) [])
+                (comprehensionEnv env ((name, iterable, filters) :: generators)) :: stack,
+              heap⟩, used⟩
+          | _ => .unsupported
   | .operation .sumSequence [.ref address, start], stack =>
       match heap[address]? with
       | some (.set items) => liftStep used
