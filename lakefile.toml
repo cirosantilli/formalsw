@@ -68,6 +68,8 @@ roots = [
   "lang.py.FormalSW.DataRuntime",
   "lang.py.FormalSW.GraphEquivalence",
   "lang.py.FormalSW.GraphPreservation",
+  "lang.py.FormalSW.GraphRelocation",
+  "lang.py.FormalSW.MutableRelocation",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",

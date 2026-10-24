@@ -638,6 +638,8 @@ The comparator matches runtime types, scalar values, stored fields, container or
 
 `Graph.equivalent_allocations` proves that appending unreachable objects preserves equivalence, even when the original heap contains aliases or cycles. For function proofs, `Mutable.Completion.equivalent_allocations` applies this result when the entry heap is unchanged and the result and globals refer only to its objects or scalar values.
 
+`Graph.Relocation.equivalent_relocated` also permits different physical addresses for fresh reachable nodes discovered in logical order. `Mutable.Relocation.equivalent_tuple_list` applies it to a fresh result tuple containing a scalar and a list of scalars, while retaining the unchanged caller heap and its globals. Both theorems prove that the actual Python comparator returns `True`.
+
 Compare all observable roots together when specifying function equivalence: the result, caller-owned inputs, and relevant supported global state. Comparing only results would miss whether a function returned its input or a copy:
 
 [source,python]
