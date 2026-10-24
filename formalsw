@@ -2031,13 +2031,14 @@ def check_source(source: Path, report: CheckReport) -> int:
         failure_message="failed to build the FormalSW core or Python model",
         failure_hint="Fix the Lean libraries before checking Python source proofs.",
     )
+    environment = lean_env()
     run([
         "lean",
         "-o",
         str(ast_olean_path),
         str(ast_path),
     ],
-        env=lean_env(),
+        env=environment,
         failure_message=f"generated JSON AST failed to import for {source}",
         failure_hint=(
             f"This usually means formalsw generated invalid JSON in {ast_json_path} "
@@ -2051,7 +2052,7 @@ def check_source(source: Path, report: CheckReport) -> int:
         str(proof_olean_path),
         str(proof_path),
     ],
-        env=lean_env(),
+        env=environment,
         failure_message=f"proof check failed for {source}",
         failure_hint=(
             f"Complete {proof_path}; remove any `sorry`; and make sure it "
@@ -2068,7 +2069,7 @@ def check_source(source: Path, report: CheckReport) -> int:
         str(requirements_olean_path),
         str(requirements_path),
     ],
-        env=lean_env(),
+        env=environment,
         failure_message=f"proof check failed for {source}",
         failure_hint=(
             f"Complete {proof_path}; remove any `sorry`; and make sure every "
