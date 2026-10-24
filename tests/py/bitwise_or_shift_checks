@@ -92,8 +92,8 @@ for label in ('merge', 'exclusive', 'shift', 'shift_right'):
             lines.append(f'example : ({call}).execution.observe 300 = '
                          f'.done (.ok ⟨{expected}, [], [.list [{contents}]], 1⟩) := by native_decide')
             comparisons += 1
-# Collection union and custom reference operators must not silently become integer operations.
-for objects in ('[.set [], .set []]', '[.dict [], .dict []]'):
+# Dictionary union and custom reference operators must not become integer operations.
+for objects in ('[.dict [], .dict []]',):
     lines.append(f'example : Mutable.binary .bitOr (.ref 0) (.ref 1) {objects} = none := by native_decide')
 for operator in ('leftShift', 'rightShift'):
     lines.append(f'example : Mutable.binary .{operator} (.ref 0) (.scalar (.int 1)) [.list []] = none := by native_decide')

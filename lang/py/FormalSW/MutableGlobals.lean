@@ -820,6 +820,17 @@ def invalidBinary (op : BinOp) (left : Value) : Eval Value := do
     | _ => error "TypeError"
   else error "TypeError"
 
+/-- Ordinary union allocates; augmented union updates the captured left operand. -/
+def setUnion (left right : Nat) (inPlace : Bool) : Eval Value := do
+  match (← get)[left]?, (← get)[right]? with
+  | some (.set xs), some (.set ys) =>
+      let items := ScalarSet.union xs ys
+      if inPlace then
+        modify fun heap => heap.set left (.set items)
+        return .ref left
+      else allocateSet items
+  | _, _ => unsupported
+
 def binary (op : BinOp) (a b : Value) : Eval Value :=
   match op with
   | .bitAnd => match a, b with
@@ -833,7 +844,8 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           match scalarBitOr left right with
           | .ok value => pure (.scalar value)
           | .error exception => throw exception
-      -- Set/dict union and user-defined operators require their own semantics.
+      | .ref left, .ref right => setUnion left right false
+      -- Tuple-key sets, dictionary union, and custom operators remain partial.
       | _, _ => unsupported
   | .bitXor => match a, b with
       | .scalar left, .scalar right =>
@@ -912,6 +924,24 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
     | .ref _, _ => invalidBinary op a
     | _, _ => error "TypeError"
 
+/-- Builtin set augmented union preserves aliases; other operations keep their usual dispatch. -/
+def inplaceBinary (op : BinOp) (left right : Value) : Eval Value :=
+  match op, left, right with
+  | .bitOr, .ref left, .ref right => setUnion left right true
+  | _, _, _ => binary op left right
+
+theorem binary_union_sets (heap : Heap) (left right : Nat) (xs ys : List Constant)
+    (leftFound : heap[left]? = some (.set xs)) (rightFound : heap[right]? = some (.set ys)) :
+    binary .bitOr (.ref left) (.ref right) heap =
+      some (.ok (.ref heap.length), heap ++ [.set (ScalarSet.union xs ys)]) := by
+  simp [binary, setUnion, leftFound, rightFound, allocateSet, Except.map]
+
+theorem inplace_union_sets (heap : Heap) (left right : Nat) (xs ys : List Constant)
+    (leftFound : heap[left]? = some (.set xs)) (rightFound : heap[right]? = some (.set ys)) :
+    inplaceBinary .bitOr (.ref left) (.ref right) heap =
+      some (.ok (.ref left), heap.set left (.set (ScalarSet.union xs ys))) := by
+  simp [inplaceBinary, setUnion, leftFound, rightFound, Except.map]
+
 /-- Sequence iteration for the builtin list, text and buffer types. -/
 def sequence : Value → Eval (List Value)
   | .scalar (.bytes bytes) => pure (bytes.map (fun byte => .scalar (.int byte.toNat)))
@@ -950,6 +980,10 @@ def allocateSetValues (items : List Value) : Eval Value := do
     let _ ← allocateSet []
     let _ ← items.mapM (addItem address)
     return .ref address
+
+theorem allocateSetValues_singleton (heap : Heap) (value : Constant) :
+    allocateSetValues [.scalar value] heap = some (.ok (.ref heap.length), heap ++ [.set [value]]) := by
+  rfl
 
 /-- Construct a fresh set from builtin sequences, sets, or dictionary keys.
 Custom iteration stays unsupported, including on an otherwise empty object. -/
@@ -1414,7 +1448,7 @@ def step (initial : Globals) (declared : List String) (anchors : Nat)
         let i ← index items sub
         let left := (items[i]?).getD (.scalar .none)
         let right ← expr state.env value
-        let result ← binary op left right
+        let result ← inplaceBinary op left right
         let (address, updated) ← array base
         let i ← index updated sub
         modify fun heap => heap.set address (.list ((updated.set i result)))
@@ -1442,7 +1476,7 @@ def step (initial : Globals) (declared : List String) (anchors : Nat)
               let items := if b then old.2 else []
               modify fun heap => heap.set address (.list (items))
               pure left
-          | _, _, _ => binary op left right
+          | _, _, _ => inplaceBinary op left right
         assign state.env target result) fun env heap => .next ⟨rest, env, heap⟩
   | .expr value :: rest => run (expr state.env value) fun _ heap => .next ⟨rest, state.env, heap⟩
   | .ifThen test yes no :: rest => run (do truth (← expr state.env test)) fun b heap =>

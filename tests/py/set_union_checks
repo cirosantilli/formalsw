@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+Compare set union with Python, including aliases, representatives, and operand effects.
+"""
+
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / "formalsw"))
+
+
+def constant(value):
+    if value is None:
+        return ".none"
+    if type(value) is bool:
+        return ".bool " + str(value).lower()
+    if type(value) is int:
+        return f".int ({value})"
+    if type(value) is bytes:
+        return ".bytes [" + ", ".join(map(str, value)) + "]"
+    return ".string " + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return ".list [" + ", ".join(map(data, value)) + "]"
+    return ".scalar (" + constant(value) + ")"
+
+
+source = """
+def mark(items: set[int], events: list[int], n: int):
+    events.append(n)
+    items.add(n)
+    return items
+
+def fail(events: list[int], n: int):
+    events.append(n)
+    return n // 0
+"""
+bodies = {
+    "ordinary": "return left | right",
+    "fresh": "out = left | right\nout.add(n)\nreturn [left, right, out, out]",
+    "inplace": "alias = left\nleft |= right\nreturn [alias, left, right]",
+    "self_copy": "out = left | left\nout.add(n)\nreturn [left, out]",
+    "self_update": "alias = left\nleft |= left\nreturn [left, alias]",
+    "ordered": "return mark(left, events, n) | mark(right, events, n + 1)",
+    "live_left": "return left | mark(left, events, n)",
+    "live_inplace": "alias = left\nleft |= mark(alias, events, n)\nreturn [left, alias]",
+    "item_update": "holder = [left]\nholder[0] |= right\nreturn [holder[0], left]",
+    "left_failure": "return fail(events, n) | mark(right, events, n + 1)",
+    "right_failure": "return mark(left, events, n) | fail(events, n + 1)",
+    "inplace_failure": "left |= fail(events, n)\nreturn left",
+}
+for name, body in bodies.items():
+    source += f"\ndef {name}(left: set[int], right: set[int], events: list[int], n: int):\n"
+    source += "".join("    " + line + "\n" for line in body.splitlines())
+world = {}
+exec(source, world)
+
+inputs = [
+    ([], []),
+    ([1, 2], [2, 3]),
+    ([True, False], [0, 1, 2]),
+    ([0, 1], [True, False, 2]),
+    ([None, "λ", b"x"], [None, "λ", b"y"]),
+    ([-(2**130), 2**130 + 3], [2**130 + 3, -1]),
+]
+equations = []
+with project_temporary_directory(prefix="set-union-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(source)
+    program = api["source_module"](path)
+    checker = SupportChecker(program)
+    for name in bodies:
+        assert not checker.check(name, heap_calls=True), (name, checker.check(name, heap_calls=True))
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](program).emit())
+    for name in bodies:
+        for left_items, right_items in inputs:
+            for shared in (False, True):
+                n = -3
+                anchors = [set(left_items), set(right_items), []]
+                initial = [list(anchors[0]), list(anchors[1])]
+                try:
+                    result = world[name](anchors[0], anchors[0 if shared else 1], anchors[2], n)
+                    error = None
+                except ZeroDivisionError:
+                    result, error = None, "ZeroDivisionError"
+                expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+                sets = [".set [" + ", ".join(map(constant, items)) + "]" for items in initial]
+                heap = "[" + ", ".join(sets + [".list []"]) + "]"
+                arguments = f'[.ref 0, .ref {0 if shared else 1}, .ref 2, .scalar (.int ({n}))]'
+                calls = [f'HeapCalls.call source "{name}" {arguments} {heap}']
+                if name in ("ordinary", "inplace", "item_update"):
+                    calls.append(f'Mutable.function source "{name}" {arguments} [] {heap}')
+                outcome = ("match c.outcome with | .ok _ => true | _ => false" if error is None else
+                           f'match c.outcome with | .error e => decide (e = (⟨"{error}", []⟩ : ExceptionObject)) | _ => false')
+                for call in calls:
+                    equations.append(
+                        f"-- {name}, shared={shared}, case {len(equations)}\n"
+                        f"#eval (match ({call}).execution.observe 1500 with\n"
+                        f"  | .done (.ok c) => ({outcome}) &&\n"
+                        f"      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)\n"
+                        "  | _ => false)\n"
+                    )
+    equations.extend([
+        "#eval decide (Mutable.binary .bitOr (.ref 0) (.ref 1) [.dict [], .dict []] = none)\n",
+        "#eval decide (Mutable.binary .bitOr (.ref 0) (.ref 1) [.keySet [], .set []] = none)\n",
+    ])
+    prefix = ("import FormalSW\nopen FormalSW.PyAst\nset_option maxRecDepth 8192\n"
+              "set_option Elab.async false\n"
+              'def source : Module := pyast_from_json% (include_str "source.json")\n')
+    # Runtime comparisons use no proof axioms. Arbitrary-input proofs live beside set_union.py.
+    # Small independent batches also bound compiler memory during these evaluations.
+    for first in range(0, len(equations), 12):
+        proof = directory / f"Checks{first // 12:03}.lean"
+        proof.write_text(prefix + "\n".join(equations[first:first + 12]))
+        checked = subprocess.run(["lake", "env", "lean", "-DwarningAsError=true", str(proof)],
+                                 cwd=ROOT, capture_output=True, text=True)
+        assert checked.returncode == 0, checked.stdout + checked.stderr
+        expected = ["true"] * len(equations[first:first + 12])
+        assert checked.stdout.splitlines() == expected, (proof.name, checked.stdout, checked.stderr)
+        print(f"Checked set-union cases {first + 1} through {min(first + 12, len(equations))}", flush=True)
+
+print(f"{len(equations)} Python set-union comparisons passed")

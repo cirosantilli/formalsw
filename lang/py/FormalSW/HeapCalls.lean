@@ -432,7 +432,8 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
       match (← get)[address]? with
       | none => Mutable.unsupported
       | some (.list _) => listInplace op left right
-      | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.binary op left right
+      | some (.set _) => Mutable.inplaceBinary op left right
+      | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.binary op left right
       | some (.bytearray bytes) =>
           match op with
           | .mult =>
@@ -453,6 +454,12 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
               modify fun heap => heap.set address (.bytearray (bytes ++ more))
               return left
           | _ => Mutable.binary op left right
+
+theorem inplace_union_sets (heap : Heap) (left right : Nat) (xs ys : List Constant)
+    (leftFound : heap[left]? = some (.set xs)) (rightFound : heap[right]? = some (.set ys)) :
+    inplace .bitOr (.ref left) (.ref right) heap =
+      some (.ok (.ref left), heap.set left (.set (ScalarSet.union xs ys))) := by
+  simpa [inplace, leftFound] using Mutable.inplace_union_sets heap left right xs ys leftFound rightFound
 
 /-- List concatenation reads both lists before replacing the left object's contents. -/
 theorem inplace_add_lists (heap : Heap) (left right : Nat) (leftItems rightItems : List Value)

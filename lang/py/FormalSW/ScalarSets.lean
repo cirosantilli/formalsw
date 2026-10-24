@@ -12,6 +12,12 @@ def contains (items : List Constant) (value : Constant) : Bool :=
 def insert (items : List Constant) (value : Constant) : List Constant :=
   if contains items value then items else items ++ [value]
 
+/-- Union retains an existing representative from the left set, including its scalar type. -/
+def union (left right : List Constant) : List Constant := right.foldl insert left
+
+theorem union_singleton (items : List Constant) (value : Constant) :
+    union items [value] = insert items value := rfl
+
 def Valid (items : List Constant) : Prop :=
   items.Pairwise fun left right => scalarCompare .eq left right = some false
 
@@ -88,5 +94,9 @@ theorem insert_ints (items : List Int) (value : Int) :
       (if value ∈ items then items else items ++ [value]).map Constant.int := by
   simp [insert, contains_ints]
   split <;> simp_all
+
+theorem union_singleton_ints (items : List Int) (value : Int) (fresh : value ∉ items) :
+    union (items.map Constant.int) [.int value] = (items ++ [value]).map Constant.int := by
+  simp [union, insert_ints, fresh]
 
 end FormalSW.PyAst.ScalarSet
