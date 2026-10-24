@@ -2186,6 +2186,32 @@ def write_generated(path: Path, content: str) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def source_proof_helpers(proof: Path) -> list[Path]:
+    """Find split source proofs in import order, rejecting missing or cyclic helpers."""
+    ordered, visited, visiting = [], set(), set()
+    root = Path.cwd().resolve()
+
+    def visit(path: Path) -> None:
+        path = path.resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise SystemExit(f"error: Lean source proof helper is missing or outside the project: {path}")
+        if path in visiting:
+            raise SystemExit(f"error: cyclic Lean source proof helpers: {path}")
+        if path in visited:
+            return
+        visiting.add(path)
+        for parts in parse_imports(path.read_text()):
+            if parts[-1].endswith('.source'):
+                visit(root.joinpath(*parts).with_suffix('.source.lean'))
+        visiting.remove(path)
+        visited.add(path)
+        if path != proof.resolve():
+            ordered.append(path)
+
+    visit(proof)
+    return ordered
+
+
 def check_source(source: Path, report: CheckReport, *, compilation: dict | None = None) -> int:
     """Compile-check one Python file and its paired Lean proof."""
     ast_path = ast_path_for_source(source)
@@ -2252,6 +2278,15 @@ def check_source(source: Path, report: CheckReport, *, compilation: dict | None 
             f"or an invalid Lean import bridge in {ast_path}."
         ),
     ), extra_dependencies=(ast_json_path,))
+    for helper in source_proof_helpers(proof_path):
+        output = olean_path_for_lean(helper)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        command = ['lean', '-DwarningAsError=true', '-o', str(output), str(helper)]
+        cache.compile(helper, output, command, lambda command: run(command,
+            env=environment,
+            failure_message=f"source proof helper failed for {source}: {helper}",
+            failure_hint="Complete the imported .source.lean proof without admissions.",
+        ))
     proof_command = [
         "lean",
         "-DwarningAsError=true",
@@ -2351,7 +2386,9 @@ def proof_dependencies(source: Path) -> list[Path]:
             raise SystemExit(f"error: imported Python source or adjacent proof is missing: {dependency}")
     if not proof.is_file():
         return dependencies
-    for parts in parse_imports(proof.read_text()):
+    imports = [parts for path in [*source_proof_helpers(proof), proof]
+               for parts in parse_imports(path.read_text())]
+    for parts in imports:
         if parts[-1].endswith(".py"):
             dependency = Path.cwd().joinpath(*parts)
         elif parts[-1].endswith(".py.ast") and ".formalsw" in parts:
