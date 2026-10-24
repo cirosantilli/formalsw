@@ -214,8 +214,9 @@ with project_temporary_directory(prefix='heap-coverage-') as directory:
         issues = SupportChecker(module).requirement('f', f'theorem wrong : Not ({model} Probe.module \"f\" []).Halts')
         assert any('require the heap call interpreter' in issue.reason for issue in issues), model
     globals_module = ast.parse('items: list[int] = []\ndef f(n: int) -> None: items.append(n)\n')
-    issues = SupportChecker(globals_module).requirement('f', 'theorem wrong : Not (HeapCalls.call Probe.module "f" [] []).Halts')
-    assert any('does not support globals' in issue.reason for issue in issues)
+    # Heap calls now carry explicit global contexts; the scalar adapter cannot.
+    issues = SupportChecker(globals_module).requirement('f', 'theorem wrong : Not (HeapCalls.scalarFunction Probe.module "f" []).Halts')
+    assert any('global inputs require HeapCalls.call' in issue.reason for issue in issues)
 
 subprocess.run([sys.executable, str(ROOT / 'tests/py/heap_calls.py')], check=True)
 print(f'Heap helper calls: {count} Python comparisons, aliases, exception ordering, and coverage checks passed')
