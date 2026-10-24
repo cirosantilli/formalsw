@@ -18,7 +18,7 @@ from pathlib import Path
 from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_model
 from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
-from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
+from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
@@ -28,7 +28,6 @@ from lang.py.imports import bindings, identify_classes, resolve_function, resolv
 from lang.py.class_support import dataclass_fields, resolve_record_inputs
 from lang.py.linking import link_imports
 from lang import spec_setup
-from lang.runtime import lake_command, runtime_env
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind, annotation_record, annotation_domain, call_globals, needs_heap_globals, global_input_names, GlobalInputError
 
 
@@ -1773,25 +1772,6 @@ def olean_path_for_lean(source: Path) -> Path:
     return Path.cwd() / ".lake/build/lib/lean" / relative.with_suffix(".olean")
 
 
-def lean_env() -> dict[str, str]:
-    """Use Lake's toolchain environment, prioritizing this project's objects.
-
-    Dependencies can have their own generated `.formalsw` namespace. Lake puts
-    dependency paths first, which would hide the current project's AST objects.
-    """
-    completed = subprocess.run(
-        lake_command("env", sys.executable, "-c",
-                     "import json, os; print(json.dumps(dict(os.environ)))"),
-        env=runtime_env(), text=True, capture_output=True, check=True,
-    )
-    env = json.loads(completed.stdout)
-    paths = [str(Path.cwd() / ".lake/build/lib/lean"), "."]
-    if env.get("LEAN_PATH"):
-        paths.append(env["LEAN_PATH"])
-    env["LEAN_PATH"] = os.pathsep.join(paths)
-    return env
-
-
 def useful_diagnostic_lines(output: str) -> list[str]:
     """Return the short diagnostic lines worth showing to users."""
     lines = []
@@ -1951,12 +1931,6 @@ def run(
     raise SystemExit(completed.returncode)
 
 
-def require_executable(name: str) -> None:
-    """Fail with a clear message when an external executable is unavailable."""
-    if shutil.which(name) is None:
-        raise SystemExit(f"required executable not found on PATH: {name}")
-
-
 def module_with_python_builtins(source: Path, module: ast.Module) -> ast.Module:
     """Append plain-Python builtin-class definitions to a program AST."""
     stdlib_source = Path(__file__).resolve().parent / "lang/py/builtin/type/str.py"
@@ -2035,13 +2009,6 @@ def check_source(source: Path, report: CheckReport) -> int:
     ]:
         olean_path.parent.mkdir(parents=True, exist_ok=True)
         lean_path.with_suffix(".olean").unlink(missing_ok=True)
-    require_executable("lake")
-    run(
-        lake_command("build", "FormalSW", "lang.py.FormalSW"),
-        env=runtime_env(),
-        failure_message="failed to build the FormalSW core or Python model",
-        failure_hint="Fix the Lean libraries before checking Python source proofs.",
-    )
     environment = lean_env()
     run([
         "lean",
@@ -2207,8 +2174,9 @@ def check_sources(sources: list[Path], report: CheckReport) -> None:
                            and report.failed_files == failures_before)
         return checked[source]
 
-    for source in sources:
-        visit(source)
+    with lean_session():
+        for source in sources:
+            visit(source)
 
 
 def filter_supported_requirements(requirements: list[Requirement], report: CheckReport) -> list[Requirement]:

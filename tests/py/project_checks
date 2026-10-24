@@ -3,8 +3,11 @@
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
 
 REPO = Path(__file__).resolve().parents[2]
+
+subprocess.run([sys.executable, str(REPO / "tests/py/session_checks")], cwd=REPO, check=True)
 
 with tempfile.TemporaryDirectory(prefix="formalsw-project-") as temporary:
     project = Path(temporary)

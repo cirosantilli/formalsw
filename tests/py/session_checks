@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Check shared Lean setup and cleanup between independent checks."""
+from pathlib import Path
+import sys
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path[0] = str(REPO)
+import subprocess
+from unittest.mock import patch
+from lang.py import lean_frontend as frontend
+
+commands = []
+run = subprocess.run
+
+
+def record(command, **kwargs):
+    commands.append(command)
+    return run(command, **kwargs)
+
+
+with patch.object(subprocess, 'run', record):
+    for attempt in range(2):
+        with frontend.lean_session():
+            assert ['FormalSW'] in frontend.parse_imports('import FormalSW')
+            parser = frontend._parser
+            environment = frontend.lean_env()
+            with frontend.lean_session():
+                assert frontend.parse_theorem('theorem example_check : True')['name'] == 'example_check'
+                assert frontend.lean_env() == environment
+            assert parser.poll() is None
+        assert parser.poll() == 0
+        assert frontend._parser is None
+        # A new invocation must consult Lake again, even in the same process.
+        assert sum('build' in command for command in commands) == attempt + 1, commands
+        assert sum('env' in command for command in commands) == attempt + 1, commands
+    try:
+        with frontend.lean_session():
+            frontend.parse_imports('import FormalSW')
+            parser = frontend._parser
+            raise ValueError('a failed check')
+    except ValueError:
+        pass
+    assert parser.poll() == 0
+    assert frontend._environment is None
+    assert frontend._parser is None
+
+print('Lean setup shared within checks; fresh setup and parser cleanup between checks passed')

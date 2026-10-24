@@ -1452,6 +1452,8 @@ The adjacent `.formalsw/tmp.py.ast.lean` is only a small import bridge. Lean rea
 
 Compiled Lean `.olean` files for generated ASTs, proofs, and requirement checks are written to a single mirrored cache under `.lake/build/lib/lean/`. Keeping shared module prefixes in one object tree supports proofs inside nested Git repositories. Build artifacts are never placed beside checked-in `.lean` proofs.
 
+Lake setup and the specification parser are shared across all sources in one invocation, including imported references. Proofs and generated requirement checks are still compiled on every invocation; existing objects are not accepted as evidence that the current source passes.
+
 Imports of other Python proof sidecars or generated Python ASTs are checked against their current sources before the importing proof, once per invocation. Dependencies require an adjacent proof file. Lean's import parser handles comments and escaped module names; failed or cyclic dependencies stop the dependent proof, even if old compiled objects still exist.
 
 The top-level JSON shape is:
