@@ -99,6 +99,16 @@ def Condition (module : Module) (memoized : List String) (env : ScalarEnv) (expr
   Finishes (evaluate module memoized env expression).step
     (evaluate module memoized env expression).initial (.ok (.bool true))
 
+/-- Source contracts always use the cache wrappers recorded in the parsed module. -/
+def sourceFunction (module : Module) (name : String) (values : List Constant) : Execution Constant :=
+  function module module.memoizedFunctions name values
+
+def sourceEvaluate (module : Module) (env : ScalarEnv) (expression : Expr) : Execution Constant :=
+  evaluate module module.memoizedFunctions env expression
+
+def SourceCondition (module : Module) (env : ScalarEnv) (expression : Expr) : Prop :=
+  Condition module module.memoizedFunctions env expression
+
 /-- Instructions that pass through the ordinary scalar interpreter unchanged. -/
 def transparent (memoized : List String) : Calls.State → Prop
   | ⟨.invoke name _, _⟩ => name ∉ memoized

@@ -245,6 +245,8 @@ structure Module where
   body : List Stmt
   /-- Canonical source identities of statically loaded class definitions. -/
   classOrigins : List (String × String) := []
+  /-- Source-validated unbounded functools caches; execution must honor these wrappers. -/
+  memoizedFunctions : List String := []
 deriving Repr, BEq, Lean.ToExpr
 
 /-- A modeled Python exception object. -/
@@ -542,7 +544,13 @@ def Module.fromJsonDocument? (json : Lean.Json) : Except String Module := do
         let origins ← origins.getArr?
         origins.toList.mapM fun entry => do
           return (← jsonString entry "name", ← jsonString entry "origin")
-  return { body := ← jsonArray ast "body" Stmt.fromJson?, classOrigins := origins }
+  let memoized ← match ast.getObjVal? "memoized_functions" with
+    | .error _ => pure []
+    | .ok _ => jsonArray ast "memoized_functions" Lean.Json.getStr?
+  return {
+    body := ← jsonArray ast "body" Stmt.fromJson?
+    classOrigins := origins
+    memoizedFunctions := memoized }
 
 end FormalSW.PyAst
 
@@ -680,7 +688,8 @@ def Module.fingerprint (module : Module) : UInt64 :=
   let body := match module.body with
     | .expr (.constant (.string _)) :: rest => rest
     | body => body
-  hash (reprStr ({ body } : ModuleSourceView))
+  let source := reprStr ({ body } : ModuleSourceView)
+  hash (if module.memoizedFunctions.isEmpty then source else source ++ reprStr module.memoizedFunctions)
 
 /-- Recognize a wrapper constructor that stores one annotated scalar field. -/
 def isScalarWrapperInit (payloadAnnotation : String) : Stmt → Bool

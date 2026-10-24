@@ -14,6 +14,7 @@ from lang.py.global_inputs import function_globals, GlobalInputError, annotation
 from lang.py.class_support import resolve_record_inputs
 from lang.py.mutable_support import check_mutable
 from lang.py.sorting_support import MERGE_SORT, QUICK_SORT, body_of, matches_sort
+from lang.py.memo_support import cache_decorator, uses_memoized
 from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
 
 
@@ -76,8 +77,13 @@ class SupportChecker:
             issues.append(UnsupportedConstruct(name, getattr(node, 'lineno', function.lineno), reason, stack))
         if isinstance(function, ast.AsyncFunctionDef):
             reject(function, 'async functions are unsupported')
-        if function.decorator_list:
-            reject(function, 'decorated functions are unsupported')
+        if function.decorator_list and not cache_decorator(self.module, function):
+            reject(function, 'decorators require an unmodified functools.lru_cache(None) import')
+        if cache_decorator(self.module, function):
+            if function.args.defaults or any(annotation_kind(arg.annotation) != 'int' for arg in function.args.args):
+                reject(function, 'memoized functions require integer positional arguments without defaults')
+            if parallel or mutable or heap_calls or uses_parallel_model(function):
+                reject(function, 'memoized functions require scalar call execution')
         if getattr(function, 'type_params', []):
             reject(function, 'generic function scopes are unsupported')
         if not self.annotation_supported(function.returns):
@@ -562,7 +568,7 @@ class SupportChecker:
 
     @staticmethod
     def execution_targets(marker: str):
-        return re.findall(r'\b(HeapCalls\.call|HeapCalls\.scalarFunction|Calls\.function|Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
+        return re.findall(r'\b(HeapCalls\.call|HeapCalls\.scalarFunction|MemoCalls\.sourceFunction|Calls\.function|Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
 
     def requirement(self, name: str | None, marker: str) -> tuple[UnsupportedConstruct, ...]:
         """Check the enclosing function and any explicitly named proof dependencies."""
@@ -648,22 +654,25 @@ class SupportChecker:
             function = self.functions.get(target)
             if function is None:
                 continue
-            if uses_assertions(self.module, function) and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction', 'Mutable.function'):
+            if uses_memoized(self.module, function) and model != 'MemoCalls.sourceFunction':
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'cached functions require MemoCalls.sourceFunction with source cache metadata'))
+            if uses_assertions(self.module, function) and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction', 'Mutable.function'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'assertions require an interpreter that executes their conditions and messages'))
-            if uses_bytes(self.module, function) and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+            if uses_bytes(self.module, function) and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'byte literals require a call interpreter'))
-            if uses_library_calls(self.module, function) and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+            if uses_library_calls(self.module, function) and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'standard-library calls require a call interpreter'))
-            if uses_method(self.module, function, 'bit_length') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+            if uses_method(self.module, function, 'bit_length') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'int.bit_length requires a call interpreter'))
-            if uses_builtin(self.module, function, 'sum') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+            if uses_builtin(self.module, function, 'sum') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'sums require a call interpreter'))
-            if uses_builtin(self.module, function, 'int') and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+            if uses_builtin(self.module, function, 'int') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'integer conversion requires a call interpreter'))
             if uses_builtin(self.module, function, 'divmod') and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
@@ -672,7 +681,7 @@ class SupportChecker:
             if uses_builtin(self.module, function, 'len') and model in ('scalarFunction', 'scalarFunctionWithGlobals'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'sequence length requires a call interpreter'))
-            if any(uses_builtin(self.module, function, name) for name in ('min', 'max')) and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+            if any(uses_builtin(self.module, function, name) for name in ('min', 'max')) and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'positional min/max requires a call interpreter'))
             if (uses_calls_model(self.module, function) and uses_heap_calls(self.module, function)
@@ -695,7 +704,7 @@ class SupportChecker:
                     issues.append(UnsupportedConstruct(target, function.lineno,
                         f'{kind.split("[")[0]} results require HeapCalls.call rather than its scalar adapter'))
                 issues.extend(self.check(target, heap_calls=True))
-            if function.args.defaults and model not in ('Calls.function', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+            if function.args.defaults and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'default arguments require Calls.function execution'))
             if model == 'Mutable.function':

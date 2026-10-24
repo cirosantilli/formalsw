@@ -20,6 +20,7 @@ from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
 from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
+from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
 from lang.py.tuple_support import flat_unpacking
@@ -568,7 +569,8 @@ def raw_theorem_type_for_function(
                     [(name, annotation.id) for name, annotation in zip(names, annotations)],
                     [(item.name, item.name, item.kind) for item in global_args])
             else:
-                runtime = "Calls.function" if module is not None and uses_calls_model(module, function) else "scalarFunction"
+                runtime = ("MemoCalls.sourceFunction" if module is not None and uses_memoized(module, function)
+                           else "Calls.function" if module is not None and uses_calls_model(module, function) else "scalarFunction")
                 binding = (f"FormalSW.PyAst.{runtime} {ast_namespace}.module "
                            f"{lean_string(function.name)} [{values}]")
             if names:
@@ -887,19 +889,21 @@ def collect_conditions(markers, function, module, namespace, prior_conditions=()
             value = (heap_term if predicate.heap else scalar_term)('«' + arg.arg + '»', kind)
             env = f"if {query} = {lean_string(arg.arg)} then some ({value}) else {env}"
         binders, domain, heap = contract_domain(function)
-        runtime = 'HeapCalls' if predicate.heap else 'Calls'
+        runtime = 'HeapCalls' if predicate.heap else 'MemoCalls' if predicate.memoized else 'Calls'
+        evaluator = 'sourceEvaluate' if runtime == 'MemoCalls' else 'evaluate'
+        condition = 'SourceCondition' if runtime == 'MemoCalls' else 'Condition'
         inputs = f'{namespace}.module (fun {query} => {env}) {namespace}.{name}'
         if predicate.heap:
             inputs += f' {heap}'
             if global_names:
                 inputs += f' {contract_globals(function)}'
         if predicate.needs_coverage:
-            covered = f"(FormalSW.PyAst.{runtime}.evaluate {inputs}).Supported"
+            covered = f"(FormalSW.PyAst.{runtime}.{evaluator} {inputs}).Supported"
             covered = guarded_type(covered, [*domain, *prior_conditions, *conditions])
             if binders:
                 covered = f"∀ {' '.join(binders)},\n{covered}"
             module.formalsw_condition_coverage.append((name + '_supported', covered, marker.line))
-        conditions.append(f"FormalSW.PyAst.{runtime}.Condition {inputs}")
+        conditions.append(f"FormalSW.PyAst.{runtime}.{condition} {inputs}")
     if function is not None and conditions and not properties:
         raise InvalidRequirement("Requires needs a property obligation")
     return conditions, properties, tuple(dict.fromkeys(unsupported))
@@ -940,7 +944,8 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
                 raise InvalidRequirement("heap call contracts require a supported return annotation")
             runtime = "HeapCalls.scalarFunction"
         else:
-            runtime = "Calls.function" if uses_calls_model(program, func) else "scalarFunction"
+            runtime = ("MemoCalls.sourceFunction" if uses_memoized(program, func)
+                       else "Calls.function" if uses_calls_model(program, func) else "scalarFunction")
         values = ", ".join(scalar_term(name, kind) for name, kind in zip(names, kinds))
         return f'FormalSW.PyAst.{runtime} {ns}.module {lean_string(func.name)} [{values}]'
 
@@ -1284,6 +1289,7 @@ class AstJsonEmitter:
             "ast": {
                 "type": "Module",
                 "body": [self.stmt(stmt) for stmt in self.module.body],
+                "memoized_functions": memoized_names(self.bindings_module),
                 "class_origins": [
                     {"name": stmt.name, "origin": stmt.formalsw_origin}
                     for stmt in self.module.body
@@ -1331,7 +1337,7 @@ class AstJsonEmitter:
                     "body": metadata + [self.stmt(child) for child in body],
                 }
             case ast.FunctionDef(name=name, args=args, returns=returns, body=body):
-                if stmt.decorator_list:
+                if stmt.decorator_list and not cache_decorator(self.bindings_module, stmt):
                     raise UnsupportedSyntax(f"{name}: decorators are unsupported")
                 return {
                     "type": "FunctionDef",

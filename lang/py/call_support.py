@@ -6,6 +6,7 @@ from pathlib import Path
 from lang.py.global_inputs import GlobalInputError, function_globals, annotation_kind, needs_heap_globals
 from lang.py.imports import bindings
 from lang.py.defaults import literal_default
+from lang.py.memo_support import cache_decorator, uses_memoized
 from lang.py.sorting_support import uses_sort_model
 from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays
 from lang.py.class_support import ordinary_attribute, plain_class_methods
@@ -246,6 +247,10 @@ def general_division(node):
 
 def has_partial_primitives(module, function):
     """Follow local callees to operations that need a runtime coverage proof."""
+    if uses_memoized(module, function):
+        # Integer-only cache keys are partial on other scalar values. Every
+        # contract must also establish coverage, especially equivalence claims.
+        return True
     byte_values = uses_bytes(module, function)
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     pending = [function]
@@ -324,6 +329,8 @@ def uses_calls_model(module, function):
     if (uses_parallel_model(function) or uses_sort_model(module, function)
             or any(annotation_kind(arg.annotation) is None for arg in function.args.args)):
         return False
+    if uses_memoized(module, function):
+        return True
     if needs_heap_globals(module, function):
         return True
     try:
@@ -357,6 +364,9 @@ def check_calls(module, function, reject, *, heap=False):
     libraries = library_functions(module)
     visited = set()
     visited_classes = set()
+    memoized_execution = uses_memoized(module, function)
+    if memoized_execution and heap:
+        reject(function, 'memoized calls require scalar execution without mutable state')
 
     def visit_class(cls):
         if cls.name in visited_classes:
@@ -386,7 +396,11 @@ def check_calls(module, function, reject, *, heap=False):
                             (alias.asname or alias.name.split('.')[0]) in (function.name, '*')
                             for alias in item.names)):
                     reject(item, 'module-level call targets must not be rebound')
-        if function.decorator_list or getattr(function, 'type_params', []) or function.args.posonlyargs or \
+        cached = cache_decorator(module, function)
+        if cached and (function.args.defaults or any(annotation_kind(arg.annotation) != 'int'
+                                                   for arg in function.args.args)):
+            reject(function, 'memoized functions require integer positional arguments without defaults')
+        if function.decorator_list and not cached or getattr(function, 'type_params', []) or function.args.posonlyargs or \
                 function.args.kwonlyargs or function.args.vararg or function.args.kwarg:
             reject(function, 'call execution requires undecorated plain positional functions')
         for default in function.args.defaults:
@@ -407,7 +421,7 @@ def check_calls(module, function, reject, *, heap=False):
         globals_ = set()
         try:
             global_inputs = function_globals(module, function, heap_calls=heap)
-            if global_inputs and not heap:
+            if global_inputs and (not heap or memoized_execution):
                 reject(function, 'global inputs require heap call execution')
             globals_.update(item.name for item in global_inputs)
         except GlobalInputError as error:

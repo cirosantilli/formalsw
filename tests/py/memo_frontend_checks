@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""
+Check cache decorator bindings, runtime selection, and source-bound proof obligations.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.memo_support import memoized_names, uses_memoized
+from lang.py.support import SupportChecker
+from lang.py.contracts import input_condition
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+base = """
+from functools import lru_cache
+
+@lru_cache(None)
+def count(n: int) -> int:
+    if n <= 0:
+        return 0
+    return 1 + count(n - 1)
+
+def caller(n: int) -> int:
+    return count(n)
+
+def selection(n: int) -> int:
+    return max(range(n + 1), key=count)
+"""
+
+def parse(text, source=None):
+    module = ast.parse(text)
+    if source is not None:
+        module.formalsw_source = source
+    return module
+
+variants = [base, base.replace('lru_cache(None)', 'lru_cache(maxsize=None)'),
+            base.replace('import lru_cache', 'import lru_cache as remember').replace('@lru_cache', '@remember'),
+            base.replace('from functools import lru_cache', 'import functools').replace('@lru_cache', '@functools.lru_cache'),
+            base.replace('from functools import lru_cache', 'import functools as ft').replace('@lru_cache', '@ft.lru_cache')]
+for text in variants:
+    module = parse(text)
+    assert memoized_names(module) == ['count']
+    for name in ('count', 'caller', 'selection'):
+        checker = SupportChecker(module)
+        assert not checker.check(name), (name, checker.check(name))
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        assert uses_memoized(module, function)
+        for runtime in ('Calls.function', 'scalarFunction', 'HeapCalls.scalarFunction'):
+            marker = f'theorem invalid (n : Int) : ({runtime} Probe.module "{name}" [.int n]).Returns'
+            assert checker.requirement(name, marker), marker
+        marker = f'theorem valid (n : Int) : (MemoCalls.sourceFunction Probe.module "{name}" [.int n]).Returns'
+        assert not checker.requirement(name, marker), checker.requirement(name, marker)
+    document = json.loads(api['AstJsonEmitter'](module).emit())
+    assert document['ast']['memoized_functions'] == ['count']
+    assert not any(node['type'] == 'Unsupported' for node in document['ast']['body'])
+    caller = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'caller')
+    predicate = input_condition('count(n) == n', caller, module)
+    assert predicate.memoized and predicate.needs_coverage and not predicate.unsupported
+
+bad = [base.replace('@lru_cache(None)', decorator) for decorator in
+       ('@lru_cache', '@lru_cache()', '@lru_cache(10)', '@lru_cache(None, typed=True)',
+        '@lru_cache(None)\n@lru_cache(None)', '@unknown(None)')]
+bad += [base.replace('count(n: int)', signature, 1) for signature in
+        ('count(n: bool)', 'count(n: list[int])', 'count(n: int = 0)', 'count(*n: int)')]
+bad += [base + suffix for suffix in
+        ('lru_cache = count\n', 'del lru_cache\n', 'from elsewhere import lru_cache\n',
+         'alias = lru_cache\n', 'setattr(lru_cache, "__code__", count.__code__)\n')]
+bad += [variants[-1] + suffix for suffix in
+        ('ft.lru_cache = count\n', 'import functools as other\nother.lru_cache = count\n',
+         'setattr(ft, "lru_cache", count)\n', 'alias = ft\n')]
+bad += [base.replace('return count(n)', 'items = []\n    return count(n)')]
+for text in bad:
+    assert SupportChecker(parse(text)).check('caller'), text
+
+with project_temporary_directory(prefix='memo-frontend-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'functools.py').write_text('def lru_cache(value): return lambda f: f\n')
+    assert SupportChecker(parse(base, directory / 'probe.py')).check('caller')
+
+subprocess.run([str(REPO / 'formalsw'), 'tests/py/memoized_calls.py'], cwd=REPO, check=True)
+print(f'Memoization frontend: {len(variants)} import variants and {len(bad)} rejection cases passed')

@@ -133,6 +133,7 @@ def main() -> int:
             "Tactic `native_decide` evaluated that the proposition",
         ),
         TestCase("termination and divergence", Path("tests/py/termination.py"), 0),
+        TestCase("memoized recursion and prerequisites", Path("tests/py/memoized_calls.py"), 0, "All 8 checks passed"),
         TestCase("range maxima with source-defined keys", Path("tests/py/range_extrema.py"), 0, "All 1 checks passed"),
         TestCase("recursive scalar calls and short circuiting", Path("tests/py/recursive_calls.py"), 0),
         TestCase("simultaneous tuple assignment and evaluation order", Path("tests/py/tuple_assignments.py"), 0),
