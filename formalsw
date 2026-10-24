@@ -19,7 +19,7 @@ from lang.py.support import SupportChecker, UnsupportedConstruct, uses_parallel_
 from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition
-from lang.py.call_support import range_sum, sequence_sum, zip_iterable, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
+from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
 from lang.py.tuple_support import flat_unpacking
@@ -1437,6 +1437,11 @@ class AstJsonEmitter:
 
     def expr(self, expr: ast.expr) -> dict[str, object]:
         """Encode one Python expression."""
+        extremum = range_extremum(expr)
+        if extremum is not None and not any(bindings(self.bindings_module, name)
+                                           for name in (expr.func.id, "range")):
+            return {"type": "ExtremumRange", "maximum": extremum.maximum, "key": extremum.key,
+                    "bounds": [self.expr(arg) for arg in extremum.bounds]}
         comprehension = range_sum(expr)
         if comprehension is not None and not bindings(self.bindings_module, "sum"):
             return {"type": "SumRange", "name": comprehension.name,

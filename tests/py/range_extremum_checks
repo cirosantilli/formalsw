@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""
+Compare range key selection with Python, including ties, errors, and binding checks.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+source = """
+def identity(n: int) -> int:
+    return n
+
+def tied(n: int) -> int:
+    return n % 3
+
+def text(n: int) -> str:
+    return str(n)
+
+def absent(n: int) -> None:
+    return None
+
+def fail(n: int) -> int:
+    return 1 // n
+
+def factorial(n: int) -> int:
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+"""
+keys = ('identity', 'tied', 'text', 'absent', 'fail', 'factorial')
+for operation in ('min', 'max'):
+    for key in keys:
+        source += f'\ndef {operation}_{key}(a: int, b: int, s: int) -> int:\n'
+        source += f'    return {operation}(range(a, b, s), key={key})\n'
+program = ast.parse(source)
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for operation in ('min', 'max'):
+    for key in keys:
+        name = f'{operation}_{key}'
+        issues = SupportChecker(program).check(name)
+        assert not issues, (name, issues)
+        for args in ((0, 7, 1), (7, -2, -2), (2, 7, 2), (0, 0, 1), (1, 0, 1),
+                     (0, 1, 1), (1, 2, 1), (1, 5, 0), (True, 4, True), ('bad', 3, 1)):
+            try:
+                expected = f'.ok (.int ({world[name](*args)}))'
+            except (TypeError, ValueError, ZeroDivisionError) as error:
+                expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+            def constant(value):
+                if type(value) is bool:
+                    return f'.bool {str(value).lower()}'
+                if type(value) is str:
+                    return f'.string {json.dumps(value)}'
+                return f'.int ({value})'
+            values = ', '.join(constant(value) for value in args)
+            lines.append(f'example : (Calls.function source "{name}" [{values}]).observe 4000 = '
+                         f'.done ({expected}) := by native_decide')
+            count += 1
+
+base = """
+def key(n: int) -> int:
+    return n % 2
+
+def f(n: int) -> int:
+    return max(range(n), key=key)
+"""
+def issues(text):
+    return SupportChecker(ast.parse(text)).check('f')
+
+assert not issues(base)
+for call in ('max(range(n), key=lambda x: x)', 'max(range(n), key=key, default=0)',
+             'max(range(n), **kwargs)', 'max(range(n), key=n)',
+             'max(range(n=n), key=key)', 'max(range(*n), key=key)'):
+    assert issues(base.replace('max(range(n), key=key)', call)), call
+for name in ('range', 'max', 'key'):
+    assert issues(base + f'{name} = 0\n'), name
+    assert issues(base.replace('f(n: int)', f'f(n: int, {name}: int)')), name
+assert issues(base.replace('return n % 2', 'return unknown(n)'))
+assert issues(base.replace('return n % 2', 'return [n]'))
+assert issues(base.replace('def key', '@decorator\ndef key'))
+
+with project_temporary_directory(prefix='range-extremum-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+print(f'Range extrema: {count} Python comparisons; recursive keys and binding checks passed')

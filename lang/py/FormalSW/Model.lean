@@ -118,6 +118,8 @@ inductive Expr where
   /-- Normalized `sum(element for name in range(bounds) if conditions...)`.
   Coverage checking verifies the builtin bindings before this node executes. -/
   | sumRange : String → Expr → List Expr → List Expr → Expr
+  /-- Consume a builtin range with a source-checked scalar key function. -/
+  | extremumRange (maximum : Bool) (bounds : List Expr) (key : String)
   /-- Consume an ordinary iterable with an optional evaluated starting value. -/
   | sumSequence : Expr → Expr → Expr
   /-- Immediately consumed generator expression, with lazy element evaluation. -/
@@ -384,6 +386,9 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
       return .call
         (← Expr.fromJson? (← jsonField json "func"))
         (← jsonArray json "args" Expr.fromJson?)
+  | "ExtremumRange" =>
+      return .extremumRange (← (← json.getObjVal? "maximum").getBool?)
+        (← jsonArray json "bounds" Expr.fromJson?) (← jsonString json "key")
   | "SumRange" =>
       return .sumRange (← jsonString json "name")
         (← Expr.fromJson? (← jsonField json "element"))
@@ -961,6 +966,7 @@ mutual
     | .sumGeneratorTargets element generators start =>
         2 + element.operationCount + start.operationCount + (generators.map fun (target, iterable, filters) =>
           target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
+    | .extremumRange _ bounds _ => 3 + (bounds.map Expr.operationCount).sum
     | .sumRange _ element bounds conditions =>
         5 + element.operationCount + (bounds.map Expr.operationCount).sum +
           (conditions.map Expr.operationCount).sum
@@ -1420,6 +1426,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.unaryOp _ _ => none
   | Expr.boolOp _ _ => none
   | Expr.ifExp _ _ _ => none
+  | Expr.extremumRange _ _ _ => none
   | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
   | Expr.reversedList _ | Expr.zipIterable _ => none

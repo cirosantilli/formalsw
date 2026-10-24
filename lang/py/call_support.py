@@ -63,6 +63,28 @@ def range_sum(node):
     return RangeSum(name, element, iterable.args, conditions)
 
 
+@dataclass(frozen=True)
+class RangeExtremum:
+    maximum: bool
+    bounds: list[ast.expr]
+    key: str
+
+
+def range_extremum(node):
+    """Recognize min/max of a range with a named, source-checked key function."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in ('min', 'max') and len(node.args) == 1
+            and len(node.keywords) == 1 and node.keywords[0].arg == 'key'
+            and isinstance(node.keywords[0].value, ast.Name)):
+        return None
+    iterable = node.args[0]
+    if not (isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+            and iterable.func.id == 'range' and 1 <= len(iterable.args) <= 3
+            and not iterable.keywords):
+        return None
+    return RangeExtremum(node.func.id == 'max', iterable.args, node.keywords[0].value.id)
+
+
 def zip_iterable(node, module):
     """Recognize the builtin only where its iterator is immediately consumed."""
     return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -407,6 +429,20 @@ def check_calls(module, function, reject, *, heap=False):
         def expr(node, scope=None):
             scope = locals_ if scope is None else scope
             recurse = lambda child: expr(child, scope)
+            extremum = range_extremum(node)
+            if extremum is not None:
+                if heap:
+                    reject(node, 'range extrema with key currently require scalar call execution')
+                for builtin in (node.func.id, 'range'):
+                    if builtin in scope or bindings(module, builtin):
+                        reject(node, f'range extrema require the unshadowed builtin {builtin}')
+                if extremum.key in scope or extremum.key not in functions:
+                    reject(node, 'range extrema require an unshadowed module-level key function')
+                else:
+                    visit(functions[extremum.key])
+                for bound in extremum.bounds:
+                    recurse(bound)
+                return
             if heap and isinstance(node, ast.ListComp):
                 if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
                        for generator in node.generators):

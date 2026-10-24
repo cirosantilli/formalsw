@@ -83,6 +83,23 @@ structure RangeSum where
 def RangeSum.filter (sum : RangeSum) : Expr :=
   if sum.conditions.isEmpty then .constant (.bool true) else .boolOp .and sum.conditions
 
+/-- Range extrema retain the winning element and its already evaluated key. -/
+structure RangeExtremum where
+  maximum : Bool
+  key : String
+  stop : Int
+  stride : Int
+
+/-- Strict comparison preserves the first element on equal keys. -/
+def RangeExtremum.choose (range : RangeExtremum) (next : Int) (score : Constant)
+    (best : Option (Int × Constant)) : Except ExceptionObject (Int × Constant) :=
+  match best with
+  | none => .ok (next, score)
+  | some (winner, previous) =>
+      match scalarCompare (if range.maximum then .gt else .lt) score previous with
+      | some better => .ok (if better then (next, score) else (winner, previous))
+      | none => .error { typeName := "TypeError", args := [] }
+
 inductive Frame where
   | binaryLeft (op : BinOp) (right : Expr) (env : ScalarEnv)
   | binaryRight (op : BinOp) (left : Constant)
@@ -109,6 +126,9 @@ inductive Frame where
       (done : List Constant) (rest : List Expr) (env : ScalarEnv)
   | sumFilter (sum : RangeSum) (next total : Int)
   | sumElement (sum : RangeSum) (next total : Int)
+  | extremumArguments (maximum : Bool) (key : String)
+      (done : List Constant) (rest : List Expr) (env : ScalarEnv)
+  | extremumKey (range : RangeExtremum) (next : Int) (best : Option (Int × Constant))
 
 inductive Work where
   | expr (expression : Expr) (env : ScalarEnv)
@@ -122,6 +142,8 @@ inductive Work where
   | startSum (name : String) (element : Expr) (conditions : List Expr)
       (values : List Constant) (env : ScalarEnv)
   | sumLoop (sum : RangeSum) (next total : Int)
+  | startExtremum (maximum : Bool) (key : String) (values : List Constant)
+  | extremumLoop (range : RangeExtremum) (next : Int) (best : Option (Int × Constant))
 
 structure State where
   work : Work
@@ -221,6 +243,13 @@ private def sumState (name : String) (element : Expr) (conditions : List Expr)
   | first :: rest =>
       ⟨.expr first env, .sumArguments name element conditions done rest env :: stack⟩
 
+private def extremumState (maximum : Bool) (key : String) (env : ScalarEnv)
+    (done : List Constant) (expressions : List Expr) (stack : List Frame) : State :=
+  match expressions with
+  | [] => ⟨.startExtremum maximum key done, stack⟩
+  | first :: rest =>
+      ⟨.expr first env, .extremumArguments maximum key done rest env :: stack⟩
+
 /-- Sum accepts booleans as integers; strings and None cause TypeError. -/
 def sumAdd (total : Int) : Constant → Except ExceptionObject Int
   | .int n => .ok (total + n)
@@ -245,6 +274,17 @@ def step (module : Module) (state : State) : Step State Constant :=
       if rangeContinues next sum.stop sum.stride then
         .next ⟨.expr sum.filter (sum.env.set sum.name (.int next)), .sumFilter sum next total :: stack⟩
       else .next ⟨.value (.int total), stack⟩
+  | .startExtremum maximum key values =>
+      match rangeBounds values with
+      | .ok (start, stop, stride) =>
+          .next ⟨.extremumLoop ⟨maximum, key, stop, stride⟩ start none, stack⟩
+      | .error exception => .done (.error exception)
+  | .extremumLoop range next best =>
+      if rangeContinues next range.stop range.stride then
+        .next ⟨.invoke range.key [.int next], .extremumKey range next best :: stack⟩
+      else match best with
+        | some (winner, _) => .next ⟨.value (.int winner), stack⟩
+        | none => .done (.error { typeName := "ValueError", args := [] })
   | .invoke name values =>
       match findFunctionIn module.body name with
       | some (args, body) =>
@@ -261,6 +301,8 @@ def step (module : Module) (state : State) : Step State Constant :=
           .next (primitiveState .slice env [] [value, lower.getD (.constant .none),
             upper.getD (.constant .none), stride.getD (.constant .none)] stack)
       | .subscript value index => .next (primitiveState .subscript env [] [value, index] stack)
+      | .extremumRange maximum bounds key =>
+          .next (extremumState maximum key env [] bounds stack)
       | .sumRange name element bounds conditions =>
           .next (sumState name element conditions env [] bounds stack)
       | .constant value => .next ⟨.value value, stack⟩
@@ -383,6 +425,12 @@ def step (module : Module) (state : State) : Step State Constant :=
               | [] => .next ⟨.block body (assignNames env names (done ++ [value])), stack⟩
               | first :: tail =>
                   .next ⟨.expr first env, .unpack names (done ++ [value]) tail body env :: stack⟩
+          | .extremumArguments maximum key done rest env =>
+              .next (extremumState maximum key env (done ++ [value]) rest stack)
+          | .extremumKey range next best =>
+              match range.choose next value best with
+              | .ok best => .next ⟨.extremumLoop range (next + range.stride) (some best), stack⟩
+              | .error exception => .done (.error exception)
           | .sumArguments name element conditions done rest env =>
               .next (sumState name element conditions env (done ++ [value]) rest stack)
           | .sumFilter sum next total =>
@@ -673,6 +721,50 @@ theorem Evaluates.sum_range (arguments : Evaluates.Arguments module env expressi
     Evaluates module env (.sumRange name element expressions conditions) (.int result) := by
   intro stack
   exact .next rfl ((sum_reach arguments [] stack).trans
+    (.next (by simp [step, bounds]) (rest stack)))
+
+
+/-- A range reduction that retains the element with the most extreme key. -/
+def ExtremumReturns (module : Module) (range : RangeExtremum) (next : Int)
+    (best : Option (Int × Constant)) (result : Int) : Prop :=
+  ∀ stack, Reaches module ⟨.extremumLoop range next best, stack⟩ ⟨.value (.int result), stack⟩
+
+namespace ExtremumReturns
+
+theorem done (finished : rangeContinues next range.stop range.stride = false) :
+    ExtremumReturns module range next (some (winner, score)) winner := by
+  intro stack
+  exact .next (by simp [step, finished]) .refl
+
+theorem next (continues : rangeContinues current range.stop range.stride = true)
+    (key : ReturnsValue module range.key [.int current] score)
+    (selected : range.choose current score best = .ok updated)
+    (rest : ExtremumReturns module range (current + range.stride) (some updated) result) :
+    ExtremumReturns module range current best result := by
+  intro stack
+  exact .next (by simp [step, continues]) ((key (.extremumKey range current best :: stack)).trans
+    (.next (by simp [step, selected]) (rest stack)))
+
+end ExtremumReturns
+
+private theorem extremum_reach
+    (h : Evaluates.Arguments module env expressions values) (done : List Constant)
+    (stack : List Frame) :
+    Reaches module (extremumState maximum key env done expressions stack)
+      ⟨.startExtremum maximum key (done ++ values), stack⟩ := by
+  induction h generalizing done with
+  | nil => simp [extremumState]; exact .refl
+  | @cons expression value expressions values head tail ih =>
+      apply (head _).trans
+      refine .next rfl ?_
+      simpa [List.append_assoc] using ih (done ++ [value])
+
+theorem Evaluates.extremum_range (arguments : Evaluates.Arguments module env expressions values)
+    (bounds : rangeBounds values = .ok (start, stop, stride))
+    (rest : ExtremumReturns module ⟨maximum, key, stop, stride⟩ start none result) :
+    Evaluates module env (.extremumRange maximum expressions key) (.int result) := by
+  intro stack
+  exact .next rfl ((extremum_reach arguments [] stack).trans
     (.next (by simp [step, bounds]) (rest stack)))
 
 def BlockReturns (module : Module) (env : ScalarEnv) (body : List Stmt) (value : Constant) : Prop :=

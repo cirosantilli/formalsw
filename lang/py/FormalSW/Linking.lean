@@ -164,6 +164,8 @@ theorem Extends.step_eq (extension : Extends target source) (state : State)
   | value _ => rfl
   | startRange _ _ _ _ _ _ => rfl
   | startSum _ _ _ _ _ => rfl
+  | startExtremum _ _ _ => rfl
+  | extremumLoop _ _ _ => rfl
   | sumLoop _ _ _ => rfl
   | primitive _ _ => rfl
 
