@@ -121,6 +121,7 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("math_factorial_che
 subprocess.run([sys.executable, str(Path(__file__).with_name("link_library_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("minimum_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("range_extremum_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("memo_call_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("divmod_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("dictionary_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("dictionary_input_checks"))], check=True)

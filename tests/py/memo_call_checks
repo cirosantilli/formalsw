@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""
+Compare the memoizing interpreter with functools, including cache hits and misses.
+
+These are kernel tests: Python wraps the same ordinary function bodies that Lean
+executes. Source decorator validation is a separate frontend responsibility.
+"""
+import ast
+from functools import lru_cache
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+api = runpy.run_path(str(REPO / 'formalsw'))
+source = """
+def count(n: int) -> int:
+    if n <= 0:
+        return 0
+    return 1 + count(n - 1)
+
+def twice(n: int) -> int:
+    return count(n) + count(n)
+
+def best(n: int) -> int:
+    return max(range(n + 1), key=count)
+
+def error(n: int) -> int:
+    return 10 // n
+
+def nested_error(n: int) -> int:
+    return count(n) + error(0)
+"""
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")',
+         'def memoized : List String := ["count", "error"]', '''
+-- Count wrapper calls and successful insertions independently of return values.
+def inspect (fuel : Nat) (state : MemoCalls.State) (hits misses size : Nat) :
+    Option (Except ExceptionObject Constant × Nat × Nat × Nat) :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 => Id.run do
+      let mut hits := hits
+      let mut misses := misses
+      let mut size := size
+      match state.current with
+      | ⟨.invoke name values, _⟩ =>
+          if name ∈ memoized then
+            if let some arguments := MemoCalls.integerArguments values then
+              if (state.cache ⟨name, arguments⟩).isSome then hits := hits + 1
+              else misses := misses + 1
+      | ⟨.value _, []⟩ =>
+          if let caller :: _ := state.callers then
+            if (state.cache caller.key).isNone then size := size + 1
+      | _ => pure ()
+      match MemoCalls.step source memoized state with
+      | .next state => return inspect fuel state hits misses size
+      | .done outcome => return some (outcome, hits, misses, size)
+      | .unsupported => return none
+''']
+checks = 0
+for name in ('count', 'twice', 'best', 'error', 'nested_error'):
+    for n in (-2, -1, 0, 1, 2, 10, 30):
+        world = {}
+        exec(source, world)
+        for cached in ('count', 'error'):
+            world[cached] = lru_cache(None)(world[cached])
+        try:
+            expected = f'.ok (.int ({world[name](n)}))'
+        except (ValueError, ZeroDivisionError) as error:
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+        info = [world[cached].cache_info() for cached in ('count', 'error')]
+        hits = sum(item.hits for item in info)
+        misses = sum(item.misses for item in info)
+        size = sum(item.currsize for item in info)
+        initial = f'⟨⟨.invoke "{name}" [.int ({n})], []⟩, [], MemoCalls.Cache.empty⟩'
+        lines.append(f'example : inspect 10000 ({initial}) 0 0 0 = '
+                     f'some ({expected}, {hits}, {misses}, {size}) := by native_decide')
+        checks += 1
+
+with project_temporary_directory(prefix='memo-call-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](ast.parse(source)).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', 'tests/py/memo_calls.lean'], cwd=REPO, check=True)
+
+print(f'Memoization: {checks} outcomes and cache statistics match functools; arbitrary-input proof passed')

@@ -19,6 +19,8 @@ roots = [
   "lang.py.FormalSW.Strings",
   "lang.py.FormalSW.IntegerParsing",
   "lang.py.FormalSW.Calls",
+  "lang.py.FormalSW.MemoCalls",
+  "lang.py.FormalSW.MemoCallRules",
   "lang.py.FormalSW.Linking",
   "lang.py.FormalSW.Globals",
   "lang.py.FormalSW.ScalarSets",
