@@ -51,13 +51,14 @@ bodies = {
     'bytes_buffer': "return bytearray(b'a') in [b'a']",
     'records': 'a = Record(n)\nb = Record(n)\nreturn a in [b]',
     'short_circuit': 'a = [[n]]\nreturn a in [a, [[n + 1]]]',
+    'nested_lists': 'a = [[n]]\nreturn a in [[[n + 1]], a]',
     'skip_container': 'return False and n in fail(xs, n)',
 }
 bodies['dict_container'] = 'return n in {n: 0}'
 bodies['set_container'] = 'return n in set([n])'
 bodies['string_container'] = 'return "a" in "abc"'
 unsupported = {
-    'unknown_equality': 'a = [[n]]\nreturn a in [[[n + 1]], a]',
+    'unknown_equality': 'a = {n: [n]}\nreturn a in [{n: [n + 1]}, a]',
 }
 for name, body in (bodies | unsupported).items():
     source += f'\ndef {name}(n: int, xs: list[int]) -> bool:\n'

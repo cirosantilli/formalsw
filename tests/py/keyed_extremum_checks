@@ -62,6 +62,7 @@ bodies = {
     'bytes': 'return min(b"za", key=lambda item: item * n)',
     'buffer': 'return max(bytearray(b"za"), key=lambda item: item * n)',
     'tuple': 'return min((n, -n), key=lambda item: item)',
+    'fresh_keys': 'return min([n, -n], key=lambda item: [item])',
     'stop_iteration': 'return max([n], key=stop)',
     'constant_unpack': 'a, b = (0, 1) if n else (2, 3)\nreturn a + b',
     'dictionary': 'return n in {True: 7, 2: 9}',
@@ -74,9 +75,6 @@ bodies = {
 for name, body in bodies.items():
     source += f'\ndef {name}(n: int) -> int:\n' + ''.join('    ' + line + '\n' for line in body.splitlines())
 source += """
-def fresh_keys(n: int) -> int:
-    return min([n, -n], key=lambda item: [item])
-
 def exceptional_heap(items: list[int], n: int) -> int:
     return max([n, 0], key=lambda value: explode(value, items))
 """
@@ -87,8 +85,6 @@ for name in (*bodies, 'exceptional_heap'):
 
 lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
          'def source : Module := pyast_from_json% (include_str "source.json")']
-# List/tuple ordering remains partial; never report it as a Python exception.
-lines.append('example : (HeapCalls.scalarFunction source "fresh_keys" [.int 3]).observe 1000 = .unsupported := by native_decide')
 checks = 0
 for name in bodies:
     for n in (-3, 0, 1, 4):

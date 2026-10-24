@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""
+Check typed entry domains, untyped helper execution, and complete callee coverage.
+"""
+import argparse
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.contracts import input_condition
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--frontend-only', action='store_true', help='skip Lean execution comparisons')
+options = parser.parse_args()
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def issues(source, name='f'):
+    return SupportChecker(ast.parse(source)).check(name)
+
+
+source = '''
+def identity(value):
+    return value
+def annotated_identity(value: object):
+    return value
+def mismatched_identity(value: str) -> str:
+    return value
+def scalar(n: int) -> int:
+    return identity(n)
+def ignored_annotation(n: int) -> int:
+    return annotated_identity(n)
+def mismatched_annotation(n: int) -> int:
+    return mismatched_identity(n)
+def push(items, value=7):
+    items.append(value)
+    return value
+def fail(items, value):
+    items.append(value)
+    return value // 0
+def heap(items: list[int], value: int) -> int:
+    return push(items, value)
+def defaulted(items: list[int]) -> int:
+    return push(items)
+def error(items: list[int], value: int) -> int:
+    return fail(items, value)
+def aliasing(items: list[int], other: list[int], value: int) -> int:
+    push(items, value)
+    return push(other, value + 1)
+def keep(items, value):
+    items.append(value)
+    return items
+def shared_reference(items: list[int], value: int) -> bool:
+    return keep(items, value) is items
+def descending_key(value):
+    return -value
+def callback(n: int) -> int:
+    return max(range(n), key=descending_key)
+class Box:
+    def __init__(self, value):
+        self.value = value
+    def read(self):
+        return self.value
+def class_value(n: int) -> int:
+    return Box(n).read()
+'''
+program = ast.parse(source)
+for node in program.body:
+    if isinstance(node, ast.ClassDef):
+        node.formalsw_origin = str(Path(__file__).resolve())
+world = {}
+exec(source, world)
+entry_names = ('scalar', 'ignored_annotation', 'mismatched_annotation', 'heap', 'defaulted', 'error',
+               'aliasing', 'shared_reference', 'callback', 'class_value')
+checker = SupportChecker(program)
+for name in entry_names:
+    assert not checker.check(name), (name, checker.check(name))
+for name in ('identity', 'annotated_identity', 'push'):
+    assert checker.check(name), name
+
+lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst',
+         'set_option maxRecDepth 8192',
+         'def program : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for value in (None, False, True, -7, 0, 9, 10**100, '', 'λ', b'x'):
+    for name in ('scalar', 'ignored_annotation', 'mismatched_annotation'):
+        expected = constant(world[name](value))
+        for model in ('Calls.function', 'HeapCalls.scalarFunction'):
+            lines.append(f'example : ({model} program "{name}" [{constant(value)}]).observe 100 = '
+                         f'.done (.ok ({expected})) := by decide')
+            count += 1
+for value in (-7, 0, 10**100):
+    answer = constant(world['class_value'](value))
+    lines.append(f'example : (HeapCalls.scalarFunction program "class_value" [{constant(value)}]).observe 200 = '
+                 f'.done (.ok ({answer})) := by decide')
+    count += 1
+for value in (-2, 0, 1, 2, 7):
+    try:
+        answer = '.ok (' + constant(world['callback'](value)) + ')'
+    except ValueError as error:
+        answer = f'.error ⟨"{type(error).__name__}", []⟩'
+    lines.append(f'example : (Calls.function program "callback" [.int ({value})]).observe 400 = '
+                 f'.done ({answer}) := by decide')
+    count += 1
+for name in ('heap', 'defaulted', 'error', 'shared_reference'):
+    for value in (-7, 0, 10**100):
+        items = [42]
+        arguments = '[.ref 0]' if name == 'defaulted' else f'[.ref 0, .scalar (.int ({value}))]'
+        try:
+            result = world[name](items) if name == 'defaulted' else world[name](items, value)
+            answer = '.ok (.scalar (' + constant(result) + '))'
+        except ZeroDivisionError as error:
+            answer = f'.error ⟨"{type(error).__name__}", []⟩'
+        contents = ', '.join('.scalar (' + constant(item) + ')' for item in items)
+        lines.append(f'example : (HeapCalls.call program "{name}" {arguments} [.list [.scalar (.int 42)]]).execution.observe 200 = '
+                     f'.done (.ok ⟨{answer}, [], [.list [{contents}]], 1⟩) := by decide')
+        count += 1
+for shared in (False, True):
+    left = [42]
+    right = left if shared else []
+    answer = world['aliasing'](left, right, 3)
+    heaps = [left] if shared else [left, right]
+    final = '[' + ', '.join('.list [' + ', '.join('.scalar (' + constant(item) + ')' for item in items) + ']'
+                            for items in heaps) + ']'
+    initial = '[.list [.scalar (.int 42)]]' if shared else '[.list [.scalar (.int 42)], .list []]'
+    lines.append(f'example : (HeapCalls.call program "aliasing" [.ref 0, .ref {0 if shared else 1}, .scalar (.int 3)] '
+                 f'{initial}).execution.observe 300 = .done (.ok ⟨.ok (.scalar (.int {answer})), [], {final}, '
+                 f'{len(heaps)}⟩) := by decide')
+    count += 1
+
+base = 'def f(n: int) -> int:\n    return helper(n)\ndef helper(value):\n    return value\n'
+assert not issues(base)
+for annotation in ('object', 'str', '"unresolved"', 'int | str', 'dict[int, list[int]]'):
+    assert not issues(base.replace('helper(value)', f'helper(value: {annotation})')), annotation
+for changed in (base.replace('f(n: int)', 'f(n)'), base.replace('f(n: int)', 'f(n: object)'),
+                base.replace('f(n: int)', 'f(n: int | str)')):
+    assert issues(changed), changed
+assert issues(base, 'helper')
+
+# Missing annotations do not exempt any callee signature, binding or body check.
+bad_signatures = ('helper(value, /)', 'helper(*value)', 'helper(value, *, extra=0)',
+                  'helper(value, **extras)', 'helper(value=[])', 'helper(value=1 + 1)')
+for signature in bad_signatures:
+    assert issues(base.replace('helper(value)', signature)), signature
+for call in ('helper()', 'helper(n, n)', 'helper(value=n)', 'helper(*n)'):
+    assert issues(base.replace('return helper(n)', f'return {call}')), call
+for body in ('return missing(value)', 'if False:\n        print(value)\n    return value',
+             'int = value\n    return int(value)', 'helper = value\n    return helper(value)',
+             'global counter\n    counter = value\n    return value'):
+    assert issues(base.replace('return value', body)), body
+for suffix in ('helper = 1\n', 'del helper\n', 'from elsewhere import helper\n', 'from elsewhere import *\n'):
+    assert issues(base + suffix), suffix
+assert issues(base.replace('def helper', '@unknown\ndef helper'))
+
+class_base = '''
+class Box:
+    def __init__(self, value):
+        self.value = value
+    def read(self):
+        return self.value
+def f(n: int) -> int:
+    return Box(n).read()
+'''
+assert not issues(class_base)
+for changed in (class_base.replace('class Box:', 'class Box(object):'),
+                class_base.replace('class Box:', 'class Box:\n    stored = 0'),
+                class_base.replace('def read(self):', 'def read(self, extra=[]):'),
+                class_base.replace('def read(self):', 'def read(self, *, extra=0):'),
+                class_base.replace('return self.value', 'print(self.value)\n        return self.value'),
+                class_base + 'Box.read = 1\n',
+                class_base.replace('def read(self):', 'def read(self):\n        return self.value\n    def __bool__(self):')):
+    assert issues(changed), changed
+# Class discovery must precede the new entry-only domain guard.
+hinted = 'class Box:\n    def __bool__(self): return True\n' + base.replace('f(n: int)', 'f(n: list[int])').replace('helper(value)', 'helper(value: Box)')
+assert any('custom special methods' in issue.reason for issue in issues(hinted))
+for signature in ('helper(value)', 'helper(value: bool)', 'helper(value: list[int])', 'helper(value: int = 0)'):
+    cached = 'from functools import lru_cache\n' + base.replace('def helper(value)', '@lru_cache(None)\ndef ' + signature)
+    assert any('memoized functions require integer' in issue.reason for issue in issues(cached)), signature
+
+# Requires keeps the actual entry's parameter domain, and partial predicate
+# operations still demand their own coverage proof through untyped helpers.
+predicate_source = base + '\ndef predicate(value):\n    return int(value) >= 0\n'
+predicate_module = ast.parse(predicate_source)
+predicate = input_condition('predicate(n)', predicate_module.body[0], predicate_module)
+assert not predicate.unsupported, predicate.unsupported
+assert predicate.needs_coverage
+assert len(predicate.arguments) == 1 and ast.dump(predicate.arguments[0].annotation) == ast.dump(ast.Name(id='int', ctx=ast.Load()))
+bad_predicate_module = ast.parse(predicate_source.replace('return int(value) >= 0', 'print(value)\n    return True'))
+assert input_condition('predicate(n)', bad_predicate_module.body[0], bad_predicate_module).unsupported
+
+proof_source = REPO / 'tests/py/untyped_callees.py'
+requirements = api['collect_requirements'](proof_source, ast.parse(proof_source.read_text()),
+                                            'tests.py.untyped_callees', 'UntypedCalleesAst')
+assert len(requirements) == 4, requirements
+assert not any(item.unsupported for item in requirements), requirements
+assert [item.marker for item in requirements].count('execution model coverage') == 1
+guarded = next(item for item in requirements if '.guarded_entry.' in item.theorem_name)
+assert 'Calls.Condition' in guarded.property_type and 'requires_guarded_entry_0' in guarded.property_type
+assert '∀' in guarded.property_type and 'Int' in guarded.property_type
+
+if not options.frontend_only:
+    with project_temporary_directory(prefix='callee-annotation-check-') as temporary:
+        directory = Path(temporary)
+        (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+        proof = directory / 'Checks.lean'
+        proof.write_text('\n'.join(lines) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+print(f'Callee annotations: entry domains, body/class/default/cache checks and Requires coverage passed; {count} execution comparisons '
+      + ('prepared (frontend-only)' if options.frontend_only else 'passed'))

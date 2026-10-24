@@ -107,6 +107,7 @@ def main() -> int:
         TestCase("short-circuiting truth consumers", Path("tests/py/truth_consumers.py"), 0, "All 2 checks passed"),
         TestCase("Boolean conversion", Path("tests/py/bool_conversion.py"), 0, "All 4 checks passed"),
         TestCase("builtin integer type tests", Path("tests/py/isinstance_int.py"), 0, "All 3 checks passed"),
+        TestCase("typed entries with untyped callees", Path("tests/py/untyped_callees.py"), 0, "All 4 checks passed"),
         TestCase("permutation counting", Path("tests/py/permutation_calls.py"), 0, "All 2 checks passed"),
         TestCase("variadic tuple annotations", Path("tests/py/variadic_tuples.py"), 0, "All 3 checks passed"),
         TestCase("shared list inputs and preconditions", Path("tests/py/heap_inputs.py"), 0, "All 8 checks passed"),
@@ -523,7 +524,7 @@ def main() -> int:
     additional_runtime_checks_passed = True
     for script in ("dictionary_items_checks", "key_dictionary_checks", "bitwise_or_shift_checks", "binary_format_checks", "unpacked_return_checks", "set_sum_checks", "set_generator_sum_checks", "global_expression_checks",
                    "lean_cache_checks", "cache_cli_checks", "string_replace_checks", "whitespace_checks",
-                   "tuple_checks", "tuple_order_checks", "reverse_sort_checks", "bool_conversion_checks", "isinstance_checks", "tuple_set_checks", "container_type_checks", "string_membership_checks", "variadic_tuple_checks", "materialized_range_checks"):
+                   "tuple_checks", "tuple_order_checks", "reverse_sort_checks", "bool_conversion_checks", "isinstance_checks", "callee_annotation_checks", "tuple_set_checks", "container_type_checks", "string_membership_checks", "variadic_tuple_checks", "materialized_range_checks"):
         checked = subprocess.run([sys.executable, f"tests/py/{script}"], cwd=REPO,
                                  text=True, capture_output=True)
         passed = checked.returncode == 0

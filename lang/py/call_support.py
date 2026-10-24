@@ -530,6 +530,7 @@ def uses_calls_model(module, function):
 
 
 def check_calls(module, function, reject, *, heap=False):
+    entry_function = function
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     classes = {node.name: node for node in module.body if isinstance(node, ast.ClassDef)}
     libraries = library_functions(module)
@@ -621,6 +622,10 @@ def check_calls(module, function, reject, *, heap=False):
                 continue
             if heap and isinstance(arg.annotation, ast.Name) and arg.annotation.id in classes:
                 visit_class(classes[arg.annotation.id])
+                continue
+            # Only the entry signature defines a quantified contract domain.
+            # Helper annotations do not constrain Python call arguments.
+            if function is not entry_function:
                 continue
             kind = annotation_kind(arg.annotation)
             if kind not in ('int', 'str', 'bytes', 'bool') and not (heap and kind and (kind.startswith(('list[', 'tuple[', 'set[', 'dict[')) or kind in ('bytes', 'bytearray'))):

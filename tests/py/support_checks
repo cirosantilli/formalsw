@@ -301,14 +301,20 @@ with project_temporary_directory(prefix='support-check-') as directory:
     assert result.returncode == 1, result.stdout
     assert 'typed object lists require' in result.stderr, result.stderr
 
+    # Delegating through ordinary helpers must still check every reached body.
     path.write_text(source + '''
 def twice_wrapped(values: list[int]) -> list[int]:
     """@formalsw: Not ReturnType"""
-    return merge_sort_int(values)
+    return checked_helper(merge_sort_int(values))
+
+def checked_helper(values):
+    if False:
+        print(values)
+    return values
 ''')
     result = stub(path)
     assert result.returncode == 1, result.stdout
-    assert 'call arguments require scalar annotations or supported heap list annotations' in result.stderr, result.stderr
+    assert 'Call expression is unsupported by call execution' in result.stderr, result.stderr
 
     # Changing a previously recognized sorting body must invalidate its contracts.
     path.write_text(source.replace('middle = len(values) // 2', 'print(values)\n    middle = len(values) // 2'))
