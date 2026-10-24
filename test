@@ -109,6 +109,7 @@ def main() -> int:
         TestCase("scalar sorting and fresh result lists", Path("tests/py/sorted_calls.py"), 0, "All 3 checks passed"),
         TestCase("formatted values and explicit exceptions", Path("tests/py/formatted_raise.py"), 0, "All 4 checks passed"),
         TestCase("enumerate shared sequences", Path("tests/py/enumerate_calls.py"), 0, "All 3 checks passed"),
+        TestCase("enumerated generator sum", Path("tests/py/enumerated_sums.py"), 0, "All 2 checks passed"),
         TestCase("mutable buffers, initialization, and helper reads", Path("tests/py/buffers.py"), 0, "All 6 checks passed"),
         TestCase("shared heap range loops", Path("tests/py/heap_ranges.py"), 0, "All 2 checks passed"),
         TestCase("prerequisites with unrelated parameters", Path("tests/py/prerequisite_parameters.py"), 0, "All 2 checks passed"),

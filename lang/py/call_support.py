@@ -92,6 +92,18 @@ def zip_iterable(node, module):
             and node.func.id == 'zip' and not bindings(module, 'zip'))
 
 
+def enumerate_arguments(node):
+    """Normalize a fresh enumerate iterator, preserving argument evaluation order."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'enumerate'):
+        return None
+    if len(node.args) in (1, 2) and not node.keywords:
+        return [node.args[0], node.args[1] if len(node.args) == 2 else ast.Constant(value=0)]
+    if len(node.args) == 1 and len(node.keywords) == 1 and node.keywords[0].arg == 'start':
+        return [node.args[0], node.keywords[0].value]
+    return None
+
+
 def reversed_sequence(node, module):
     """Recognize a fresh reverse iterator consumed directly by a for loop."""
     return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -497,6 +509,18 @@ def check_calls(module, function, reject, *, heap=False):
                             reject(iterable, 'range requires one to three positional arguments')
                         for argument in iterable.args:
                             expr(argument, iterable_scope)
+                    elif (isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+                          and iterable.func.id == 'enumerate'):
+                        if 'enumerate' in iterable_scope or bindings(module, 'enumerate'):
+                            reject(iterable, 'enumerate iteration requires the unshadowed builtin enumerate')
+                        if not flat_unpacking(generator.target) or len(generator.target.elts) != 2:
+                            reject(generator.target, 'enumerate requires immediate unpacking into two local names')
+                        arguments = enumerate_arguments(iterable)
+                        if arguments is None:
+                            reject(iterable, 'enumerate supports an iterable and optional positional or keyword start')
+                        else:
+                            for argument in arguments:
+                                expr(argument, iterable_scope)
                     elif zip_iterable(iterable, module):
                         if 'zip' in iterable_scope:
                             reject(iterable, 'zip iteration requires the unshadowed builtin zip')
@@ -821,10 +845,12 @@ def check_calls(module, function, reject, *, heap=False):
                     if (not isinstance(node.target, (ast.Tuple, ast.List)) or len(node.target.elts) != 2
                             or not all(isinstance(target, ast.Name) for target in node.target.elts)):
                         reject(node, 'enumerate loops require immediate unpacking into two local names')
-                    if not 1 <= len(node.iter.args) <= 2 or node.iter.keywords:
-                        reject(node, 'enumerate loops support an iterable and optional positional start')
-                    for argument in node.iter.args:
-                        expr(argument)
+                    arguments = enumerate_arguments(node.iter)
+                    if arguments is None:
+                        reject(node, 'enumerate loops support an iterable and optional positional or keyword start')
+                    else:
+                        for argument in arguments:
+                            expr(argument)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)
                 elif heap and isinstance(node, ast.For) and reversed_sequence(node.iter, module):

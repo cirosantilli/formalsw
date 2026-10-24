@@ -54,6 +54,19 @@ def unsupported(xs: list[int], n: int):
     return [x for x in set()]
 '''
 bodies = {
+    'enumerated': 'return [[i, x] for i, x in enumerate(xs)]',
+    'enumerated_keyword': 'return [[i, x] for [i, x] in enumerate(xs, start=n)]',
+    'enumerated_repeat': 'return [x for x, x in enumerate(xs, n)]',
+    'enumerated_first_scope': 'return [xs for i, xs in enumerate(xs, n)]',
+    'enumerated_filter': 'return [touch(xs, x) for i, x in enumerate([n], touch(xs, 5)) if i > 0]',
+    'enumerated_nested': 'return [[i, j, x] for i in range(n) for j, x in enumerate(xs, i)]',
+    'enumerated_unicode': 'return [[i, c] for i, c in enumerate("λ😀", start=n)]',
+    'enumerated_bytes': 'return [[i, c] for i, c in enumerate(b"az", n)]',
+    'enumerated_buffer': 'return [[i, c] for i, c in enumerate(bytearray(b"az"), n)]',
+    'enumerated_live': 'return [[i, grow(xs, x)] for i, x in enumerate(xs, n)]',
+    'enumerated_bad_source': 'return [x for i, x in enumerate(touch(xs, 10), touch(xs, 20))]',
+    'enumerated_bad_counter': 'return [x for i, x in enumerate([touch(xs, 10)], "bad")]',
+    'enumerated_no_leak': 'i = 40\nx = 50\nout = [i + x for i, x in enumerate(xs)]\nreturn [out, i, x]',
     'tuple_targets': 'return [x + y for x, y in [[n, n + 1], [2, 3]]]',
     'list_targets': 'return [x - y for [x, y] in [[n, n + 1], [2, 3]]]',
     'constant_tuple_targets': 'return [x + y for x, y in [(1, 2), (3, 4)]]',

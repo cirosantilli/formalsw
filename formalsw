@@ -20,7 +20,7 @@ from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
-from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
+from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
@@ -1391,7 +1391,8 @@ class AstJsonEmitter:
                 return {
                     "type": "For",
                     "target": self.expr(target),
-                    "iter": self.expr(iter_expr),
+                    "iter": (self.iterator_expr(iter_expr) if isinstance(iter_expr, ast.Call) and iter_expr.keywords
+                             else self.expr(iter_expr)),
                     "body": [self.stmt(child) for child in body],
                     "orelse": [self.stmt(child) for child in orelse],
                 }
@@ -1584,7 +1585,14 @@ class AstJsonEmitter:
                 raise UnsupportedSyntax(f"unsupported expression: {ast.dump(expr)}")
 
     def iterator_expr(self, node: ast.expr) -> dict[str, object]:
-        """Retain fresh builtin zip iterators without admitting escaping iterator objects."""
+        """Retain fresh iterators without admitting escaping iterator objects."""
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'enumerate' and not bindings(self.bindings_module, 'enumerate')):
+            arguments = enumerate_arguments(node)
+            if arguments is None:
+                raise UnsupportedSyntax('enumerate supports an iterable and optional positional or keyword start')
+            return {"type": "Call", "func": {"type": "Name", "id": "enumerate"},
+                    "args": [self.expr(arg) for arg in arguments]}
         if zip_iterable(node, self.bindings_module):
             if node.keywords:
                 raise UnsupportedSyntax('zip iteration supports positional sequence arguments, without strict')

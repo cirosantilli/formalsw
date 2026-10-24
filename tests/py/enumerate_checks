@@ -51,6 +51,7 @@ def unsupported(xs: list[int], start: int):
 '''
 bodies = {
     'ordinary': 'for i, value in enumerate(xs, start):\n    out.append([i, value])',
+    'keyword': 'for i, value in enumerate(xs, start=start):\n    out.append([i, value])',
     'default': 'for i, value in enumerate(xs):\n    out.append([i, value])',
     'list_target': 'for [i, value] in enumerate(xs, start):\n    out.append([i, value])',
     'same_target': 'for value, value in enumerate(xs, start):\n    out.append(value)',
@@ -110,12 +111,27 @@ for name, initial, start in itertools.product(bodies, ([], [0], [3, 0, 7]), (-2,
 
 lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
 for target, arguments in (('pair', 'xs'), ('a, b, c', 'xs'), ('a, *b', 'xs'), ('a, xs[0]', 'xs'),
-                          ('a, b', ''), ('a, b', 'xs, 0, 1'), ('a, b', 'xs, start=0')):
+                          ('a, b', ''), ('a, b', 'xs, 0, 1'), ('a, b', 'xs, 0, start=0'), ('a, b', 'xs, stop=0')):
     text = f'def f(xs: list[int]):\n    for {target} in enumerate({arguments}):\n        pass\n'
     assert SupportChecker(ast.parse(text)).check('f'), text
 for binding in ('enumerate = 1\n', 'from somewhere import enumerate\n'):
     text = binding + 'def f(xs: list[int]):\n    for i, x in enumerate(xs):\n        pass\n'
     assert SupportChecker(ast.parse(text)).check('f'), text
+
+for target, arguments in (('pair', 'xs'), ('i, x, y', 'xs'), ('i, *x', 'xs'),
+                          ('i, x', 'xs, 0, start=1'), ('i, x', 'xs, end=0')):
+    for expression in (f'[i for {target} in enumerate({arguments})]',
+                       f'sum(i for {target} in enumerate({arguments}))'):
+        module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
+        assert SupportChecker(module).check('f'), expression
+for expression in ('enumerate(xs)', '[pair for pair in enumerate(xs)]',
+                   'sum(i for i, x in enumerate(xs) for enumerate in [1])'):
+    module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
+    # The first iterable uses the outer scope; a later target does not shadow it.
+    if 'for enumerate in' not in expression:
+        assert SupportChecker(module).check('f'), expression
+    else:
+        assert not SupportChecker(module).check('f'), SupportChecker(module).check('f')
 
 with project_temporary_directory(prefix='enumerate-checks-') as directory:
     directory = Path(directory)

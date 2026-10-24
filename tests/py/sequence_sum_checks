@@ -61,6 +61,20 @@ def start_alias(xs: list[int], n: int) -> list[int]:
     return xs
 '''
 bodies = {
+    'enumerated': 'return sum(i * x for i, x in enumerate(xs, n))',
+    'enumerated_default': 'return sum(i + x for i, x in enumerate(xs))',
+    'enumerated_keyword': 'return sum(i * x for [i, x] in enumerate(xs, start=n))',
+    'enumerated_repeated': 'return sum(x for x, x in enumerate(xs, n))',
+    'enumerated_filter': 'return sum(i + x for i, x in enumerate(xs) if i % 2 if x)',
+    'enumerated_nested': 'return sum(i + j + x for i in range(n) for j, x in enumerate(xs, i))',
+    'enumerated_range_inner': 'return sum(i + x + j for i, x in enumerate(xs) for j in range(x))',
+    'enumerated_live': 'return sum(i + grow(xs, x) for i, x in enumerate(xs, n))',
+    'enumerated_sum_start': 'return sum((touch(xs, x) for i, x in enumerate([n], touch(xs, 10))), touch(xs, 20))',
+    'enumerated_bad_source': 'return sum((x for i, x in enumerate(bad_iterable(xs, 10), touch(xs, 20))), touch(xs, 30))',
+    'enumerated_bad_counter': 'return sum((x for i, x in enumerate([touch(xs, 10)], "bad")), touch(xs, 30))',
+    'enumerated_first_scope': 'return sum(xs for i, xs in enumerate(xs))',
+    'enumerated_no_leak': 'i = 40\nx = 50\nout = sum(i + x for i, x in enumerate(xs))\nreturn [out, i, x]',
+    'enumerated_later_local': 'i = 40\nreturn sum(x for x in xs if i for i, x in enumerate([n]))',
     'unpacked': 'return sum(x + y for x, y in [[n, n + 1], [2, 3]])',
     'unpacked_lists': 'return sum(x - y for [x, y] in [[n, n + 1]])',
     'unpacked_start': 'return sum((touch(xs, x + y) for x, y in [[n, n + 1]]), touch(xs, 50))',

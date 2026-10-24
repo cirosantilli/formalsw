@@ -486,6 +486,17 @@ def comprehensionStart (anchors : Nat) (element : Expr)
                 .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩
           | _ => .unsupported
 
+/-- Enumerate accepts an integer start, including a Boolean, with no size limit. -/
+def enumerateStart : Value → Eval Int
+  | .scalar (.int value) => pure value
+  | .scalar (.bool value) => pure (if value then 1 else 0)
+  | _ => Mutable.error "TypeError"
+
+/-- Only immediately unpacked enumerate pairs are admitted by the source checker. -/
+def enumerateTarget : Expr → Option (String × String)
+  | .tuple [.name index, .name name] | .list [.name index, .name name] => some (index, name)
+  | _ => none
+
 /-- Mask every bound name, including unpacked names in later generators. -/
 def comprehensionTargetsEnv (env : Env) (generators : List (Expr × Expr × List Expr)) : Env :=
   fun name => if generators.any (fun generator => (targetLocals generator.1).contains name) then none else env name
@@ -511,6 +522,8 @@ def comprehensionTargetsBody (terminal : List Stmt) : List (Expr × Expr × List
         (comprehensionFilters filters (comprehensionTargetsBody terminal rest))
       match iterable with
       | .zipIterable expressions => [.forZip (.name (comprehensionTargetName target)) expressions body []]
+      | .call (.name "enumerate") _ => [.forIn target iterable
+          (comprehensionFilters filters (comprehensionTargetsBody terminal rest)) []]
       | _ => [.forIn (.name (comprehensionTargetName target)) iterable body []]
 
 /-- Capture the first iterator in the outer scope, before allocating the result. -/
@@ -528,6 +541,13 @@ def comprehensionTargetsStart (anchors : Nat) (element : Expr)
       match iterable with
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
           enter (.zipStepLoop name sources 0 body []) heap
+      | .call (.name "enumerate") _ => match enumerateTarget target, values with
+          | some (index, name), [source, start] =>
+              run (globals := globals) anchors heap (enumerateStart start) fun counter heap =>
+                run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
+                  enter (.enumerateStepLoop index name (sequenceSource source) 0 counter
+                    (comprehensionFilters filters (comprehensionTargetsBody [.comprehensionAppend heap.length element] rest)) []) heap
+          | _, _ => .unsupported
       | .call (.name "range") _ => match rangeBounds values with
           | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
           | .error error => done (globals := globals) anchors heap (.error error)
@@ -605,6 +625,13 @@ def sumGeneratorTargetsStart (anchors : Nat) (element : Expr)
       match iterable with
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
           enter (.zipStepLoop name sources 0 body []) heap
+      | .call (.name "enumerate") _ => match enumerateTarget target, values with
+          | some (index, name), [source, start] =>
+              run (globals := globals) anchors heap (enumerateStart start) fun counter heap =>
+                run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
+                  enter (.enumerateStepLoop index name (sequenceSource source) 0 counter
+                    (comprehensionFilters filters (comprehensionTargetsBody (sumBody element []) rest)) []) heap
+          | _, _ => .unsupported
       | .call (.name "range") _ => match rangeBounds values with
           | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
           | .error error => done (globals := globals) anchors heap (.error error)
@@ -612,12 +639,6 @@ def sumGeneratorTargetsStart (anchors : Nat) (element : Expr)
           | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
               enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
           | _ => .unsupported
-
-/-- Enumerate accepts an integer start, including a Boolean, with no size limit. -/
-def enumerateStart : Value → Eval Int
-  | .scalar (.int value) => pure value
-  | .scalar (.bool value) => pure (if value then 1 else 0)
-  | _ => Mutable.error "TypeError"
 
 def primitive : Operation → List Value → Eval Value
   | .membership negated, [needle, container] => membership needle container negated
@@ -889,13 +910,13 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             env [] expressions stack heap)
       | .listCompTargets element (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
-            | .call (.name "range") expressions | .zipIterable expressions => expressions
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.comprehensionTargets element generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .sumGeneratorTargets element (generators@((_, iterable, _) :: _)) start =>
           let expressions := match iterable with
-            | .call (.name "range") expressions | .zipIterable expressions => expressions
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
       | .reversedList expression => .next (argumentsState .reversedList env [] [expression] stack heap)
