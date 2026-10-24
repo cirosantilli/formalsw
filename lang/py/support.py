@@ -16,6 +16,7 @@ from lang.py.typing_support import resolve_typing_annotations
 from lang.py.mutable_support import check_mutable
 from lang.py.sorting_support import MERGE_SORT, QUICK_SORT, body_of, matches_sort
 from lang.py.memo_support import cache_decorator, uses_memoized
+from lang.py.named_callbacks import lower_named_callbacks
 from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_set_iteration, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
 
 
@@ -40,6 +41,7 @@ def binary_comparison(function: ast.FunctionDef) -> bool:
 
 class SupportChecker:
     def __init__(self, module: ast.Module):
+        lower_named_callbacks(module)
         resolve_typing_annotations(module)
         resolve_record_inputs(module)
         self.module = module

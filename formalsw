@@ -21,6 +21,7 @@ from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
+from lang.py.named_callbacks import lower_named_callbacks
 from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
 from lang.py.permutation_support import permutation_arguments
 from lang.py.call_support import reverse_keyword, integer_instance
@@ -762,6 +763,7 @@ def source_module(source):
             identify_classes(module, path)
             prepare_specification(source, module)
             lower_local_functions(module)
+            lower_named_callbacks(module)
             if proof_path_for_source(path).is_file() or any(
                     getattr(node, 'formalsw_markers', ()) for node in (module, *module.body)):
                 link_imports(path, module, source_module)
@@ -1310,6 +1312,7 @@ class AstJsonEmitter:
 
     def __init__(self, module: ast.Module, bindings_module: ast.Module | None = None):
         """Store the parsed Python module."""
+        lower_named_callbacks(module)
         self.module = module
         self.bindings_module = module if bindings_module is None else bindings_module
 

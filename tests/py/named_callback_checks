@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""
+Compare protected callback specialization with Python and check rejection boundaries.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.named_callbacks import lower_named_callbacks
+from lang.py.support import SupportChecker
+from lang.py.call_support import uses_heap_calls
+from lang.py.global_inputs import call_globals
+from lang.py.memo_support import uses_memoized
+from lang.py.imports import identify_classes
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = """
+from functools import lru_cache
+
+def increment(n: int) -> int:
+    return n + 1
+
+def negate(n: int) -> int:
+    return -n
+
+def divide(n: int) -> int:
+    return 10 // n
+
+def singleton(n: int) -> list[int]:
+    return [n]
+
+def apply(fn, value):
+    return fn(value)
+
+def twice(fn, value):
+    return fn(fn(value))
+
+def compose(first, second, value):
+    return second(first(value))
+
+def iterate(fn, k: int, n: int) -> int:
+    for _ in range(k):
+        n = fn(n)
+    return n
+
+def defaulted(fn, value=7):
+    return fn(value)
+
+def optional(value=7, fn=None):
+    return fn(value)
+
+def middle_default(value=3, fn=None, other=9):
+    return fn(value) + other
+
+def same_named(increment, value):
+    return increment(value)
+
+def around(left, fn, right):
+    return 100 * fn(left) + right
+
+def mark(items: list[int], value: int) -> int:
+    items.append(value)
+    return value
+
+def record(items: list[int], value: int) -> int:
+    items.append(value + 10)
+    return value
+
+def binary(fn, left, right):
+    return fn(left, right)
+
+def explode(items: list[int], value: int) -> int:
+    items.append(value)
+    return 10 // value
+
+@lru_cache(None)
+def fibonacci(n: int) -> int:
+    if n <= 1:
+        return n
+    return fibonacci(n - 1) + fibonacci(n - 2)
+
+class Box:
+    def __init__(self, value):
+        self.value = value
+    def read(self):
+        return self.value
+
+def boxed(value: int) -> int:
+    box = Box(value)
+    return box.read()
+
+def hinted(fn: Box, value):
+    return fn(value)
+
+"""
+bodies = {
+    'single': 'return apply(increment, n)',
+    'repeated': 'return twice(increment, n)',
+    'negated': 'return twice(negate, n)',
+    'composed': 'return compose(increment, negate, n)',
+    'same_callback': 'return compose(increment, increment, n)',
+    'loop': 'return iterate(increment, n, 10)',
+    'negative_loop': 'return iterate(negate, 3, n)',
+    'nested_calls': 'return apply(increment, apply(negate, n))',
+    'default_argument': 'return defaulted(increment)',
+    'explicit_default': 'return defaulted(increment, n)',
+    'callback_default': 'return optional(n, increment)',
+    'middle_defaults': 'return middle_default(n, increment)',
+    'same_parameter_name': 'return same_named(increment, n)',
+    'nonfirst_callback': 'return around(n, increment, -n)',
+    'list_result': 'return len(apply(singleton, n))',
+    'division': 'return apply(divide, n)',
+    'argument_order': 'items = []\nvalue = around(mark(items, n), increment, mark(items, n + 1))\nreturn 10000 * value + 100 * items[0] + items[1]',
+    'callback_effects': 'items = []\nvalue = binary(record, items, mark(items, n))\nreturn 10000 * value + 100 * items[0] + items[1]',
+    'memoized': 'return twice(fibonacci, n)',
+    'class_callback': 'return apply(boxed, n)',
+    'callback_class_hint': 'return hinted(increment, n)',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int) -> int:\n' + ''.join('    ' + line + '\n' for line in body.splitlines())
+
+source += """
+def exceptional_heap(items: list[int], n: int) -> int:
+    return binary(explode, items, n)
+"""
+original = {}
+exec(source, original)
+module = ast.parse(source)
+identify_classes(module, Path(__file__))
+lower_named_callbacks(module)
+first = ast.dump(module)
+lower_named_callbacks(module)
+assert ast.dump(module) == first, 'normalization must be idempotent'
+translated = {}
+exec(compile(module, '<normalized-callbacks>', 'exec'), translated)
+checker = SupportChecker(module)
+for name in (*bodies, 'exceptional_heap'):
+    assert not checker.check(name), (name, checker.check(name))
+
+# Removing a default callback leaves the remaining immutable default in place.
+optional_clone = next(node for node in module.body if isinstance(node, ast.FunctionDef)
+                      and node.name.startswith('__formalsw_callback_optional_'))
+assert [arg.arg for arg in optional_clone.args.args] == ['value']
+assert ast.literal_eval(optional_clone.args.defaults[0]) == 7
+assert len(optional_clone.args.defaults) == 1
+
+base = '''
+def callback(n: int) -> int:
+    return n + 1
+
+def other(n: int) -> int:
+    return n - 1
+
+def apply(fn, value):
+    return fn(value)
+
+def root(n: int) -> int:
+    return apply(callback, n)
+'''
+bad = [
+    base + '\ncallback = other\n',
+    base + '\nif False:\n    callback = other\n',
+    base + '\ndel callback\n',
+    base + '\ncallback.extra = 1\n',
+    base.replace('root(n: int)', 'root(n: int, callback: int)'),
+    base.replace('    return apply(callback, n)', '    callback = n\n    return apply(callback, n)'),
+    base.replace('return fn(value)', 'fn = other\n    return fn(value)'),
+    base.replace('return fn(value)', 'del fn\n    return fn(value)'),
+    base.replace('return fn(value)', 'alias = fn\n    return alias(value)'),
+    base.replace('return fn(value)', 'return fn'),
+    base.replace('return fn(value)', 'return fn.__name__'),
+    base.replace('return fn(value)', 'return [fn][0](value)'),
+    base.replace('return fn(value)', 'for fn in [other]:\n        return fn(value)'),
+    base.replace('return fn(value)', 'return (lambda: fn(value))()'),
+    base.replace('return fn(value)', 'def nested():\n        return fn(value)\n    return nested()'),
+    base.replace('return apply(callback, n)', 'return apply(other if n else callback, n)'),
+    base.replace('return apply(callback, n)', 'return apply(unknown, n)'),
+    base.replace('return apply(callback, n)', 'return apply(callback, value=n)'),
+    base.replace('return apply(callback, n)', 'return apply(callback, n, n)'),
+    base.replace('return apply(callback, n)', 'return apply(callback)'),
+    base.replace('return apply(callback, n)', 'return apply(*[callback, n])'),
+    base.replace('return fn(value)', 'print(value)\n    return fn(value)'),
+    base.replace('def apply(fn, value)', 'def apply(fn, value=[])'),
+    base.replace('def apply(fn, value)', 'def apply(fn=[], value=0)'),
+    'from functools import lru_cache\n' + base.replace('def apply(fn, value)', '@lru_cache(None)\ndef apply(fn, value)'),
+    'class Box:\n    def __bool__(self):\n        return True\n' + base.replace('def apply(fn, value)', 'def apply(fn: Box, value)'),
+    base.replace('def apply(fn, value)', 'def apply(fn, *, value)'),
+    base.replace('def apply(fn, value)', 'def apply(fn, value, *extra)'),
+    base.replace('return fn(value)', 'callback = value\n    return fn(value)'),
+    base.replace('def apply(fn, value)', '@unknown\ndef apply(fn, value)'),
+    base.replace('def callback(n: int)', '@unknown\ndef callback(n: int)'),
+    base.replace('return apply(callback, n)', 'alias = callback\n    return apply(alias, n)'),
+    base + '\nfrom other_module import callback\n',
+    base.replace('return fn(value)', 'return value'),
+]
+# Function objects are captured before other argument expressions. Reject any
+# supported-name rewrite when the target can be rebound at either time.
+bad.extend([
+    base.replace('return apply(callback, n)', 'return apply(callback, rebind(n))') + '''
+def rebind(n: int) -> int:
+    global callback
+    callback = other
+    return n
+''',
+    base.replace('return n + 1', 'global callback\n    callback = other\n    return n + 1'),
+    base.replace('return apply(callback, n)', 'return apply(callback, rebind(n))') + '''
+def rebind(n: int) -> int:
+    global apply
+    apply = other
+    return n
+''',
+    base.replace('return n + 1', 'global apply\n    apply = other\n    return n + 1'),
+])
+for text in bad:
+    candidate = ast.parse(text)
+    lower_named_callbacks(candidate)
+    assert SupportChecker(candidate).check('root'), text
+
+# Rechecking binding guards after other AST preparation cannot reuse an obsolete
+# stable-binding decision. This also protects linked copies of private clones.
+changed = ast.parse(base)
+lower_named_callbacks(changed)
+changed.body.extend(ast.parse('def write(n: int) -> int:\n    global callback\n    callback = other\n    return n\n').body)
+assert SupportChecker(changed).check('root')
+
+# Fresh clone names cannot capture an existing source reference or declaration.
+collision_source = base + '\ndef __formalsw_callback_apply_fn_callback(n: int) -> int:\n    return -999\n'
+collision = ast.parse(collision_source)
+lower_named_callbacks(collision)
+assert not SupportChecker(collision).check('root')
+assert any(isinstance(node, ast.FunctionDef) and node.name == '__formalsw_callback_apply_fn_callback_'
+           for node in collision.body)
+
+# Global inputs and memoized callbacks remain reachable after specialization.
+global_source = ast.parse('setting: int = 7\ndef callback(n: int) -> int: return n + setting\ndef apply(fn, n): return fn(n)\ndef root(n: int) -> int: return apply(callback, n)\n')
+SupportChecker(global_source)
+assert [item.name for item in call_globals(global_source, global_source.body[3])] == ['setting']
+assert uses_memoized(module, next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'memoized'))
+
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+checks = 0
+for name in bodies:
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    heap = uses_heap_calls(module, function)
+    memo = uses_memoized(module, function)
+    runtime = ('MemoHeapCalls.scalarFunction' if heap else 'MemoCalls.function') if memo else (
+        'HeapCalls.scalarFunction' if heap else 'Calls.function')
+    call = runtime + ' source'
+    if memo and not heap:
+        call += ' source.memoizedFunctions'
+    values = (-3, 0, 1, 4) if name != 'memoized' else (0, 1, 4, 7)
+    for n in values:
+        outcomes = []
+        for world in (original, translated):
+            try:
+                value = world[name](n)
+                outcomes.append(('ok', value))
+            except (ValueError, TypeError, ZeroDivisionError) as error:
+                outcomes.append((type(error).__name__, None))
+        assert outcomes[0] == outcomes[1], (name, n, outcomes)
+        kind, value = outcomes[0]
+        if kind == 'ok':
+            expected = f'.ok (.int ({value}))'
+        else:
+            expected = f'.error {{ typeName := "{kind}", args := [] }}'
+        lines.append(f'example : ({call} "{name}" [.int ({n})]).observe 20000 = .done ({expected}) := by native_decide')
+        checks += 1
+
+for world in (original, translated):
+    items = [7]
+    try:
+        world['exceptional_heap'](items, 0)
+        raise AssertionError('expected ZeroDivisionError')
+    except ZeroDivisionError:
+        pass
+    assert items == [7, 0], items
+lines.append('example : (HeapCalls.call source "exceptional_heap" [.ref 0, .scalar (.int 0)] [.list [.scalar (.int 7)]]).execution.observe 2000 = .done (.ok ⟨.error { typeName := "ZeroDivisionError", args := [] }, [], [.list [.scalar (.int 7), .scalar (.int 0)]], 1⟩) := by native_decide')
+checks += 1
+
+if '--frontend-only' in sys.argv:
+    print(f'Named callbacks: {checks} Python/normalized comparisons and {len(bad) + 1} binding/scope/body rejections passed')
+    raise SystemExit(0)
+
+with project_temporary_directory(prefix='named-callbacks-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+subprocess.run([str(ROOT / 'formalsw'), 'tests/py/named_callbacks.py'], cwd=ROOT, check=True)
+print(f'Named callbacks: {checks} Python/normalized/Lean comparisons and {len(bad) + 1} binding/scope/body rejections passed')

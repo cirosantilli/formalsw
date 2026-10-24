@@ -7,6 +7,7 @@ from lang.py.global_inputs import GlobalInputError, function_globals, annotation
 from lang.py.imports import bindings
 from lang.py.permutation_support import permutation_binding, permutation_arguments
 from lang.py.defaults import literal_default
+from lang.py.named_callbacks import callback_bindings_valid, callback_signature
 from lang.py.memo_support import cache_decorator, uses_memoized
 from lang.py.call_graph import call_targets
 from lang.py.sorting_support import uses_sort_model
@@ -461,7 +462,7 @@ def uses_set_iteration(module, function):
         if current.name in visited:
             continue
         visited.add(current.name)
-        kinds = [annotation_kind(arg.annotation) for arg in current.args.args]
+        kinds = [annotation_kind(arg.annotation) for arg in callback_signature(module, current)]
         kinds.append(annotation_kind(current.returns))
         sets |= any(kind and (kind == 'set' or kind.startswith('set[')) for kind in kinds)
         for statement in current.body:
@@ -495,8 +496,12 @@ def uses_heap_calls(module, function):
         if current.name in visited:
             continue
         visited.add(current.name)
-        kinds = [annotation_kind(arg.annotation) for arg in current.args.args]
+        kinds = [annotation_kind(arg.annotation) for arg in callback_signature(module, current)]
         kinds.append(annotation_kind(current.returns))
+        if getattr(current, 'formalsw_callback_origin', None) and any(
+                isinstance(arg.annotation, ast.Name) and arg.annotation.id in classes
+                for arg in callback_signature(module, current)):
+            return True
         if any(kind and (kind.startswith(('list[', 'tuple[', 'set[', 'dict[')) or kind in ('bytearray', 'record')) for kind in kinds):
             return True
         # Defaults are evaluated at definition time, outside the modeled body.
@@ -591,6 +596,8 @@ def check_calls(module, function, reject, *, heap=False):
         visited.add(id(function))
         if hasattr(function, "formalsw_local_function_error"):
             reject(function, function.formalsw_local_function_error)
+        if not callback_bindings_valid(module, function):
+            reject(function, 'named callbacks require protected module-level function bindings')
         if owner is None and sum(isinstance(node, ast.FunctionDef) and node.name == function.name
                for node in module.body) != 1:
             reject(function, 'call targets must have one module-level definition')
@@ -652,7 +659,7 @@ def check_calls(module, function, reject, *, heap=False):
                          | compared_local_tuple_displays(module, function)) if heap else set()
         # A local may reuse a function/class name as data. Each call site below
         # separately rejects invoking a shadowed module-level target.
-        for index, arg in enumerate(function.args.args):
+        for index, arg in enumerate(callback_signature(module, function)):
             if getattr(arg, "formalsw_capture", False):
                 continue
             if owner is not None and index == 0:
