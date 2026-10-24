@@ -83,6 +83,29 @@ def equalElements : List Value → List Value → Option Bool
 def equalLists (left right : List Value) : Option Bool :=
   if left.length = right.length then equalElements left right else some false
 
+/-- List counting uses builtin scalar equality and Python's identity shortcut.
+Distinct references may need custom equality or nested traversal and remain unsupported. -/
+def countElements (needle : Value) : List Value → Option Nat
+  | [] => some 0
+  | item :: rest => do
+      let equal ← if item = needle then some true else match item, needle with
+        | .scalar left, .scalar right => scalarCompare .eq left right
+        | _, _ => none
+      let total ← countElements needle rest
+      return total + if equal then 1 else 0
+
+/-- Every mathematical integer list has a fully supported occurrence count. -/
+theorem countElements_ints (items : List Int) (needle : Int) :
+    countElements (.scalar (.int needle)) (items.map fun item => .scalar (.int item)) =
+      some (items.count needle) := by
+  induction items with
+  | nil => rfl
+  | cons item rest ih =>
+      by_cases same : item = needle
+      · subst item
+        simp [countElements, ih]
+      · simp [countElements, ih, scalarCompare, evalCmpOp, same]
+
 /-- Dictionary equality ignores insertion order and compares the stored values. -/
 def equalEntries (left right : List (Constant × Value)) : Option Bool :=
   match left with
@@ -417,6 +440,7 @@ inductive Operation where
   | setSlice (replacement : Value)
   | append (address : Nat)
   | pop (address : Nat)
+  | count (address : Nat)
   | sort (address : Nat)
   | sortReverse (address : Nat)
   | replace (text : String)
@@ -924,6 +948,12 @@ def primitive : Operation → List Value → Eval Value
   | .pop address, [] => Mutable.popItem address (.scalar (.int (-1)))
   | .pop address, [index] => Mutable.popItem address index
   | .pop _, _ => Mutable.error "TypeError"
+  | .count address, [needle] => do
+      let heap ← get
+      let some (.list items) := heap[address]? | Mutable.unsupported
+      let some total := countElements needle items | Mutable.unsupported
+      return .scalar (.int total)
+  | .count _, _ => Mutable.error "TypeError"
   | .sort address, [] => do
       let heap ← get
       let some (.list items) := heap[address]? | Mutable.unsupported
@@ -1135,6 +1165,13 @@ def primitive : Operation → List Value → Eval Value
       scalarResult (Calls.positionalMinimum values)
   | _, _ => Mutable.unsupported
 
+/-- Counting reads the current integer contents without allocating or changing any object. -/
+theorem primitive_count_list (heap : Heap) (address : Nat) (items : List Int) (needle : Int)
+    (found : heap[address]? = some (.list (items.map fun item => .scalar (.int item)))) :
+    primitive (.count address) [.scalar (.int needle)] heap =
+      some (.ok (.scalar (.int (items.count needle))), heap) := by
+  simp [primitive, found, countElements_ints]
+
 /-- List construction copies the outer list and preserves all element references. -/
 theorem primitive_list_list (heap : Heap) (address : Nat) (items : List Value)
     (found : heap[address]? = some (.list items)) :
@@ -1247,6 +1284,9 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
               | _ => Mutable.error "AttributeError"
             else if name = "append" then pure (.append address)
             else if name = "pop" then pure (.pop address)
+            else if name = "count" then match (← get)[address]? with
+              | some (.list _) => pure (.count address)
+              | _ => Mutable.unsupported
             else if name = "get" ∨ name = "setdefault" then Mutable.error "AttributeError"
             else if name = "strip" ∨ name = "split" then match (← get)[address]? with
               | some (.bytearray _) => Mutable.unsupported
@@ -1260,11 +1300,11 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
             else Mutable.unsupported
         | some (.set _) | some (.keySet _) =>
             if name = "add" then pure (.add address)
-            else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+            else if name = "count" ∨ name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
         | some (.dict _) | some (.keyDict _) =>
             if name = "get" then pure (.dictionaryGet address)
             else if name = "setdefault" then pure (.dictionarySetDefault address)
-            else if name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+            else if name = "count" ∨ name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
         | some (.tuple _) =>
             if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
         | none => Mutable.unsupported
@@ -1288,6 +1328,9 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
         else if name = "join" then match value with
           | .string separator => pure (.join separator)
           | .bytes _ => Mutable.unsupported
+          | _ => Mutable.error "AttributeError"
+        else if name = "count" then match value with
+          | .string _ | .bytes _ => Mutable.unsupported
           | _ => Mutable.error "AttributeError"
         else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
   if name = "$formalsw.sort.reverse" then
@@ -2021,7 +2064,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | sort _ | sortReverse _ | replace _ | zfill _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
   | value value =>
@@ -2395,6 +2438,22 @@ theorem sort (receiver : Evaluates (globals := globals) module env base heap (.r
   apply Reaches.next (following := argumentsState (.sort address) env [] [] stack middle)
     (by simp [step, run, bindMethod, found])
   exact .next (by simp [argumentsState, step, result, run, operation]) .refl
+
+/-- Count binds the list before argument evaluation and reads its live contents afterward. -/
+theorem count (receiver : Evaluates (globals := globals) module env base heap (.ref address) middle)
+    (found : middle[address]? = some (.list items))
+    (arguments : Arguments (globals := globals) module env expressions middle values afterArguments)
+    (operation : primitive (.count address) values afterArguments = some (.ok value, finalHeap))
+    (localName : ∀ name, base = .name name → (env name).isSome = true) :
+    Evaluates (globals := globals) module env (.call (.attribute base "count") expressions) heap value finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr base env, .methodReceiver "count" expressions env :: stack, heap⟩)
+    (by cases base <;> simp_all [step])
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := argumentsState (.count address) env [] expressions stack middle)
+    (by simp [step, run, bindMethod, found])
+  apply (arguments_reach arguments (.count address) [] anchors stack).trans
+  exact .next (by simp [step, result, run, operation]) .refl
 
 /-- The receiver is bound before arguments run; removal reads the resulting live heap. -/
 theorem pop (lookup : env name = some (.ref address))

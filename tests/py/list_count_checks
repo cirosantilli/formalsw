@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+Compare list counting, receiver binding, argument effects, and exceptions with Python.
+"""
+import argparse
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--frontend-only', action='store_true', help='skip Lean execution comparisons')
+options = parser.parse_args()
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def occurrences(items: list[int], value: int) -> int:
+    return items.count(value)
+def mark(items, value):
+    items.append(value)
+    return value
+def effect(items: list[int], value: int) -> int:
+    return items.count(mark(items, value))
+def remove(items, value):
+    if items:
+        items.pop()
+    return value
+def shortened(items: list[int], value: int) -> int:
+    return items.count(remove(items, value))
+def fail(items, value):
+    items.append(value)
+    raise ValueError()
+def argument_error(items: list[int], value: int) -> int:
+    return items.count(fail(items, value))
+def no_argument(items: list[int], value: int) -> int:
+    return items.count()
+def excess(items: list[int], value: int) -> int:
+    return items.count(mark(items, value), mark(items, value + 1))
+def wrong_scalar(items: list[int], value: int) -> int:
+    return value.count(mark(items, value))
+def wrong_none(items: list[int], value: int) -> int:
+    return None.count(mark(items, value))
+def wrong_set(items: list[int], value: int) -> int:
+    return {value}.count(mark(items, value))
+def wrong_dictionary(items: list[int], value: int) -> int:
+    return {value: value}.count(mark(items, value))
+def replace(holder, value):
+    holder[0] = [value, value, value]
+    return value
+def captured(items: list[int], value: int):
+    holder = [items]
+    result = holder[0].count(replace(holder, value))
+    return [result, holder, items]
+def cycle(items: list[int], value: int) -> int:
+    items.append(items)
+    return items.count(items)
+class Counter:
+    def __init__(self, items):
+        self.items = items
+    def count(self, first, second):
+        self.items.append(first)
+        return second + 100
+def ordinary_method(items: list[int], value: int) -> int:
+    return Counter(items).count(mark(items, value), mark(items, value + 1))
+class Shadow:
+    def __init__(self):
+        self.count = 0
+def stored_field(items: list[int], value: int) -> int:
+    return Shadow().count(mark(items, value))
+class Bound:
+    def count(self, value):
+        return value + 100
+def rebind(instance, items, value):
+    instance.count = 0
+    items.append(value)
+    return value
+def captured_user_method(items: list[int], value: int) -> int:
+    instance = Bound()
+    return instance.count(rebind(instance, items, value))
+'''
+program = ast.parse(source)
+for node in program.body:
+    if isinstance(node, ast.ClassDef):
+        node.formalsw_origin = str(Path(__file__).resolve())
+entry_names = ('occurrences', 'effect', 'shortened', 'argument_error', 'no_argument', 'excess',
+               'wrong_scalar', 'wrong_none', 'wrong_set', 'wrong_dictionary', 'captured', 'cycle',
+               'ordinary_method', 'stored_field', 'captured_user_method')
+checker = SupportChecker(program)
+for name in entry_names:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst',
+         'set_option maxRecDepth 8192',
+         'def program : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+
+
+def comparison(name, initial, value):
+    global count
+    items = initial.copy()
+    try:
+        result = world[name](items, value)
+        error = None
+    except (TypeError, AttributeError, ValueError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots([items] + ([result] if error is None else [])))
+    contents = ', '.join('.scalar (' + constant(item) + ')' for item in initial)
+    arguments = f'[.ref 0, .scalar ({constant(value)})]'
+    call = f'HeapCalls.call program "{name}" {arguments} [.list [{contents}]]'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error error => decide (error = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([f'-- {name}, comparison {count}',
+                  f'example : (match ({call}).execution.observe 600 with',
+                  f'  | .done (.ok c) => ({outcome}) &&',
+                  f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 4000) == some true)',
+                  '  | _ => false) = true := by native_decide'])
+    count += 1
+
+
+scalars = [None, False, True, -1, 0, 1, 10**80, '', 'λ', b'', b'x']
+samples = [[], [False, 0, True, 1], scalars, [None, None, 'λ', b'x'], [2, 2, -1]]
+for initial in samples:
+    contents = ', '.join('.scalar (' + constant(item) + ')' for item in initial)
+    for value in scalars:
+        answer = initial.count(value)
+        lines.append(f'example : HeapCalls.primitive (.count 0) [.scalar ({constant(value)})] [.list [{contents}]] = '
+                     f'some (.ok (.scalar (.int {answer})), [.list [{contents}]]) := by decide')
+        count += 1
+        comparison('occurrences', initial, value)
+for name in entry_names[1:]:
+    for initial in ([], [0, 1, 1]):
+        if name == 'cycle' and initial:
+            continue
+        comparison(name, initial, 1)
+
+# Identity is safe even for cyclic references; distinct nested comparisons and
+# custom equality remain visibly unsupported instead of becoming inequality.
+lines.extend([
+    'example : HeapCalls.primitive (.count 0) [.ref 1] [.list [.ref 1, .ref 1], .list []] = '
+    'some (.ok (.scalar (.int 2)), [.list [.ref 1, .ref 1], .list []]) := by decide',
+    'example : HeapCalls.primitive (.count 0) [.ref 2] [.list [.ref 1], .list [.scalar (.int 1)], .list [.scalar (.int 1)]] = none := by decide',
+    'example : HeapCalls.primitive (.count 0) [.ref 1] [.list [.scalar (.int 1)], .instance "origin" "CustomEquality" []] = none := by decide',
+    'example : HeapCalls.primitive (.count 0) [.scalar (.int 1)] [.list [.ref 1], .instance "origin" "CustomEquality" []] = none := by decide',
+    'example : HeapCalls.primitive (.count 0) [.ref 1] [.list [], .instance "origin" "CustomEquality" []] = '
+    'some (.ok (.scalar (.int 0)), [.list [], .instance "origin" "CustomEquality" []]) := by decide',
+])
+for obj in ('.tuple []', '.bytearray []'):
+    lines.append(f'example : HeapCalls.bindMethod program (.ref 0) "count" [{obj}] = none := by decide')
+for scalar in ('.string "x"', '.bytes []'):
+    lines.append(f'example : HeapCalls.bindMethod program (.scalar ({scalar})) "count" [] = none := by decide')
+
+probe = ast.parse('def f(n: int) -> int:\n    return n.count(0)\n')
+assert uses_heap_calls(probe, probe.body[0])
+assert not SupportChecker(probe).check('f')
+for call in ('items.count(value=value)', 'items.count(*value)', 'items.count(**value)'):
+    invalid = ast.parse(f'def f(items: list[int], value: int) -> int:\n    return {call}\n')
+    assert SupportChecker(invalid).check('f'), call
+custom_protocol = '''
+class Custom:
+    def __eq__(self, other):
+        return True
+def f(n: int) -> int:
+    return [Custom()].count(Custom())
+'''
+assert SupportChecker(ast.parse(custom_protocol)).check('f')
+assert SupportChecker(ast.parse(custom_protocol.replace('class Custom:', 'class Custom(int):'))).check('f')
+ordinary_call = next(node for node in program.body if isinstance(node, ast.FunctionDef) and node.name == 'ordinary_method').body[0].value
+assert api['AstJsonEmitter'](program).expr(ordinary_call)['type'] == 'Call'
+proof_source = REPO / 'tests/py/list_count.py'
+requirements = api['collect_requirements'](proof_source, ast.parse(proof_source.read_text()), 'tests.py.list_count', 'ListCountAst')
+assert len(requirements) == 3 and not any(item.unsupported for item in requirements), requirements
+assert [item.marker for item in requirements].count('execution model coverage') == 1
+
+if not options.frontend_only:
+    with project_temporary_directory(prefix='list-count-check-') as temporary:
+        directory = Path(temporary)
+        (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+        proof = directory / 'Checks.lean'
+        proof.write_text('\n'.join(lines) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+print(f'List count: frontend/binding/protocol checks passed; {count} Python comparisons '
+      + ('prepared (frontend-only)' if options.frontend_only else 'passed'))
