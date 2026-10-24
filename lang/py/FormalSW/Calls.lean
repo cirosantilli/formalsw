@@ -65,6 +65,7 @@ def Primitive.apply : Primitive → List Constant → Option (Except ExceptionOb
   | .builtin .len, [value] => some (length value)
   | .builtin .int, values => integerConversion values
   | .builtin .str, values => some (Strings.str values)
+  | .builtin .ord, [value] => some (Strings.ord value)
   | .builtin .max, values => positionalMaximum values
   | .builtin .min, values => positionalMinimum values
   | .builtin .intBitLength, [value] => some (Math.bitLengthCall value)

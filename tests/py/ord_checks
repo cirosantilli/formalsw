@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""
+Compare ordinal conversion with Python, including buffers, errors, and effects.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+source = '''
+def scalar(text: str) -> int:
+    return ord(text)
+def heap(text: str) -> int:
+    items = [text]
+    return ord(items[0])
+def buffer(value: bytes) -> int:
+    return ord(bytearray(value))
+def invalid_list(text: str) -> int:
+    return ord([text])
+def argument_error(text: str) -> int:
+    return ord(1 // 0)
+def mutate(items: list[int]) -> str:
+    items.append(7)
+    return "λ"
+def effect(items: list[int]) -> int:
+    return ord(mutate(items))
+'''
+module = ast.parse(source)
+world = {}
+exec(source, world)
+lines = []
+count = 0
+values = ['', 'A', 'z', 'λ', '😀', '\U0010ffff', 'ab', 'e\u0301', b'', b'A', b'\xff', b'ab', 4, True, None]
+for name in ('scalar', 'heap', 'invalid_list', 'argument_error', 'buffer'):
+    assert not SupportChecker(module).check(name), SupportChecker(module).check(name)
+    backend = 'HeapCalls.scalarFunction' if name in ('heap', 'invalid_list', 'buffer') else 'Calls.function'
+    for value in (values if name != 'buffer' else [b'', b'A', b'\xff', b'ab']):
+        try:
+            expected = '.ok (' + constant(world[name](value)) + ')'
+        except (TypeError, ZeroDivisionError) as error:
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+        lines.append(f'example : ({backend} Probe.module "{name}" [{constant(value)}]).observe 200 = '
+                     f'.done ({expected}) := by decide')
+        count += 1
+assert not SupportChecker(module).check('effect')
+items = []
+assert world['effect'](items) == ord('λ') and items == [7]
+lines.append('''
+example : (HeapCalls.call Probe.module "effect" [.ref 0] [.list []]).execution.observe 200 =
+    .done (.ok ⟨.ok (.scalar (.int 955)), [], [.list [.scalar (.int 7)]], 1⟩) := by decide
+
+example (character : Char) : Calls.ReturnsValue Probe.module "scalar"
+    [.string (String.ofList [character])] (.int character.toNat) := by
+  apply Calls.BlockReturns.function rfl rfl
+  apply Calls.BlockReturns.return_value
+  apply Calls.Evaluates.builtin (.cons (Calls.Evaluates.lookup rfl) .nil)
+  simp only [Calls.Primitive.apply, Strings.ord_character]
+''')
+with project_temporary_directory(prefix='ord-check-') as temporary:
+    directory = Path(temporary)
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+                     + 'open FormalSW.PyAst\nset_option maxRecDepth 8192\n' + '\n'.join(lines))
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+for call in ('ord()', 'ord(text, text)', 'ord(text=text)', 'ord(*text)'):
+    assert SupportChecker(ast.parse(f'def f(text: str):\n    return {call}\n')).check('f'), call
+for binding in ('ord = 1\n', 'from other import ord\n'):
+    assert SupportChecker(ast.parse(binding + 'def f(text: str):\n    return ord(text)\n')).check('f')
+local = ast.parse('def ord(text: str):\n    return 17\ndef f(text: str):\n    return ord(text)\n')
+assert not SupportChecker(local).check('f')
+assert api['AstJsonEmitter'](local).expr(local.body[-1].body[0].value)['type'] == 'Call'
+assert SupportChecker(module).requirement('scalar', 'theorem wrong : (scalarFunction Probe.module "scalar" [.string text]).Returns')
+assert SupportChecker(module).requirement('scalar', 'theorem wrong : FormalSW.Property.Function.Throws Probe.module "scalar"')
+print(f'Ordinal conversion: {count} Python comparisons, argument effects, binding checks, and arbitrary-character proof passed')

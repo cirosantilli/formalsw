@@ -369,7 +369,7 @@ def uses_calls_model(module, function):
         or identity_comparison(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'max', 'min', 'len'}
+        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'ord', 'max', 'min', 'len'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -691,6 +691,13 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'divmod requires the unshadowed builtin divmod')
                 if node.keywords or len(node.args) != 2:
                     reject(node, 'divmod requires exactly two positional arguments')
+                for item in node.args:
+                    recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'ord':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'ordinal conversion requires the unshadowed builtin ord')
+                if node.keywords or len(node.args) != 1:
+                    reject(node, 'ord requires exactly one positional argument')
                 for item in node.args:
                     recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'len':

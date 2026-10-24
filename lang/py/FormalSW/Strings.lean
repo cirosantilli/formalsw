@@ -25,6 +25,18 @@ def str : List Constant → Except ExceptionObject Constant
   | [value] => .ok (.string (convert value))
   | _ => .error typeError
 
+/-- A Unicode character or a single byte has an ordinal; other lengths and types fail. -/
+def ord : Constant → Except ExceptionObject Constant
+  | .string text => match text.toList with
+      | [character] => .ok (.int character.toNat)
+      | _ => .error typeError
+  | .bytes [byte] => .ok (.int byte.toNat)
+  | _ => .error typeError
+
+@[simp] theorem ord_character (character : Char) :
+    ord (.string (String.ofList [character])) = .ok (.int character.toNat) := by
+  simp [ord]
+
 def get (value index : Constant) : Except ExceptionObject Constant :=
   match value, scalarNumber index with
   | .bytes bytes, some index =>

@@ -89,6 +89,7 @@ deriving Repr, DecidableEq, BEq, Lean.ToExpr
 inductive Builtin where
   | int
   | str
+  | ord
   | max
   | min
   | divmod
@@ -432,6 +433,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "int" => pure Builtin.int
         | "len" => pure Builtin.len
         | "str" => pure Builtin.str
+        | "ord" => pure Builtin.ord
         | "max" => pure Builtin.max
         | "min" => pure Builtin.min
         | "divmod" => pure Builtin.divmod

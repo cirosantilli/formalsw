@@ -136,6 +136,7 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("math_module_checks
 subprocess.run([sys.executable, str(Path(__file__).with_name("range_sum_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("sequence_sum_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("bit_length_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("ord_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("int_conversion_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("integer_parsing_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("sequence_checks"))], check=True)

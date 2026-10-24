@@ -644,6 +644,12 @@ def primitive : Operation → List Value → Eval Value
   | .append _, _ | .add _, _ => Mutable.error "TypeError"
   | .builtin .identity, [left, right] => identity left right
   | .builtin .len, [value] => Mutable.length value
+  | .builtin .ord, [.scalar value] => scalarResult (some (Strings.ord value))
+  | .builtin .ord, [.ref address] => do
+      match (← get)[address]? with
+      | some (.bytearray bytes) => scalarResult (some (Strings.ord (.bytes bytes)))
+      | some _ => Mutable.error "TypeError"
+      | none => Mutable.unsupported
   | .builtin .divmod, values => Mutable.divmod values
   | .builtin .bytearray, values => Mutable.bytearray values
   | .builtin .set, [] => Mutable.allocateSet []

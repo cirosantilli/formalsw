@@ -675,6 +675,9 @@ class SupportChecker:
             if uses_builtin(self.module, function, 'int') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'integer conversion requires a call interpreter'))
+            if uses_builtin(self.module, function, 'ord') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'ordinal conversion requires a call interpreter'))
             if uses_builtin(self.module, function, 'divmod') and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'divmod returns a tuple and requires the heap call interpreter'))
@@ -759,6 +762,10 @@ class SupportChecker:
                        for f in (target, other) if f in self.functions for name in ('min', 'max')):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
                         'legacy Function properties omit positional min/max; use the short DSL or Calls'))
+                if any(uses_builtin(self.module, self.functions[f], 'ord')
+                       for f in (target, other) if f in self.functions):
+                    issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
+                        'legacy Function properties omit ordinal conversion; use the short DSL or Calls'))
                 if any(uses_method(self.module, self.functions[f], 'bit_length')
                        for f in (target, other) if f in self.functions):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
