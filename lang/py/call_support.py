@@ -251,6 +251,15 @@ def general_division(node):
             and not (isinstance(divisor, ast.Constant) and type(divisor.value) is int and divisor.value >= 0))
 
 
+def identity_comparison(node):
+    return (isinstance(node, ast.Compare) and len(node.ops) == 1
+            and isinstance(node.ops[0], (ast.Is, ast.IsNot)))
+
+
+def singleton_literal(node):
+    return isinstance(node, ast.Constant) and (node.value is None or type(node.value) is bool)
+
+
 def has_partial_primitives(module, function):
     """Follow local callees to operations that need a runtime coverage proof."""
     if uses_memoized(module, function):
@@ -267,6 +276,8 @@ def has_partial_primitives(module, function):
             continue
         visited.add(current.name)
         for node in ast.walk(current):
+            if identity_comparison(node) and not any(map(singleton_literal, [node.left, *node.comparators])):
+                return True
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == 'int' and not bindings(module, 'int')):
                 return True
@@ -355,6 +366,7 @@ def uses_calls_model(module, function):
         or isinstance(node, ast.Constant) and type(node.value) is bytes
         or range_sum(node) is not None
         or general_division(node)
+        or identity_comparison(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'max', 'min', 'len'}
@@ -575,6 +587,9 @@ def check_calls(module, function, reject, *, heap=False):
                 # An immediately consumed literal never exposes its pooled tuple identity.
                 if isinstance(node.comparators[0], ast.Tuple):
                     hidden_tuples.add(node.comparators[0])
+                recurse(node.left)
+                recurse(node.comparators[0])
+            elif identity_comparison(node):
                 recurse(node.left)
                 recurse(node.comparators[0])
             elif isinstance(node, ast.Compare) and all(isinstance(

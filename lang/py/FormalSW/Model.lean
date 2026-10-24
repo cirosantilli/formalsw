@@ -85,7 +85,7 @@ inductive CmpOp where
   | gtE
 deriving Repr, DecidableEq, BEq, Lean.ToExpr
 
-/-- Builtins resolved by the frontend after rejecting shadowed bindings. -/
+/-- Resolved builtin calls and intrinsic operators emitted by the frontend. -/
 inductive Builtin where
   | int
   | str
@@ -93,6 +93,8 @@ inductive Builtin where
   | min
   | divmod
   | intBitLength
+  /-- Python identity, never resolved through a user-visible function name. -/
+  | identity
   | len
   | bytearray
   | set
@@ -437,6 +439,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "set" => pure Builtin.set
         | "sorted" => pure Builtin.sorted
         | "int.bit_length" => pure Builtin.intBitLength
+        | "identity" => pure Builtin.identity
         | builtinName => throw s!"unsupported scalar builtin: {builtinName}"
       return .builtinCall builtin (← jsonArray json "args" Expr.fromJson?)
   | "ReversedList" =>

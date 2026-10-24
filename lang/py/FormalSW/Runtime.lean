@@ -43,6 +43,17 @@ def scalarCompare (op : CmpOp) (left right : Constant) : Option Bool :=
                 | _ => false)
           | _, _ => none
 
+/-- None and Booleans are singletons. Equal integers, strings and bytes may be
+pooled, so their object identity is deliberately left unsupported. -/
+def scalarIdentity (left right : Constant) : Option Bool :=
+  match left, right with
+  | .none, .none => some true
+  | .bool a, .bool b => some (a == b)
+  | .int a, .int b => if a = b then none else some false
+  | .string a, .string b => if a = b then none else some false
+  | .bytes a, .bytes b => if a = b then none else some false
+  | _, _ => some false
+
 @[simp] def scalarNumber : Constant → Option Int
   | .int n => some n
   | .bool b => some (if b then 1 else 0)

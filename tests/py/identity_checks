@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Check singleton/reference identity and reject reliance on scalar pooling."""
+import ast
+from itertools import product
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(REPO / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes ' + str(list(value))
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+source = '''
+def same(a: int, b: int) -> bool: return a is b
+def different(a: int, b: int) -> bool: return a is not b
+def touch(xs: list[int], n: int) -> list[int]:
+    xs.append(n)
+    return xs
+
+def effect(xs: list[int], ys: list[int]) -> bool:
+    return touch(xs, 1) is touch(ys, 2)
+
+def compare_none(xs: list[int]) -> bool:
+    return touch(xs, 1) is not None
+
+def fail(xs: list[int], ys: list[int]) -> bool:
+    return (touch(xs, 1)[0] // 0) is touch(ys, 2)
+
+def lookup(cache: dict[int, int], n: int) -> bool:
+    return cache.get(n) is not None
+'''
+program = ast.parse(source)
+world = {}
+exec(source, world)
+for node in program.body:
+    assert not SupportChecker(program).check(node.name), node.name
+lines = ['import FormalSW', 'open FormalSW.PyAst',
+         'def program : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+samples = [None, False, True, -1, 0, 1, 2**130, '', 'x', b'', b'x']
+for a, b in product(samples, repeat=2):
+    ambiguous = type(a) in (int, str, bytes) and type(a) is type(b) and a == b
+    for name in ('same', 'different'):
+        if ambiguous:
+            outcome = '.unsupported'
+        else:
+            answer = str(world[name](a, b)).lower()
+            outcome = f'.done (.ok (.bool {answer}))'
+        args = f'[{constant(a)}, {constant(b)}]'
+        for model in ('Calls.function', 'HeapCalls.scalarFunction'):
+            lines.append(f'example : ({model} program "{name}" {args}).observe 80 = {outcome} := by native_decide')
+            count += 1
+
+for shared in (False, True):
+    for name in ('effect', 'fail'):
+        xs = []
+        ys = xs if shared else []
+        try:
+            outcome = '.ok (.scalar (.bool ' + str(world[name](xs, ys)).lower() + '))'
+        except ZeroDivisionError:
+            outcome = '.error { typeName := "ZeroDivisionError", args := [] }'
+        initial = '[.list []]' if shared else '[.list [], .list []]'
+        def encoded(items):
+            return '.list [' + ', '.join('.scalar (.int ' + str(n) + ')' for n in items) + ']'
+        final = '[' + ', '.join(map(encoded, [xs] if shared else [xs, ys])) + ']'
+        lines.append(f'example : (HeapCalls.call program "{name}" [.ref 0, .ref {0 if shared else 1}] {initial}).execution.observe 160 = '
+                     f'.done (.ok ⟨{outcome}, [], {final}, {1 if shared else 2}⟩) := by native_decide')
+        count += 1
+lines.append('example : (HeapCalls.call program "compare_none" [.ref 0] [.list []]).execution.observe 100 = '
+             '.done (.ok ⟨.ok (.scalar (.bool true)), [], [.list [.scalar (.int 1)]], 1⟩) := by native_decide')
+for n in (-1, 0, 1, 2):
+    answer = str(world['lookup']({0: 0, 1: 7}, n)).lower()
+    entries = '[(.int 0, .scalar (.int 0)), (.int 1, .scalar (.int 7))]'
+    lines.append(f'example : (HeapCalls.call program "lookup" [.ref 0, .scalar (.int ({n}))] [.dict {entries}]).execution.observe 100 = '
+                 f'.done (.ok ⟨.ok (.scalar (.bool {answer})), [], [.dict {entries}], 1⟩) := by native_decide')
+    count += 1
+# Object identity is independent of user equality methods and stored fields.
+lines.append('example : HeapCalls.identity (.ref 0) (.ref 1) [.instance "origin" "C" [], .instance "origin" "C" []] = '
+             'some (.ok (.scalar (.bool false)), [.instance "origin" "C" [], .instance "origin" "C" []]) := by native_decide')
+
+with project_temporary_directory(prefix='identity-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+    for marker in ('Returns', 'Not Halts', 'Equiv(f)', 'Not Equiv(f)'):
+        path = directory / ('partial_' + str(len(list(directory.iterdir()))) + '.py')
+        path.write_text(f'def f(n: int) -> bool:\n    """\n    @formalsw: {marker}\n    """\n    return n is n\n')
+        module = api['source_module'](path)
+        requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        assert any(r.marker == 'execution model coverage' and '.Supported' in r.property_type
+                   for r in requirements), marker
+    path = directory / 'predicate.py'
+    path.write_text('def f(n: int) -> int:\n    """\n    @formalsw: Requires(n is n)\n'
+                    '    @formalsw: Returns\n    """\n    return n\n')
+    requirements = api['collect_requirements'](path, api['source_module'](path), 'Probe', 'ProbeAst')
+    assert any(r.marker == 'precondition model coverage' for r in requirements)
+    path = directory / 'vacuous.py'
+    path.write_text('def f(n: int) -> bool:\n    """\n    @formalsw: Equiv(f)\n    """\n    return n is n\n')
+    stub = subprocess.run([str(REPO / 'formalsw'), '--stub', str(path)], cwd=REPO,
+                          capture_output=True, text=True, check=True).stdout
+    namespace = next(line for line in stub.splitlines() if line.startswith('namespace ')).split(' ', 1)[1]
+    path.with_suffix('.py.lean').write_text(stub.split('theorem f.«Supported»')[0].replace(
+        '  sorry', '  intro n outcome\n  rfl') + f'end {namespace}\n')
+    rejected = subprocess.run([str(REPO / 'formalsw'), str(path)], cwd=REPO, capture_output=True, text=True)
+    assert rejected.returncode != 0 and 'Supported' in rejected.stderr, rejected.stdout + rejected.stderr
+
+subprocess.run([str(REPO / 'formalsw'), 'tests/py/identity.py'], cwd=REPO, check=True)
+print(f'Identity: {count + 1} execution comparisons, coverage rejection and arbitrary-input proofs passed')

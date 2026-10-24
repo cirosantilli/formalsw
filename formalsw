@@ -1536,6 +1536,11 @@ class AstJsonEmitter:
                 return {"type": "IfExp", "test": self.expr(test),
                         "body": self.expr(body), "orelse": self.expr(orelse)}
             case ast.Compare(left=left, ops=ops, comparators=comparators):
+                if len(ops) == 1 and isinstance(ops[0], (ast.Is, ast.IsNot)):
+                    compared = {"type": "BuiltinCall", "name": "identity",
+                                "args": [self.expr(left), self.expr(comparators[0])]}
+                    return ({"type": "UnaryOp", "op": "Not", "operand": compared}
+                            if isinstance(ops[0], ast.IsNot) else compared)
                 if len(ops) == 1 and isinstance(ops[0], (ast.In, ast.NotIn)):
                     return {"type": "Membership", "element": self.expr(left),
                             "container": self.expr(comparators[0]), "negated": isinstance(ops[0], ast.NotIn)}

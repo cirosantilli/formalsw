@@ -61,6 +61,7 @@ def length : Constant → Except ExceptionObject Constant
 
 def Primitive.apply : Primitive → List Constant → Option (Except ExceptionObject Constant)
   | .raiseException typeName, args => some (.error { typeName, args })
+  | .builtin .identity, [left, right] => (scalarIdentity left right).map (fun value => .ok (.bool value))
   | .builtin .len, [value] => some (length value)
   | .builtin .int, values => integerConversion values
   | .builtin .str, values => some (Strings.str values)

@@ -58,6 +58,13 @@ def unary (op : UnaryOp) (value : Value) : Eval Value := do
       | .scalar value => scalarResult (scalarExpr (fun _ => none) (.unaryOp .uSub (.constant value)))
       | .ref _ => Mutable.error "TypeError"
 
+/-- Identity never calls equality methods or coerces Boolean/integer values. -/
+def identity : Value → Value → Eval Value
+  | .ref left, .ref right => pure (.scalar (.bool (left == right)))
+  | .scalar left, .scalar right =>
+      scalarResult ((scalarIdentity left right).map (fun value => .ok (.bool value)))
+  | _, _ => pure (.scalar (.bool false))
+
 /-- Scalar element equality uses Python's numeric coercion. References with the
 same identity compare equal; comparisons of distinct nested lists are partial. -/
 def equalElements : List Value → List Value → Option Bool
@@ -632,6 +639,7 @@ def primitive : Operation → List Value → Eval Value
   | .append address, [value] => Mutable.appendItem address value
   | .add address, [value] => Mutable.addItem address value
   | .append _, _ | .add _, _ => Mutable.error "TypeError"
+  | .builtin .identity, [left, right] => identity left right
   | .builtin .len, [value] => Mutable.length value
   | .builtin .divmod, values => Mutable.divmod values
   | .builtin .bytearray, values => Mutable.bytearray values
