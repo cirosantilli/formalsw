@@ -674,6 +674,19 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           | .ok value => pure (.scalar value)
           | .error exception => throw exception
       | _, _ => unsupported
+  | .bitOr => match a, b with
+      | .scalar left, .scalar right =>
+          match scalarBitOr left right with
+          | .ok value => pure (.scalar value)
+          | .error exception => throw exception
+      -- Set/dict union and user-defined operators require their own semantics.
+      | _, _ => unsupported
+  | .leftShift => match a, b with
+      | .scalar left, .scalar right =>
+          match scalarShiftLeft left right with
+          | .ok value => pure (.scalar value)
+          | .error exception => throw exception
+      | _, _ => unsupported
   | _ => do
     let number : Value → Value
       | .scalar (.bool b) => .scalar (.int (if b then 1 else 0))

@@ -155,6 +155,7 @@ def main() -> int:
         TestCase("local helper calls and reused source proofs", Path("tests/py/linked_calls.py"), 0, "All 2 checks passed"),
         TestCase("variable and signed integer division", Path("tests/py/division.py"), 0, "All 4 checks passed"),
         TestCase("signed divmod and tuple unpacking", Path("tests/py/divmod.py"), 0, "All 3 checks passed"),
+        TestCase("integer OR and left shift", Path("tests/py/bitwise_or_shift.py"), 0),
         TestCase("dictionary lookup and shared mutation", Path("tests/py/dictionaries.py"), 0, "All 3 checks passed"),
         TestCase("global dictionaries, helper calls and prerequisites", Path("tests/py/heap_global_context.py"), 0, "All 8 checks passed"),
         TestCase("dictionary input domains and return types", Path("tests/py/dictionary_inputs.py"), 0, "All 11 checks passed"),
@@ -509,6 +510,15 @@ def main() -> int:
     print(f"{'PASS' if link_checks_passed else 'FAIL'} local helper dependencies", flush=True)
     if not link_checks_passed:
         print(textwrap.indent((link_checks.stdout + link_checks.stderr).rstrip(), "  "))
+    additional_runtime_checks_passed = True
+    for script in ("bitwise_or_shift_checks", "unpacked_return_checks", "set_sum_checks"):
+        checked = subprocess.run([sys.executable, f"tests/py/{script}"], cwd=REPO,
+                                 text=True, capture_output=True)
+        passed = checked.returncode == 0
+        additional_runtime_checks_passed &= passed
+        print(f"{'PASS' if passed else 'FAIL'} {script}", flush=True)
+        if not passed:
+            print(textwrap.indent((checked.stdout + checked.stderr).rstrip(), "  "))
     raw_docs = (REPO / "README.adoc").read_text().split("=== Raw Lean specification\n", 1)[1].split("\n== How it works", 1)[0]
     raw_headers = re.findall(r"^==== (.+)$", raw_docs, re.MULTILINE)
     raw_ids = re.findall(r"^\[\[(raw-lean-[^\]]+)\]\]\n==== ", raw_docs, re.MULTILINE)
@@ -543,6 +553,7 @@ def main() -> int:
         and truth_checks_passed
         and permutation_checks_passed
         and permutation_source_checks_passed
+        and additional_runtime_checks_passed
     ) else 1
 
 

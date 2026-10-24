@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""
+Returned constant tuples are safe only when all reachable calls unpack them.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.support import SupportChecker
+from lang.py.tuple_support import unpacked_return_tuple_displays
+
+
+helper = '''
+def pair(n: int):
+    if n < 0:
+        return -1, 0
+    return n, n + 1
+'''
+
+
+def check(body, accepted, extra=''):
+    module = ast.parse(helper + extra + '\ndef entry(n: int) -> int:\n' + body)
+    entry = module.body[-1]
+    hidden = unpacked_return_tuple_displays(module, entry)
+    assert bool(hidden) == accepted, (body, hidden)
+    issues = SupportChecker(module).check('entry', heap_calls=True)
+    assert bool(issues) != accepted, (body, issues)
+    # A direct contract on the tuple-returning helper must still reject pooling.
+    assert not unpacked_return_tuple_displays(module, module.body[0])
+    assert SupportChecker(module).check('pair', heap_calls=True)
+
+
+check('    a, b = pair(n)\n    c, d = pair(-1)\n    return a + b + c + d\n', True)
+check('    [a, b] = pair(n)\n    return a + b\n', True)
+check('    a, b = pair(n)\n    return a + b\n', True,
+      '\ndef unrelated(n: int):\n    return pair(n)\n')
+check('    a, b = pair(n)\n    c, d = worker(n)\n    return a + b + c + d\n', False,
+      '\ndef worker(n: int):\n    return pair(n)\n')
+check('    return pair(n)\n', False)
+check('    a = pair(n)\n    return len(a)\n', False)
+check('    a, b = pair(n)\n    c = pair(n)\n    return a + len(c)\n', False)
+check('    a = pair(-1)\n    b = pair(-1)\n    return a is b\n', False)
+check('    a, b = pair(n)\n    pair(n)\n    return a + b\n', False)
+check('    a, b = pair(n)\n    alias = pair\n    return a + b\n', False)
+check('    a, *b = pair(n)\n    return a\n', False)
+check('    other = a, b = pair(n)\n    return a + b\n', False)
+
+source = helper + '''
+def entry(n: int) -> int:
+    a, b = pair(n)
+    c, d = pair(-1)
+    return a + b + c + d
+'''
+world = {}
+exec(source, world)
+assert world['pair'](-1) is world['pair'](-2)
+api = runpy.run_path(str(ROOT / 'formalsw'))
+lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+for n in range(-3, 4):
+    result = world['entry'](n)
+    lines.append(f'example : (match (HeapCalls.call source "entry" [.scalar (.int ({n}))] []).execution.observe 200 with'
+                 f' | .done (.ok c) => decide (c.outcome = .ok (.scalar (.int ({result}))))'
+                 ' | _ => false) = true := by native_decide')
+with project_temporary_directory(prefix='unpacked-returns-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](ast.parse(source)).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print('Returned-tuple escape checks and 7 Python comparisons passed')

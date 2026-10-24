@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+Compare set summation with Python across numeric representatives and schedules.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = """
+def touch(values: set[int], events: list[int]) -> int:
+    events.append(7)
+    values.add(11)
+    return 5
+"""
+bodies = {
+    'default': 'return sum(values)',
+    'negative_start': 'return sum(values, -9)',
+    'boolean_start': 'return sum(values, True)',
+    'none_start': 'return sum(values, None)',
+    'text_start': 'return sum(values, "")',
+    'bytes_start': 'return sum(values, b"")',
+    'buffer_start': 'return sum(values, bytearray())',
+    'list_start': 'return sum(values, events)',
+    'argument_mutation': 'return sum(values, touch(values, events))',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(values: set[int], events: list[int]):\n    {body}\n'
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+
+lines = [
+    'import FormalSW',
+    'import lang.py.FormalSW.SetSumCalls',
+    'open FormalSW.PyAst',
+    'set_option maxRecDepth 8192',
+    'def source : Module := pyast_from_json% (include_str "source.json")',
+]
+inputs = [[], [3], [3, -2, 7], [True, False, -3, 7], ['bad'], [None], [b'bad']]
+schedules = ['fun _ => 0', 'fun _ => 17', 'fun n => n + 1']
+cases = list(itertools.product(bodies, inputs, schedules))
+for order in itertools.permutations(range(3)):
+    remaining, indices = list(range(3)), []
+    for index in order:
+        position = remaining.index(index)
+        indices.append(position)
+        remaining.pop(position)
+    schedule = 'fun n => ([' + ', '.join(map(str, indices)) + '] : List Nat)[n]?.getD 0'
+    cases.append(('default', [3, -2, 7], schedule))
+
+count = 0
+for name, initial, schedule in cases:
+    values, events = set(initial), []
+    try:
+        result = world[name](values, events)
+        error = None
+    except TypeError:
+        result, error = None, 'TypeError'
+    expected = data(snapshot_roots([values, events] + ([result] if error is None else [])))
+    heap = '[.set [' + ', '.join(map(constant, initial)) + '], .list []]'
+    call = f'(SetCalls.call source "{name}" [.ref 0, .ref 1] {heap}).run ({schedule})'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               'match c.outcome with | .error e => decide (e = ⟨"TypeError", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, {schedule}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+# This theorem is genuinely universal, unlike the finite semantic comparisons.
+lines.append('''
+example (items : List Int) (heap : Mutable.Heap) (address : Nat)
+    (found : heap[address]? = some (.set (items.map Constant.int)))
+    (initial : Int) (choices : ChoiceSchedule) (anchors used : Nat)
+    (stack : List HeapCalls.Frame) :
+    ∃ finalUsed, SetCalls.Reaches choices source anchors
+      ⟨⟨.operation .sumSequence [.ref address, .scalar (.int initial)], stack, heap⟩, used⟩
+      ⟨⟨.value (.scalar (.int (initial + items.sum))), stack, heap⟩, finalUsed⟩ :=
+  SetCalls.sum_integers_reaches choices source heap address items found initial anchors stack used
+''')
+
+with project_temporary_directory(prefix='set-sum-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} set-sum comparisons passed, covering schedules, bool/int values, starts, and errors')

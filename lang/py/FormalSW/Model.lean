@@ -49,6 +49,10 @@ inductive BinOp where
   | mult
   /-- Python bitwise conjunction. -/
   | bitAnd
+  /-- Python bitwise disjunction. -/
+  | bitOr
+  /-- Python left shift; negative counts raise ValueError at runtime. -/
+  | leftShift
   /-- Python exponentiation. Float-producing cases require another value model. -/
   | pow
   /-- Python floor division `//`. -/
@@ -63,6 +67,21 @@ def integerBitAnd : Int → Int → Int
   | .ofNat a, .negSucc b => .ofNat (Nat.bitwise (fun x y => x && !y) a b)
   | .negSucc a, .ofNat b => .ofNat (Nat.bitwise (fun x y => x && !y) b a)
   | .negSucc a, .negSucc b => .negSucc (a ||| b)
+
+/-- Integer disjunction with Python's unbounded two's-complement sign extension. -/
+def integerBitOr : Int → Int → Int
+  | .ofNat a, .ofNat b => .ofNat (a ||| b)
+  | .ofNat a, .negSucc b => .negSucc (Nat.bitwise (fun x y => x && !y) b a)
+  | .negSucc a, .ofNat b => .negSucc (Nat.bitwise (fun x y => x && !y) a b)
+  | .negSucc a, .negSucc b => .negSucc (a &&& b)
+
+/-- A nonnegative left shift multiplies by an exact power of two, including for negative values. -/
+def integerShiftLeft (value : Int) (count : Nat) : Int := value * 2 ^ count
+
+@[simp] theorem integerBitOr_nat (a b : Nat) : integerBitOr a b = (a ||| b : Nat) := rfl
+
+@[simp] theorem integerShiftLeft_nat (a count : Nat) :
+    integerShiftLeft a count = ((a * 2 ^ count : Nat) : Int) := rfl
 
 @[simp] theorem integerBitAnd_nat (a b : Nat) : integerBitAnd a b = (a &&& b : Nat) := rfl
 
@@ -335,6 +354,8 @@ private def BinOp.fromJson? (json : Lean.Json) : Except String BinOp := do
   | "Sub" => return .sub
   | "Mult" => return .mult
   | "BitAnd" => return .bitAnd
+  | "BitOr" => return .bitOr
+  | "LShift" => return .leftShift
   | "Pow" => return .pow
   | "FloorDiv" => return .floorDiv
   | "Mod" => return .mod
@@ -1540,6 +1561,8 @@ def evalIntExpr (env : Env) : Expr -> Option Int
       | BinOp.sub => some (leftValue - rightValue)
       | BinOp.mult => some (leftValue * rightValue)
       | BinOp.bitAnd => some (integerBitAnd leftValue rightValue)
+      | BinOp.bitOr => some (integerBitOr leftValue rightValue)
+      | BinOp.leftShift => if rightValue < 0 then none else some (integerShiftLeft leftValue rightValue.toNat)
       | BinOp.pow => if rightValue < 0 then none else some (leftValue ^ rightValue.toNat)
       | BinOp.floorDiv => none
       | BinOp.mod => if rightValue = 0 then none else some (leftValue % rightValue)

@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""
+Compare OR and left shifts with Python, including signs, types, and operand effects.
+"""
+import ast
+from itertools import product
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return f'(.bool {str(value).lower()})'
+    if type(value) is int:
+        return f'(.int ({value}))'
+    if type(value) is bytes:
+        return '(.bytes [' + ', '.join(map(str, value)) + '])'
+    return '(.string ' + json.dumps(value) + ')'
+
+
+def result(operation):
+    try:
+        return '.ok ' + constant(operation())
+    except (TypeError, ValueError, ZeroDivisionError) as exception:
+        return '.error { typeName := ' + json.dumps(type(exception).__name__) + ', args := [] }'
+
+
+values = [-(2**130 + 3), -5, -1, 0, 1, 6, 2**130 + 7, True, False, None, 'x', b'x']
+counts = [-3, -1, 0, 1, 2, 63, 130, True, False, None, 'x', b'x']
+lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192']
+comparisons = 0
+for operator, operation, right_values in (
+        ('bitOr', lambda a, b: a | b, values),
+        ('leftShift', lambda a, b: a << b, counts)):
+    for a, b in product(values, right_values):
+        expected = result(lambda: operation(a, b))
+        lines.append(f'example : scalarBinary .{operator} {constant(a)} {constant(b)} = '
+                     f'some ({expected}) := by native_decide')
+        lines.append(f'example : Mutable.binary .{operator} (.scalar {constant(a)}) (.scalar {constant(b)}) [] = '
+                     f'some (({expected} : Except ExceptionObject Constant).map Mutable.Value.scalar, []) := by native_decide')
+        comparisons += 2
+
+source = '''
+def record(items: list[int], n: int) -> int:
+    items.append(n)
+    return n
+'''
+for label, symbol in (('merge', '|'), ('shift', '<<')):
+    source += f'''
+def {label}_effect(items: list[int], a: int, b: int) -> int:
+    return record(items, a) {symbol} record(items, b)
+def {label}_inplace(items: list[int], a: int, b: int) -> int:
+    a {symbol}= record(items, b)
+    return a
+def {label}_item(items: list[int], a: int, b: int) -> int:
+    items.append(a)
+    items[0] {symbol}= record(items, b)
+    return items[0]
+def {label}_raises_left(items: list[int], a: int, b: int) -> int:
+    return (record(items, a) // 0) {symbol} record(items, b)
+'''
+program = ast.parse(source)
+world = {}
+exec(source, world)
+lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
+for label in ('merge', 'shift'):
+    for variant in ('effect', 'inplace', 'item', 'raises_left'):
+        name = label + '_' + variant
+        assert not SupportChecker(program).check(name), SupportChecker(program).check(name)
+        for a, b in ((-5, 3), (0, -1), (2**130 + 3, 130), (True, False), (-1, True)):
+            items = []
+            try:
+                expected = '.ok (.scalar ' + constant(world[name](items, a, b)) + ')'
+            except (TypeError, ValueError, ZeroDivisionError) as exception:
+                expected = '.error { typeName := ' + json.dumps(type(exception).__name__) + ', args := [] }'
+            contents = ', '.join('.scalar ' + constant(value) for value in items)
+            call = f'HeapCalls.call source "{name}" [.ref 0, .scalar {constant(a)}, .scalar {constant(b)}] [.list []]'
+            lines.append(f'example : ({call}).execution.observe 300 = '
+                         f'.done (.ok ⟨{expected}, [], [.list [{contents}]], 1⟩) := by native_decide')
+            comparisons += 1
+# Collection union and custom reference operators must not silently become integer operations.
+for objects in ('[.set [], .set []]', '[.dict [], .dict []]'):
+    lines.append(f'example : Mutable.binary .bitOr (.ref 0) (.ref 1) {objects} = none := by native_decide')
+lines.append('example : Mutable.binary .leftShift (.ref 0) (.scalar (.int 1)) [.list []] = none := by native_decide')
+
+with project_temporary_directory(prefix='bitwise-or-shift-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+subprocess.run([str(ROOT / 'formalsw'), 'tests/py/bitwise_or_shift.py'], cwd=ROOT, check=True)
+print(f'OR and left shift: {comparisons} Python comparisons; arbitrary-input source proofs passed')

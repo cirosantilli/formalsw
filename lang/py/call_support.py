@@ -10,7 +10,7 @@ from lang.py.defaults import literal_default
 from lang.py.memo_support import cache_decorator, uses_memoized
 from lang.py.call_graph import call_targets
 from lang.py.sorting_support import uses_sort_model
-from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays
+from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays, unpacked_return_tuple_displays
 from lang.py.class_support import ordinary_attribute, plain_class_methods
 
 
@@ -379,7 +379,7 @@ def uses_set_iteration(module, function):
                 if isinstance(node, ast.For):
                     loops |= not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                                   and node.iter.func.id == 'range')
-                loops |= sequence_extremum(node) is not None
+                loops |= sequence_extremum(node) is not None or sequence_sum(node) is not None
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     sets |= node.func.id == 'set' and not bindings(module, 'set')
                     pending.extend(functions[target] for target in call_targets(node) if target in functions)
@@ -465,7 +465,7 @@ def uses_calls_model(module, function):
         or range_sum(node) is not None
         or general_division(node)
         or identity_comparison(node)
-        or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd))
+        or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd, ast.BitOr, ast.LShift))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'ord', 'abs', 'pow', 'max', 'min', 'len'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
@@ -480,6 +480,7 @@ def check_calls(module, function, reject, *, heap=False):
     libraries = library_functions(module)
     visited = set()
     visited_classes = set()
+    return_tuples = unpacked_return_tuple_displays(module, function) if heap else set()
     memoized_execution = uses_memoized(module, function)
     if memoized_execution and uses_set_iteration(module, function):
         reject(function, 'set traversal and memoized calls need a combined execution model')
@@ -553,7 +554,7 @@ def check_calls(module, function, reject, *, heap=False):
             globals_.update(item.name for item in global_inputs)
         except GlobalInputError as error:
             reject(function, str(error))
-        hidden_tuples = unpacked_tuple_displays(function) if heap else set()
+        hidden_tuples = (unpacked_tuple_displays(function) | return_tuples) if heap else set()
         # A local may reuse a function/class name as data. Each call site below
         # separately rejects invoking a shadowed module-level target.
         for index, arg in enumerate(function.args.args):
@@ -736,7 +737,7 @@ def check_calls(module, function, reject, *, heap=False):
                 recurse(node.func.value)
                 recurse(node.args[0])
                 return
-            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow, ast.BitAnd)):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow, ast.BitAnd, ast.BitOr, ast.LShift)):
                 recurse(node.left)
                 recurse(node.right)
             elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):

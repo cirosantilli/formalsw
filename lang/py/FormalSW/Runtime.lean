@@ -67,9 +67,27 @@ def scalarBitAnd (left right : Constant) : Except ExceptionObject Constant :=
       | some a, some b => .ok (.int (integerBitAnd a b))
       | _, _ => .error { typeName := "TypeError", args := [] }
 
+/-- Boolean disjunction retains bool only when both operands are bool. -/
+def scalarBitOr (left right : Constant) : Except ExceptionObject Constant :=
+  match left, right with
+  | .bool a, .bool b => .ok (.bool (a || b))
+  | _, _ => match scalarNumber left, scalarNumber right with
+      | some a, some b => .ok (.int (integerBitOr a b))
+      | _, _ => .error { typeName := "TypeError", args := [] }
+
+/-- Shift operands accept integers and Booleans; the result is always an integer. -/
+def scalarShiftLeft (left right : Constant) : Except ExceptionObject Constant :=
+  match scalarNumber left, scalarNumber right with
+  | some a, some b =>
+      if b < 0 then .error { typeName := "ValueError", args := [] }
+      else .ok (.int (integerShiftLeft a b.toNat))
+  | _, _ => .error { typeName := "TypeError", args := [] }
+
 def scalarBinary (op : BinOp) (left right : Constant) : Option (Except ExceptionObject Constant) :=
   match op with
   | .bitAnd => some (scalarBitAnd left right)
+  | .bitOr => some (scalarBitOr left right)
+  | .leftShift => some (scalarShiftLeft left right)
   | _ =>
     match scalarNumber left, scalarNumber right with
     | some left, some right =>
@@ -77,7 +95,7 @@ def scalarBinary (op : BinOp) (left right : Constant) : Option (Except Exception
         | .add => some (.ok (.int (left + right)))
         | .sub => some (.ok (.int (left - right)))
         | .mult => some (.ok (.int (left * right)))
-        | .bitAnd => none -- Handled before numeric coercion.
+        | .bitAnd | .bitOr | .leftShift => none -- Handled before numeric coercion.
         | .pow =>
             if right < 0 then none
             else some (.ok (.int (left ^ right.toNat)))
