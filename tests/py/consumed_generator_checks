@@ -68,13 +68,15 @@ def aliased(xs: list[int]):
     return result
 def nested_join(xs: list[int]):
     return "".join(row for row in [xs, xs])
+def reverse_sorted(xs: list[int]):
+    return sorted((x for x in xs), reverse=True)
 class Sink:
     def join(self, values: list[int]) -> int:
         return 1
 def custom_join(xs: list[int]):
     return Sink().join(x for x in xs)
 '''
-names = ['receiver_order', 'bad_receiver', 'aliased', 'nested_join']
+names = ['receiver_order', 'bad_receiver', 'aliased', 'nested_join', 'reverse_sorted']
 generators = {
     'basic': ('x', 'for x in xs'),
     'filtered': ('x', 'for x in xs if x % 2 == 0'),
@@ -147,7 +149,7 @@ for name in names:
 
 # A custom method must never receive an eagerly materialized generator argument.
 lines.append('example : (HeapCalls.call source "custom_join" [.ref 0] [.list []]).execution.observe 100 = .unsupported := by decide')
-for expression in ('sorted((x for x in xs), reverse=True)', 'list(x async for x in xs)',
+for expression in ('sorted((x for x in xs), unknown=True)', 'list(x async for x in xs)',
                    '"".join(iterable=(x for x in xs))'):
     module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
     assert SupportChecker(module).check('f'), expression
