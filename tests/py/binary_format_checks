@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""
+Compare binary conversion with Python across signs, errors and argument effects.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def outcome(operation):
+    try:
+        return '.ok (' + constant(operation()) + ')'
+    except (TypeError, ValueError) as error:
+        return '.error { typeName := ' + json.dumps(type(error).__name__) + ', args := [] }'
+
+
+lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst',
+         'set_option maxRecDepth 8192']
+values = list(range(-64, 65)) + [True, False, None, '', '123', b'123']
+for width in (7, 8, 31, 32, 63, 64, 127, 256, 1024):
+    for offset in (-1, 0, 1):
+        values.extend([2**width + offset, -(2**width + offset)])
+comparisons = 0
+for value in values:
+    expected = outcome(lambda: bin(value))
+    lines.append(f'example : Calls.Primitive.apply (.builtin .bin) [{constant(value)}] = '
+                 f'some ({expected}) := by native_decide')
+    lines.append(f'example : HeapCalls.primitive (.builtin .bin) [.scalar ({constant(value)})] [] = '
+                 f'some (({expected} : Except ExceptionObject Constant).map Mutable.Value.scalar, []) '
+                 ':= by native_decide')
+    comparisons += 2
+for actual, stored in (([], '.list []'), ((), '.tuple []'), (set(), '.set []'),
+                       ({}, '.dict []'), (bytearray(), '.bytearray []')):
+    expected = outcome(lambda: bin(actual))
+    lines.append(f'example : HeapCalls.primitive (.builtin .bin) [.ref 0] [{stored}] = '
+                 f'some (({expected} : Except ExceptionObject Constant).map Mutable.Value.scalar, [{stored}]) '
+                 ':= by native_decide')
+    comparisons += 1
+# Custom __index__ protocols and dangling references require separate coverage.
+for heap in ('[]', '[.instance "" "Indexable" []]', '[.dataInstance "" "Indexable" false [] []]'):
+    lines.append(f'example : HeapCalls.primitive (.builtin .bin) [.ref 0] {heap} = none := by native_decide')
+
+source = """
+def record(events: list[int], value: int) -> int:
+    events.append(1)
+    return value
+
+def fail(events: list[int]) -> int:
+    events.append(2)
+    raise ValueError()
+
+def scalar(value: int):
+    return bin(value)
+
+def ordered(events: list[int], value: int):
+    return bin(record(events, value))
+
+def extra_argument(events: list[int], value: int):
+    return bin(record(events, value), record(events, value))
+
+def missing_argument(events: list[int], value: int):
+    return bin()
+
+def first_failure(events: list[int], value: int):
+    return bin(fail(events), record(events, value))
+
+def second_failure(events: list[int], value: int):
+    return bin(record(events, value), fail(events))
+"""
+module = ast.parse(source)
+world = {}
+exec(source, world)
+lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
+checker = SupportChecker(module)
+for name in ('scalar', 'ordered', 'extra_argument', 'missing_argument', 'first_failure', 'second_failure'):
+    assert not checker.check(name), (name, checker.check(name))
+    for value in (-585, 0, 585, True, None, '123'):
+        if name == 'scalar':
+            expected = outcome(lambda: world[name](value))
+            lines.append(f'example : (Calls.function source "scalar" [{constant(value)}]).observe 200 = '
+                         f'.done ({expected}) := by native_decide')
+        else:
+            events = []
+            expected = outcome(lambda: world[name](events, value))
+            contents = ', '.join('.scalar (' + constant(item) + ')' for item in events)
+            lines.append(f'example : (HeapCalls.call source "{name}" [.ref 0, .scalar ({constant(value)})] '
+                         f'[.list []]).execution.observe 300 = .done (.ok '
+                         f'⟨({expected} : Except ExceptionObject Constant).map Mutable.Value.scalar, '
+                         f'[], [.list [{contents}]], 1⟩) := by native_decide')
+        comparisons += 1
+for rejected in (
+    'def bad(bin: int):\n    return bin(1)\n',
+    'def bad(n: int):\n    bin = n\n    return bin(n)\n',
+    'from somewhere import bin\ndef bad(n: int):\n    return bin(n)\n',
+    'def bad(n: int):\n    return bin(number=n)\n',
+):
+    assert SupportChecker(ast.parse(rejected)).check('bad'), rejected
+with project_temporary_directory(prefix='binary-format-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'{comparisons} binary-format Python comparisons passed')

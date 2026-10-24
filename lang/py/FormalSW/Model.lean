@@ -110,6 +110,7 @@ inductive Builtin where
   | any
   | pow
   | abs
+  | bin
   | int
   | str
   | ord
@@ -494,6 +495,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "any" => pure Builtin.any
         | "pow" => pure Builtin.pow
         | "abs" => pure Builtin.abs
+        | "bin" => pure Builtin.bin
         | "ord" => pure Builtin.ord
         | "max" => pure Builtin.max
         | "min" => pure Builtin.min

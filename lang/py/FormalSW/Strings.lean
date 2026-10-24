@@ -1,6 +1,7 @@
 import lang.py.FormalSW.Runtime
 import lang.py.builtin.type.sequence
 import lang.py.builtin.type.bytes
+import lang.py.builtin.function
 
 /-! Scalar sequence operations distinguish Unicode characters from raw bytes.
 As with the unbounded call stack, decimal conversion has no configurable
@@ -23,6 +24,16 @@ def convert : Constant → String
 def str : List Constant → Except ExceptionObject Constant
   | [] => .ok (.string "")
   | [value] => .ok (.string (convert value))
+  | _ => .error typeError
+
+/-- Binary formatting uses the shared signed, arbitrary-precision builtin model. -/
+def binaryRepresentation (value : Int) : String :=
+  String.ofList ((Py.Builtin.Function.Conversion.bin value).map Char.ofNat)
+
+def bin : List Constant → Except ExceptionObject Constant
+  | [value] => match scalarNumber value with
+      | some number => .ok (.string (binaryRepresentation number))
+      | none => .error typeError
   | _ => .error typeError
 
 /-- Unicode substring membership, including the empty substring. -/

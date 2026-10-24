@@ -468,7 +468,7 @@ def uses_calls_model(module, function):
         or identity_comparison(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd, ast.BitOr, ast.LShift))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'ord', 'abs', 'pow', 'max', 'min', 'len'}
+        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'bin', 'ord', 'abs', 'pow', 'max', 'min', 'len'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -885,6 +885,13 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'absolute value requires the unshadowed builtin abs')
                 if node.keywords or len(node.args) != 1:
                     reject(node, 'abs requires exactly one positional argument')
+                for item in node.args:
+                    recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'bin':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'binary conversion requires the unshadowed builtin bin')
+                if node.keywords:
+                    reject(node, 'bin keyword arguments are not modeled')
                 for item in node.args:
                     recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'ord':

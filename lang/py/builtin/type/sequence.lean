@@ -77,6 +77,15 @@ theorem slice_reverse (values : List α) :
   change Except.ok ((List.range values.length).reverse.filterMap (fun index => values[index]?)) = _
   rw [List.filterMap_reverse, get_range]
 
+/-- Reverse a prefix while omitting the final `skip` entries of the original sequence. -/
+theorem slice_reverse_skip (values : List α) (skip : Nat) :
+    slice values { start := some (-((skip : Int)+1)), step := some (-1) } =
+      .ok (values.take (values.length-skip)).reverse := by
+  unfold slice
+  rw [Slice.indexList_reverse_skip]
+  change Except.ok ((List.range (values.length-skip)).reverse.filterMap (fun index => values[index]?)) = _
+  rw [List.filterMap_reverse, get_range_prefix]
+
 def contains [BEq α] (values : List α) (needle : α) : Bool := values.contains needle
 def concat (left right : List α) : List α := left ++ right
 def repeated (values : List α) (count : Int) : List α :=

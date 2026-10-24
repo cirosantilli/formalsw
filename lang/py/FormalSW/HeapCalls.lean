@@ -900,6 +900,13 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .pow, _ => Mutable.error "TypeError"
   | .builtin .abs, [.scalar value] => scalarResult (some (Calls.absoluteValue value))
   | .builtin .abs, _ => Mutable.error "TypeError"
+  | .builtin .bin, [.scalar value] => scalarResult (some (Strings.bin [value]))
+  | .builtin .bin, [.ref address] => do
+      match (← get)[address]? with
+      | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
+      | some _ => Mutable.error "TypeError"
+      | none => Mutable.unsupported
+  | .builtin .bin, _ => Mutable.error "TypeError"
   | .builtin .ord, [.scalar value] => scalarResult (some (Strings.ord value))
   | .builtin .ord, [.ref address] => do
       match (← get)[address]? with

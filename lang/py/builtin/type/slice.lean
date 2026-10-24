@@ -76,6 +76,42 @@ theorem indexList_reverse (length : Nat) :
   change (.ok (indexListFuel length ((length : Int) - 1) (-1) (-1)) : Result (List Nat)) = _
   exact congrArg (Except.ok (ε := Error)) (reverse_indices length)
 
+private theorem reverse_prefix_indices (fuel length : Nat) (enough : length ≤ fuel) :
+    indexListFuel fuel ((length : Int) - 1) (-1) (-1) = (List.range length).reverse := by
+  induction fuel generalizing length with
+  | zero =>
+      have empty : length = 0 := by omega
+      subst length
+      rfl
+  | succ fuel ih =>
+      cases length with
+      | zero => rfl
+      | succ length =>
+          have position : ((length+1 : Nat) : Int)-1 = length := by omega
+          have within : (-1 : Int) < length := by omega
+          have rest := ih length (by omega)
+          simpa [indexListFuel, position, within, List.range_succ, List.reverse_append] using
+            congrArg (List.cons length) rest
+
+/-- A negative-unit slice starting before the final `skip` entries reverses the
+remaining prefix. This includes starts before the beginning of the sequence. -/
+theorem indexList_reverse_skip (length skip : Nat) :
+    indexList { start := some (-((skip : Int)+1)), step := some (-1) } length =
+      .ok (List.range (length-skip)).reverse := by
+  have normalized : indices { start := some (-((skip : Int)+1)), step := some (-1) } length =
+      .ok ((((length-skip : Nat) : Int)-1), -1, -1) := by
+    simp only [indices, Option.getD_some, show ¬ (-1 : Int) = 0 by decide,
+      show ¬ (-1 : Int) > 0 by decide, if_false,
+      normalizeNegativeStart, normalizeNegativeStop,
+      show -((skip : Int)+1) < 0 by omega, if_true, clamp]
+    have start : max (-1 : Int) (min (-((skip : Int)+1)+(length : Int)) ((length : Int)-1)) =
+        ((length-skip : Nat) : Int)-1 := by omega
+    rw [start]
+  unfold indexList
+  rw [normalized]
+  change Except.ok (indexListFuel length (((length-skip : Nat) : Int)-1) (-1) (-1)) = _
+  rw [reverse_prefix_indices length (length-skip) (by omega)]
+
 example : indexList {} 4 = .ok [0, 1, 2, 3] := rfl
 example : indexList { step := some (-1) } 4 = .ok [3, 2, 1, 0] := rfl
 

@@ -8,6 +8,8 @@ import lang.py.builtin.type.list
 import lang.py.builtin.type.special
 import lang.py.builtin.type.str
 import lang.py.builtin.type.type
+import Init.Data.Nat.ToString
+import Lean.Elab.Tactic.Omega
 
 /-! Python builtin function semantics, kept in one module. -/
 
@@ -37,6 +39,46 @@ def oct (value : Int) : Str.Str := formatInteger 8 [48, 111] value
 def hex (value : Int) : Str.Str := formatInteger 16 [48, 120] value
 def chr (value : Int) : Result Str.Str := Str.chr value
 def ord (value : Str.Str) : Result Int := Str.ord value
+
+private theorem digit_eq_digitChar (value : Nat) (small : value < 16) :
+    digit value = (Nat.digitChar value).toNat := by
+  by_cases decimal : value < 10
+  · simp only [digit, if_pos decimal, Nat.toNat_digitChar_of_lt_ten decimal]
+  · have choices : value = 10 ∨ value = 11 ∨ value = 12 ∨ value = 13 ∨ value = 14 ∨ value = 15 := by omega
+    rcases choices with rfl | rfl | rfl | rfl | rfl | rfl <;> rfl
+
+private theorem digitsFuel_eq_toDigits (base fuel value : Nat)
+    (baseLower : 1 < base) (baseUpper : base ≤ 16) (enough : value < fuel) :
+    digitsFuel base fuel value = (Nat.toDigits base value).map Char.toNat := by
+  induction fuel generalizing value with
+  | zero => omega
+  | succ fuel ih =>
+      rw [digitsFuel, Nat.toDigits_eq_if baseLower]
+      by_cases small : value < base
+      · simp only [if_pos small, List.map_cons, List.map_nil,
+          digit_eq_digitChar value (by omega)]
+      · have decreases : value / base < value := Nat.div_lt_self (by omega) baseLower
+        have next := ih (value / base) (by omega)
+        have remainder : value % base < 16 :=
+          Nat.lt_of_lt_of_le (Nat.mod_lt value (by omega : 0 < base)) baseUpper
+        simp only [if_neg small, List.map_append, List.map_cons, List.map_nil,
+          next, digit_eq_digitChar (value % base) remainder]
+
+private theorem formatUnsigned_eq_toDigits (base value : Nat)
+    (baseLower : 1 < base) (baseUpper : base ≤ 16) :
+    formatUnsigned base value = (Nat.toDigits base value).map Char.toNat := by
+  by_cases zero : value = 0
+  · subst value
+    simp [formatUnsigned]
+  · simp only [formatUnsigned, if_neg zero]
+    exact digitsFuel_eq_toDigits base (value+1) value baseLower baseUpper (Nat.lt_succ_self _)
+
+/-- The standard binary prefix precedes the full, untruncated numeral. -/
+theorem bin_nat (value : Nat) :
+    bin (value : Int) = [48, 98] ++ (Nat.toDigits 2 value).map Char.toNat := by
+  simp only [bin, formatInteger, show ¬ (value : Int) < 0 by omega, if_false,
+    List.nil_append, Int.natAbs_natCast]
+  rw [formatUnsigned_eq_toDigits 2 value (by decide) (by decide)]
 
 def bool (truth : α → Bool) (object : α) : Bool := truth object
 def intOfBool (value : Bool) : Int := Bool.toInt value
