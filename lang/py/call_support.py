@@ -166,12 +166,21 @@ def sequence_sum(node):
 
 
 def consumed_generator(node):
-    """Recognize generator consumers whose builtin execution is modeled."""
-    if (isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords
-            and isinstance(node.args[0], ast.GeneratorExp)
-            and (isinstance(node.func, ast.Name) and node.func.id in ('list', 'sorted')
+    """Recognize immediate consumers without materializing their lazy input."""
+    if not (isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords):
+        return None
+    iterable = node.args[0]
+    if (isinstance(node.func, ast.Name) and node.func.id in ('all', 'any')
+            and isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+            and iterable.func.id == 'range'):
+        name = '$formalsw.truth.item'
+        iterable = ast.copy_location(ast.GeneratorExp(
+            elt=ast.Name(id=name, ctx=ast.Load()), generators=[ast.comprehension(
+                target=ast.Name(id=name, ctx=ast.Store()), iter=iterable, ifs=[], is_async=0)]), iterable)
+    if (isinstance(iterable, ast.GeneratorExp)
+            and (isinstance(node.func, ast.Name) and node.func.id in ('list', 'sorted', 'all', 'any')
                  or isinstance(node.func, ast.Attribute) and node.func.attr == 'join')):
-        return node.func, node.args[0]
+        return node.func, iterable
     return None
 
 
@@ -415,7 +424,7 @@ def uses_heap_calls(module, function):
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
-                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "list", "set", "sorted"}
+                    or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "list", "set", "sorted", "all", "any"}
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "divmod" and not bindings(module, "divmod")
                     or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get', 'pop', 'join')):
@@ -845,6 +854,15 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'divmod requires the unshadowed builtin divmod')
                 if node.keywords or len(node.args) != 2:
                     reject(node, 'divmod requires exactly two positional arguments')
+                for item in node.args:
+                    recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ('all', 'any'):
+                if not heap:
+                    reject(node, 'truth consumers require heap call execution')
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, f'truth consumption requires the unshadowed builtin {node.func.id}')
+                if node.keywords or len(node.args) != 1:
+                    reject(node, f'{node.func.id} requires one positional argument')
                 for item in node.args:
                     recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'pow':

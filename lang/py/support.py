@@ -698,6 +698,9 @@ class SupportChecker:
             if uses_builtin(self.module, function, 'pow') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'builtin powers require a call interpreter'))
+            if any(uses_builtin(self.module, function, name) for name in ('all', 'any')) and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction', 'SetCalls.call'):
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'truth consumers require the heap call interpreter'))
             if uses_builtin(self.module, function, 'divmod') and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'divmod returns a tuple and requires the heap call interpreter'))

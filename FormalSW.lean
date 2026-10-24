@@ -11,6 +11,7 @@ import lang.py.FormalSW.HeapSortingCalls
 import lang.py.FormalSW.SetCalls
 import lang.py.FormalSW.DictionaryCalls
 import lang.py.FormalSW.SumCalls
+import lang.py.FormalSW.TruthCalls
 import lang.py.FormalSW.MembershipCalls
 import lang.py.FormalSW.ComprehensionCalls
 import lang.py.FormalSW.GeneratorCalls

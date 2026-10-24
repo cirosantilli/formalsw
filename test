@@ -100,6 +100,7 @@ def main() -> int:
         TestCase("string joining", Path("tests/py/join_calls.py"), 0, "All 5 checks passed"),
         TestCase("generator exception boundaries", Path("tests/py/generator_exceptions.py"), 0, "All 6 checks passed"),
         TestCase("immediate generator consumers", Path("tests/py/consumed_generators.py"), 0, "All 8 checks passed"),
+        TestCase("short-circuiting truth consumers", Path("tests/py/truth_consumers.py"), 0, "All 2 checks passed"),
         TestCase("permutation counting", Path("tests/py/permutation_calls.py"), 0, "All 2 checks passed"),
         TestCase("shared list inputs and preconditions", Path("tests/py/heap_inputs.py"), 0, "All 8 checks passed"),
         TestCase("nested list inputs and shared rows", Path("tests/py/nested_inputs.py"), 0, "All 6 checks passed"),
@@ -452,6 +453,14 @@ def main() -> int:
     print(f"{'PASS' if consumed_generator_checks_passed else 'FAIL'} immediate generator consumers", flush=True)
     if not consumed_generator_checks_passed:
         print(textwrap.indent((consumed_generator_checks.stdout + consumed_generator_checks.stderr).rstrip(), "  "))
+    truth_checks = subprocess.run(
+        [sys.executable, "tests/py/truth_checks"],
+        cwd=REPO, text=True, capture_output=True,
+    )
+    truth_checks_passed = truth_checks.returncode == 0
+    print(f"{'PASS' if truth_checks_passed else 'FAIL'} lazy all/any consumers", flush=True)
+    if not truth_checks_passed:
+        print(textwrap.indent((truth_checks.stdout + truth_checks.stderr).rstrip(), "  "))
     permutation_checks = subprocess.run(
         [sys.executable, "tests/py/permutation_checks"],
         cwd=REPO, text=True, capture_output=True,
@@ -531,6 +540,7 @@ def main() -> int:
         and join_checks_passed
         and generator_exception_checks_passed
         and consumed_generator_checks_passed
+        and truth_checks_passed
         and permutation_checks_passed
         and permutation_source_checks_passed
     ) else 1

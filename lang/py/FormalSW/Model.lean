@@ -87,6 +87,8 @@ deriving Repr, DecidableEq, BEq, Lean.ToExpr
 
 /-- Resolved builtin calls and intrinsic operators emitted by the frontend. -/
 inductive Builtin where
+  | all
+  | any
   | pow
   | abs
   | int
@@ -463,6 +465,8 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "int" => pure Builtin.int
         | "len" => pure Builtin.len
         | "str" => pure Builtin.str
+        | "all" => pure Builtin.all
+        | "any" => pure Builtin.any
         | "pow" => pure Builtin.pow
         | "abs" => pure Builtin.abs
         | "ord" => pure Builtin.ord

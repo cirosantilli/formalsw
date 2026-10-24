@@ -307,8 +307,14 @@ theorem builtin (arguments : Arguments (globals := globals) module spec env expr
     (operation : HeapCalls.primitive (.builtin name) values middle = some (.ok value, finalHeap)) :
     Evaluates (globals := globals) module spec env (.builtinCall name expressions) heap value finalHeap := by
   intro anchors stack
+  have next : HeapCalls.step module anchors
+      ⟨.operation (.builtin name) values, stack, middle⟩ globals =
+      .next ⟨.value value, stack, finalHeap⟩ := by
+    cases name with
+    | all | any => simp [HeapCalls.primitive, Mutable.unsupported] at operation
+    | _ => simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, operation]
   exact Runs.next trivial rfl ((arguments_reach arguments (.builtin name) [] anchors stack).trans
-    (Runs.next trivial (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, operation]) .refl))
+    (Runs.next trivial next .refl))
 
 end Evaluates
 

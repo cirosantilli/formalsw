@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+Compare lazy all/any consumers with Python, including decisive early exits.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    if len(xs) < 4:
+        xs.append(n + 1)
+    return n
+def fail(xs: list[int], n: int) -> int:
+    xs.append(-1)
+    raise StopIteration(n)
+def fail_sequence(xs: list[int]) -> list[int]:
+    xs.append(7)
+    raise StopIteration(7)
+def wrong_then_stop(xs: list[int], n: int):
+    xs.append(n)
+    if n:
+        raise StopIteration(n)
+    return None
+def predicate(xs: list[int], n: int) -> int:
+    xs.append(n)
+    if n == 2:
+        raise StopIteration(n)
+    return n
+'''
+names = []
+generators = {
+    'basic': ('x', 'for x in xs'),
+    'filtered': ('x', 'for x in xs if x % 2 == 0'),
+    'nested': ('x + y', 'for x in xs for y in range(2) if y != 0'),
+    'unpacked': ('a + b', 'for a, b in zip(xs, xs)'),
+    'enumerated': ('i + x', 'for i, x in enumerate(xs, start=2)'),
+    'ranged': ('x', 'for x in range(len(xs))'),
+    'shadow': ('xs', 'for xs in xs'),
+    'mutating': ('touch(xs, x)', 'for x in xs'),
+    'inside_error': ('fail(xs, x)', 'for x in xs'),
+    'first_error': ('x', 'for x in fail_sequence(xs)'),
+    'filter_effect': ('x', 'for x in range(3) if predicate(xs, x) >= 0'),
+    'inner_effect': ('predicate(xs, y)', 'for x in range(2) for y in range(3)'),
+}
+for consumer in ('all', 'any'):
+    call = consumer
+    for variant, (element, loops) in generators.items():
+        name = consumer + '_' + variant
+        names.append(name)
+        rendered = element
+        source += f'\ndef {name}(xs: list[int]):\n    return {call}({rendered} {loops})\n'
+    name = consumer + '_scope'
+    names.append(name)
+    rendered = 'x'
+    source += (f'\ndef {name}(xs: list[int]):\n    x = 99\n'
+               f'    return [{call}({rendered} for x in xs), x]\n')
+    name = consumer + '_consume_before_validate'
+    names.append(name)
+    source += f'\ndef {name}(xs: list[int]):\n    return {call}(wrong_then_stop(xs, x) for x in range(2))\n'
+    name = consumer + '_after'
+    names.append(name)
+    source += f'\ndef {name}(xs: list[int]):\n    {call}({rendered} for x in xs)\n    return fail(xs, 8)\n'
+
+    for variant, expression in {
+        'plain': f'{consumer}(xs)',
+        'text': f'{consumer}("ab")',
+        'empty': f'{consumer}("")',
+        'bytes': f'{consumer}(b"a\\x00")',
+        'buffer': f'{consumer}(bytearray(b"a\\x00"))',
+        'tuple': f'{consumer}((len(xs), 1))',
+        'objects': f'{consumer}([[], [1]])',
+        'range': f'{consumer}(range(-2, 3))',
+        'wrong_type': f'{consumer}(1)',
+        'first_decisive': f'{consumer}(predicate(xs, x) for x in range(3))',
+        'later_error': f'{consumer}(predicate(xs, x) for x in range(1, 3))',
+        'eager_argument': f'{consumer}([predicate(xs, x) for x in range(3)])',
+    }.items():
+        name = consumer + '_' + variant
+        names.append(name)
+        source += f'\ndef {name}(xs: list[int]):\n    return {expression}\n'
+
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    if isinstance(function, ast.FunctionDef):
+        issues = checker.check(function.name, heap_calls=True)
+        assert not issues, (function.name, issues)
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name in names:
+    for initial in ([], [0], [2, -1, 0], [True, False, 1, 0]):
+        value = initial.copy()
+        try:
+            answer = world[name](value)
+            error = None
+        except (StopIteration, RuntimeError, TypeError, AttributeError) as exception:
+            answer = None
+            # Implicit errors omit interpreter-specific messages.
+            args = list(exception.args) if type(exception) is StopIteration else []
+            error = (type(exception).__name__, args)
+        heap = '[.list [' + ', '.join('.scalar (' + constant(n) + ')' for n in initial) + ']]'
+        snapshot = data(snapshot_roots([value] + ([] if error else [answer])))
+        if error:
+            label, args = error
+            error_value = '⟨' + json.dumps(label) + ', [' + ', '.join(map(constant, args)) + ']⟩'
+            outcome = f'match c.outcome with | .error e => decide (e = {error_value}) | _ => false'
+        else:
+            outcome = 'match c.outcome with | .ok _ => true | _ => false'
+        lines.extend([
+            f'-- {name}, input {initial}',
+            f'example : (match (HeapCalls.call source "{name}" [.ref 0] {heap}).execution.observe 3000 with',
+            f'  | .done (.ok c) => ({outcome}) &&',
+            f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+            '  | _ => false) = true := by native_decide',
+        ])
+        count += 1
+
+# Invalid calls and shadowed builtins must not receive builtin semantics.
+for consumer in ('all', 'any'):
+    for expression in (f'{consumer}()', f'{consumer}(xs, xs)', f'{consumer}(iterable=xs)',
+                       f'{consumer}(x async for x in xs)'):
+        module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
+        assert SupportChecker(module).check('f'), expression
+    for binding in (f'{consumer} = 1\n', f'from somewhere import {consumer}\n'):
+        module = ast.parse(binding + f'def f(xs: list[int]):\n    return {consumer}(x for x in xs)\n')
+        assert SupportChecker(module).check('f'), binding
+    module = ast.parse(f'def f(xs: list[int], {consumer}: int):\n    return {consumer}(x for x in xs)\n')
+    assert SupportChecker(module).check('f')
+    for runtime in ('Calls.function', 'scalarFunction', 'Mutable.function'):
+        module = ast.parse(f'def f(n: int):\n    return {consumer}(range(n))\n')
+        assert SupportChecker(module).requirement('f',
+            f'theorem wrong : Not ({runtime} Probe.module "f" [.int 2]).Returns')
+module = ast.parse('def f(xs: list[int]):\n    g = (x for x in xs)\n    return all(g)\n')
+assert SupportChecker(module).check('f')
+
+with project_temporary_directory(prefix='truth-consumers-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Returns', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'coverage{index}.py'
+        path.write_text('def f(values: set[int]) -> bool:\n    """\n    @formalsw: '
+                        + marker + '\n    """\n    return all(values)\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} truth-consumer Python comparisons passed, including short circuiting, mutations, and exceptions')

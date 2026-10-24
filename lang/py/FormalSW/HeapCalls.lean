@@ -347,6 +347,7 @@ inductive Operation where
   | permutationStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | zipStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
+  | truthGenerator (universal : Bool) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
   | generatorCollect (action : GeneratorAction) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
 
 /-- The sequence reference and lexical key environment persist across key calls. -/
@@ -744,6 +745,66 @@ def sumGeneratorTargetsStart (anchors : Nat) (element : Expr)
               enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
           | _ => .unsupported
 
+/-- Stop on the first decisive truth value; otherwise keep requesting items. -/
+def truthBody (universal : Bool) (element : Expr) : List Stmt :=
+  [.ifThen element (if universal then [] else [.return (.constant (.bool true))])
+    (if universal then [.return (.constant (.bool false))] else [])]
+
+/-- Ordinary all/any arguments are evaluated before their iterator is acquired. -/
+def truthSequenceStart (anchors : Nat) (universal : Bool) (values : List Value)
+    (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  match values with
+  | [source] => run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
+      .next ⟨.block
+        [.sequenceStepLoop sumItem (sequenceSource source) 0 (truthBody universal (.name sumItem)) [],
+         .return (.constant (.bool universal))] (fun _ => none), stack, heap⟩
+  | _ => done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
+
+/-- Evaluate only the first generator iterable in the enclosing lexical scope. -/
+def truthGeneratorArguments (universal : Bool) (element : Expr)
+    (generators : List (Expr × Expr × List Expr)) (env : Env) (stack : List Frame) (heap : Heap) : State :=
+  let expressions := match generators with
+    | (_, iterable, _) :: _ => match iterable with
+        | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+        | _ => [iterable]
+    | [] => []
+  argumentsState (.truthGenerator universal element generators (comprehensionTargetsEnv env generators))
+    env [] expressions stack heap
+
+/-- Filters, inner iterables, and yielded values stay lazy, including short circuiting.
+No collector list is allocated. Exceptions raised by generator code retain its boundary. -/
+def truthGeneratorStart (anchors : Nat) (universal : Bool) (element : Expr)
+    (generators : List (Expr × Expr × List Expr)) (env : Env)
+    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  match generators with
+  | [] => .unsupported
+  | (target, iterable, filters) :: rest =>
+      let terminal := truthBody universal element
+      let body := comprehensionTargetBody target
+        (comprehensionFilters filters (comprehensionTargetsBody terminal rest))
+      let name := comprehensionTargetName target
+      let enter := fun loop heap => Step.next
+        ⟨.block [loop, .return (.constant (.bool universal))] env, .generatorEnd :: stack, heap⟩
+      match iterable with
+      | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
+          enter (.permutationStepLoop name rows body []) heap
+      | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
+          enter (.zipStepLoop name sources 0 body []) heap
+      | .call (.name "enumerate") _ => match enumerateTarget target, values with
+          | some (index, name), [source, start] =>
+              run (globals := globals) anchors heap (enumerateStart start) fun counter heap =>
+                run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
+                  enter (.enumerateStepLoop index name (sequenceSource source) 0 counter
+                    (comprehensionFilters filters (comprehensionTargetsBody terminal rest)) []) heap
+          | _, _ => .unsupported
+      | .call (.name "range") _ => match rangeBounds values with
+          | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
+          | .error error => done (globals := globals) anchors heap (.error error)
+      | _ => match values with
+          | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
+              enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
+          | _ => .unsupported
+
 def primitive : Operation → List Value → Eval Value
   | .membership negated, [needle, container] => membership needle container negated
   | .notCallable, _ => Mutable.error "TypeError"
@@ -1047,6 +1108,10 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           | none => construct (globals := globals) module anchors name values stack heap
   | .operation (.method receiver args body) values =>
       invokeMethod (globals := globals) anchors receiver args body values stack heap
+  | .operation (.builtin .all) values => truthSequenceStart (globals := globals) anchors true values stack heap
+  | .operation (.builtin .any) values => truthSequenceStart (globals := globals) anchors false values stack heap
+  | .operation (.truthGenerator universal element generators env) values =>
+      truthGeneratorStart (globals := globals) anchors universal element generators env values stack heap
   | .operation .sumSequence values => sumSequenceStart (globals := globals) anchors values stack heap
   | .operation (.sumGenerator element generators env start) values =>
       sumGeneratorStart (globals := globals) anchors element generators env start values stack heap
@@ -1123,6 +1188,10 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
+      | .consumeGenerator (.builtinCall .all []) element generators =>
+          .next (truthGeneratorArguments true element generators env stack heap)
+      | .consumeGenerator (.builtinCall .any []) element generators =>
+          .next (truthGeneratorArguments false element generators env stack heap)
       | .consumeGenerator (.builtinCall .list []) element generators =>
           .next (generatorArguments .list element generators env stack heap)
       | .consumeGenerator (.builtinCall .sorted []) element generators =>
@@ -1634,7 +1703,8 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | join _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | builtin name => cases name <;> rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | join _ | add _ | dictionaryGet _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
   | value value =>
@@ -1917,8 +1987,11 @@ theorem builtin (arguments : Arguments (globals := globals) module env expressio
     (operation : primitive (.builtin name) values middle = some (.ok value, finalHeap)) :
     Evaluates (globals := globals) module env (.builtinCall name expressions) heap value finalHeap := by
   intro anchors stack
-  exact .next rfl ((arguments_reach arguments (.builtin name) [] anchors stack).trans
-    (.next (by simp [step, result, run, operation]) .refl))
+  apply Reaches.next rfl
+  apply (arguments_reach arguments (.builtin name) [] anchors stack).trans
+  cases name with
+  | all | any => simp [primitive, Mutable.unsupported] at operation
+  | _ => exact .next (by simp [step, result, run, operation]) .refl
 
 /-- Joining captures the separator before evaluating the iterable argument. -/
 theorem join (receiver : Evaluates (globals := globals) module env base heap (.scalar (.string separator)) middle)
