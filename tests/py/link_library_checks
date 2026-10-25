@@ -51,6 +51,35 @@ with project_temporary_directory(prefix='library-link-') as temporary:
                 expected = f'.ok (.int {math.factorial(n) + math.factorial(n + 1)})'
             lines.append(f'example : (Calls.function source{index} "f" [.int ({n})]).observe 200 = .done ({expected}) := by native_decide')
 
+    for index, (main_import, helper_import, cache_name, cached_helper) in enumerate((
+        ('from functools import lru_cache', 'from functools import lru_cache', 'lru_cache', False),
+        ('from functools import lru_cache', 'from functools import lru_cache, reduce', 'lru_cache', True),
+        ('from functools import lru_cache as memo', 'from functools import lru_cache as memo', 'memo', True),
+    )):
+        source.write_text(f'{main_import}\nfrom helper import g\n@{cache_name}(None)\ndef f(n: int) -> int:\n    return g(n) + g(n)\n')
+        decorator = f'@{cache_name}(None)\n' if cached_helper else ''
+        helper.write_text(f'{helper_import}\n{decorator}def g(n: int) -> int:\n    return n + 1\n')
+        module = ast.parse(source.read_text())
+        module.formalsw_source = source
+        dependency = ast.parse(helper.read_text())
+        link_imports(source, module, lambda path: dependency)
+        assert not SupportChecker(module).check('f')
+        assert len(bindings(module, cache_name)) == 1
+        assert ast.dump(ast.Module(body=module.body[-len(dependency.body):], type_ignores=[])) == ast.dump(dependency)
+        (directory / f'memo{index}.json').write_text(api['AstJsonEmitter'](module).emit())
+        lines.append(f'def memo{index} : Module := pyast_from_json% (include_str "memo{index}.json")')
+        for n in (-3, 0, 8):
+            lines.append(f'example : (MemoCalls.sourceFunction memo{index} "f" [.int ({n})]).observe 200 = .done (.ok (.int ({2 * (n + 1)}))) := by native_decide')
+        for extra in (f'{cache_name} = f\n', f'del {cache_name}\n', f'escaped = {cache_name}\n'):
+            unsafe = ast.parse(source.read_text() + extra)
+            unsafe.formalsw_source = source
+            try:
+                link_imports(source, unsafe, lambda path: dependency)
+            except ContractError:
+                pass
+            else:
+                assert SupportChecker(unsafe).check('f'), 'unsafe cache binding accepted'
+
     base_main = 'from math import factorial\nfrom helper import g\ndef f(n: int) -> int: return factorial(n) + g(n)\n'
     base_helper = 'from math import factorial\ndef g(n: int) -> int: return factorial(n)\n'
     for main, dependency in (
@@ -76,4 +105,4 @@ with project_temporary_directory(prefix='library-link-') as temporary:
     proof.write_text('\n'.join(lines) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
 
-print('Shared library imports: 15 execution comparisons and binding/capture checks passed')
+print('Shared library imports: 24 execution comparisons and binding/capture checks passed')

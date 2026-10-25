@@ -45,9 +45,21 @@ def free_calls(module):
 
 
 def shared_library_bindings(left, right):
-    """Identical, unmodified modeled from-imports can share one binding."""
+    """Identical modeled library and cache-decorator imports can share a binding."""
     from lang.py.call_support import library_functions
-    left_imports, right_imports = library_functions(left), library_functions(right)
+    def imports(module):
+        result = dict(library_functions(module))
+        # Cache decorators are not ordinary callable library functions. Their
+        # identity is still safe to merge; cache_decorator validates their use
+        # and rejects mutations or escaping aliases in the linked module.
+        for node in module.body:
+            if isinstance(node, ast.ImportFrom) and node.module == 'functools' and node.level == 0:
+                for alias in node.names:
+                    if alias.name == 'lru_cache':
+                        result[alias.asname or alias.name] = ('functools', 'lru_cache', node)
+        return result
+
+    left_imports, right_imports = imports(left), imports(right)
     shared = set()
     for name in left_imports.keys() & right_imports.keys():
         first, second = left_imports[name], right_imports[name]
