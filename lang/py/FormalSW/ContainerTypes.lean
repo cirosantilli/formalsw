@@ -13,6 +13,7 @@ inductive ContainerType where
   | list (element : ContainerType)
   | tuple (fields : List ContainerType)
   | tupleOf (element : ContainerType)
+  | dictionary (key value : ContainerType)
 deriving Repr
 
 inductive Value.HasContainerType (heap : Heap) : Value → ContainerType → Prop where
@@ -31,6 +32,17 @@ inductive Value.HasContainerType (heap : Heap) : Value → ContainerType → Pro
       (∀ item ∈ items, HasContainerType heap item element) →
       HasContainerType heap (.ref address) (.tupleOf element)
 
+  | scalarDictionary {address : Nat} {entries : List (Constant × Value)} {key value : ContainerType} :
+      heap[address]? = some (.dict entries) →
+      (∀ entry ∈ entries, HasContainerType heap (.scalar entry.1) key) →
+      (∀ entry ∈ entries, HasContainerType heap entry.2 value) →
+      HasContainerType heap (.ref address) (.dictionary key value)
+  | keyedDictionary {address : Nat} {entries : List (HashDict.Entry Value)} {key value : ContainerType} :
+      heap[address]? = some (.keyDict entries) →
+      (∀ entry ∈ entries, HasContainerType heap entry.2.1 key) →
+      (∀ entry ∈ entries, HasContainerType heap entry.2.2 value) →
+      HasContainerType heap (.ref address) (.dictionary key value)
+
 theorem Value.HasContainerType.of_heap_preserved
     (typed : Value.HasContainerType heap value kind)
     (preserved : ∀ (address : Nat) (object : Object),
@@ -41,6 +53,8 @@ theorem Value.HasContainerType.of_heap_preserved
   | list found _ ih => exact .list (preserved _ _ found) ih
   | fixedTuple found length _ ih => exact .fixedTuple (preserved _ _ found) length ih
   | variadicTuple found _ ih => exact .variadicTuple (preserved _ _ found) ih
+  | scalarDictionary found _ _ keys values => exact .scalarDictionary (preserved _ _ found) keys values
+  | keyedDictionary found _ _ keys values => exact .keyedDictionary (preserved _ _ found) keys values
 
 theorem Value.HasContainerType.append
     (typed : Value.HasContainerType heap value kind) (extra : Heap) :

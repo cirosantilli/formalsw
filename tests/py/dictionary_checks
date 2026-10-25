@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compare scalar-key dictionaries, aliasing, and expression effects with Python.
+Compare dictionaries, aliasing, and expression effects with Python.
 """
 import ast
 import itertools
@@ -68,6 +68,7 @@ bodies = {
     'key_failure': 'return {fail(xs, n): touch(xs, n+1), 9: touch(xs, n+2)}',
     'value_failure': 'return {touch(xs, n): fail(xs, n+1), 9: touch(xs, n+2)}',
     'lookup': 'return {1: xs, 2: n}.get(n)',
+    'get_tuple': 'return {}.get((n,), 1)',
     'default': 'return {1: xs, 2: n}.get(n, 88)',
     'default_effect': 'return {1: xs, 2: n}.get(n, touch(xs, 88))',
     'default_failure': 'return {n: xs}.get(n, fail(xs, 88))',
@@ -108,7 +109,6 @@ bodies = {
 unsupported = {
     'display_key': 'return {xs: 1}',
     'tuple_key': 'return {(n,): 1}',
-    'get_tuple': 'return {}.get((n,), 1)',
     'custom_key': 'return {}.get(Box(n), 1)',
     'slice_key': 'return {}[:]',
     'slice_write': 'd = {}\nd[:] = n\nreturn d',

@@ -27,6 +27,8 @@ def kind_of(annotation, prefix='', suffix=''):
 
 
 cases = {
+    'dict[str, tuple[int, int]]': ('dict[str,tuple[int,int]]',
+        '.dictionary (.scalar "str") (.tuple [.scalar "int", .scalar "int"])'),
     'list[tuple[int, int]]': ('list[tuple[int,int]]', '.list (.tuple [.scalar "int", .scalar "int"])'),
     'tuple[int, str, bool]': ('tuple[int,str,bool]', '.tuple [.scalar "int", .scalar "str", .scalar "bool"]'),
     'tuple[()]': ('tuple[()]', '.tuple []'),
@@ -57,13 +59,14 @@ for prefix, annotation in (
     assert not SupportChecker(module).check('f'), (prefix, annotation)
 
 for annotation in ('tuple[int, ..., str]', 'tuple[...]', 'tuple[float]',
-                   'list[tuple[int, object]]', 'tuple[set[int]]', 'dict[str, tuple[int, int]]'):
+                   'list[tuple[int, object]]', 'tuple[set[int]]', 'dict[list[int], str]'):
     kind, _ = kind_of(annotation)
     assert kind is None, (annotation, kind)
 
 for prefix, annotation, suffix in (
     ('', 'tuple[int, int]', '\ntuple = list\n'),
     ('', 'tuple[list[int]]', '\nlist = tuple\n'),
+    ('', 'dict[str, tuple[int]]', '\ndict = list\n'),
     ('from other import Tuple', 'Tuple[int, int]', ''),
     ('from typing import Tuple', 'Tuple[int, int]', '\nTuple = tuple\n'),
     ('from typing import Tuple', 'Tuple[int, int]', '\nescaped = Tuple\n'),

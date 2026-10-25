@@ -3,7 +3,7 @@ import lang.py.FormalSW.GraphPreservation
 import lang.py.builtin.type.bytearray
 import lang.py.FormalSW.Strings
 import lang.py.FormalSW.ScalarDicts
-import lang.py.FormalSW.HashKeys
+import lang.py.FormalSW.HashDicts
 
 namespace FormalSW.PyAst.Mutable
 
@@ -22,6 +22,8 @@ inductive Object where
   /-- Tuple-containing sets retain their original representatives and references. -/
   | keySet (items : List (HashKey × Value))
   | dict (entries : List (Constant × Value))
+  /-- Tuple keys retain their actual representative and all shared references. -/
+  | keyDict (entries : List (HashDict.Entry Value))
   /-- Plain instances have ordered fields and no custom special methods. -/
   | instance (origin name : String) (fields : List (String × Value))
   /-- Dataclass fields drive generated equality; frozen instances reject writes. -/
@@ -326,12 +328,19 @@ def KeySetValid (heap : Heap) (items : List (HashKey × Value)) : Prop :=
       | .scalar _ => True
       | .ref address => address < heap.length
 
+/-- Cached dictionary keys preserve both key and value edges. -/
+def KeyDictValid (heap : Heap) (entries : List (HashDict.Entry Value)) : Prop :=
+  entries.Pairwise (fun left right => HashKey.equal left.1 right.1 = false) ∧
+    ∀ entry ∈ entries, keyOf heap entry.2.1 = some (.ok entry.1) ∧
+      entry.2.1.edge.Within heap.length ∧ entry.2.2.edge.Within heap.length
+
 /-- Every reference points into the heap; cycles and sharing are permitted. -/
 def Heap.Valid (heap : Heap) : Prop :=
   ∀ object ∈ heap, match object with
     | .bytearray _ => True
     | .set items => ScalarSet.Valid items
     | .keySet items => KeySetValid heap items
+    | .keyDict entries => KeyDictValid heap entries
     | .dict entries => ScalarDict.Valid entries ∧
         ∀ entry ∈ entries, match entry.2 with
           | .scalar _ => True
@@ -362,6 +371,7 @@ def Completion.snapshot (c : Completion) : Data :=
       | .list items => ⟨.list, [], items.map Value.edge⟩
       | .tuple items => ⟨.tuple, [], items.map Value.edge⟩
       | .dict entries => ⟨.dict, [], entries.flatMap (fun (key, value) => [.scalar key, value.edge])⟩
+      | .keyDict entries => ⟨.dict, [], entries.flatMap (fun entry => [entry.2.1.edge, entry.2.2.edge])⟩
       | .set items => ⟨.set, [], (ScalarSet.canonical items).map Graph.Edge.scalar⟩
       | .keySet items => ⟨.set, [], (canonicalKeys items).map (fun entry => entry.2.edge)⟩
       | .bytearray bytes => ⟨.bytearray, [], bytes.map (fun byte => .scalar (.int byte.toNat))⟩)).encode
@@ -390,6 +400,7 @@ theorem Completion.equivalent_allocations (heap leftExtra rightExtra : Heap) (re
     | .list items => ⟨.list, [], items.map Value.edge⟩
     | .tuple items => ⟨.tuple, [], items.map Value.edge⟩
     | .dict entries => ⟨.dict, [], entries.flatMap (fun (key, value) => [.scalar key, value.edge])⟩
+    | .keyDict entries => ⟨.dict, [], entries.flatMap (fun entry => [entry.2.1.edge, entry.2.2.edge])⟩
     | .set items => ⟨.set, [], (ScalarSet.canonical items).map Graph.Edge.scalar⟩
     | .keySet items => ⟨.set, [], (canonicalKeys items).map (fun entry => entry.2.edge)⟩
     | .bytearray bytes => ⟨.bytearray, [], bytes.map (fun byte => .scalar (.int byte.toNat))⟩
@@ -420,6 +431,11 @@ theorem Completion.equivalent_allocations (heap leftExtra rightExtra : Heap) (re
           cases value : entry.2 with
           | scalar _ => trivial
           | ref _ => simpa only [value] using fieldValid
+    | keyDict entries =>
+        obtain ⟨entry, member, edgeMember⟩ := List.mem_flatMap.mp edgeMember
+        rcases List.mem_cons.mp edgeMember with rfl | edgeMember
+        · exact (objectValid.2 entry member).2.1
+        · exact List.mem_singleton.mp edgeMember ▸ (objectValid.2 entry member).2.2
     | bytearray bytes =>
         obtain ⟨byte, _, rfl⟩ := List.mem_map.mp edgeMember
         trivial
@@ -695,7 +711,7 @@ def byteValues : Value → Eval (List UInt8)
       match (← get)[address]? with
       | some (.bytearray bytes) => return bytes
       | some (.list items) | some (.tuple items) => items.mapM byte
-      | some (.set _) | some (.keySet _) | some (.dict _) => unsupported
+      | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) => unsupported
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
@@ -715,7 +731,7 @@ def array (value : Value) : Eval (Nat × List Value) := do
       | some (.list items) => return (address, items)
       | some (.bytearray _) => error "TypeError"
       | some (.tuple _) => error "TypeError"
-      | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+      | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
 
@@ -737,6 +753,7 @@ def truth (value : Value) : Eval Bool := do
       | some (.set items) => return !items.isEmpty
       | some (.keySet items) => return !items.isEmpty
       | some (.dict entries) => return !entries.isEmpty
+      | some (.keyDict entries) => return !entries.isEmpty
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => return true
       | none => unsupported
 
@@ -755,7 +772,7 @@ def invalidBinary (op : BinOp) (left : Value) : Eval Value := do
         match (← get)[address]? with
         | some (.bytearray _) => unsupported
         | some (.list _) | some (.tuple _) => error "TypeError"
-        | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+        | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
         | none => unsupported
     | _ => error "TypeError"
   else error "TypeError"
@@ -774,6 +791,12 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           | .ok value => pure (.scalar value)
           | .error exception => throw exception
       -- Set/dict union and user-defined operators require their own semantics.
+      | _, _ => unsupported
+  | .bitXor => match a, b with
+      | .scalar left, .scalar right =>
+          match scalarBitXor left right with
+          | .ok value => pure (.scalar value)
+          | .error exception => throw exception
       | _, _ => unsupported
   | .leftShift => match a, b with
       | .scalar left, .scalar right =>
@@ -806,7 +829,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           | some (.tuple items) =>
               if n = 1 ∨ items.isEmpty then return .ref address
               else allocateTuple (List.replicate n.toNat items).flatten
-          | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+          | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
           | none => unsupported
         else invalidBinary op a
     | .ref address, .scalar (.bytes bytes) =>
@@ -814,7 +837,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           match (← get)[address]? with
           | some (.bytearray left) => allocateBuffer (left ++ bytes)
           | some (.list _) | some (.tuple _) => error "TypeError"
-          | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+          | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
           | none => unsupported
         else invalidBinary op a
     | .scalar (.bytes bytes), .ref address =>
@@ -822,7 +845,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           match (← get)[address]? with
           | some (.bytearray right) => return .scalar (.bytes (bytes ++ right))
           | some (.list _) | some (.tuple _) => error "TypeError"
-          | some (.set _) | some (.keySet _) | some (.dict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
+          | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
           | none => unsupported
         else invalidBinary op a
     | .scalar (.string s), .scalar (.int n) | .scalar (.int n), .scalar (.string s) =>
@@ -848,7 +871,7 @@ def sequence : Value → Eval (List Value)
       match (← get)[address]? with
       | some (.list items) | some (.tuple items) => pure items
       | some (.bytearray bytes) => pure (bytes.map (fun byte => .scalar (.int byte.toNat)))
-      | some (.set _) | some (.keySet _) | some (.dict _) => unsupported
+      | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) => unsupported
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
   | _ => error "TypeError"
@@ -887,6 +910,7 @@ def setFrom (source : Value) : Eval Value := do
         | some (.set items) => pure (items.map Value.scalar)
         | some (.keySet items) => pure (items.map Prod.snd)
         | some (.dict entries) => pure (entries.map fun entry => Value.scalar entry.1)
+        | some (.keyDict entries) => pure (entries.map fun entry => entry.2.1)
         | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => unsupported
         | _ => sequence source
     | _ => sequence source
@@ -932,6 +956,7 @@ def length : Value → Eval Value
       | some (.set items) => return .scalar (.int items.length)
       | some (.keySet items) => return .scalar (.int items.length)
       | some (.dict entries) => return .scalar (.int entries.length)
+      | some (.keyDict entries) => return .scalar (.int entries.length)
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
 
@@ -948,12 +973,60 @@ def allocateDict (entries : List (Constant × Value)) : Eval Value := do
   modify fun heap => heap ++ [.dict entries]
   return .ref address
 
+/-- Scalar-only dictionaries keep their original heap representation until a tuple is inserted. -/
+def promoteDictionary (entries : List (Constant × Value)) : List (HashDict.Entry Value) :=
+  entries.map fun (key, value) => (.scalar key, .scalar key, value)
+
+/-- Return the original keys, rather than copies of their tuple representatives. -/
+def dictionaryEntries : Object → Option (List (HashDict.Entry Value))
+  | .dict entries => some (promoteDictionary entries)
+  | .keyDict entries => some entries
+  | _ => none
+
 /-- A bound get reads the dictionary after all argument effects. -/
 def dictionaryGet (address : Nat) (key defaultValue : Value) : Eval Value := do
   match (← get)[address]? with
-  | some (.dict entries) => return (ScalarDict.lookup entries (← dictionaryKey key)).getD defaultValue
+  | some (.dict entries) =>
+      match key with
+      | .scalar scalar => return (ScalarDict.lookup entries scalar).getD defaultValue
+      | .ref _ => return (HashDict.lookup (promoteDictionary entries) (← hashKey key)).getD defaultValue
+  | some (.keyDict entries) => return (HashDict.lookup entries (← hashKey key)).getD defaultValue
   | none => unsupported
   | some _ => error "TypeError"
+
+/-- Defaults are evaluated by the caller even when an existing value is returned. -/
+def dictionarySetDefault (address : Nat) (key defaultValue : Value) : Eval Value := do
+  match (← get)[address]? with
+  | some (.dict entries) =>
+      match key with
+      | .scalar scalar =>
+          match ScalarDict.lookup entries scalar with
+          | some value => return value
+          | none =>
+              modify fun heap => heap.set address (.dict (ScalarDict.insert entries scalar defaultValue))
+              return defaultValue
+      | .ref _ =>
+          let hashed ← hashKey key
+          let promoted := promoteDictionary entries
+          match HashDict.lookup promoted hashed with
+          | some value => return value
+          | none =>
+              modify fun heap => heap.set address (.keyDict (HashDict.insert promoted hashed key defaultValue))
+              return defaultValue
+  | some (.keyDict entries) =>
+      let hashed ← hashKey key
+      match HashDict.lookup entries hashed with
+      | some value => return value
+      | none =>
+          modify fun heap => heap.set address (.keyDict (HashDict.insert entries hashed key defaultValue))
+          return defaultValue
+  | none => unsupported
+  | some _ => error "TypeError"
+
+/-- Tuple-valued KeyError arguments require a heap exception object and remain partial. -/
+private def missingDictionaryKey : Value → Eval Value
+  | .scalar key => throw { typeName := "KeyError", args := [key] }
+  | .ref _ => unsupported
 
 def getItem (value subscript : Value) : Eval Value := do
   match value, subscript with
@@ -966,10 +1039,21 @@ def getItem (value subscript : Value) : Eval Value := do
       | some (.list items) | some (.tuple items) => return (items[← index items subscript]?).getD (.scalar .none)
       | some (.bytearray bytes) => return .scalar (.int ((bytes[← index bytes subscript]?).getD 0).toNat)
       | some (.dict entries) =>
-          let key ← dictionaryKey subscript
-          match ScalarDict.lookup entries key with
+          match subscript with
+          | .scalar key =>
+              match ScalarDict.lookup entries key with
+              | some value => return value
+              | none => throw { typeName := "KeyError", args := [key] }
+          | .ref _ =>
+              let key ← hashKey subscript
+              match HashDict.lookup (promoteDictionary entries) key with
+              | some value => return value
+              | none => missingDictionaryKey subscript
+      | some (.keyDict entries) =>
+          let key ← hashKey subscript
+          match HashDict.lookup entries key with
           | some value => return value
-          | none => throw { typeName := "KeyError", args := [key] }
+          | none => missingDictionaryKey subscript
       | some (.set _) | some (.keySet _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
   | _, _ => error "TypeError"
@@ -999,8 +1083,18 @@ def setItem (value subscript replacement : Value) : Eval Value := do
           modify fun heap => heap.set address (.bytearray (bytes.set i byte))
           return .scalar .none
       | some (.dict entries) =>
-          let key ← dictionaryKey subscript
-          modify fun heap => heap.set address (.dict (ScalarDict.insert entries key replacement))
+          match subscript with
+          | .scalar key =>
+              modify fun heap => heap.set address (.dict (ScalarDict.insert entries key replacement))
+              return .scalar .none
+          | .ref _ =>
+              let key ← hashKey subscript
+              modify fun heap => heap.set address
+                (.keyDict (HashDict.insert (promoteDictionary entries) key subscript replacement))
+              return .scalar .none
+      | some (.keyDict entries) =>
+          let key ← hashKey subscript
+          modify fun heap => heap.set address (.keyDict (HashDict.insert entries key subscript replacement))
           return .scalar .none
       | some (.set _) | some (.keySet _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | some (.tuple _) => error "TypeError"
@@ -1068,7 +1162,7 @@ def getSlice (value lower upper stride : Value) : Eval Value := do
       | some (.bytearray bytes) =>
           let bounds ← sliceBounds lower upper stride
           allocateBuffer (← sequenceResult (Py.Builtin.Sequence.slice bytes bounds))
-      | some (.dict _) => unsupported
+      | some (.dict _) | some (.keyDict _) => unsupported
       | some (.set _) | some (.keySet _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | none => unsupported
 
@@ -1112,7 +1206,7 @@ def setSlice (value lower upper stride replacement : Value) : Eval Value := do
           let result ← sequenceResult (Py.Builtin.ByteArray.setSlice bytes bounds replacement)
           modify fun heap => heap.set address (.bytearray result)
           return .scalar .none
-      | some (.dict _) => unsupported
+      | some (.dict _) | some (.keyDict _) => unsupported
       | some (.set _) | some (.keySet _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "TypeError"
       | some (.tuple _) => error "TypeError"
       | none => unsupported
@@ -1134,7 +1228,7 @@ def appendReceiver (value : Value) : Eval Nat := do
   | .ref address =>
       match (← get)[address]? with
       | some (.list _) | some (.bytearray _) => return address
-      | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "AttributeError"
+      | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "AttributeError"
       | none => unsupported
   | .scalar _ => error "AttributeError"
 
@@ -1147,7 +1241,7 @@ def appendItem (address : Nat) (value : Value) : Eval Value := do
       let byte ← byte value
       modify fun heap => heap.set address (.bytearray (bytes ++ [byte]))
       return .scalar .none
-  | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "AttributeError"
+  | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "AttributeError"
   | none => unsupported
 
 /-- Remove an element from the live sequence, retaining all remaining references.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compare OR and left shifts with Python, including signs, types, and operand effects.
+Compare OR, XOR, and left shifts with Python, including signs, types, and operand effects.
 """
 import ast
 from itertools import product
@@ -43,6 +43,7 @@ lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst', 'set_option
 comparisons = 0
 for operator, operation, right_values in (
         ('bitOr', lambda a, b: a | b, values),
+        ('bitXor', lambda a, b: a ^ b, values),
         ('leftShift', lambda a, b: a << b, counts)):
     for a, b in product(values, right_values):
         expected = result(lambda: operation(a, b))
@@ -57,7 +58,7 @@ def record(items: list[int], n: int) -> int:
     items.append(n)
     return n
 '''
-for label, symbol in (('merge', '|'), ('shift', '<<')):
+for label, symbol in (('merge', '|'), ('exclusive', '^'), ('shift', '<<')):
     source += f'''
 def {label}_effect(items: list[int], a: int, b: int) -> int:
     return record(items, a) {symbol} record(items, b)
@@ -75,7 +76,7 @@ program = ast.parse(source)
 world = {}
 exec(source, world)
 lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
-for label in ('merge', 'shift'):
+for label in ('merge', 'exclusive', 'shift'):
     for variant in ('effect', 'inplace', 'item', 'raises_left'):
         name = label + '_' + variant
         assert not SupportChecker(program).check(name), SupportChecker(program).check(name)
@@ -102,4 +103,4 @@ with project_temporary_directory(prefix='bitwise-or-shift-') as temporary:
     proof.write_text('\n'.join(lines) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
 subprocess.run([str(ROOT / 'formalsw'), 'tests/py/bitwise_or_shift.py'], cwd=ROOT, check=True)
-print(f'OR and left shift: {comparisons} Python comparisons; arbitrary-input source proofs passed')
+print(f'OR, XOR, and left shift: {comparisons} Python comparisons; arbitrary-input source proofs passed')

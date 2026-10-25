@@ -49,4 +49,30 @@ theorem shift.«Supported» (a count : Int) (condition : Calls.Condition program
     (function program "shift" [.int a, .int count]).Supported :=
   (shift.«Returns» a count condition).supported
 
+
+theorem exclusive.result (a b : Int) :
+    ReturnsValue program "exclusive" [.int a, .int b] (.int (integerBitXor a b)) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.binary (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+    (by simp [scalarBinary, scalarBitXor])
+
+theorem exclusive.«Returns» (a b : Int) : (function program "exclusive" [.int a, .int b]).Returns :=
+  (exclusive.result a b).returns
+
+theorem exclusive.«Supported» (a b : Int) : (function program "exclusive" [.int a, .int b]).Supported :=
+  (exclusive.«Returns» a b).supported
+
+theorem different.result (a b : Bool) :
+    ReturnsValue program "different" [.bool a, .bool b] (.bool (a != b)) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.binary (Evaluates.lookup rfl) (Evaluates.lookup rfl) rfl
+
+theorem different.«Returns» (a b : Bool) : (function program "different" [.bool a, .bool b]).Returns :=
+  (different.result a b).returns
+
+theorem different.«Supported» (a b : Bool) : (function program "different" [.bool a, .bool b]).Supported :=
+  (different.«Returns» a b).supported
+
 end tests.py.bitwise_or_shift

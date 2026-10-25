@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""
+Compare tuple-key dictionaries, materialized maps, aliases, and default effects with Python.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.global_inputs import annotation_kind, container_type_term
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def push_pair(a: int, b: int):
+    table = {}
+    alias = table
+    first = table.setdefault((a, b), [])
+    first.append(a)
+    alias.setdefault((a, b), []).append(b)
+    return table.get((a, b), [])
+
+def retained_key(n: int):
+    saved = (True, n)
+    table = {}
+    table[saved] = []
+    table[(1, n)] = [9]
+    return (table, saved)
+
+def missing_default(a: int):
+    default = []
+    table = {}
+    value = table.get((a, 2), default)
+    return (default, value, table)
+
+def nested_key(a: int, b: int):
+    table = {}
+    saved = ((a,), b)
+    table[saved] = [a]
+    table.setdefault(((a,), b), []).append(b)
+    table[((a,), b)] = table.get(saved)
+    return (table, saved)
+
+def record(log: list[int], n: int):
+    log.append(n)
+    return [n]
+
+def eager(log: list[int]):
+    table = {}
+    first_digit = 1
+    first = table.setdefault((first_digit, 2), record(log, 10))
+    table.setdefault((first_digit, 2), record(log, 20)).append(30)
+    return first
+
+def inject(table: dict[tuple[int, int], list[int]], n: int):
+    first_digit = 1
+    table[(first_digit, 2)] = [n]
+    return [-1]
+
+def late_read(n: int):
+    table = {}
+    first_digit = 1
+    return table.setdefault((first_digit, 2), inject(table, n))
+
+def promoted():
+    table = {True: [1], None: [2]}
+    digit = 3
+    table[(digit, 4)] = [5]
+    table[1] = [6]
+    table.setdefault(False)
+    return table
+
+def unhashable(log: list[int]):
+    table = {}
+    return table.setdefault(([],), record(log, 1))
+
+def map_digits(text: str):
+    return list(map(int, text))
+
+def map_lengths():
+    return list(map(len, ["", "a", "λ😀"]))
+
+def map_range(n: int):
+    return list(map(str, range(n)))
+'''
+program = ast.parse(source)
+world = {}
+exec(source, world)
+for name in ('push_pair', 'retained_key', 'missing_default', 'nested_key', 'eager', 'late_read',
+             'promoted', 'unhashable', 'map_digits', 'map_lengths', 'map_range'):
+    rejected = SupportChecker(program).check(name)
+    assert not rejected, (name, rejected)
+
+for name in ('list', 'map', 'int'):
+    shadowed = ast.parse(f'def f(values: list[str], {name}: int):\n    return list(map(int, values))\n')
+    assert SupportChecker(shadowed).check('f'), name
+for kind in ('dict[str,list[int]]', 'list[dict[int,str]]', 'dict[tuple[int,int],list[int]]'):
+    canonical = annotation_kind(ast.parse(kind, mode='eval').body)
+    assert canonical == kind
+    assert '.dictionary' in container_type_term(canonical)
+
+cases = []
+for a, b in ((-1, 0), (0, 0), (1, 2), (2**130 + 7, -(2**130))):
+    cases.extend([('push_pair', [a, b], False), ('nested_key', [a, b], False),
+                  ('missing_default', [a], False), ('late_read', [a], False)])
+cases += [('retained_key', [7], False), ('promoted', [], False), ('eager', [], True),
+          ('unhashable', [], True), ('map_lengths', [], False)]
+cases += [('map_digits', [text], False) for text in ('', '0123456789', '١٢٣', '7x')]
+cases += [('map_range', [n], False) for n in (-2, 0, 4)]
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+for name, scalars, logged in cases:
+    log = []
+    try:
+        result = world[name](*([log] if logged else scalars))
+        expected = snapshot_roots(([log] if logged else []) + [result])
+        test = f'Graph.observedBool ((Graph.compare c.snapshot ({data(expected)})).observe 4000) == some true'
+    except (TypeError, ValueError) as error:
+        expected = snapshot_roots([log] if logged else [])
+        test = (f'(match c.outcome with | .error e => e.typeName == {json.dumps(type(error).__name__)} | _ => false) && '
+                f'Graph.observedBool ((Graph.compare c.snapshot ({data(expected)})).observe 4000) == some true')
+    arguments = '[.ref 0]' if logged else '[' + ', '.join('.scalar (' + constant(x) + ')' for x in scalars) + ']'
+    heap = '[.list []]' if logged else '[]'
+    call = f'HeapCalls.call source "{name}" {arguments} {heap}'
+    lines += [f'example : (match ({call}).execution.observe 4000 with',
+              f'  | .done (.ok c) => {test}', '  | _ => false) = true := by native_decide']
+
+with project_temporary_directory(prefix='key-dictionaries-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'Tuple dictionary keys, shared values, eager defaults, and materialized maps: {len(cases)} Python comparisons passed.')

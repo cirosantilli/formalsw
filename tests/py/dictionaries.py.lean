@@ -14,6 +14,8 @@ theorem roundtrip.result (n key : Int) (heap : Mutable.Heap) :
       (.scalar (.int n))
       ((heap ++ [Mutable.Object.dict (table n key)]).set heap.length
         (Mutable.Object.dict (ScalarDict.insert (table n key) (.int key) (.scalar (.int (n + 1)))))) := by
+  let lastHeap := (heap ++ [Mutable.Object.dict (table n key)]).set heap.length
+    (Mutable.Object.dict (ScalarDict.insert (table n key) (.int key) (.scalar (.int (n+1)))))
   apply HeapCalls.BlockReturns.function rfl rfl
   apply HeapCalls.BlockReturns.assign
   · apply HeapCalls.Evaluates.dictionary
@@ -26,20 +28,21 @@ theorem roundtrip.result (n key : Int) (heap : Mutable.Heap) :
     · apply Mutable.setItem_dictionary (entries := table n key)
       simp [table, ScalarDict.insert]
     · apply HeapCalls.BlockReturns.return_value
-      apply HeapCalls.Evaluates.binary (av := .scalar (.int (n + 1)))
+      apply HeapCalls.Evaluates.binary (middle := lastHeap) (afterRight := lastHeap) (finalHeap := lastHeap)
+        (av := .scalar (.int (n + 1)))
       · apply HeapCalls.Evaluates.dictionary_get
           (entries := ScalarDict.insert (table n key) (.int key) (.scalar (.int (n + 1))))
           (by intro name equal; cases equal; simp [HeapCalls.setLocal])
           (HeapCalls.Evaluates.lookup rfl)
         · simp
         · exact .cons (HeapCalls.Evaluates.lookup rfl) (.cons HeapCalls.Evaluates.constant .nil)
-        · change Mutable.dictionaryGet _ _ _ _ = _
+        · change Mutable.dictionaryGet heap.length (.scalar (.int key)) (.scalar (.int 0)) lastHeap = _
           rw [Mutable.dictionaryGet_scalar _ _
             (ScalarDict.insert (table n key) (.int key) (.scalar (.int (n + 1))))
-            (by simp), ScalarDict.lookup_insert_self]
+            (by simp [lastHeap]), ScalarDict.lookup_insert_self]
           rfl
       · exact HeapCalls.Evaluates.constant
-      · simp [Mutable.binary, scalarBinary]
+      · simp [Mutable.binary, scalarBinary, lastHeap]
 
 private theorem reference.result (n key : Int) :
     Finishes (scalarFunction program "reference" [.int n, .int key]).step

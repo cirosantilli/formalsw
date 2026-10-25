@@ -9,19 +9,19 @@ theorem dictionaryGet_scalar (heap : Heap) (address : Nat) (entries : List (Cons
     (found : heap[address]? = some (.dict entries)) (key : Constant) (defaultValue : Value) :
     dictionaryGet address (.scalar key) defaultValue heap =
       some (.ok ((ScalarDict.lookup entries key).getD defaultValue), heap) := by
-  simp [dictionaryGet, dictionaryKey, found]
+  simp [dictionaryGet, found]
 
 theorem getItem_dictionary (heap : Heap) (address : Nat) (entries : List (Constant × Value))
     (found : heap[address]? = some (.dict entries)) (key : Constant)
     (present : ScalarDict.lookup entries key = some value) :
     getItem (.ref address) (.scalar key) heap = some (.ok value, heap) := by
-  simp [getItem, dictionaryKey, found, present]
+  simp [getItem, found, present]
 
 theorem setItem_dictionary (heap : Heap) (address : Nat) (entries : List (Constant × Value))
     (found : heap[address]? = some (.dict entries)) (key : Constant) (value : Value) :
     setItem (.ref address) (.scalar key) value heap =
       some (.ok (.scalar .none), heap.set address (.dict (ScalarDict.insert entries key value))) := by
-  simp [setItem, dictionaryKey, found, Except.map]
+  simp [setItem, found, Except.map]
 
 end Mutable
 

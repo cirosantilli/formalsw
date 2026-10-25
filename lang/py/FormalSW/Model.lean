@@ -51,6 +51,8 @@ inductive BinOp where
   | bitAnd
   /-- Python bitwise disjunction. -/
   | bitOr
+  /-- Python bitwise exclusive disjunction. -/
+  | bitXor
   /-- Python left shift; negative counts raise ValueError at runtime. -/
   | leftShift
   /-- Python exponentiation. Float-producing cases require another value model. -/
@@ -74,6 +76,15 @@ def integerBitOr : Int → Int → Int
   | .ofNat a, .negSucc b => .negSucc (Nat.bitwise (fun x y => x && !y) b a)
   | .negSucc a, .ofNat b => .negSucc (Nat.bitwise (fun x y => x && !y) a b)
   | .negSucc a, .negSucc b => .negSucc (a &&& b)
+
+/-- Exclusive disjunction with unbounded two's-complement sign extension. -/
+def integerBitXor : Int → Int → Int
+  | .ofNat a, .ofNat b => .ofNat (a ^^^ b)
+  | .ofNat a, .negSucc b => .negSucc (a ^^^ b)
+  | .negSucc a, .ofNat b => .negSucc (a ^^^ b)
+  | .negSucc a, .negSucc b => .ofNat (a ^^^ b)
+
+@[simp] theorem integerBitXor_nat (a b : Nat) : integerBitXor a b = (a ^^^ b : Nat) := rfl
 
 /-- A nonnegative left shift multiplies by an exact power of two, including for negative values. -/
 def integerShiftLeft (value : Int) (count : Nat) : Int := value * 2 ^ count
@@ -132,6 +143,8 @@ deriving Repr, BEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
 inductive Expr where
+  /-- The literal ellipsis retained in variadic tuple annotations. Execution is unsupported. -/
+  | ellipsis : Expr
   /-- A Python literal constant. -/
   | constant : Constant -> Expr
   /-- A Python identifier reference. -/
@@ -359,6 +372,7 @@ private def BinOp.fromJson? (json : Lean.Json) : Except String BinOp := do
   | "Mult" => return .mult
   | "BitAnd" => return .bitAnd
   | "BitOr" => return .bitOr
+  | "BitXor" => return .bitXor
   | "LShift" => return .leftShift
   | "Pow" => return .pow
   | "FloorDiv" => return .floorDiv
@@ -379,6 +393,7 @@ private def CmpOp.fromJson? (json : Lean.Json) : Except String CmpOp := do
 /-- Decode one expression from the version 1 JSON schema. -/
 partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
   match ← jsonString json "type" with
+  | "Ellipsis" => return .ellipsis
   | "Constant" =>
       match ← jsonField json "value" with
       | .num number => return .constant (.int (← (Lean.Json.num number).getInt?))
@@ -1037,7 +1052,7 @@ def evalBinaryComparisonOutcome (module : Module) (name : String)
 mutual
   /-- Count expression operations, assigning unit cost to every AST node. -/
   partial def Expr.operationCount : Expr → Nat
-    | .constant _ | .name _ => 1
+    | .ellipsis | .constant _ | .name _ => 1
     | .attribute value _ => 1 + value.operationCount
     | .dict entries => 1 + (entries.map fun (key, value) => key.operationCount + value.operationCount).sum
     | .list elements | .tuple elements => 1 + (elements.map Expr.operationCount).sum
@@ -1526,7 +1541,7 @@ range-sum example by mapping that recognized AST shape to `sumRange`.
 -/
 def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.constant (Constant.int value) => some value
-  | Expr.constant _ => none
+  | Expr.ellipsis | Expr.constant _ => none
   | Expr.name name => Env.get? env name
   | Expr.attribute _ _ => none
   | Expr.unaryOp UnaryOp.uSub expr => do
@@ -1568,6 +1583,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
       | BinOp.mult => some (leftValue * rightValue)
       | BinOp.bitAnd => some (integerBitAnd leftValue rightValue)
       | BinOp.bitOr => some (integerBitOr leftValue rightValue)
+      | BinOp.bitXor => some (integerBitXor leftValue rightValue)
       | BinOp.leftShift => if rightValue < 0 then none else some (integerShiftLeft leftValue rightValue.toNat)
       | BinOp.pow => if rightValue < 0 then none else some (leftValue ^ rightValue.toNat)
       | BinOp.floorDiv => none

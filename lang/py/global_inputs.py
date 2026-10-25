@@ -37,7 +37,9 @@ def annotation_domain(annotation):
 
 def structured_kind(kind):
     """Select the recursive heap domain without changing existing flat domains."""
-    return bool(kind and 'tuple[' in kind)
+    scalar_kinds = ('int', 'str', 'bytes', 'bool', 'None')
+    flat_dictionaries = {f'dict[{key},{value}]' for key in scalar_kinds for value in scalar_kinds}
+    return bool(kind and ('tuple[' in kind or 'dict[' in kind and kind not in flat_dictionaries))
 
 
 def _structured_annotation_kind(annotation):
@@ -53,6 +55,14 @@ def _structured_annotation_kind(annotation):
     if container == 'list':
         element = _structured_annotation_kind(annotation.slice)
         return f'list[{element}]' if element is not None else None
+    if container == 'dict':
+        fields = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else []
+        if len(fields) != 2:
+            return None
+        key, value = (_structured_annotation_kind(field) for field in fields)
+        if key is None or value is None or any(token in key for token in ('list[', 'dict[')):
+            return None
+        return f'dict[{key},{value}]'
     if container != 'tuple':
         return None
     fields = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
@@ -81,6 +91,9 @@ def container_type_term(kind):
             return '.scalar "None"'
         if node.value.id == 'list':
             return f'.list ({render(node.slice)})'
+        if node.value.id == 'dict':
+            key, value = node.slice.elts
+            return f'.dictionary ({render(key)}) ({render(value)})'
         fields = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
         if len(fields) == 2 and isinstance(fields[1], ast.Constant) and fields[1].value is Ellipsis:
             return f'.tupleOf ({render(fields[0])})'
@@ -98,6 +111,8 @@ def annotation_kind(annotation):
     if structured_kind(structured):
         return structured
     if isinstance(annotation, ast.Subscript):
+        if getattr(annotation.value, 'formalsw_typing_invalid', False):
+            return None
         container = getattr(annotation.value, 'formalsw_typing_container', None)
         if container is None and isinstance(annotation.value, ast.Name):
             container = annotation.value.id

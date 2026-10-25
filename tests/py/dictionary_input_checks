@@ -82,7 +82,7 @@ for key_kind, value_kind in itertools.product(kinds, repeat=2):
               f'  exact ⟨rfl, ({value}), rfl, rfl⟩',
               f'example : Mutable.Value.HasType [.dict []] (.ref 0) "{kind}" := ⟨[], rfl, by simp⟩']
 for kind in ('dict[int]', 'dict[int,str,bool]', 'dict[float,str]', 'dict[list[int],str]',
-             'dict[str,list[int]]', 'dict[str,object]', 'list[dict[int,str]]'):
+             'dict[str,object]'):
     assert annotation_kind(ast.parse(kind, mode='eval').body) is None, kind
 for declaration in ('table: dict[int, str]', 'table: dict[int, str] = {}'):
     assert not SupportChecker(ast.parse(declaration + '\ndef f() -> int: return len(table)\n')).check('f')

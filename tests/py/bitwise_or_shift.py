@@ -18,3 +18,17 @@ def shift(a: int, count: int) -> int:
     @formalsw: Returns
     """
     return a << count
+
+
+def exclusive(a: int, b: int) -> int:
+    """
+    @formalsw: Returns
+    """
+    return a ^ b
+
+
+def different(a: bool, b: bool) -> bool:
+    """
+    @formalsw: Returns
+    """
+    return a ^ b

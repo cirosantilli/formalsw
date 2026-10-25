@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""
+Variadic annotations retain executable bodies without accepting executable ellipsis.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import sys
+
+root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(root))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(root / 'formalsw'))
+for annotation in ('tuple[str, ...]', 'list[tuple[int, ...]]'):
+    source = f'from __future__ import annotations\ndef keep(xs: {annotation}) -> {annotation}:\n    return xs\n'
+    module = ast.parse(source)
+    assert not SupportChecker(module).check('keep')
+    document = json.loads(api['AstJsonEmitter'](module).emit())
+    function = document['ast']['body'][1]
+    assert function['type'] == 'FunctionDef'
+    assert function['body'][0]['type'] == 'Return'
+    assert 'Ellipsis' in json.dumps(function['args'])
+
+for source in (
+    'def bad(n: int) -> int:\n    return ...\n',
+    'def bad(n: int) -> int:\n    return n + ...\n',
+):
+    assert SupportChecker(ast.parse(source)).check('bad')
+print('Variadic annotation bodies retained; executable ellipsis rejected.')

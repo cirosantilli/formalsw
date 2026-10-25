@@ -118,6 +118,17 @@ theorem equalLists_ints (left right : List Int) :
   · have different : left ≠ right := fun same => lengths (congrArg List.length same)
     simp [equalLists, lengths, different]
 
+/-- Key equality is structural; dictionary values use the existing partial value equality. -/
+private def equalKeyEntries : List (HashDict.Entry Value) → List (HashDict.Entry Value) → Option Bool
+  | [], _ => some true
+  | entry :: rest, right => do
+      let some value := HashDict.lookup right entry.1 | some false
+      let equal ← equalLists [entry.2.2] [value]
+      if equal then equalKeyEntries rest right else some false
+
+private def equalKeyDictionaries (left right : List (HashDict.Entry Value)) : Option Bool :=
+  if left.length = right.length then equalKeyEntries left right else some false
+
 @[simp] def compareScalars (op : CmpOp) (left right : Constant) : Eval Value :=
   match scalarCompare op left right with
   | some value => pure (.scalar (.bool value))
@@ -168,6 +179,20 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
               let some equal := if a = b then some true else equalDictionaries xs ys | Mutable.unsupported
               return .scalar (.bool (if op == .eq then equal else !equal))
           | _ => Mutable.error "TypeError"
+      | some (.dict xs), some (.keyDict ys) =>
+          match op with
+          | .eq | .notEq =>
+              let some equal := equalKeyDictionaries (Mutable.promoteDictionary xs) ys | Mutable.unsupported
+              return .scalar (.bool (if op == .eq then equal else !equal))
+          | _ => Mutable.error "TypeError"
+      | some (.keyDict xs), some object =>
+          match Mutable.dictionaryEntries object with
+          | none => compareDifferent op
+          | some ys => match op with
+              | .eq | .notEq =>
+                  let some equal := if a = b then some true else equalKeyDictionaries xs ys | Mutable.unsupported
+                  return .scalar (.bool (if op == .eq then equal else !equal))
+              | _ => Mutable.error "TypeError"
       | some (.tuple xs), some (.tuple ys) =>
           match op with
           | .eq | .notEq =>
@@ -220,9 +245,15 @@ def membership (needle container : Value) (negated : Bool) : Eval Value := do
   let found ← match container with
     | .ref address => match (← get)[address]? with
         | some (.list items) | some (.tuple items) => sequenceContains needle items
-        | some (.dict entries) => do
-            let key ← Mutable.dictionaryKey needle
-            pure (ScalarDict.lookup entries key).isSome
+        | some (.dict entries) =>
+            match needle with
+            | .scalar key => pure (ScalarDict.lookup entries key).isSome
+            | .ref _ => do
+                let key ← Mutable.hashKey needle
+                pure (HashDict.lookup (Mutable.promoteDictionary entries) key).isSome
+        | some (.keyDict entries) => do
+            let key ← Mutable.hashKey needle
+            pure (HashDict.lookup entries key).isSome
         | some (.set items) => match needle with
             | .scalar value => pure (ScalarSet.contains items value)
             | .ref _ => do
@@ -252,7 +283,7 @@ theorem membership_dictionary (key : Constant) (negated : Bool)
     membership (.scalar key) (.ref address) negated heap =
       some (.ok (.scalar (.bool (if negated then !(ScalarDict.lookup entries key).isSome
         else (ScalarDict.lookup entries key).isSome))), heap) := by
-  simp [membership, found, Mutable.dictionaryKey]
+  simp [membership, found]
 
 theorem compare_int_lists (left right : List Int)
     (foundLeft : heap[a]? = some (.list (left.map fun n => .scalar (.int n))))
@@ -313,7 +344,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
       match (← get)[address]? with
       | none => Mutable.unsupported
       | some (.list _) => listInplace op left right
-      | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.binary op left right
+      | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.binary op left right
       | some (.bytearray bytes) =>
           match op with
           | .mult =>
@@ -328,7 +359,7 @@ def inplace (op : BinOp) (left right : Value) : Eval Value := do
                     | some (.bytearray more) =>
                         if other = address ∧ !more.isEmpty then Mutable.error "BufferError"
                         else pure more
-                    | some (.list _) | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
+                    | some (.list _) | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
                     | none => Mutable.unsupported
                 | _ => Mutable.error "TypeError"
               modify fun heap => heap.set address (.bytearray (bytes ++ more))
@@ -368,6 +399,7 @@ inductive Operation where
   | join (separator : String)
   | add (address : Nat)
   | dictionaryGet (address : Nat)
+  | dictionarySetDefault (address : Nat)
   | builtin (name : Builtin)
   | reversedList
   | sumSequence
@@ -857,6 +889,9 @@ def primitive : Operation → List Value → Eval Value
   | .dictionaryGet address, [key] => Mutable.dictionaryGet address key (.scalar .none)
   | .dictionaryGet address, [key, defaultValue] => Mutable.dictionaryGet address key defaultValue
   | .dictionaryGet _, _ => Mutable.error "TypeError"
+  | .dictionarySetDefault address, [key] => Mutable.dictionarySetDefault address key (.scalar .none)
+  | .dictionarySetDefault address, [key, defaultValue] => Mutable.dictionarySetDefault address key defaultValue
+  | .dictionarySetDefault _, _ => Mutable.error "TypeError"
   | .append address, [value] => Mutable.appendItem address value
   | .pop address, [] => Mutable.popItem address (.scalar (.int (-1)))
   | .pop address, [index] => Mutable.popItem address index
@@ -944,7 +979,7 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .int, [.ref address] => do
       match (← get)[address]? with
       | some (.bytearray bytes) => scalarResult (Calls.integerConversion [.bytes bytes])
-      | some (.list _) | some (.set _) | some (.keySet _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
+      | some (.list _) | some (.set _) | some (.keySet _) | some (.dict _) | some (.keyDict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.error "TypeError"
       | _ => Mutable.unsupported
   | .builtin .int, values => do
       let values ← values.mapM fun value => match value with
@@ -1069,19 +1104,20 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
       | some (.list _) | some (.bytearray _) =>
           if name = "append" then pure (.append address)
           else if name = "pop" then pure (.pop address)
-          else if name = "get" then Mutable.error "AttributeError"
+          else if name = "get" ∨ name = "setdefault" then Mutable.error "AttributeError"
           else if name = "replace" then match (← get)[address]? with
             | some (.bytearray _) => Mutable.unsupported
             | _ => Mutable.error "AttributeError"
           else Mutable.unsupported
       | some (.set _) | some (.keySet _) =>
           if name = "add" then pure (.add address)
-          else if name = "append" ∨ name = "get" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
-      | some (.dict _) =>
+          else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
+      | some (.dict _) | some (.keyDict _) =>
           if name = "get" then pure (.dictionaryGet address)
+          else if name = "setdefault" then pure (.dictionarySetDefault address)
           else if name = "append" ∨ name = "add" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.tuple _) =>
-          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
+          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
       | none => Mutable.unsupported
   | .scalar value =>
       if name = "replace" then match value with
@@ -1092,7 +1128,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
         | .string separator => pure (.join separator)
         | .bytes _ => Mutable.unsupported
         | _ => Mutable.error "AttributeError"
-      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
+      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
 
 /-- Stored fields are values; first-class bound methods are outside this model. -/
 def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
@@ -1690,7 +1726,7 @@ private theorem bindMethod_extend (extension : Extends target source)
       | none => simp [bindMethod, found]
       | some object =>
           cases object with
-          | list items | tuple items | bytearray items | set items | keySet items | dict items => simp [bindMethod, found]
+          | list items | tuple items | bytearray items | set items | keySet items | dict items | keyDict items => simp [bindMethod, found]
           | «instance» origin className fields | dataInstance origin className frozen declared fields =>
               cases defined : source.findClass className with
               | none => simp [bindMethod, found, instanceClass, defined, Mutable.unsupported] at supported
@@ -1709,7 +1745,7 @@ private theorem attribute_extend (extension : Extends target source)
       | none => simp [getAttribute, found]
       | some object =>
           cases object with
-          | list items | tuple items | bytearray items | set items | keySet items | dict items =>
+          | list items | tuple items | bytearray items | set items | keySet items | dict items | keyDict items =>
               simp [getAttribute, found]
           | «instance» origin className fields | dataInstance origin className frozen declared fields =>
               cases defined : source.findClass className with
@@ -1762,7 +1798,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | replace _ | join _ | add _ | dictionaryGet _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | replace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
   | value value =>
@@ -1787,7 +1823,7 @@ theorem step_extend (extension : Extends target source) (state : State)
                   | none => simp [step, found]
                   | some object =>
                       cases object with
-                      | list items | tuple items | bytearray items | set items | keySet items | dict items => simp [step, found]
+                      | list items | tuple items | bytearray items | set items | keySet items | dict items | keyDict items => simp [step, found]
                       | «instance» origin className fields | dataInstance origin className frozen declared fields =>
                           simp only [step, found] at supported ⊢
                           exact protected_run_extend _ _ (bindMethod_extend extension) supported
