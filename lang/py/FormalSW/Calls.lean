@@ -266,7 +266,7 @@ mutual
     | .breakLoop | .continueLoop => true
     | .ifThen _ yes no => loopControl yes || loopControl no
     | .whileDo _ _ otherwise | .forIn _ _ _ otherwise | .forZip _ _ _ otherwise
-      | .forReversed _ _ _ otherwise => loopControl otherwise
+      | .forReversed _ _ _ otherwise | .forDictionaryItems _ _ _ otherwise => loopControl otherwise
     | _ => false
 
   /-- Structural recursion keeps finite syntax inspection reducible in proofs. -/

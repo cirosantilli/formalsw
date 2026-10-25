@@ -427,6 +427,7 @@ structure SequenceExtremum where
 inductive Frame where
   | extremumSource (maximum : Bool) (parameter : String) (key : Expr) (env : Env)
   | extremumKey (cursor : SequenceExtremum) (position : Nat) (candidate : Value) (best : Option (Value × Value))
+  | dictionaryItemsReceiver (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | dictionaryKey (value : Expr) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | dictionaryValue (key : Constant) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | sumStart (loop : Stmt) (env : Env)
@@ -1225,6 +1226,46 @@ def construct (module : Module) (anchors : Nat) (name : String) (values : List V
           invokeMethod (globals := globals) anchors (.ref heap.length) args body values (.initialized heap.length :: stack)
             (heap ++ [.instance origin name []])
 
+/-- Preserve the original key representative and shared value in either dictionary representation. -/
+def dictionaryItemFields : Mutable.Object → Option (List (Value×Value))
+  | .dict entries => some (entries.map fun entry => (.scalar entry.1, entry.2))
+  | .keyDict entries => some (entries.map Prod.snd)
+  | _ => none
+
+/-- Only immediate iteration exposes this cursor; builtin views cannot escape.
+Instances retain ordinary method dispatch and sequence iteration. -/
+def dictionaryItemsStart (anchors : Nat) (target : Expr) (body otherwise following : List Stmt)
+    (env : Env) (receiver : Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  let custom := fun () => match target with
+    | .name name => Step.next ⟨.value receiver,
+        .methodReceiver "items" [] env :: .sequence name body otherwise following env :: stack, heap⟩
+    | .tuple targets | .list targets => match Calls.targetNames targets with
+        | some names => .next ⟨.value receiver,
+            .methodReceiver "items" [] env :: .unpackSequence names body otherwise following env :: stack, heap⟩
+        | none => .unsupported
+    | _ => .unsupported
+  match receiver with
+  | .ref address => match heap[address]? with
+      | some object => match dictionaryItemFields object with
+          | some entries => .next ⟨.block
+              (.dictionaryItemsStepLoop (comprehensionTargetName target) address
+                (entries.map fun entry => sequenceSource entry.1) 0
+                (comprehensionTargetBody target body) otherwise :: following) env, stack, heap⟩
+          | none => match object with
+              | .instance _ _ _ | .dataInstance _ _ _ _ _ => custom ()
+              | _ => done (globals := globals) anchors heap (.error { typeName := "AttributeError", args := [] })
+      | none => .unsupported
+  | .scalar _ => done (globals := globals) anchors heap (.error { typeName := "AttributeError", args := [] })
+
+/-- Each next reads current values. Supported dictionary writes only insert or
+replace, so stable keys retain their positions. Deletion is not modeled. -/
+def dictionaryItemsNext (address : Nat) (keys : List SequenceSource) (position : Nat) : Eval (Option (Value×Value)) := do
+  let some object := (← get)[address]? | Mutable.unsupported
+  let some entries := dictionaryItemFields object | Mutable.unsupported
+  if entries.length ≠ keys.length then Mutable.error "RuntimeError"
+  else if entries.map (fun entry => sequenceSource entry.1) ≠ keys then Mutable.unsupported
+  else return entries[position]?
+
 def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Globals := []) : Step State Completion :=
   let ⟨work, stack, heap⟩ := state
   protectGenerator stack <|
@@ -1421,6 +1462,17 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
                 .next ⟨.block (body ++ [Calls.loopContinuation body
                   (.permutationStepLoop name remaining body otherwise)] ++ rest)
                   (setLocal env name value), stack, heap⟩
+      | .forDictionaryItems target receiver body otherwise :: rest =>
+          .next ⟨.expr receiver env, .dictionaryItemsReceiver target body otherwise rest env :: stack, heap⟩
+      | .dictionaryItemsStepLoop name address keys position body otherwise :: rest =>
+          run (globals := globals) anchors heap (dictionaryItemsNext address keys position) fun item heap =>
+            match item with
+            | none => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
+            | some (key, value) => run (globals := globals) anchors heap
+                (Mutable.allocateTuple [key, value]) fun pair heap =>
+                  .next ⟨.block (body ++ [Calls.loopContinuation body
+                    (.dictionaryItemsStepLoop name address keys (position+1) body otherwise)] ++ rest)
+                    (setLocal env name pair), stack, heap⟩
       | .forZip target expressions body otherwise :: rest =>
           .next (argumentsState (.zipStart target body otherwise rest env) env [] expressions stack heap)
       | .zipStepLoop name sources position body otherwise :: rest =>
@@ -1494,6 +1546,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       match stack with
       | [] => done (globals := globals) anchors heap (.ok value)
       | frame :: stack => match frame with
+          | .dictionaryItemsReceiver target body otherwise following env =>
+              dictionaryItemsStart (globals := globals) anchors target body otherwise following env value stack heap
           | .dictionaryKey expression rest entries env => match value with
               | .scalar key => .next ⟨.expr expression env, .dictionaryValue key rest entries env :: stack, heap⟩
               -- Hashing can interleave with later expressions differently for

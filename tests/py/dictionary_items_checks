@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""
+Compare live dictionary item iteration, shared values, and control flow with Python.
+"""
+import ast
+import copy
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+def hash_key(value):
+    if type(value) is tuple:
+        return '.tuple [' + ', '.join(map(hash_key, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+def inputs(roots):
+    objects = []
+    addresses = {}
+
+    def edge(value):
+        if type(value) in (int, bool, str, bytes, type(None)):
+            return '.scalar (' + constant(value) + ')'
+        identity = id(value)
+        if identity not in addresses:
+            addresses[identity] = len(objects)
+            objects.append(value)
+        return '.ref ' + str(addresses[identity])
+
+    arguments = ', '.join(edge(value) for value in roots)
+    cells = []
+    cursor = 0
+    while cursor < len(objects):
+        value = objects[cursor]
+        if type(value) is dict:
+            if any(type(key) is tuple for key in value):
+                cells.append('.keyDict [' + ', '.join('(' + hash_key(key) + ', ' + edge(key) + ', ' + edge(item) + ')'
+                                                      for key, item in value.items()) + ']')
+            else:
+                cells.append('.dict [' + ', '.join('(' + constant(key) + ', ' + edge(item) + ')'
+                                                   for key, item in value.items()) + ']')
+        elif type(value) is bytearray:
+            cells.append('.bytearray [' + ', '.join(map(str, value)) + ']')
+        elif type(value) is set:
+            cells.append('.set [' + ', '.join(map(constant, sorted(value))) + ']')
+        else:
+            kind = '.tuple' if type(value) is tuple else '.list'
+            cells.append(kind + ' [' + ', '.join(map(edge, value)) + ']')
+        cursor += 1
+    return arguments, '[' + ', '.join(cells) + ']', objects
+
+
+source = '''
+def collect(d: dict[str, int]):
+    out = []
+    for key, value in d.items():
+        out.append((key, value))
+    else:
+        out.append(99)
+    return out
+def pairs(d: dict[str, int]):
+    out = []
+    for pair in d.items():
+        out.append(pair)
+    return out
+def list_target(d: dict[str, int]):
+    out = []
+    for [key, value] in d.items():
+        out.append(value)
+    return out
+def replace_live(d: dict[str, int]):
+    out = []
+    for key, value in d.items():
+        out.append(value)
+        d["later"] = value + 10
+    return out
+def touch(d: dict[str, int]):
+    d["later"] = 77
+def helper_updates(d: dict[str, int]):
+    out = []
+    for key, value in d.items():
+        out.append(value)
+        touch(d)
+    return out
+def rebind(d: dict[str, int]):
+    out = []
+    for key, value in d.items():
+        d = {}
+        out.append(key)
+    return out
+def receiver(d: dict[str, int]):
+    d["extra"] = d.get("extra", 0) + 1
+    return d
+def effect(d: dict[str, int]):
+    out = []
+    for key, value in receiver(d).items():
+        out.append(key)
+    return out
+def break_add(d: dict[str, int]):
+    out = []
+    for key, value in d.items():
+        d["extra"] = 9
+        out.append(key)
+        break
+    else:
+        out.append(99)
+    return out
+def return_add(d: dict[str, int]):
+    for key, value in d.items():
+        d["extra"] = 9
+        return value
+    return 0
+def continue_add(d: dict[str, int]):
+    for key, value in d.items():
+        d["extra"] = 9
+        continue
+    return 0
+def promote(d: dict[str, int]):
+    for key, value in d.items():
+        d[(key, "new")] = value
+    return 0
+def unpack_error(d: dict[str, int]):
+    for a, b, c in d.items():
+        return a
+    return 0
+def repeated_target(d: dict[str, int]):
+    out = []
+    for a, a in d.items():
+        out.append(a)
+    return out
+def numeric_alias(d: dict[int, int]):
+    out = []
+    for key, value in d.items():
+        d[1] = 55
+        out.append((key, value))
+    return out
+def shared_lists(d: dict[str, list[int]]):
+    out = []
+    for key, value in d.items():
+        value.sort()
+        out.append(value)
+    return out
+def nested(d: dict[str, int]):
+    out = []
+    for key, value in d.items():
+        for other, item in d.items():
+            if key == other:
+                continue
+            out.append(item)
+    return out
+def outer_else(d: dict[str, int]):
+    out = []
+    for i in range(3):
+        for key, value in d.items():
+            break
+        else:
+            continue
+        out.append(i)
+    return out
+def defaults(d: dict[str, int]):
+    out = []
+    for key, value in d.items():
+        d.setdefault(key, -4)
+        out.append(value)
+    return out
+def outer_break(d: dict[str, int]):
+    out = []
+    for i in range(3):
+        for key, value in d.items():
+            pass
+        else:
+            break
+        out.append(i)
+    return out
+def tuple_alias(d: dict[tuple[int, int], int]):
+    out = []
+    for key, value in d.items():
+        one = True
+        d[(one, 2)] = 77
+        out.append(key)
+    return out
+def escaped(d: dict[str, int]):
+    return d.items()
+def tuple_keys(n: int):
+    d = {}
+    d[(n, n + 1)] = 3
+    for pair in d.items():
+        return pair
+    return 0
+class Box:
+    def __init__(self, n: int):
+        self.n = n
+    def items(self):
+        return [(self.n, 2)]
+def custom(n: int):
+    box = Box(n)
+    out = []
+    for key, value in box.items():
+        out.append(key + value)
+    return out
+def shadowed(n: int):
+    box = Box(n)
+    box.items = n
+    for pair in box.items():
+        return pair
+    return 0
+'''
+program = ast.parse(source)
+for node in program.body:
+    if isinstance(node, ast.ClassDef):
+        node.formalsw_origin = 'dictionary-items-checks.' + node.name
+checker = SupportChecker(program)
+for function in program.body:
+    if isinstance(function, ast.FunctionDef):
+        issues = checker.check(function.name, heap_calls=True)
+        assert not issues, (function.name, issues)
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+
+
+def compare(name, arguments):
+    global count
+    actual = copy.deepcopy(arguments)
+    encoded, heap, anchors = inputs(actual)
+    try:
+        result = world[name](*actual)
+        error = None
+    except (TypeError, AttributeError, RuntimeError, ValueError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [{encoded}] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {count}',
+        f'example : (match ({call}).execution.observe 4000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 10000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+
+cases = [{}, {'first': 1}, {'first': 1, 'later': 2}, {'later': -3, 'first': 4},
+         {'first': 1, 'middle': 0, 'last': -2}]
+for name in ('collect', 'pairs', 'list_target', 'replace_live', 'helper_updates', 'rebind', 'effect',
+             'break_add', 'return_add', 'continue_add', 'promote', 'unpack_error', 'repeated_target', 'nested', 'outer_else', 'defaults', 'outer_break'):
+    for value in cases:
+        compare(name, [value])
+for value in ({True: 1, 2: 3}, {False: -1, 1: 4}, {1: 0}, {}):
+    compare('numeric_alias', [value])
+shared = [3, 1, 2]
+for value in ({}, {'a': [3, 2, 1]}, {'a': shared, 'b': shared}, {'a': [], 'b': [4, -1]}):
+    compare('shared_lists', [value])
+for value in (None, 1, True, 'abc', b'ab', [], (), bytearray([1, 2]), set()):
+    compare('collect', [value])
+for value in (-3, 0, 7):
+    compare('custom', [value])
+    compare('shadowed', [value])
+
+# Deleting keys is outside the current dictionary model, including through aliases.
+module = ast.parse('def remove(d: dict[str, int]):\n    for key, value in d.items():\n        del d[key]\n')
+assert SupportChecker(module).check('remove', heap_calls=True)
+
+for value in ({(1, 2): 3}, {(True, 2): 4, (3, 4): 5}, {('a', (None, b'b')): 7, 'later': 8}):
+    for name in ('collect', 'pairs', 'list_target', 'rebind', 'nested', 'promote'):
+        compare(name, [value])
+for value in ({(1, 2): 3}, {(True, 2): 4, (3, 4): 5}):
+    compare('tuple_alias', [value])
+key = (1, 2)
+compare('pairs', [{key: key}])
+for value in (-3, 0, 7):
+    compare('tuple_keys', [value])
+
+# Escaping builtin view values remain outside this model.
+for name, arguments, heap in (('escaped', '.ref 0', '[.dict []]'),):
+    lines.extend([
+        f'example : (match (HeapCalls.call source "{name}" [{arguments}] {heap}).execution.observe 4000 with',
+        '  | .unsupported => true | _ => false) = true := by native_decide',
+    ])
+with project_temporary_directory(prefix='dictionary-items-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'{count} live dictionary item Python comparisons passed')

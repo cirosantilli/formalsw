@@ -238,7 +238,7 @@ instance : Repr Arg where
 inductive SequenceSource where
   | scalar (value : Constant)
   | ref (address : Nat)
-deriving Repr, BEq, Lean.ToExpr
+deriving Repr, DecidableEq, BEq, Lean.ToExpr
 
 /-- Python statements currently represented by the AST bridge. -/
 inductive Stmt where
@@ -265,6 +265,10 @@ inductive Stmt where
   | augAssign : Expr -> BinOp -> Expr -> Stmt
   /-- A Python `for target in iter` statement. -/
   | forIn : Expr -> Expr -> List Stmt -> List Stmt -> Stmt
+  /-- Immediate iteration over a dictionary's live items, without an escaping view. -/
+  | forDictionaryItems : Expr → Expr → List Stmt → List Stmt → Stmt
+  /-- Private dictionary cursor retains its source and original ordered keys. -/
+  | dictionaryItemsStepLoop : String → Nat → List SequenceSource → Nat → List Stmt → List Stmt → Stmt
   /-- A loop consuming a fresh builtin zip over supported sequences. -/
   | forZip : Expr → List Expr → List Stmt → List Stmt → Stmt
   /-- A loop consuming a fresh builtin reversed iterator. -/
@@ -601,6 +605,10 @@ private partial def Stmt.fromJson? (json : Lean.Json) : Except String Stmt := do
   | "ForReversed" =>
       return .forReversed (← jsonString json "name")
         (← Expr.fromJson? (← jsonField json "iter"))
+        (← jsonArray json "body" Stmt.fromJson?) (← jsonArray json "orelse" Stmt.fromJson?)
+  | "ForDictionaryItems" =>
+      return .forDictionaryItems (← Expr.fromJson? (← jsonField json "target"))
+        (← Expr.fromJson? (← jsonField json "receiver"))
         (← jsonArray json "body" Stmt.fromJson?) (← jsonArray json "orelse" Stmt.fromJson?)
   | "ForZip" =>
       return .forZip (← Expr.fromJson? (← jsonField json "target"))
@@ -1103,7 +1111,7 @@ mutual
     | .rangeLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .rangeStepLoop _ _ _ _ body otherwise | .sequenceStepLoop _ _ _ body otherwise
-      | .setStepLoop _ _ _ _ body otherwise
+      | .setStepLoop _ _ _ _ body otherwise | .dictionaryItemsStepLoop _ _ _ _ body otherwise
       | .enumerateStepLoop _ _ _ _ _ body otherwise | .unpackStepLoop _ _ _ body otherwise
       | .permutationStepLoop _ _ body otherwise | .zipStepLoop _ _ _ body otherwise | .reverseSequenceStepLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
@@ -1125,7 +1133,7 @@ mutual
     | .forZip target arguments body orelse =>
         1 + target.operationCount + (arguments.map Expr.operationCount).sum +
           (body.map Stmt.operationCount).sum + (orelse.map Stmt.operationCount).sum
-    | .forIn target iter body orelse =>
+    | .forIn target iter body orelse | .forDictionaryItems target iter body orelse =>
         1 + target.operationCount + iter.operationCount +
           (body.map Stmt.operationCount).sum + (orelse.map Stmt.operationCount).sum
     | .ifThen test body orelse | .whileDo test body orelse =>
@@ -1141,7 +1149,7 @@ end
 
 /-- Whether a statement is a `for` loop. -/
 def Stmt.hasFor : Stmt → Bool
-  | .forIn _ _ _ _ | .forZip _ _ _ _ | .forReversed _ _ _ _ => true
+  | .forIn _ _ _ _ | .forZip _ _ _ _ | .forReversed _ _ _ _ | .forDictionaryItems _ _ _ _ => true
   | _ => false
 
 /-- Whether a statement is a `while` loop. -/
@@ -1168,7 +1176,7 @@ def Stmt.callsFunction (name : String) : Stmt → Bool
   | .return value => value.callsFunction name
   | .assign _ value => value.callsFunction name
   | .augAssign target _ value => target.callsFunction name || value.callsFunction name
-  | .forIn target iter _ _ => target.callsFunction name || iter.callsFunction name
+  | .forIn target iter _ _ | .forDictionaryItems target iter _ _ => target.callsFunction name || iter.callsFunction name
   | .forReversed _ value _ _ => name == "reversed" || value.callsFunction name
   | .forZip target values _ _ =>
       name == "zip" || target.callsFunction name || values.any (fun value => value.callsFunction name)

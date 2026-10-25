@@ -48,6 +48,7 @@ roots = [
   "lang.py.FormalSW.SetCalls",
   "lang.py.FormalSW.SetSumCalls",
   "lang.py.FormalSW.DictionaryCalls",
+  "lang.py.FormalSW.DictionaryItemsCalls",
   "lang.py.FormalSW.KeyDictionaryCalls",
   "lang.py.FormalSW.SumCalls",
   "lang.py.FormalSW.TruthCalls",

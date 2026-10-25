@@ -1407,6 +1407,12 @@ class AstJsonEmitter:
                     "value": self.expr(value),
                 }
             case ast.For(target=target, iter=iter_expr, body=body, orelse=orelse):
+                if (isinstance(iter_expr, ast.Call) and isinstance(iter_expr.func, ast.Attribute)
+                        and iter_expr.func.attr == 'items' and not iter_expr.args and not iter_expr.keywords):
+                    return {"type": "ForDictionaryItems", "target": self.expr(target),
+                            "receiver": self.expr(iter_expr.func.value),
+                            "body": [self.stmt(child) for child in body],
+                            "orelse": [self.stmt(child) for child in orelse]}
                 if (reversed_sequence(iter_expr, self.bindings_module)
                         and isinstance(target, ast.Name) and len(iter_expr.args) == 1 and not iter_expr.keywords):
                     return {"type": "ForReversed", "name": target.id, "iter": self.expr(iter_expr.args[0]),
