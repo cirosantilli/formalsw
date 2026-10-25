@@ -95,6 +95,7 @@ def print_result(result: TestResult) -> None:
 def main() -> int:
     """Run all tests and return a process exit status."""
     cases = [
+        TestCase("fresh list construction", Path("tests/py/list_calls.py"), 0, "All 5 checks passed"),
         TestCase("shared list inputs and preconditions", Path("tests/py/heap_inputs.py"), 0, "All 8 checks passed"),
         TestCase("nested list inputs and shared rows", Path("tests/py/nested_inputs.py"), 0, "All 6 checks passed"),
         TestCase("list comprehensions", Path("tests/py/comprehensions.py"), 0, "All 3 checks passed"),
@@ -405,6 +406,14 @@ def main() -> int:
     print(f"{'PASS' if call_checks_passed else 'FAIL'} recursive call coverage", flush=True)
     if not call_checks_passed:
         print(textwrap.indent((call_checks.stdout + call_checks.stderr).rstrip(), "  "))
+    list_checks = subprocess.run(
+        [sys.executable, "tests/py/list_checks"],
+        cwd=REPO, text=True, capture_output=True,
+    )
+    list_checks_passed = list_checks.returncode == 0
+    print(f"{'PASS' if list_checks_passed else 'FAIL'} list construction and aliases", flush=True)
+    if not list_checks_passed:
+        print(textwrap.indent((list_checks.stdout + list_checks.stderr).rstrip(), "  "))
     project_checks = subprocess.run(
         [sys.executable, "tests/py/project_checks"],
         cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
@@ -463,6 +472,7 @@ def main() -> int:
         and setup_checks_passed
         and link_checks_passed
         and call_checks_passed
+        and list_checks_passed
     ) else 1
 
 

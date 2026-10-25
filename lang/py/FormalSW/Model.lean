@@ -98,6 +98,7 @@ inductive Builtin where
   | identity
   | len
   | bytearray
+  | list
   | set
   | sorted
 deriving Repr, BEq, Lean.ToExpr
@@ -445,6 +446,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "min" => pure Builtin.min
         | "divmod" => pure Builtin.divmod
         | "bytearray" => pure Builtin.bytearray
+        | "list" => pure Builtin.list
         | "set" => pure Builtin.set
         | "sorted" => pure Builtin.sorted
         | "int.bit_length" => pure Builtin.intBitLength

@@ -678,6 +678,15 @@ def primitive : Operation → List Value → Eval Value
       | none => Mutable.unsupported
   | .builtin .divmod, values => Mutable.divmod values
   | .builtin .bytearray, values => Mutable.bytearray values
+  | .builtin .list, [] => Mutable.allocate []
+  | .builtin .list, [value] => do
+      -- Custom iteration protocols require their own execution model.
+      if let .ref address := value then
+        match (← get)[address]? with
+        | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
+        | _ => pure ()
+      Mutable.allocate (← Mutable.sequence value)
+  | .builtin .list, _ => Mutable.error "TypeError"
   | .builtin .set, [] => Mutable.allocateSet []
   | .builtin .sorted, [value] => do
       let items ← match value with
@@ -739,6 +748,20 @@ def primitive : Operation → List Value → Eval Value
         | .ref _ => Mutable.unsupported
       scalarResult (Calls.positionalMinimum values)
   | _, _ => Mutable.unsupported
+
+/-- List construction copies the outer list and preserves all element references. -/
+theorem primitive_list_list (heap : Heap) (address : Nat) (items : List Value)
+    (found : heap[address]? = some (.list items)) :
+    primitive (.builtin .list) [.ref address] heap =
+      some (.ok (.ref heap.length), heap ++ [.list items]) := by
+  simp [primitive, found, Mutable.sequence, Mutable.allocate, Except.map]
+
+/-- Converting a tuple allocates a list without copying the elements. -/
+theorem primitive_list_tuple (heap : Heap) (address : Nat) (items : List Value)
+    (found : heap[address]? = some (.tuple items)) :
+    primitive (.builtin .list) [.ref address] heap =
+      some (.ok (.ref heap.length), heap ++ [.list items]) := by
+  simp [primitive, found, Mutable.sequence, Mutable.allocate, Except.map]
 
 private theorem mapM_identity (items : List Constant) :
     (items.mapM (fun value => pure value) : Eval (List Constant)) = pure items := by
