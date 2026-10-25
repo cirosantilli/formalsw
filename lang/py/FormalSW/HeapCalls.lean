@@ -314,6 +314,7 @@ inductive Operation where
   | setSlice (replacement : Value)
   | append (address : Nat)
   | pop (address : Nat)
+  | join (separator : String)
   | add (address : Nat)
   | dictionaryGet (address : Nat)
   | builtin (name : Builtin)
@@ -670,6 +671,17 @@ def primitive : Operation → List Value → Eval Value
   | .pop address, [] => Mutable.popItem address (.scalar (.int (-1)))
   | .pop address, [index] => Mutable.popItem address index
   | .pop _, _ => Mutable.error "TypeError"
+  | .join separator, [value] => do
+      if let .ref address := value then
+        match (← get)[address]? with
+        | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
+        | _ => pure ()
+      let items ← Mutable.sequence value
+      let strings ← items.mapM fun item => match item with
+        | .scalar (.string text) => pure text
+        | _ => Mutable.error "TypeError"
+      return .scalar (.string (String.intercalate separator strings))
+  | .join _, _ => Mutable.error "TypeError"
   | .add address, [value] => Mutable.addItem address value
   | .append _, _ | .add _, _ => Mutable.error "TypeError"
   | .builtin .identity, [left, right] => identity left right
@@ -771,6 +783,23 @@ private theorem mapM_identity (items : List Constant) :
     (items.mapM (fun value => pure value) : Eval (List Constant)) = pure items := by
   simpa using (List.mapM_pure (m := Eval) (l := items) (f := id))
 
+private theorem mapM_strings (items : List String) :
+    (items.mapM (fun value => pure value) : Eval (List String)) = pure items := by
+  simpa using (List.mapM_pure (m := Eval) (l := items) (f := id))
+
+/-- Joining reads strings in order without modifying the input list. -/
+theorem primitive_join_list (heap : Heap) (address : Nat) (separator : String) (items : List String)
+    (found : heap[address]? = some (.list (items.map fun text => .scalar (.string text)))) :
+    primitive (.join separator) [.ref address] heap =
+      some (.ok (.scalar (.string (String.intercalate separator items))), heap) := by
+  simp [primitive, found, Mutable.sequence, List.mapM_map, mapM_strings, Function.comp_def, Except.map]
+
+theorem primitive_join_tuple (heap : Heap) (address : Nat) (separator : String) (items : List String)
+    (found : heap[address]? = some (.tuple (items.map fun text => .scalar (.string text)))) :
+    primitive (.join separator) [.ref address] heap =
+      some (.ok (.scalar (.string (String.intercalate separator items))), heap) := by
+  simp [primitive, found, Mutable.sequence, List.mapM_map, mapM_strings, Function.comp_def, Except.map]
+
 /-- Sorting reads the list's current contents and returns a fresh list. -/
 theorem primitive_sorted_list (heap : Heap) (address : Nat) (items sorted : List Constant)
     (found : heap[address]? = some (.list (items.map Mutable.Value.scalar)))
@@ -827,8 +856,12 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
       | some (.tuple _) =>
           if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" then Mutable.error "AttributeError" else Mutable.unsupported
       | none => Mutable.unsupported
-  | .scalar _ =>
-      if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" then Mutable.error "AttributeError" else Mutable.unsupported
+  | .scalar value =>
+      if name = "join" then match value with
+        | .string separator => pure (.join separator)
+        | .bytes _ => Mutable.unsupported
+        | _ => Mutable.error "AttributeError"
+      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" then Mutable.error "AttributeError" else Mutable.unsupported
 
 /-- Stored fields are values; first-class bound methods are outside this model. -/
 def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
@@ -1422,7 +1455,7 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | join _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>
@@ -1704,6 +1737,21 @@ theorem builtin (arguments : Arguments (globals := globals) module env expressio
   intro anchors stack
   exact .next rfl ((arguments_reach arguments (.builtin name) [] anchors stack).trans
     (.next (by simp [step, result, run, operation]) .refl))
+
+/-- Joining captures the separator before evaluating the iterable argument. -/
+theorem join (receiver : Evaluates (globals := globals) module env base heap (.scalar (.string separator)) middle)
+    (arguments : Arguments (globals := globals) module env expressions middle values afterArguments)
+    (operation : primitive (.join separator) values afterArguments = some (.ok value, finalHeap))
+    (localName : ∀ name, base = .name name → (env name).isSome = true) :
+    Evaluates (globals := globals) module env (.call (.attribute base "join") expressions) heap value finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr base env, .methodReceiver "join" expressions env :: stack, heap⟩)
+    (by cases base <;> simp_all [step])
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := argumentsState (.join separator) env [] expressions stack middle)
+    (by simp [step, run, bindMethod])
+  apply (arguments_reach arguments (.join separator) [] anchors stack).trans
+  exact .next (by simp [step, result, run, operation]) .refl
 
 /-- The receiver is bound before arguments run; removal reads the resulting live heap. -/
 theorem pop (lookup : env name = some (.ref address))

@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+Compare string joining with Python, including Unicode and argument effects.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def combine(separator: str, xs: list[str]):
+    return separator.join(xs)
+def touch(xs: list[str]):
+    xs.append("argument")
+    return xs
+def make_separator(xs: list[str]):
+    xs.append("receiver")
+    return ":"
+def order(xs: list[str]):
+    return make_separator(xs).join(touch(xs))
+def replace(holder: list[str], xs: list[str]):
+    holder[0] = "new"
+    return xs
+def captured(xs: list[str]):
+    holder = ["old"]
+    result = holder[0].join(replace(holder, xs))
+    return [result, holder]
+def fail(xs: list[str]):
+    xs.append("effect")
+    raise ValueError()
+def argument_error(xs: list[str]):
+    return "".join(fail(xs))
+def invalid_receiver(xs: list[str]):
+    n = 3
+    return n.join(touch(xs))
+def excess(xs: list[str]):
+    return "".join(touch(xs), touch(xs))
+def nested(xs: list[str]):
+    return "".join([xs])
+def tuple_input(a: str, b: str):
+    return "-".join((a, b, a))
+def text_input(s: str):
+    return ":".join(s)
+def bytes_input():
+    return "".join(b"a")
+def empty_bytes():
+    return "".join(b"")
+def buffer_input():
+    return "".join(bytearray([1]))
+def empty_buffer():
+    return "".join(bytearray())
+def empty_tuple():
+    return "".join(())
+def not_iterable():
+    return "".join(None)
+def missing_argument():
+    return "".join()
+def set_input():
+    return "".join(set())
+def dict_input():
+    return "".join({})
+def binary_join():
+    return b"".join([])
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    issues = checker.check(function.name, heap_calls=True)
+    assert not issues, (function.name, issues)
+assert uses_heap_calls(program, next(f for f in program.body if f.name == 'text_input'))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+
+
+def compare(name, arguments, heap, actual, anchors):
+    global count
+    try:
+        result = world[name](*actual)
+        error = None
+    except (TypeError, ValueError, AttributeError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [{arguments}] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {count}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+
+cases = [[], [""], ["a", 1], [None], [b"x"], [True], ["λ", "😀", "x"]]
+cases += [list(values) for values in itertools.product(("", "a", "λ"), repeat=2)]
+for initial in cases:
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    for separator in ('', ':', '😀λ'):
+        value = initial.copy()
+        compare('combine', '.scalar (' + constant(separator) + '), .ref 0', heap,
+                [separator, value], [value])
+    for name in ('order', 'captured', 'argument_error', 'invalid_receiver', 'excess', 'nested'):
+        value = initial.copy()
+        compare(name, '.ref 0', heap, [value], [value])
+for a, b in itertools.product(('', 'a', 'λ😀'), repeat=2):
+    compare('tuple_input', '.scalar (' + constant(a) + '), .scalar (' + constant(b) + ')', '[]', [a, b], [])
+for text in ('', 'abc', 'λ😀λ'):
+    compare('text_input', '.scalar (' + constant(text) + ')', '[]', [text], [])
+for name in ('bytes_input', 'empty_bytes', 'buffer_input', 'empty_buffer', 'empty_tuple',
+             'not_iterable', 'missing_argument'):
+    compare(name, '', '[]', [], [])
+
+for name in ('set_input', 'dict_input', 'binary_join'):
+    lines.append(f'example : (HeapCalls.call source "{name}" [] []).execution.observe 100 = .unsupported := by decide')
+lines.append('example : HeapCalls.primitive (.join "") [.ref 0] [.instance "source" "Iterable" []] = none := by decide')
+for expression in ('"".join(iterable=xs)', '"".join(x for x in xs)'):
+    module = ast.parse(f'def f(xs: list[str]):\n    return {expression}\n')
+    assert SupportChecker(module).check('f')
+with project_temporary_directory(prefix='join-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} join Python comparisons passed, including Unicode, receiver binding, and exceptions')
