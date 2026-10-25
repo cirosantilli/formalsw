@@ -3,6 +3,7 @@ import lang.py.FormalSW.Linking
 import lang.py.FormalSW.ScalarSort
 import lang.py.FormalSW.HeapSort
 import lang.py.FormalSW.Permutations
+import lang.py.FormalSW.Combinations
 import lang.py.FormalSW.StringReplace
 
 /-! Function calls with shared lists. Locals and continuations carry references;
@@ -515,6 +516,7 @@ inductive Operation where
   | dictionaryComprehension (key value : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
   | comprehensionStore (address : Nat)
   | permutationStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
+  | combinationStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | zipStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
   | truthGenerator (universal : Bool) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
@@ -772,6 +774,13 @@ def SequenceExtremum.choose (cursor : SequenceExtremum) (candidate score : Value
 def permutationRows : List Value → Eval (List (List SequenceSource))
   | [source, length] => do
       let cursor ← Permutations.acquire source length
+      return cursor.remaining.map (List.map sequenceSource)
+  | _ => Mutable.error "TypeError"
+
+/-- Capture positional combinations after the iterable and required length evaluate. -/
+def combinationRows : List Value → Eval (List (List SequenceSource))
+  | [source, length] => do
+      let cursor ← Combinations.acquire source length
       return cursor.remaining.map (List.map sequenceSource)
   | _ => Mutable.error "TypeError"
 
@@ -1782,6 +1791,10 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       sumGeneratorStart (globals := globals) anchors element generators env start values stack heap
   | .operation (.comprehension element generators env) values =>
       comprehensionStart (globals := globals) anchors element generators env values stack heap
+  | .operation (.combinationStart target body otherwise following env) values =>
+      run (globals := globals) anchors heap (combinationRows values) fun rows heap =>
+        .next ⟨.block (.permutationStepLoop (comprehensionTargetName target) rows
+          (comprehensionTargetBody target body) otherwise :: following) env, stack, heap⟩
   | .operation (.permutationStart target body otherwise following env) values =>
       run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
         .next ⟨.block (.permutationStepLoop (comprehensionTargetName target) rows
@@ -1963,6 +1976,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           .next ⟨.expr receiver env, .dictionaryValuesReceiver target body otherwise rest env :: stack, heap⟩
       | .forIn target (.permutationsIterable expressions) body otherwise :: rest =>
           .next (argumentsState (.permutationStart target body otherwise rest env) env [] expressions stack heap)
+      | .forIn target (.combinationsIterable expressions) body otherwise :: rest =>
+          .next (argumentsState (.combinationStart target body otherwise rest env) env [] expressions stack heap)
       | .permutationStepLoop name rows body otherwise :: rest =>
           match rows with
           | [] => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
@@ -2272,6 +2287,16 @@ theorem Evaluates.not_permutations
   cases reached with
   | next transition _ => simp [step] at transition
 
+/-- Combination iterators are likewise confined to their consuming loop. -/
+theorem Evaluates.not_combinations
+    (evaluated : Evaluates (globals := globals) module env iterable heap value finalHeap)
+    (expressions : List Expr) : iterable ≠ .combinationsIterable expressions := by
+  intro equal
+  subst iterable
+  have reached := evaluated 0 []
+  cases reached with
+  | next transition _ => simp [step] at transition
+
 /-- A private values iterator is only meaningful in a consuming loop. -/
 theorem Evaluates.not_dictionary_values
     (evaluated : Evaluates (globals := globals) module env iterable heap value finalHeap)
@@ -2447,7 +2472,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>
@@ -3057,6 +3082,7 @@ theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "ran
   have start : step (globals := globals) module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
     have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
@@ -3318,6 +3344,7 @@ theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "ran
   have start : step (globals := globals) module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
     have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
@@ -3356,6 +3383,7 @@ theorem for_unpack
       ⟨.block (.forIn (.tuple expressions) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .unpackSequence names body otherwise following env :: stack, heap⟩ := by
     have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
@@ -3530,6 +3558,7 @@ theorem Evaluates.list_comp_sequence
           (comprehensionEnv env ((name, iterable, filters) :: generators)))
         env [] [iterable] stack heap) := by
     have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   apply Reaches.next first

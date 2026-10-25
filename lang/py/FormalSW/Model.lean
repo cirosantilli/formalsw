@@ -207,6 +207,8 @@ inductive Expr where
   | zipIterable : List Expr → Expr
   /-- A fresh positional permutation iterator, consumed without escaping. -/
   | permutationsIterable : List Expr → Expr
+  /-- A fresh positional combination iterator, consumed without escaping. -/
+  | combinationsIterable : List Expr → Expr
   /-- An immediately consumed dictionary values iterator; the view cannot escape. -/
   | dictionaryValuesIterable : Expr → Expr
   /-- Eager list comprehension: local target, iterable, and ordered filters. -/
@@ -447,6 +449,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
             ← Expr.fromJson? (← jsonField generator "iter"),
             ← jsonArray generator "ifs" Expr.fromJson?))
   | "PermutationsIterable" => return .permutationsIterable (← jsonArray json "args" Expr.fromJson?)
+  | "CombinationsIterable" => return .combinationsIterable (← jsonArray json "args" Expr.fromJson?)
   | "ZipIterable" => return .zipIterable (← jsonArray json "args" Expr.fromJson?)
   | "DictionaryValuesIterable" => return .dictionaryValuesIterable (← Expr.fromJson? (← jsonField json "receiver"))
   | "ListCompTargets" | "SetComp" =>
@@ -1124,7 +1127,8 @@ mutual
     | .listComp element generators =>
         1 + element.operationCount + (generators.map fun (_, iterable, filters) =>
           1 + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
-    | .permutationsIterable arguments | .zipIterable arguments => 1 + (arguments.map Expr.operationCount).sum
+    | .permutationsIterable arguments | .combinationsIterable arguments | .zipIterable arguments =>
+        1 + (arguments.map Expr.operationCount).sum
     | .dictionaryValuesIterable receiver => 1 + receiver.operationCount
     | .listCompTargets element generators | .setComp element generators =>
         1 + element.operationCount + (generators.map fun (target, iterable, filters) =>
@@ -1610,7 +1614,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.extremumSequence _ _ _ _ | Expr.sortedSequence _ _ _ _ => none
   | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
-  | Expr.reversedList _ | Expr.zipIterable _ | Expr.permutationsIterable _ | Expr.dictionaryValuesIterable _ => none
+  | Expr.reversedList _ | Expr.zipIterable _ | Expr.permutationsIterable _ | Expr.combinationsIterable _ | Expr.dictionaryValuesIterable _ => none
   | Expr.listComp _ _ | Expr.listCompTargets _ _ | Expr.setComp _ _ | Expr.dictComp _ _ _
       | Expr.sumGeneratorTargets _ _ _ | Expr.consumeGenerator _ _ _ => none
   | Expr.tuple _ | Expr.dict _ => none

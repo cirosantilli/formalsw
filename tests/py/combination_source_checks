@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""
+Compare fresh combination loops with Python, including snapshots and shared elements.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+source_text = '''
+from itertools import combinations as choose
+import itertools as it
+
+
+def trace(n: int) -> str:
+    text = ""
+    for row in choose([3, 1, 3], n):
+        for value in row:
+            text += str(value)
+        text += ";"
+    return text
+
+
+def keyword(n: int) -> str:
+    text = ""
+    for first, second in it.combinations([3, 1, 3], r=n):
+        text += str(first) + str(second) + ";"
+    return text
+
+
+def mixed() -> str:
+    text = ""
+    for row in it.combinations([2, 1], 1):
+        text += str(row[0])
+    for row in it.permutations([2, 1], 2):
+        text += str(row[0]) + str(row[1])
+    return text
+
+
+def snapshot() -> str:
+    pool = [1, 2, 3]
+    text = ""
+    for row in choose(pool, 2):
+        pool[1] = 9
+        pool.append(4)
+        text += str(row[0]) + str(row[1])
+    return text
+
+
+def shared() -> str:
+    pool = [[1], [2], [3]]
+    total = 0
+    for row in choose(pool, 2):
+        row[0][0] += 1
+        total += row[1][0]
+    return str(total) + str(pool[0][0]) + str(pool[1][0]) + str(pool[2][0])
+
+
+def control() -> str:
+    text = ""
+    for row in choose([1, 2, 3], 2):
+        if row[0] == 1:
+            continue
+        text += str(row[1])
+        break
+    else:
+        text += "else"
+    return text
+
+
+def empty() -> str:
+    text = ""
+    for row in choose([], 0):
+        text += str(len(row))
+    for row in choose([], 1):
+        text += "unexpected"
+    else:
+        text += "else"
+    return text
+'''
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + repr(value).replace("'", '"')
+
+
+with project_temporary_directory(prefix='combinations-') as temporary:
+    directory = Path(temporary)
+    source = directory / 'program.py'
+    source.write_text(source_text)
+    program = api['source_module'](source)
+    scope = runpy.run_path(str(source))
+    cases = [(name, [length]) for name in ('trace', 'keyword')
+             for length in (-1, 0, 1, 2, 3, 4, None, True, '2')]
+    cases += [(name, []) for name in ('mixed', 'snapshot', 'shared', 'control', 'empty')]
+    for name in scope:
+        if name in {case[0] for case in cases}:
+            issues = SupportChecker(program).check(name)
+            assert not issues, issues
+    (directory / 'program.json').write_text(api['AstJsonEmitter'](program).emit())
+    lines = ['import FormalSW', 'open FormalSW.PyAst',
+             'def program : Module := pyast_from_json% (include_str "program.json")']
+    expected = []
+    for index, (name, arguments) in enumerate(cases):
+        try:
+            outcome = 'ok:' + scope[name](*arguments)
+        except Exception as error:
+            outcome = 'error:' + type(error).__name__
+        expected.append(f'case{index}:' + outcome)
+        values = ', '.join(constant(value) for value in arguments)
+        lines.append(f'''
+#eval IO.println ("case{index}:" ++
+  match (HeapCalls.scalarFunction program "{name}" [{values}]).observe 20000 with
+  | .done (.ok (.string text)) => "ok:" ++ text
+  | .done (.error error) => "error:" ++ error.typeName
+  | _ => "unfinished or unexpected result")''')
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    result = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)],
+                            cwd=REPO, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = [line for line in result.stdout.splitlines() if line.startswith('case')]
+    assert observed == expected, (observed, expected)
+
+    for extra in ('\nescaped = choose\n', '\nchoose = trace\n', '\nit.combinations = trace\n'):
+        altered = ast.parse(source_text + extra)
+        altered.formalsw_source = source
+        assert SupportChecker(altered).check('trace'), extra
+    for imported in ('from itertools import combinations as choose, permutations as choose',
+                     'from itertools import permutations as choose, combinations as choose'):
+        altered = ast.parse(source_text.replace('from itertools import combinations as choose', imported))
+        altered.formalsw_source = source
+        assert SupportChecker(altered).check('trace'), 'duplicate constructor alias accepted'
+    altered = ast.parse(source_text.replace('import itertools as it', 'import itertools as it, math as it'))
+    altered.formalsw_source = source
+    assert SupportChecker(altered).check('keyword'), 'duplicate module alias accepted'
+    altered = ast.parse(source_text + '\nfrom itertools import permutations as perm\nescaped = perm\n')
+    altered.formalsw_source = source
+    assert not SupportChecker(altered).check('trace'), 'unrelated constructor alias blocked combinations'
+    for body in ('rows = choose([1, 2], 1)\n    return 0',
+                 'return [row for row in choose([1, 2], 1)]',
+                 'for row in choose([1, 2]):\n        pass\n    return 0'):
+        altered = ast.parse('from itertools import combinations as choose\ndef f():\n    ' + body + '\n')
+        altered.formalsw_source = source
+        assert SupportChecker(altered).check('f'), body
+    (directory / 'itertools.py').write_text('')
+    altered = ast.parse(source_text)
+    altered.formalsw_source = source
+    assert SupportChecker(altered).check('trace'), 'shadowed itertools module accepted'
+
+print(f'Combination loops: {len(cases)} Python execution comparisons and binding/escape checks passed')

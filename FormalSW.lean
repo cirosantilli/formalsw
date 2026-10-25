@@ -6,6 +6,7 @@ import lang.py.FormalSW.HeapSort
 import lang.py.FormalSW.MutableGlobals
 import lang.py.FormalSW.ContainerTypes
 import lang.py.FormalSW.Permutations
+import lang.py.FormalSW.Combinations
 import lang.py.FormalSW.Instances
 import lang.py.FormalSW.HeapCalls
 import lang.py.FormalSW.HeapSortingCalls
@@ -23,6 +24,7 @@ import lang.py.FormalSW.ComprehensionCalls
 import lang.py.FormalSW.DictionaryValuesCalls
 import lang.py.FormalSW.GeneratorCalls
 import lang.py.FormalSW.PermutationCalls
+import lang.py.FormalSW.CombinationCalls
 import lang.py.FormalSW.ZipCalls
 import lang.py.FormalSW.ReverseCalls
 import lang.py.FormalSW.LoopCalls

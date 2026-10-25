@@ -37,7 +37,7 @@ def iteratorStep (choices : ChoiceSchedule) (anchors : Nat) (state : State)
       ((target, iterable, filters) :: generators) env) [.ref address], stack =>
       match iterable with
       | .call (.name "range") _ | .call (.name "enumerate") _
-      | .zipIterable _ | .permutationsIterable _ => .unsupported
+      | .zipIterable _ | .permutationsIterable _ | .combinationsIterable _ => .unsupported
       | _ => match heap[address]? with
           | some (.set items) =>
               let body := comprehensionTargetBody target

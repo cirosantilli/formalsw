@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from lang.py.global_inputs import GlobalInputError, function_globals, annotation_kind, needs_heap_globals
 from lang.py.imports import bindings
-from lang.py.permutation_support import permutation_binding, permutation_arguments
+from lang.py.permutation_support import permutation_binding, permutation_arguments, combination_binding, combination_arguments
 from lang.py.defaults import literal_default
 from lang.py.named_callbacks import callback_bindings_valid, callback_signature
 from lang.py.memo_support import cache_decorator, uses_memoized
@@ -1365,6 +1365,21 @@ def check_calls(module, function, reject, *, heap=False):
                         if isinstance(argument, ast.Tuple):
                             hidden_tuples.add(argument)
                         expr(argument)
+                    block(node.body, loop_depth + 1)
+                    block(node.orelse, loop_depth)
+                elif heap and isinstance(node, ast.For) and combination_binding(node.iter, module) is not None:
+                    if combination_binding(node.iter, module) in locals_:
+                        reject(node.iter, 'combinations requires an unshadowed standard-library import')
+                    if not (isinstance(node.target, ast.Name) or flat_unpacking(node.target)):
+                        reject(node, 'combination loops require a name or flat tuple/list target')
+                    arguments = combination_arguments(node.iter, module)
+                    if arguments is None:
+                        reject(node.iter, 'combinations requires a positional iterable and a length')
+                    else:
+                        for argument in arguments:
+                            if isinstance(argument, ast.Tuple):
+                                hidden_tuples.add(argument)
+                            expr(argument)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)
                 elif heap and isinstance(node, ast.For) and permutation_binding(node.iter, module) is not None:

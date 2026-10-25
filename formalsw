@@ -23,7 +23,7 @@ from lang.py.lean_frontend import parse_imports, parse_theorem, guard_propositio
 from lang.py.local_functions import lower_local_functions
 from lang.py.named_callbacks import lower_named_callbacks
 from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, generator_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration, uses_heap_memoized, memo_heap_runtime, heap_pool_functions, observable_pool_tuples, dictionary_values_receiver
-from lang.py.permutation_support import permutation_arguments
+from lang.py.permutation_support import permutation_arguments, combination_arguments
 from lang.py.call_support import reverse_keyword, integer_instance
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.constant_pools import identify_constant_pools
@@ -1441,7 +1441,8 @@ class AstJsonEmitter:
                     "type": "For",
                     "target": self.expr(target),
                     "iter": (self.iterator_expr(iter_expr)
-                             if permutation_arguments(iter_expr, self.bindings_module) is not None
+                             if (permutation_arguments(iter_expr, self.bindings_module) is not None
+                                 or combination_arguments(iter_expr, self.bindings_module) is not None)
                              or dictionary_values_receiver(iter_expr) is not None
                              or isinstance(iter_expr, ast.Call) and iter_expr.keywords
                              else self.expr(iter_expr)),
@@ -1764,6 +1765,9 @@ class AstJsonEmitter:
         values_receiver = dictionary_values_receiver(node)
         if dictionary_values and values_receiver is not None:
             return {"type": "DictionaryValuesIterable", "receiver": self.expr(values_receiver)}
+        combination = combination_arguments(node, self.bindings_module)
+        if combination is not None:
+            return {"type": "CombinationsIterable", "args": [self.expr(arg) for arg in combination]}
         permutation = permutation_arguments(node, self.bindings_module)
         if permutation is not None:
             return {"type": "PermutationsIterable", "args": [self.expr(arg) for arg in permutation]}
