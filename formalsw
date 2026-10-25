@@ -20,7 +20,7 @@ from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
-from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls
+from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
@@ -444,7 +444,7 @@ def guard_raw_requirement(requirement, function, conditions):
     return replace(requirement, property_type=guarded['type']), bound | set(guarded['bound'])
 
 
-def raw_heap_global_type(requirement, function, ast_namespace, conditions):
+def raw_heap_global_type(requirement, function, ast_namespace, conditions, module):
     """Raw properties use the same entry heap, global inputs, and guards as short DSL properties."""
     binders, domain, heap = contract_domain(function)
     requirement, bound = guard_raw_requirement(requirement, function, [*domain, *conditions])
@@ -465,7 +465,8 @@ def raw_heap_global_type(requirement, function, ast_namespace, conditions):
     params = ' '.join(f'({name} : {"Nat" if reference_kind(kind) else scalar_lean_type(kind)})'
                       for name, kind in zip(names, kinds))
     values = ', '.join(heap_term(name, kind) for name, kind in zip(names, kinds))
-    binding = f'FormalSW.PyAst.HeapCalls.call {ast_namespace}.module {lean_string(function.name)} [{values}] {heap} {contract_globals(function)}'
+    runtime = 'SetCalls' if uses_set_iteration(module, function) else 'HeapCalls'
+    binding = f'FormalSW.PyAst.{runtime}.call {ast_namespace}.module {lean_string(function.name)} [{values}] {heap} {contract_globals(function)}'
     if names:
         binding = f'fun {params} => {binding}'
     body = f'let this_function := {binding};\n{requirement.property_type}'
@@ -484,7 +485,7 @@ def raw_theorem_type_for_function(
 ) -> str:
     """Infer referenced, unbound Python arguments in a function-level theorem."""
     if getattr(function, 'formalsw_globals', ()):
-        return raw_heap_global_type(requirement, function, ast_namespace, conditions)
+        return raw_heap_global_type(requirement, function, ast_namespace, conditions, module)
     raw_heap = heap_input_name(function) if module is not None and uses_calls_model(module, function) else None
     if raw_heap:
         conditions = [*contract_domain(function)[1], *conditions]
@@ -533,13 +534,15 @@ def raw_theorem_type_for_function(
                 f"{function.name}: this_function supports positional arguments without variadics"
             )
         annotations = [argument.annotation for argument in arguments]
-        if raw_heap:
+        if raw_heap or uses_set_iteration(module, function):
             names = [f"input_{index}" for index in range(len(arguments))]
             kinds = [annotation_kind(arg.annotation) for arg in arguments]
             lambda_params = " ".join(f"({name} : {'Nat' if reference_kind(kind) else scalar_lean_type(kind)})"
                                      for name, kind in zip(names, kinds))
             values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))
-            binding = f'FormalSW.PyAst.HeapCalls.call {ast_namespace}.module {lean_string(function.name)} [{values}] «{raw_heap}»'
+            runtime = 'SetCalls' if uses_set_iteration(module, function) else 'HeapCalls'
+            entry_heap = f'«{raw_heap}»' if raw_heap else '[]'
+            binding = f'FormalSW.PyAst.{runtime}.call {ast_namespace}.module {lean_string(function.name)} [{values}] {entry_heap}'
             if names:
                 binding = f"fun {lambda_params} => {binding}"
         elif mutable:
@@ -890,7 +893,7 @@ def collect_conditions(markers, function, module, namespace, prior_conditions=()
             value = (heap_term if predicate.heap else scalar_term)('«' + arg.arg + '»', kind)
             env = f"if {query} = {lean_string(arg.arg)} then some ({value}) else {env}"
         binders, domain, heap = contract_domain(function)
-        runtime = 'HeapCalls' if predicate.heap else 'MemoCalls' if predicate.memoized else 'Calls'
+        runtime = 'SetCalls' if predicate.choices else 'HeapCalls' if predicate.heap else 'MemoCalls' if predicate.memoized else 'Calls'
         evaluator = 'sourceEvaluate' if runtime == 'MemoCalls' else 'evaluate'
         condition = 'SourceCondition' if runtime == 'MemoCalls' else 'Condition'
         inputs = f'{namespace}.module (fun {query} => {env}) {namespace}.{name}'
@@ -910,7 +913,7 @@ def collect_conditions(markers, function, module, namespace, prior_conditions=()
     return conditions, properties, tuple(dict.fromkeys(unsupported))
 
 
-def scalar_contract_type(module, function, namespace, property_name, conditions, negations, target=None, input_function=None):
+def scalar_contract_type(module, function, namespace, property_name, conditions, negations, target=None, input_function=None, force_choices=False):
     """Keep typing and Requires guards inside the universal or existential domain."""
     inputs = input_function or function
     arguments = inputs.args.args
@@ -918,6 +921,8 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
     binders, domain, heap = contract_domain(inputs)
     heap_inputs = heap_input_name(inputs) is not None
     names = [f"«{arg.arg}»" for arg in arguments]
+
+    choices = force_choices or uses_set_iteration(module, function) or bool(target and uses_set_iteration(target[0], target[1]))
 
     def call(program, func, ns):
         if bindings(program, func.name) != [func]:
@@ -930,9 +935,12 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
             raise InvalidRequirement("cross-file Equiv references with globals need separate module contexts")
         if [annotation_domain(arg.annotation) for arg in func.args.args] != [annotation_domain(arg.annotation) for arg in arguments]:
             raise InvalidRequirement("Equiv requires matching supported argument domains")
-        if heap_inputs or getattr(inputs, "formalsw_globals", ()):
+        if choices and uses_memoized(program, func):
+            raise InvalidRequirement("set traversal and memoized calls need a combined execution model")
+        if choices or heap_inputs or getattr(inputs, "formalsw_globals", ()):
             values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))
-            result = f'FormalSW.PyAst.HeapCalls.call {ns}.module {lean_string(func.name)} [{values}] {heap}'
+            runtime = 'SetCalls' if choices else 'HeapCalls'
+            result = f'FormalSW.PyAst.{runtime}.call {ns}.module {lean_string(func.name)} [{values}] {heap}'
             if getattr(inputs, 'formalsw_globals', ()):
                 result += f' {contract_globals(inputs)}'
             return result
@@ -1131,6 +1139,8 @@ def collect_requirements(
             covered = []
             issues = list(condition_unsupported)
             seen = set()
+            choice_coverage = any(uses_set_iteration(program, function)
+                                  for program, function, _ in coverage_targets)
             for program, function, namespace in coverage_targets:
                 if (namespace, function.name) in seen:
                     continue
@@ -1139,7 +1149,7 @@ def collect_requirements(
                 issues.extend(function_issues)
                 if not function_issues:
                     covered.append(scalar_contract_type(program, function, namespace,
-                        'Supported', conditions, 0, input_function=stmt))
+                        'Supported', conditions, 0, input_function=stmt, force_choices=choice_coverage))
             property_type = 'False' if issues else ' ∧ '.join(f'({term})' for term in covered)
             requirements.append(Requirement(f'{proof_namespace}.{lean_import_component(stmt.name)}.«Supported»',
                 property_type, source_path, stmt.lineno, 'execution model coverage',

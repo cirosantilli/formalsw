@@ -33,6 +33,8 @@ roots = [
   "lang.py.FormalSW.MutableGlobals",
   "lang.py.FormalSW.Instances",
   "lang.py.FormalSW.HeapCalls",
+  "lang.py.FormalSW.Choices",
+  "lang.py.FormalSW.SetCalls",
   "lang.py.FormalSW.DictionaryCalls",
   "lang.py.FormalSW.SumCalls",
   "lang.py.FormalSW.MembershipCalls",

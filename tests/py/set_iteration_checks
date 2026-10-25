@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Check arbitrary set traversal choices, retained objects, and mutation errors."""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+bodies = {
+    'total': 'out = 0\nfor value in values:\n    out += value\nreturn out',
+    'count_else': 'out = 0\nfor value in values:\n    out += 1\nelse:\n    out += 100\nreturn out',
+    'nested': 'out = 0\nfor a in values:\n    for b in values:\n        out += a + b\nreturn out',
+    'pair_sums': 'out = set()\nfor a in values:\n    for b in values:\n        out.add(a + b)\nreturn out',
+    'duplicate': 'for value in values:\n    values.add(value)\nreturn len(values)',
+    'grow': 'for value in values:\n    values.add(100)\nreturn len(values)',
+    'continue_grow': 'for value in values:\n    values.add(100)\n    continue\nreturn len(values)',
+    'break_grow': 'for value in values:\n    values.add(100)\n    break\nelse:\n    return -1\nreturn len(values)',
+    'alias_grow': 'alias = values\nfor value in values:\n    alias.add(100)\nreturn len(values)',
+    'last_grow': 'for value in values:\n    if value == max(values):\n        values.add(100)\nreturn len(values)',
+    'rebind': 'out = 0\nfor value in values:\n    values = set()\n    out += value\nreturn out',
+    'nested_break': 'out = 0\nfor a in values:\n    for b in values:\n        out += 1\n        break\nreturn out',
+    'skip_even': 'out = 0\nfor value in values:\n    if value % 2 == 0:\n        continue\n    out += value\nreturn out',
+    'collect': 'out = []\nfor value in values:\n    out.append(value)\nreturn out',
+    'first': 'for value in values:\n    return value\nreturn None',
+}
+source = ''
+for name, body in bodies.items():
+    source += f'\ndef {name}(values: set[int]):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+schedules = [('fun _ => 0', lambda _: 0), ('fun _ => 17', lambda _: 17),
+             ('fun n => n + 1', lambda n: n + 1)]
+count = 0
+for name, initial, (schedule, choose) in itertools.product(
+        bodies, ([], [1], [3, -2, 1], [1, 100]), schedules):
+    original = set(initial)
+    try:
+        if name in ('collect', 'first'):
+            # These observations are deliberately order-sensitive. Compare the
+            # Python loop with this permitted permutation, not a fixed set order.
+            remaining, ordered = list(initial), []
+            while remaining:
+                ordered.append(remaining.pop(choose(len(ordered)) % len(remaining)))
+            result = world[name](ordered)
+        else:
+            result = world[name](original)
+        error = None
+    except RuntimeError:
+        result, error = None, 'RuntimeError'
+    expected = data(snapshot_roots([original] + ([result] if error is None else [])))
+    heap = '[.set [' + ', '.join(map(constant, initial)) + ']]'
+    call = f'(SetCalls.call source "{name}" [.ref 0] {heap}).run ({schedule})'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, {schedule}',
+        f'example : (match ({call}).execution.observe 3000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+# All six permutations of three representatives must be realizable. Neither
+# insertion order nor a single arbitrary traversal can prove a universal result.
+for order in itertools.permutations([1, 2, 3]):
+    remaining, indices = [1, 2, 3], []
+    for value in order:
+        index = remaining.index(value)
+        indices.append(index)
+        remaining.pop(index)
+    schedule = 'fun n => ([' + ', '.join(map(str, indices)) + '] : List Nat)[n]?.getD 0'
+    expected = data(snapshot_roots([{1, 2, 3}, list(order)]))
+    call = '(SetCalls.call source "collect" [.ref 0] [.set [.int 1, .int 2, .int 3]]).run (' + schedule + ')'
+    lines.append(f'example : (match ({call}).execution.observe 300 with\n'
+                 f'  | .done (.ok c) => Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000)\n'
+                 '  | _ => none) = some true := by native_decide')
+    count += 1
+
+lines.append('''
+def firstChoice : Mutable.CallFamily :=
+  SetCalls.call source "first" [.ref 0] [.set [.int 1, .int 2]]
+def one : Mutable.Completion := ⟨.ok (.scalar (.int 1)), [], [.set [.int 1, .int 2]], 1⟩
+def two : Mutable.Completion := ⟨.ok (.scalar (.int 2)), [], [.set [.int 1, .int 2]], 1⟩
+
+-- An order-sensitive prerequisite must not discard a possibly accepted input.
+example : SetCalls.Condition source (fun name => if name = "values" then some (.ref 0) else none)
+    (.compare (.call (.name "first") [.name "values"]) [(.eq, .constant (.int 1))])
+    [.set [.int 1, .int 2]] := by
+  refine ⟨(fun _ => 0), [.set [.int 1, .int 2]], ?_⟩
+  exact Mutable.Call.finishes_of_observe (fuel := 100) (by decide)
+
+-- One successful traversal cannot prove guaranteed equivalence.
+example : ¬ firstChoice.Equiv firstChoice := by
+  intro equivalent
+  have left : (firstChoice.run (fun _ => 0)).Finishes one :=
+    Mutable.Call.finishes_of_observe (fuel := 100) (by decide)
+  have right : (firstChoice.run (fun _ => 1)).Finishes two :=
+    Mutable.Call.finishes_of_observe (fuel := 100) (by decide)
+  obtain ⟨result, finished, same⟩ := (equivalent (fun _ => 0) (fun _ => 1)).1 one left
+  have equality : result = two := Mutable.Call.unique finished right
+  rw [equality] at same
+  rcases same with identical | ⟨_, _, _, graph⟩
+  · cases identical
+  · exact (Graph.not_equivalent_of_observe (fuel := 5000) (by native_decide)) graph
+''')
+
+with project_temporary_directory(prefix='set-iteration-checks-') as directory:
+    directory = Path(directory)
+    for index, marker in enumerate(('Returns', 'Not Halts', 'Throws', 'ReturnType', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'contract{index}.py'
+        path.write_text('def f(values: set[int]) -> int:\n    """\n    @formalsw: '
+                        + marker + '\n    """\n    for value in values:\n        return value\n    return 0\n')
+        module = api['source_module'](path)
+        requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        assert not any(item.unsupported for item in requirements), requirements
+        assert all('SetCalls.call' in item.property_type for item in requirements), requirements
+        coverage = [item for item in requirements if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and 'Not' not in coverage[0].property_type
+        checker = SupportChecker(module)
+        for runtime in ('HeapCalls.call', 'HeapCalls.scalarFunction', 'Calls.function', 'scalarFunction'):
+            assert checker.requirement('f', f'theorem wrong : Not ({runtime} ProbeAst.module "f" []).Halts')
+    path = directory / 'requires.py'
+    path.write_text('''def positive(values: set[int]) -> bool:
+    for value in values:
+        if value < 0:
+            return False
+    return True
+
+def f(values: set[int]) -> int:
+    """
+    @formalsw: Requires(positive(values))
+    @formalsw: Returns
+    """
+    return len(values)
+''')
+    module = api['source_module'](path)
+    requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+    assert not any(item.unsupported for item in requirements), requirements
+    assert any('SetCalls.Condition' in item.property_type for item in requirements), requirements
+    assert any('SetCalls.evaluate' in item.property_type and '.Supported' in item.property_type
+               for item in requirements), requirements
+    # Equivalence and coverage must use the same interpreter on both sides,
+    # including the optimized implementation that does not itself iterate a set.
+    path = ROOT / 'tests/py/set_iteration.py'
+    module = api['source_module'](path)
+    requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+    coverage = next(item for item in requirements if item.theorem_name == 'Probe.fast_count.«Supported»')
+    assert coverage.property_type.count('SetCalls.call') == 2, coverage
+    assert 'HeapCalls.call' not in coverage.property_type, coverage
+    path = directory / 'memoized.py'
+    path.write_text('''from functools import lru_cache
+
+@lru_cache(None)
+def cached(n: int) -> int:
+    return n
+
+def reference(n: int) -> int:
+    values = {i for i in range(n)}
+    for value in values:
+        return value
+    return 0
+
+def solve(n: int) -> int:
+    """
+    @formalsw: Equiv(reference)
+    """
+    return cached(n)
+''')
+    module = api['source_module'](path)
+    try:
+        api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+    except api['InvalidRequirement'] as error:
+        assert 'combined execution model' in str(error), error
+    else:
+        raise AssertionError('set traversal silently discarded memoization semantics')
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} set-iteration comparisons passed, including all permutations, aliases, and mutation errors')

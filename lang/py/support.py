@@ -15,7 +15,7 @@ from lang.py.class_support import resolve_record_inputs
 from lang.py.mutable_support import check_mutable
 from lang.py.sorting_support import MERGE_SORT, QUICK_SORT, body_of, matches_sort
 from lang.py.memo_support import cache_decorator, uses_memoized
-from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
+from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_set_iteration, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
 
 
 @dataclass(frozen=True)
@@ -568,7 +568,7 @@ class SupportChecker:
 
     @staticmethod
     def execution_targets(marker: str):
-        return re.findall(r'\b(HeapCalls\.call|HeapCalls\.scalarFunction|MemoCalls\.sourceFunction|Calls\.function|Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
+        return re.findall(r'\b(SetCalls\.call|HeapCalls\.call|HeapCalls\.scalarFunction|MemoCalls\.sourceFunction|Calls\.function|Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
 
     def requirement(self, name: str | None, marker: str) -> tuple[UnsupportedConstruct, ...]:
         """Check the enclosing function and any explicitly named proof dependencies."""
@@ -579,7 +579,7 @@ class SupportChecker:
                           for item in function_globals(self.module, self.functions[target]))
         except GlobalInputError:
             pass
-        explicit_heap = any(model == "HeapCalls.call" and target == name
+        explicit_heap = any(model in ("HeapCalls.call", "SetCalls.call") and target == name
                             for model, target in self.execution_targets(marker))
         issues = list(self.check(name, mutable=mutable, heap_calls=explicit_heap)) if name else []
         if name:
@@ -654,6 +654,12 @@ class SupportChecker:
             function = self.functions.get(target)
             if function is None:
                 continue
+            if uses_set_iteration(self.module, function) and model != 'SetCalls.call':
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'set traversal requires universal choice execution; use the short DSL or SetCalls.call'))
+            # SetCalls extends supported heap steps, so it has the same builtin coverage.
+            if model == 'SetCalls.call':
+                model = 'HeapCalls.call'
             if uses_memoized(self.module, function) and model != 'MemoCalls.sourceFunction':
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'cached functions require MemoCalls.sourceFunction with source cache metadata'))

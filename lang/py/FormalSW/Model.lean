@@ -232,6 +232,8 @@ inductive Stmt where
   | rangeStepLoop : String → Int → Int → Int → List Stmt → List Stmt → Stmt
   /-- Internal sequence iterator: a scalar sequence or a shared heap address. -/
   | sequenceStepLoop : String → SequenceSource → Nat → List Stmt → List Stmt → Stmt
+  /-- A private set iterator retains its original object and unvisited representatives. -/
+  | setStepLoop : String → Nat → List Constant → List Constant → List Stmt → List Stmt → Stmt
   /-- Internal sequence iterator with immediate, left-to-right flat unpacking. -/
   | unpackStepLoop : List String → SequenceSource → Nat → List Stmt → List Stmt → Stmt
   /-- Internal enumerate iterator with an unobservable, immediately unpacked pair. -/
@@ -1025,6 +1027,7 @@ mutual
     | .rangeLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .rangeStepLoop _ _ _ _ body otherwise | .sequenceStepLoop _ _ _ body otherwise
+      | .setStepLoop _ _ _ _ body otherwise
       | .enumerateStepLoop _ _ _ _ _ body otherwise | .unpackStepLoop _ _ _ body otherwise
       | .zipStepLoop _ _ _ body otherwise | .reverseSequenceStepLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum

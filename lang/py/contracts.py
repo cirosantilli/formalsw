@@ -17,6 +17,7 @@ class InputCondition:
     heap: bool = False
     globals: tuple = ()
     memoized: bool = False
+    choices: bool = False
 
 
 def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Module) -> InputCondition:
@@ -30,7 +31,7 @@ def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Mod
     except SyntaxError as error:
         raise ContractError(f'invalid Requires predicate: {text}') from error
     # These imports are local because call coverage itself uses import resolution.
-    from lang.py.call_support import check_calls, has_partial_primitives, uses_heap_calls
+    from lang.py.call_support import check_calls, has_partial_primitives, uses_heap_calls, uses_set_iteration
     from lang.py.memo_support import uses_memoized
     from lang.py.global_inputs import annotation_kind, call_globals, GlobalInputError
     from lang.py.support import UnsupportedConstruct
@@ -66,7 +67,7 @@ def input_condition(text: str, function: ast.FunctionDef | None, module: ast.Mod
         reference_kind(annotation_kind(arg.annotation)) for arg in function.args.args))
     check_calls(context, helper, reject, heap=heap)
     return InputCondition(expression, arguments, tuple(dict.fromkeys(issues)),
-                          heap or has_partial_primitives(context, helper), heap, globals_, uses_memoized(context, helper))
+                          heap or has_partial_primitives(context, helper), heap, globals_, uses_memoized(context, helper), uses_set_iteration(context, helper))
 
 
 def reference_kind(kind):

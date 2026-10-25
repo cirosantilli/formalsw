@@ -26,7 +26,7 @@ theorem singleton.«Returns» (n : Int) :
 theorem singleton.«ReturnType» (n : Int) :
     (HeapCalls.call program "singleton" [.scalar (.int n)] []).ReturnType "set[int]" := by
   refine .inr ⟨.ref 0, [], [.set [.int n]], 0, (singleton.result n).finishes, ?_⟩
-  simp [Mutable.Value.HasType, Data.typeName]
+  simp [Mutable.Value.HasType, show Mutable.dictionaryKinds "set[int]" = none from rfl, Data.typeName]
 
 theorem singleton.«Supported» (n : Int) :
     (HeapCalls.call program "singleton" [.scalar (.int n)] []).Supported :=

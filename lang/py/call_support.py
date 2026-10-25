@@ -302,6 +302,42 @@ def has_partial_primitives(module, function):
     return False
 
 
+
+def uses_set_iteration(module, function):
+    """Select arbitrary-order execution when a reachable loop may consume a set.
+
+    This is conservative backend selection, not permission to execute unknown
+    constructs: the source checker and universal Supported obligation still apply.
+    Comprehensions consuming sets are not yet implemented by the iterator model.
+    """
+    if module is None:
+        return False
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    pending, visited = [function], set()
+    sets, loops = False, False
+    while pending:
+        current = pending.pop()
+        if current.name in visited:
+            continue
+        visited.add(current.name)
+        kinds = [annotation_kind(arg.annotation) for arg in current.args.args]
+        kinds.append(annotation_kind(current.returns))
+        sets |= any(kind and (kind == 'set' or kind.startswith('set[')) for kind in kinds)
+        for statement in current.body:
+            for node in ast.walk(statement):
+                sets |= isinstance(node, (ast.Set, ast.SetComp))
+                if isinstance(node, ast.For):
+                    loops |= not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
+                                  and node.iter.func.id == 'range')
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    sets |= node.func.id == 'set' and not bindings(module, 'set')
+                    if node.func.id in functions:
+                        pending.append(functions[node.func.id])
+        if sets and loops:
+            return True
+    return False
+
+
 def uses_heap_calls(module, function):
     """Find list allocation or use in the transitive local call graph."""
     if needs_heap_globals(module, function):
