@@ -145,6 +145,23 @@ def bitCount (value : IntValue) : Nat :=
   let magnitude := value.natAbs
   bitCountFuel (bitLength value) magnitude
 
+private theorem bitCountFuel_eq_countP (fuel magnitude : Nat) :
+    bitCountFuel fuel magnitude = (List.range fuel).countP magnitude.testBit := by
+  induction fuel generalizing magnitude with
+  | zero => rfl
+  | succ fuel ih =>
+      rw [bitCountFuel, List.range_succ_eq_map, List.countP_cons, List.countP_map]
+      simp only [Function.comp_def, Nat.testBit_succ, ← ih]
+      have parity : magnitude % 2 = if magnitude.testBit 0 then 1 else 0 := by
+        simp only [Nat.testBit_zero, decide_eq_true_eq]
+        split <;> omega
+      rw [parity, Nat.add_comm]
+
+/-- `bit_count()` counts the set bit positions in the magnitude, including for negative integers. -/
+theorem bitCount_eq_countP (value : IntValue) :
+    bitCount value = (List.range (bitLength value)).countP value.natAbs.testBit :=
+  bitCountFuel_eq_countP (bitLength value) value.natAbs
+
 private def bytesLittleEndian : Nat → Nat → List UInt8
   | 0, _ => []
   | length + 1, value =>
