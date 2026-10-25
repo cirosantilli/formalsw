@@ -805,7 +805,7 @@ def invalidBinary (op : BinOp) (left : Value) : Eval Value := do
   if op == .sub then
     match left with
     | .ref address => match (← get)[address]? with
-        | some (.set _) | some (.keySet _) | none => unsupported
+        | none => unsupported
         | some _ => error "TypeError"
     | _ => error "TypeError"
   else if op == .mod then
@@ -830,6 +830,22 @@ def setUnion (left right : Nat) (inPlace : Bool) : Eval Value := do
         return .ref left
       else allocateSet items
   | _, _ => unsupported
+
+/-- Ordinary difference allocates; augmented difference updates the captured left set. -/
+def setDifference (left right : Nat) (inPlace : Bool) : Eval Value := do
+  match (← get)[left]?, (← get)[right]? with
+  | some (.set xs), some (.set ys) =>
+      let items := ScalarSet.difference xs ys
+      if inPlace then
+        modify fun heap => heap.set left (.set items)
+        return .ref left
+      else allocateSet items
+  | some (.set _), some (.keySet _) | some (.keySet _), some (.set _)
+    | some (.keySet _), some (.keySet _) => unsupported
+  | some (.instance _ _ _), _ | _, some (.instance _ _ _)
+    | some (.dataInstance _ _ _ _ _), _ | _, some (.dataInstance _ _ _ _ _) => unsupported
+  | none, _ | _, none => unsupported
+  | _, _ => error "TypeError"
 
 def binary (op : BinOp) (a b : Value) : Eval Value :=
   match op with
@@ -881,6 +897,7 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
               else allocateTuple (xs ++ ys)
           | none, _ | _, none => unsupported
           | _, _ => error "TypeError"
+        else if op == .sub then setDifference left right false
         else invalidBinary op a
     | .ref address, .scalar (.int n) | .scalar (.int n), .ref address =>
         if op == .mult then
@@ -924,9 +941,10 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
     | .ref _, _ => invalidBinary op a
     | _, _ => error "TypeError"
 
-/-- Builtin set augmented union preserves aliases; other operations keep their usual dispatch. -/
+/-- Builtin set augmented union and difference preserve aliases. -/
 def inplaceBinary (op : BinOp) (left right : Value) : Eval Value :=
   match op, left, right with
+  | .sub, .ref left, .ref right => setDifference left right true
   | .bitOr, .ref left, .ref right => setUnion left right true
   | _, _, _ => binary op left right
 
@@ -941,6 +959,20 @@ theorem inplace_union_sets (heap : Heap) (left right : Nat) (xs ys : List Consta
     inplaceBinary .bitOr (.ref left) (.ref right) heap =
       some (.ok (.ref left), heap.set left (.set (ScalarSet.union xs ys))) := by
   simp [inplaceBinary, setUnion, leftFound, rightFound, Except.map]
+
+theorem binary_difference_sets (heap : Heap) (left right : Nat) (xs ys : List Constant)
+    (leftFound : heap[left]? = some (.set xs)) (rightFound : heap[right]? = some (.set ys)) :
+    binary .sub (.ref left) (.ref right) heap =
+      some (.ok (.ref heap.length), heap ++ [.set (ScalarSet.difference xs ys)]) := by
+  simp [binary, show (BinOp.sub == BinOp.add) = false from rfl,
+    show (BinOp.sub == BinOp.sub) = true from rfl,
+    setDifference, leftFound, rightFound, allocateSet, Except.map]
+
+theorem inplace_difference_sets (heap : Heap) (left right : Nat) (xs ys : List Constant)
+    (leftFound : heap[left]? = some (.set xs)) (rightFound : heap[right]? = some (.set ys)) :
+    inplaceBinary .sub (.ref left) (.ref right) heap =
+      some (.ok (.ref left), heap.set left (.set (ScalarSet.difference xs ys))) := by
+  simp [inplaceBinary, setDifference, leftFound, rightFound, Except.map]
 
 /-- Sequence iteration for the builtin list, text and buffer types. -/
 def sequence : Value → Eval (List Value)

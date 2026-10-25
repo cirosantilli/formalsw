@@ -15,11 +15,34 @@ def insert (items : List Constant) (value : Constant) : List Constant :=
 /-- Union retains an existing representative from the left set, including its scalar type. -/
 def union (left right : List Constant) : List Constant := right.foldl insert left
 
+/-- Difference removes equal right-hand values and retains the original left representatives. -/
+def difference (left right : List Constant) : List Constant :=
+  left.filter (fun value => !contains right value)
+
 theorem union_singleton (items : List Constant) (value : Constant) :
     union items [value] = insert items value := rfl
 
 def Valid (items : List Constant) : Prop :=
   items.Pairwise fun left right => scalarCompare .eq left right = some false
+
+theorem mem_difference (left right : List Constant) (value : Constant) :
+    value ∈ difference left right ↔ value ∈ left ∧ contains right value = false := by
+  simp [difference]
+
+theorem valid_difference (left right : List Constant) (valid : Valid left) :
+    Valid (difference left right) := valid.filter _
+
+theorem difference_empty (items : List Constant) : difference items [] = items := by
+  simp [difference, contains]
+
+theorem difference_self (items : List Constant) : difference items items = [] := by
+  apply List.filter_eq_nil_iff.mpr
+  intro value member
+  have reflexive : scalarCompare .eq value value = some true := by
+    cases value <;> simp [scalarCompare, evalCmpOp]
+  have present : contains items value = true :=
+    List.any_eq_true.mpr ⟨value, member, by simp [reflexive]⟩
+  simp [present]
 
 def subset (left right : List Constant) : Bool :=
   left.all (contains right)
@@ -88,6 +111,16 @@ theorem contains_ints (items : List Int) (value : Int) :
         contains (tail.map Constant.int) (.int value)) = _
       rw [ih]
       simp [scalarCompare, evalCmpOp, eq_comm]
+
+theorem difference_ints (left right : List Int) :
+    difference (left.map Constant.int) (right.map Constant.int) =
+      (left.filter (fun value => decide (value ∉ right))).map Constant.int := by
+  simp [difference, List.filter_map, contains_ints, Function.comp_def]
+
+theorem contains_difference_ints (left right : List Int) (value : Int) :
+    contains (difference (left.map Constant.int) (right.map Constant.int)) (.int value) =
+      decide (value ∈ left ∧ value ∉ right) := by
+  simp [difference_ints, contains_ints]
 
 theorem insert_ints (items : List Int) (value : Int) :
     insert (items.map Constant.int) (.int value) =

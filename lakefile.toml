@@ -54,6 +54,7 @@ roots = [
   "lang.py.FormalSW.Choices",
   "lang.py.FormalSW.SetCalls",
   "lang.py.FormalSW.SetSumCalls",
+  "lang.py.FormalSW.SetDifferenceCalls",
   "lang.py.FormalSW.DictionaryCalls",
   "lang.py.FormalSW.DictionaryItemsCalls",
   "lang.py.FormalSW.DictionaryValuesCalls",

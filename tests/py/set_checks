@@ -47,8 +47,6 @@ def iterate(items: set[int]) -> int:
     for item in items:
         return item
     return 0
-def difference(items: set[int]) -> set[int]:
-    return items - items
 """
 bodies = {
     'constructor_list': 'return set([n, n, True, 1, False, 0, None, "λ", b"abc"])',
@@ -133,8 +131,8 @@ for name, initial, n, shared in itertools.product(bodies, ([], [1, -2]), (-2, 0,
     ])
     count += 1
 
-# Unmodeled set iteration and arithmetic must not manufacture Python outcomes.
-for name in ('iterate', 'difference'):
+# Unmodeled set iteration must not manufacture a Python outcome.
+for name in ('iterate',):
     lines.append(f'example : (HeapCalls.call source "{name}" [.ref 0] [.set [.int 1]]).execution.observe 100 = .unsupported := by decide')
 for source, heap in (
     ('.ref 0', '[.list [.ref 1], .tuple [.ref 1]]'),

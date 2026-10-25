@@ -462,6 +462,13 @@ theorem inplace_union_sets (heap : Heap) (left right : Nat) (xs ys : List Consta
       some (.ok (.ref left), heap.set left (.set (ScalarSet.union xs ys))) := by
   simpa [inplace, leftFound] using Mutable.inplace_union_sets heap left right xs ys leftFound rightFound
 
+theorem inplace_difference_sets (heap : Heap) (left right : Nat) (xs ys : List Constant)
+    (leftFound : heap[left]? = some (.set xs)) (rightFound : heap[right]? = some (.set ys)) :
+    inplace .sub (.ref left) (.ref right) heap =
+      some (.ok (.ref left), heap.set left (.set (ScalarSet.difference xs ys))) := by
+  simpa [inplace, leftFound] using
+    Mutable.inplace_difference_sets heap left right xs ys leftFound rightFound
+
 /-- List concatenation reads both lists before replacing the left object's contents. -/
 theorem inplace_add_lists (heap : Heap) (left right : Nat) (leftItems rightItems : List Value)
     (leftFound : heap[left]? = some (.list leftItems))

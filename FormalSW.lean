@@ -14,6 +14,7 @@ import lang.py.FormalSW.ReverseSortingCalls
 import lang.py.FormalSW.TupleComparisons
 import lang.py.FormalSW.SetCalls
 import lang.py.FormalSW.SetSumCalls
+import lang.py.FormalSW.SetDifferenceCalls
 import lang.py.FormalSW.DictionaryCalls
 import lang.py.FormalSW.DictionaryItemsCalls
 import lang.py.FormalSW.KeyDictionaryCalls
