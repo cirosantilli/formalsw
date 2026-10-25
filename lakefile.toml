@@ -39,6 +39,7 @@ roots = [
   "lang.py.FormalSW.SumCalls",
   "lang.py.FormalSW.MembershipCalls",
   "lang.py.FormalSW.ComprehensionCalls",
+  "lang.py.FormalSW.GeneratorCalls",
   "lang.py.FormalSW.ZipCalls",
   "lang.py.FormalSW.ReverseCalls",
   "lang.py.FormalSW.LoopCalls",

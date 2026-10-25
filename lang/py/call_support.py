@@ -131,6 +131,16 @@ def sequence_sum(node):
     return iterable, start
 
 
+def consumed_generator(node):
+    """Recognize generator consumers whose builtin execution is modeled."""
+    if (isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords
+            and isinstance(node.args[0], ast.GeneratorExp)
+            and (isinstance(node.func, ast.Name) and node.func.id in ('list', 'sorted')
+                 or isinstance(node.func, ast.Attribute) and node.func.attr == 'join')):
+        return node.func, node.args[0]
+    return None
+
+
 def reversed_list(node):
     """Recognize the eager builtin composition without exposing an iterator."""
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -572,6 +582,20 @@ def check_calls(module, function, reject, *, heap=False):
                     for condition in generator.ifs:
                         expr(condition, inner_scope)
                 expr(node.elt, inner_scope)
+                return
+            consumed = consumed_generator(node)
+            if consumed is not None:
+                if not heap:
+                    reject(node, 'generator consumption requires heap call execution')
+                    return
+                consumer, generator = consumed
+                if isinstance(consumer, ast.Name):
+                    if consumer.id in scope or bindings(module, consumer.id):
+                        reject(node, f'generator consumption requires the unshadowed builtin {consumer.id}')
+                else:
+                    ordinary_attribute(consumer, reject)
+                    recurse(consumer.value)
+                recurse(ast.copy_location(ast.ListComp(elt=generator.elt, generators=generator.generators), generator))
                 return
             summed = sequence_sum(node)
             if summed is not None and not bindings(module, "sum"):

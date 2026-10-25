@@ -134,7 +134,7 @@ for name in ('fresh', 'empty', 'empty_tuple', 'text', 'bytes_value', 'buffer'):
 
 for name in ('set_value', 'dict_value'):
     lines.append(f'example : (HeapCalls.call source "{name}" [] []).execution.observe 100 = .unsupported := by decide')
-for expression in ('list(xs, xs)', 'list(iterable=xs)', 'list(x for x in xs)'):
+for expression in ('list(xs, xs)', 'list(iterable=xs)'):
     module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
     assert SupportChecker(module).check('f'), expression
 for binding in ('list = 1\n', 'from somewhere import list\n'):

@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""
+Compare immediate list, sorted, and string-join generators with Python.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    if len(xs) < 4:
+        xs.append(n + 1)
+    return n
+def fail(xs: list[int], n: int) -> int:
+    xs.append(-1)
+    raise StopIteration(n)
+def fail_sequence(xs: list[int]) -> list[int]:
+    xs.append(7)
+    raise StopIteration(7)
+def wrong_then_stop(xs: list[int], n: int):
+    xs.append(n)
+    if n:
+        raise StopIteration(n)
+    return None
+def make_separator(xs: list[int]) -> str:
+    xs.append(9)
+    return "|"
+def first_source(xs: list[int]) -> list[int]:
+    xs.append(7)
+    return xs
+def receiver_order(xs: list[int]):
+    return make_separator(xs).join(str(x) for x in first_source(xs))
+def bad_receiver(xs: list[int]):
+    n = 3
+    return n.join(str(x) for x in first_source(xs))
+def aliased(xs: list[int]):
+    result = list(row for row in [xs, xs])
+    result[0].append(4)
+    return result
+def nested_join(xs: list[int]):
+    return "".join(row for row in [xs, xs])
+class Sink:
+    def join(self, values: list[int]) -> int:
+        return 1
+def custom_join(xs: list[int]):
+    return Sink().join(x for x in xs)
+'''
+names = ['receiver_order', 'bad_receiver', 'aliased', 'nested_join']
+generators = {
+    'basic': ('x', 'for x in xs'),
+    'filtered': ('x', 'for x in xs if x % 2 == 0'),
+    'nested': ('x + y', 'for x in xs for y in range(2) if y != 0'),
+    'unpacked': ('a + b', 'for a, b in zip(xs, xs)'),
+    'enumerated': ('i + x', 'for i, x in enumerate(xs, start=2)'),
+    'ranged': ('x', 'for x in range(len(xs))'),
+    'shadow': ('xs', 'for xs in xs'),
+    'mutating': ('touch(xs, x)', 'for x in xs'),
+    'inside_error': ('fail(xs, x)', 'for x in xs'),
+    'first_error': ('x', 'for x in fail_sequence(xs)'),
+}
+for consumer in ('list', 'sorted', 'join'):
+    call = '"λ".join' if consumer == 'join' else consumer
+    for variant, (element, loops) in generators.items():
+        name = consumer + '_' + variant
+        names.append(name)
+        rendered = f'str({element})' if consumer == 'join' else element
+        source += f'\ndef {name}(xs: list[int]):\n    return {call}({rendered} {loops})\n'
+    name = consumer + '_scope'
+    names.append(name)
+    rendered = 'str(x)' if consumer == 'join' else 'x'
+    source += (f'\ndef {name}(xs: list[int]):\n    x = 99\n'
+               f'    return [{call}({rendered} for x in xs), x]\n')
+    name = consumer + '_consume_before_validate'
+    names.append(name)
+    source += f'\ndef {name}(xs: list[int]):\n    return {call}(wrong_then_stop(xs, x) for x in range(2))\n'
+    name = consumer + '_after'
+    names.append(name)
+    source += f'\ndef {name}(xs: list[int]):\n    {call}({rendered} for x in xs)\n    return fail(xs, 8)\n'
+
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    if isinstance(function, ast.FunctionDef):
+        issues = checker.check(function.name, heap_calls=True)
+        assert not issues, (function.name, issues)
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name in names:
+    for initial in ([], [0], [2, -1, 0], [True, False, 1, 0]):
+        value = initial.copy()
+        try:
+            answer = world[name](value)
+            error = None
+        except (StopIteration, RuntimeError, TypeError, AttributeError) as exception:
+            answer = None
+            # Implicit errors omit interpreter-specific messages.
+            args = list(exception.args) if type(exception) is StopIteration else []
+            error = (type(exception).__name__, args)
+        heap = '[.list [' + ', '.join('.scalar (' + constant(n) + ')' for n in initial) + ']]'
+        snapshot = data(snapshot_roots([value] + ([] if error else [answer])))
+        if error:
+            label, args = error
+            error_value = '⟨' + json.dumps(label) + ', [' + ', '.join(map(constant, args)) + ']⟩'
+            outcome = f'match c.outcome with | .error e => decide (e = {error_value}) | _ => false'
+        else:
+            outcome = 'match c.outcome with | .ok _ => true | _ => false'
+        lines.extend([
+            f'-- {name}, input {initial}',
+            f'example : (match (HeapCalls.call source "{name}" [.ref 0] {heap}).execution.observe 3000 with',
+            f'  | .done (.ok c) => ({outcome}) &&',
+            f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+            '  | _ => false) = true := by native_decide',
+        ])
+        count += 1
+
+# A custom method must never receive an eagerly materialized generator argument.
+lines.append('example : (HeapCalls.call source "custom_join" [.ref 0] [.list []]).execution.observe 100 = .unsupported := by decide')
+for expression in ('sorted((x for x in xs), reverse=True)', 'list(x async for x in xs)',
+                   '"".join(iterable=(x for x in xs))'):
+    module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
+    assert SupportChecker(module).check('f'), expression
+for builtin in ('list', 'sorted'):
+    for binding in (f'{builtin} = 1\n', f'from somewhere import {builtin}\n'):
+        module = ast.parse(binding + f'def f(xs: list[int]):\n    return {builtin}(x for x in xs)\n')
+        assert SupportChecker(module).check('f'), binding
+    module = ast.parse(f'def f(xs: list[int], {builtin}: int):\n    return {builtin}(x for x in xs)\n')
+    assert SupportChecker(module).check('f')
+module = ast.parse('def f(xs: list[int]):\n    g = (x for x in xs)\n    return list(g)\n')
+assert SupportChecker(module).check('f')
+
+with project_temporary_directory(prefix='consumed-generators-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} consumed-generator Python comparisons passed, including scope, aliases, and exception boundaries')

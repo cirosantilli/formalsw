@@ -154,6 +154,8 @@ inductive Expr where
   | setComp : Expr → List (Expr × Expr × List Expr) → Expr
   /-- Immediately consumed generator sum with explicit unpacking targets. -/
   | sumGeneratorTargets : Expr → List (Expr × Expr × List Expr) → Expr → Expr
+  /-- A resolved builtin consumes a fresh generator; the iterator cannot escape. -/
+  | consumeGenerator : Expr → Expr → List (Expr × Expr × List Expr) → Expr
   /-- A Python subscription such as `values[i]`. -/
   | subscript : Expr -> Expr -> Expr
   /-- A Python slice used inside a subscription. -/
@@ -381,6 +383,13 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
             ← Expr.fromJson? (← jsonField generator "iter"),
             ← jsonArray generator "ifs" Expr.fromJson?))
         (← Expr.fromJson? (← jsonField json "start"))
+  | "ConsumeGenerator" =>
+      return .consumeGenerator (← Expr.fromJson? (← jsonField json "consumer"))
+        (← Expr.fromJson? (← jsonField json "elt"))
+        (← jsonArray json "generators" fun generator => do
+          return (← Expr.fromJson? (← jsonField generator "target"),
+            ← Expr.fromJson? (← jsonField generator "iter"),
+            ← jsonArray generator "ifs" Expr.fromJson?))
   | "Tuple" => return .tuple (← jsonArray json "elts" Expr.fromJson?)
   | "Dict" => return .dict (← jsonArray json "entries" fun entry => do
       return (← Expr.fromJson? (← jsonField entry "key"),
@@ -1012,6 +1021,9 @@ mutual
     | .sumGeneratorTargets element generators start =>
         2 + element.operationCount + start.operationCount + (generators.map fun (target, iterable, filters) =>
           target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
+    | .consumeGenerator consumer element generators =>
+        1 + consumer.operationCount + element.operationCount + (generators.map fun (target, iterable, filters) =>
+          target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
     | .extremumRange _ bounds _ => 3 + (bounds.map Expr.operationCount).sum
     | .sumRange _ element bounds conditions =>
         5 + element.operationCount + (bounds.map Expr.operationCount).sum +
@@ -1480,7 +1492,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
   | Expr.reversedList _ | Expr.zipIterable _ => none
-  | Expr.listComp _ _ | Expr.listCompTargets _ _ | Expr.setComp _ _ | Expr.sumGeneratorTargets _ _ _ => none
+  | Expr.listComp _ _ | Expr.listCompTargets _ _ | Expr.setComp _ _ | Expr.sumGeneratorTargets _ _ _ | Expr.consumeGenerator _ _ _ => none
   | Expr.tuple _ | Expr.dict _ => none
   | Expr.binOp
       (Expr.binOp

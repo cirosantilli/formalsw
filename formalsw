@@ -20,7 +20,7 @@ from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
-from lang.py.call_support import range_sum, range_extremum, sequence_sum, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
+from lang.py.call_support import range_sum, range_extremum, sequence_sum, consumed_generator, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
@@ -1479,6 +1479,19 @@ class AstJsonEmitter:
                 kind = "SumGeneratorTargets" if encoded["type"] == "ListCompTargets" else "SumGenerator"
                 return {**encoded, "type": kind, "start": self.expr(start)}
             return {"type": "SumSequence", "iter": self.expr(iterable), "start": self.expr(start)}
+        consumed = consumed_generator(expr)
+        if consumed is not None:
+            consumer, generator = consumed
+            if not isinstance(consumer, ast.Name) or not bindings(self.bindings_module, consumer.id):
+                encoded = self.expr(ast.ListComp(elt=generator.elt, generators=generator.generators))
+                generators = encoded["generators"]
+                if encoded["type"] == "ListComp":
+                    generators = [{"target": {"type": "Name", "id": item["name"]},
+                                   "iter": item["iter"], "ifs": item["ifs"]} for item in generators]
+                target = ({"type": "BuiltinCall", "name": consumer.id, "args": []}
+                          if isinstance(consumer, ast.Name) else self.expr(consumer))
+                return {"type": "ConsumeGenerator", "consumer": target,
+                        "elt": encoded["elt"], "generators": generators}
         match expr:
             case ast.JoinedStr(values=values):
                 if not plain_fstring(expr):

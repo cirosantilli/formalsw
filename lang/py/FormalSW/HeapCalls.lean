@@ -299,6 +299,12 @@ theorem inplace_add_lists (heap : Heap) (left right : Nat) (leftItems rightItems
       some (.ok (.ref left), heap.set left (.list (leftItems ++ rightItems))) := by
   simp [inplace, listInplace, Mutable.array, Mutable.sequence, leftFound, rightFound, Except.map]
 
+/-- Builtins that consume a fresh generator completely before processing its items. -/
+inductive GeneratorAction where
+  | list
+  | sorted
+  | join (separator : String)
+
 inductive Operation where
   | call (name : String)
   /-- A bound function captures its receiver and definition before argument effects. -/
@@ -327,6 +333,7 @@ inductive Operation where
   | setComprehension (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
   | zipStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
+  | generatorCollect (action : GeneratorAction) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
 
 inductive Frame where
   | dictionaryKey (value : Expr) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
@@ -334,6 +341,8 @@ inductive Frame where
   | sumStart (loop : Stmt) (env : Env)
   /-- Installed after the first iterable and ordinary consumer arguments finish. -/
   | generatorEnd
+  | generatorConsumer (action : GeneratorAction)
+  | generatorReceiver (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
   | initialized (address : Nat)
   | attribute (name : String)
   | methodReceiver (name : String) (arguments : List Expr) (env : Env)
@@ -588,6 +597,17 @@ def comprehensionTargetsStart (anchors : Nat) (element : Expr)
           | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
               enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
           | _ => .unsupported
+
+/-- A generator's first iterable is evaluated in the enclosing scope. -/
+def generatorArguments (action : GeneratorAction) (element : Expr)
+    (generators : List (Expr × Expr × List Expr)) (env : Env) (stack : List Frame) (heap : Heap) : State :=
+  let expressions := match generators with
+    | (_, iterable, _) :: _ => match iterable with
+        | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
+        | _ => [iterable]
+    | [] => []
+  argumentsState (.generatorCollect action element generators (comprehensionTargetsEnv env generators))
+    env [] expressions stack heap
 
 /-- These internal names cannot collide with Python identifiers. -/
 def sumAccumulator : String := "$formalsw.sum"
@@ -964,6 +984,9 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           (comprehensionTargetBody target body) otherwise :: following) env, stack, heap⟩
   | .operation (.comprehensionTargets element generators env) values =>
       comprehensionTargetsStart (globals := globals) anchors element generators env values stack heap
+  | .operation (.generatorCollect action element generators env) values =>
+      comprehensionTargetsStart (globals := globals) anchors element generators env values
+        (.generatorEnd :: .generatorConsumer action :: stack) heap
   | .operation (.setComprehension element generators env) values =>
       comprehensionTargetsStart (globals := globals) (isSet := true) anchors element generators env values stack heap
   | .operation (.sumGeneratorTargets element generators env start) values =>
@@ -1020,6 +1043,12 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
+      | .consumeGenerator (.builtinCall .list []) element generators =>
+          .next (generatorArguments .list element generators env stack heap)
+      | .consumeGenerator (.builtinCall .sorted []) element generators =>
+          .next (generatorArguments .sorted element generators env stack heap)
+      | .consumeGenerator (.attribute receiver "join") element generators =>
+          .next ⟨.expr receiver env, .generatorReceiver element generators env :: stack, heap⟩
       | .reversedList expression => .next (argumentsState .reversedList env [] [expression] stack heap)
       | .subscript base (.slice lower upper stride) =>
           .next (argumentsState .slice env [] [base, lower.getD (.constant .none),
@@ -1167,6 +1196,14 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
               .next ⟨.dictionary rest (ScalarDict.insert entries key value) env, stack, heap⟩
           | .sumStart loop env => sumEnter (globals := globals) anchors loop env value (.generatorEnd :: stack) heap
           | .generatorEnd => .next ⟨.value value, stack, heap⟩
+          | .generatorConsumer .list => .next ⟨.value value, stack, heap⟩
+          | .generatorConsumer .sorted => .next ⟨.operation (.builtin .sorted) [value], stack, heap⟩
+          | .generatorConsumer (.join separator) => .next ⟨.operation (.join separator) [value], stack, heap⟩
+          | .generatorReceiver element generators env =>
+              run (globals := globals) anchors heap (bindMethod module value "join") fun method heap =>
+                match method with
+                | .join separator => .next (generatorArguments (.join separator) element generators env stack heap)
+                | _ => .unsupported
           | .initialized address => match value with
               | .scalar .none => .next ⟨.value (.ref address), stack, heap⟩
               | _ => done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
@@ -1491,7 +1528,7 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | join _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | join _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>
@@ -1503,6 +1540,9 @@ theorem step_extend (extension : Extends target source) (state : State)
               exact protected_run_extend _ _ (attribute_extend extension) supported
           | methodReceiver name arguments env =>
               exact protected_run_extend _ _ (bindMethod_extend extension) supported
+          | generatorReceiver element generators env =>
+              exact protected_run_extend _ _ (bindMethod_extend extension) supported
+          | generatorConsumer action => cases action <;> rfl
           | augmentAttribute name op right rest env =>
               exact protected_run_extend _ _ (attribute_extend extension) supported
           | addReceiver item env | appendReceiver item env =>

@@ -150,7 +150,7 @@ for name in ('bytes_input', 'empty_bytes', 'buffer_input', 'empty_buffer', 'empt
 for name in ('set_input', 'dict_input', 'binary_join'):
     lines.append(f'example : (HeapCalls.call source "{name}" [] []).execution.observe 100 = .unsupported := by decide')
 lines.append('example : HeapCalls.primitive (.join "") [.ref 0] [.instance "source" "Iterable" []] = none := by decide')
-for expression in ('"".join(iterable=xs)', '"".join(x for x in xs)'):
+for expression in ('"".join(iterable=xs)',):
     module = ast.parse(f'def f(xs: list[str]):\n    return {expression}\n')
     assert SupportChecker(module).check('f')
 with project_temporary_directory(prefix='join-checks-') as directory:
