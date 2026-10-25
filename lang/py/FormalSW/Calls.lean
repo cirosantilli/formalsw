@@ -59,12 +59,20 @@ def length : Constant → Except ExceptionObject Constant
   | .bytes bytes => .ok (.int bytes.length)
   | _ => .error { typeName := "TypeError", args := [] }
 
+/-- The numeric absolute-value builtin accepts integers and their Boolean subclass. -/
+def absoluteValue : Constant → Except ExceptionObject Constant
+  | .int value => .ok (.int value.natAbs)
+  | .bool value => .ok (.int (if value then 1 else 0))
+  | _ => .error { typeName := "TypeError", args := [] }
+
 def Primitive.apply : Primitive → List Constant → Option (Except ExceptionObject Constant)
   | .raiseException typeName, args => some (.error { typeName, args })
   | .builtin .identity, [left, right] => (scalarIdentity left right).map (fun value => .ok (.bool value))
   | .builtin .len, [value] => some (length value)
   | .builtin .int, values => integerConversion values
   | .builtin .str, values => some (Strings.str values)
+  | .builtin .abs, [value] => some (absoluteValue value)
+  | .builtin .abs, _ => some (.error { typeName := "TypeError", args := [] })
   | .builtin .ord, [value] => some (Strings.ord value)
   | .builtin .max, values => positionalMaximum values
   | .builtin .min, values => positionalMinimum values

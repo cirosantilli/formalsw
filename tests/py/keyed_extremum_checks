@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""
+Check key order, ties, live sequence mutation, captures, and exceptional heaps.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.support import SupportChecker
+from lang.py.global_inputs import call_globals
+from lang.py.memo_support import uses_memoized
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = """
+from functools import lru_cache
+
+def negate(n: int) -> int:
+    return -n
+
+@lru_cache(None)
+def count(n: int) -> int:
+    if n <= 0:
+        return 0
+    return 1 + count(n - 1)
+
+def grow(value: int, items: list[int]) -> int:
+    if len(items) < 4:
+        items.append(value + 1)
+    return value
+
+def shrink(value: int, items: list[int]) -> int:
+    items.pop()
+    return value
+
+def stop(value: int) -> int:
+    raise StopIteration(value)
+
+def explode(value: int, items: list[int]) -> int:
+    items.append(value)
+    return 10 // value
+
+"""
+bodies = {
+    'named': 'return max([n, -n], key=negate)',
+    'minimum': 'return min([n, -n], key=negate)',
+    'captured': 'return max([n, -n, 0], key=lambda item: item * n)',
+    'identity_tie': 'pair = max([(n, 2), (n, 1)], key=lambda item: item[0])\nreturn pair[1]',
+    'numeric_keys': 'return max([n, -n], key=lambda item: item > 0)',
+    'absolute': 'return max([n, -n, 1], key=abs)',
+    'live_append': 'items = [n]\nreturn max(items, key=lambda item: grow(item, items))',
+    'live_shrink': 'items = [n, n + 1, n + 2]\nresult = max(items, key=lambda item: shrink(item, items))\nreturn result + 100 * len(items)',
+    'empty': 'items = [n] if n > 0 else []\nreturn min(items, key=lambda item: item)',
+    'memoized': 'return max([n, 0, n], key=count)',
+    'string': 'return ord(max("za", key=lambda character: ord(character) * n))',
+    'bytes': 'return min(b"za", key=lambda item: item * n)',
+    'buffer': 'return max(bytearray(b"za"), key=lambda item: item * n)',
+    'tuple': 'return min((n, -n), key=lambda item: item)',
+    'stop_iteration': 'return max([n], key=stop)',
+    'constant_unpack': 'a, b = (0, 1) if n else (2, 3)\nreturn a + b',
+    'dictionary': 'return n in {True: 7, 2: 9}',
+    'dictionary_not': 'return n not in {True: 7, 2: 9}',
+    'dictionary_unhashable': 'return [n] in {1: 2}',
+    'abs_scalar': 'return abs(n)',
+    'abs_bool': 'return abs(n > 0)',
+    'abs_type_error': 'return abs([n])',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int) -> int:\n' + ''.join('    ' + line + '\n' for line in body.splitlines())
+source += """
+def fresh_keys(n: int) -> int:
+    return min([n, -n], key=lambda item: [item])
+
+def exceptional_heap(items: list[int], n: int) -> int:
+    return max([n, 0], key=lambda value: explode(value, items))
+"""
+module = ast.parse(source)
+checker = SupportChecker(module)
+for name in (*bodies, 'exceptional_heap'):
+    assert not checker.check(name), (name, checker.check(name))
+
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+# List/tuple ordering remains partial; never report it as a Python exception.
+lines.append('example : (HeapCalls.scalarFunction source "fresh_keys" [.int 3]).observe 1000 = .unsupported := by native_decide')
+checks = 0
+for name in bodies:
+    for n in (-3, 0, 1, 4):
+        world = {}
+        exec(source, world)
+        try:
+            value = world[name](n)
+            constant = f'.bool {str(value).lower()}' if type(value) is bool else f'.int ({value})'
+            expected = f'.ok ({constant})'
+        except (ValueError, TypeError, StopIteration) as error:
+            args = f'[.int ({n})]' if isinstance(error, StopIteration) else '[]'
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := {args} }}'
+        runtime = 'MemoHeapCalls' if name == 'memoized' else 'HeapCalls'
+        lines.append(f'example : ({runtime}.scalarFunction source "{name}" [.int ({n})]).observe 10000 = .done ({expected}) := by native_decide')
+        checks += 1
+for n in (-3, 0, 4):
+    world = {}
+    exec(source, world)
+    items = [7]
+    try:
+        world['exceptional_heap'](items, n)
+        raise AssertionError('expected ZeroDivisionError')
+    except ZeroDivisionError:
+        pass
+    changed = ', '.join(f'.scalar (.int ({item}))' for item in items)
+    lines.append(f'example : (HeapCalls.call source "exceptional_heap" [.ref 0, .scalar (.int ({n}))] [.list [.scalar (.int 7)]]).execution.observe 1000 = .done (.ok ⟨.error {{ typeName := "ZeroDivisionError", args := [] }}, [], [.list [{changed}], .list [.scalar (.int ({n})), .scalar (.int 0)]], 1⟩) := by native_decide')
+    checks += 1
+
+base = 'def f(n: int) -> int:\n    return max([n, 0], key=lambda item: item)\n'
+for text in (base + 'max = f\n', base.replace('n: int', 'n: int, max: int'),
+             base.replace('lambda item: item', 'lambda item, other: item'),
+             base.replace('lambda item: item', 'lambda item=0: item'),
+             base.replace('lambda item: item', 'lambda *items: 0'),
+             base.replace('lambda item: item', 'lambda item: (item := 1)'),
+             base.replace('key=', 'default=0, key='),
+             base.replace('lambda item: item', 'unknown'),
+             'def f(n: int) -> int:\n    value = (1, 2) if n else (3, 4)\n    return value[0]\n'):
+    assert SupportChecker(ast.parse(text)).check('f'), text
+for text in (base.replace('lambda item: item', 'lambda item: abs(item)'),
+             'def f(n: int) -> int:\n    return abs(n)\n'):
+    for suffix in ('abs = f\n', 'from other import abs\n'):
+        assert SupportChecker(ast.parse(text + suffix)).check('f')
+    assert SupportChecker(ast.parse(text)).requirement('f', 'theorem wrong : (Calls.function Probe.module "f" [.int 0]).Returns') if 'max(' in text else True
+
+shadow = ast.parse('def key(n: int) -> int: return n\ndef f(n: int) -> int:\n    key = [n]\n    return max(key, key=lambda item: item)\n')
+assert not SupportChecker(shadow).check('f')
+shadow_call = ast.parse('def key(n: int) -> int: return n\ndef f(n: int) -> int:\n    key = n\n    return key(n)\n')
+assert SupportChecker(shadow_call).check('f')
+
+global_source = ast.parse('setting: int = 7\ndef key(n: int) -> int: return n + setting\ndef f(n: int) -> int: return max([n], key=key)\n')
+assert [item.name for item in call_globals(global_source, global_source.body[-1])] == ['setting']
+assert uses_memoized(module, next(item for item in module.body if isinstance(item, ast.FunctionDef) and item.name == 'memoized'))
+
+with project_temporary_directory(prefix='keyed-extrema-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+subprocess.run([str(ROOT / 'formalsw'), 'tests/py/keyed_extrema.py'], cwd=ROOT, check=True)
+
+print(f'Keyed extrema, absolute values and dictionary membership: {checks} Python comparisons passed')

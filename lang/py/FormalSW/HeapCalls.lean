@@ -198,12 +198,15 @@ def sequenceContains (needle : Value) : List Value → Eval Bool
       if ← Mutable.truth equal then return true
       sequenceContains needle rest
 
-/-- Membership currently covers shared lists and tuples. Other iterable protocols
-remain partial; a known non-iterable scalar raises Python's TypeError. -/
+/-- Membership covers shared sequences, sets and dictionary keys. Other iterable
+protocols remain partial; a known non-iterable scalar raises Python's TypeError. -/
 def membership (needle container : Value) (negated : Bool) : Eval Value := do
   let found ← match container with
     | .ref address => match (← get)[address]? with
         | some (.list items) | some (.tuple items) => sequenceContains needle items
+        | some (.dict entries) => do
+            let key ← Mutable.dictionaryKey needle
+            pure (ScalarDict.lookup entries key).isSome
         | some (.set items) => match needle with
             | .scalar value => pure (ScalarSet.contains items value)
             | .ref _ => Mutable.unsupported
@@ -211,6 +214,14 @@ def membership (needle container : Value) (negated : Bool) : Eval Value := do
     | .scalar (.int _) | .scalar (.bool _) | .scalar .none => Mutable.error "TypeError"
     | _ => Mutable.unsupported
   return .scalar (.bool (if negated then !found else found))
+
+/-- Dictionary membership checks normalized scalar keys without reading their values. -/
+theorem membership_dictionary (key : Constant) (negated : Bool)
+    (found : heap[address]? = some (.dict entries)) :
+    membership (.scalar key) (.ref address) negated heap =
+      some (.ok (.scalar (.bool (if negated then !(ScalarDict.lookup entries key).isSome
+        else (ScalarDict.lookup entries key).isSome))), heap) := by
+  simp [membership, found, Mutable.dictionaryKey]
 
 theorem compare_int_lists (left right : List Int)
     (foundLeft : heap[a]? = some (.list (left.map fun n => .scalar (.int n))))
@@ -338,7 +349,17 @@ inductive Operation where
   | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
   | generatorCollect (action : GeneratorAction) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
 
+/-- The sequence reference and lexical key environment persist across key calls. -/
+structure SequenceExtremum where
+  maximum : Bool
+  source : Value
+  parameter : String
+  key : Expr
+  env : Env
+
 inductive Frame where
+  | extremumSource (maximum : Bool) (parameter : String) (key : Expr) (env : Env)
+  | extremumKey (cursor : SequenceExtremum) (position : Nat) (candidate : Value) (best : Option (Value × Value))
   | dictionaryKey (value : Expr) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | dictionaryValue (key : Constant) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | sumStart (loop : Stmt) (env : Env)
@@ -387,6 +408,7 @@ inductive Frame where
       (body otherwise following : List Stmt) (env : Env)
 
 inductive Work where
+  | extremumLoop (cursor : SequenceExtremum) (position : Nat) (best : Option (Value × Value))
   | dictionary (remaining : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | expr (expression : Expr) (env : Env)
   | block (body : List Stmt) (env : Env)
@@ -469,6 +491,21 @@ def sequenceValue : SequenceSource → Value
 
 @[simp] theorem sequenceValue_source (value : Value) :
     sequenceValue (sequenceSource value) = value := by cases value <;> rfl
+
+/-- Each iterator advance observes the current shared sequence, including key effects. -/
+def extremumItem (source : Value) (position : Nat) : Eval (Option Value) := do
+  let items ← Mutable.sequence source
+  return items[position]?
+
+/-- Keep the original item and first equal key; comparisons may raise on mixed keys. -/
+def SequenceExtremum.choose (cursor : SequenceExtremum) (candidate score : Value)
+    (best : Option (Value × Value)) : Eval (Value × Value) := do
+  match best with
+  | none => return (candidate, score)
+  | some (winner, previous) =>
+      let compared ← compare (if cursor.maximum then .gt else .lt) score previous
+      let better ← Mutable.truth compared
+      return if better then (candidate, score) else (winner, previous)
 
 /-- Capture positional permutations after all constructor arguments evaluate. -/
 def permutationRows : List Value → Eval (List (List SequenceSource))
@@ -746,6 +783,8 @@ def primitive : Operation → List Value → Eval Value
   | .append _, _ | .add _, _ => Mutable.error "TypeError"
   | .builtin .identity, [left, right] => identity left right
   | .builtin .len, [value] => Mutable.length value
+  | .builtin .abs, [.scalar value] => scalarResult (some (Calls.absoluteValue value))
+  | .builtin .abs, _ => Mutable.error "TypeError"
   | .builtin .ord, [.scalar value] => scalarResult (some (Strings.ord value))
   | .builtin .ord, [.ref address] => do
       match (← get)[address]? with
@@ -967,6 +1006,14 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
   let ⟨work, stack, heap⟩ := state
   protectGenerator stack <|
   match work with
+  | .extremumLoop cursor position best =>
+      run (globals := globals) anchors heap (extremumItem cursor.source position) fun item heap =>
+        match item with
+        | none => match best with
+            | none => done (globals := globals) anchors heap (.error { typeName := "ValueError", args := [] })
+            | some (winner, _) => .next ⟨.value winner, stack, heap⟩
+        | some candidate => .next ⟨.expr cursor.key (setLocal cursor.env cursor.parameter candidate),
+            .extremumKey cursor position candidate best :: stack, heap⟩
   | .dictionary [] entries _ => result (globals := globals) anchors heap (Mutable.allocateDict entries) stack
   | .dictionary ((key, value) :: rest) entries env =>
       .next ⟨.expr key env, .dictionaryKey value rest entries env :: stack, heap⟩
@@ -1011,6 +1058,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
   | .operation operation values => result (globals := globals) anchors heap (primitive operation values) stack
   | .expr expression env =>
       match expression with
+      | .extremumSequence maximum iterable parameter key =>
+          .next ⟨.expr iterable env, .extremumSource maximum parameter key env :: stack, heap⟩
       | .constant value => .next ⟨.value (.scalar value), stack, heap⟩
       | .name name => match env name with
           | some value => .next ⟨.value value, stack, heap⟩
@@ -1298,6 +1347,12 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           | .assignSlice base lower upper stride rest env =>
               .next (argumentsState (.setSlice value) env [] [base, lower, upper, stride]
                 (.discard rest env :: stack) heap)
+          | .extremumSource maximum parameter key env =>
+              run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
+                .next ⟨.extremumLoop ⟨maximum, value, parameter, key, env⟩ 0 none, stack, heap⟩
+          | .extremumKey cursor position candidate best =>
+              run (globals := globals) anchors heap (cursor.choose candidate value best) fun updated heap =>
+                .next ⟨.extremumLoop cursor (position + 1) (some updated), stack, heap⟩
           | .assign name rest env => .next ⟨.block rest (setLocal env name value), stack, heap⟩
           | .unpack names rest env =>
               run (globals := globals) anchors heap (Mutable.sequence value) fun items heap =>
@@ -1567,7 +1622,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               simp only [step, found, extension.functions name args body found]
       | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | join _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
-  | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
+  | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
   | value value =>
       cases stack with
       | nil => rfl
@@ -2509,6 +2564,45 @@ theorem Evaluates.list_comp_sequence
     ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
       (.next rfl (.next rfl .refl)))
   cases iterable <;> simp_all [step, comprehensionStart, run]
+
+/-- Sequence extrema preserve both retained item identities and every key's heap effects. -/
+def ExtremumReturns (module : Module) (cursor : SequenceExtremum) (position : Nat)
+    (best : Option (Value × Value)) (heap : Heap) (value : Value) (finalHeap : Heap)
+    (globals : Mutable.Globals := []) : Prop :=
+  ∀ anchors stack, Reaches (globals := globals) module anchors
+    ⟨.extremumLoop cursor position best, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
+
+namespace ExtremumReturns
+
+theorem done (exhausted : extremumItem cursor.source position heap = some (.ok none, heap)) :
+    ExtremumReturns (globals := globals) module cursor position (some (winner, score)) heap winner heap := by
+  intro anchors stack
+  exact .next (by simp [step, run, exhausted]) .refl
+
+theorem next (read : extremumItem cursor.source position heap = some (.ok (some candidate), heap))
+    (key : Evaluates (globals := globals) module (setLocal cursor.env cursor.parameter candidate)
+      cursor.key heap score afterKey)
+    (selected : cursor.choose candidate score best afterKey = some (.ok updated, afterSelection))
+    (rest : ExtremumReturns (globals := globals) module cursor (position + 1) (some updated)
+      afterSelection value finalHeap) :
+    ExtremumReturns (globals := globals) module cursor position best heap value finalHeap := by
+  intro anchors stack
+  exact .next (by simp [step, run, read]) ((key anchors (.extremumKey cursor position candidate best :: stack)).trans
+    (.next (by simp [step, run, selected]) (rest anchors stack)))
+
+end ExtremumReturns
+
+theorem Evaluates.extremum_sequence
+    (iterable : Evaluates (globals := globals) module env expression heap source middle)
+    (acquired : Mutable.sequence source middle = some (.ok items, middle))
+    (rest : ExtremumReturns (globals := globals) module ⟨maximum, source, parameter, key, env⟩ 0 none
+      middle value finalHeap) :
+    Evaluates (globals := globals) module env (.extremumSequence maximum expression parameter key)
+      heap value finalHeap := by
+  intro anchors stack
+  exact .next rfl ((iterable anchors (.extremumSource maximum parameter key env :: stack)).trans
+    (.next (by simp [step, run, acquired]) (rest anchors stack)))
+
 end FormalSW.PyAst.HeapCalls
 
 namespace FormalSW.PyAst.Mutable.Call

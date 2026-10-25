@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""
+Check typing aliases preserve contract domains and reject unstable bindings.
+"""
+import ast
+from pathlib import Path
+import runpy
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.global_inputs import annotation_kind, call_globals
+from lang.py.support import SupportChecker
+from lang.py.typing_support import resolve_typing_annotations
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+checks = 0
+
+
+def accepted(text):
+    global checks
+    checks += 1
+    module = ast.parse(text)
+    before = ast.dump(module)
+    issues = SupportChecker(module).check('f')
+    assert ast.dump(module) == before, 'resolving types changed the source AST'
+    return module, issues
+
+
+for imported, annotation in (
+    ('from typing import List', 'List[int]'),
+    ('from typing import List as Numbers', 'Numbers[int]'),
+    ('import typing', 'typing.List[int]'),
+    ('import typing as t', 't.List[int]'),
+    ('from typing import Dict', 'Dict[int, bool]'),
+    ('import typing as t', 't.Dict[bytes, str]'),
+    ('from typing import Set', 'Set[int]'),
+    ('from typing import List', 'List[List[int]]'),
+):
+    source = imported + f'\ndef f(items: {annotation}) -> {annotation}:\n    return items\n'
+    module, issues = accepted(source)
+    assert not issues, (source, issues)
+    kind = annotation_kind(module.body[-1].args.args[0].annotation)
+    assert kind is not None
+    for suffix in ('\nfrom other import *\n',):
+        assert accepted(source + suffix)[1], source + suffix
+
+base = 'from typing import List\ndef f(items: List[int]) -> List[int]:\n    return items\n'
+for text in (
+    base.replace('from typing import List', ''),
+    base.replace('from typing import List', 'from other import List'),
+    base.replace('from typing import List', 'from .typing import List'),
+    base + 'List = list\n', base + 'del List\n',
+    base + 'if False:\n    List = list\n',
+    base + 'def mutate():\n    global List\n    List = list\n',
+    base + 'escaped = List\n',
+    base.replace('List[int]', 'List[float]'),
+    base.replace('List[int]', 'List[int, str]'),
+):
+    assert accepted(text)[1], text
+
+qualified = base.replace('from typing import List', 'import typing as t').replace('List[int]', 't.List[int]')
+for suffix in ('t = None\n', 't.List = list\n', 'del t.List\n', 'setattr(t, "List", list)\n',
+               'def mutate():\n    t.List = list\n', 'def escape():\n    return t\n'):
+    assert accepted(qualified + suffix)[1], suffix
+
+# Local variable annotations are unevaluated, even when using the same alias.
+local = base.replace('    return items', '    copy: List[int] = items\n    return copy')
+assert not accepted(local)[1]
+# Class scopes do not inherit module-level resolution through a shadowing name.
+module = ast.parse('from typing import List\nclass Box:\n    List = int\n    items: List[int]\n')
+resolve_typing_annotations(module)
+assert annotation_kind(module.body[-1].body[-1].annotation) is None
+# Rechecking a modified AST must invalidate its old resolved annotation metadata.
+module, issues = accepted(base)
+assert not issues
+module.body.extend(ast.parse('List = list').body)
+assert SupportChecker(module).check('f')
+
+with tempfile.TemporaryDirectory(prefix='formalsw-typing-') as temporary:
+    directory = Path(temporary)
+    module = ast.parse(base)
+    module.formalsw_source = directory / 'source.py'
+    for shadow in ('typing.py', 'typing'):
+        path = directory / shadow
+        path.write_text('List = int\n') if path.suffix else path.mkdir()
+        assert SupportChecker(module).check('f')
+        path.unlink() if path.suffix else path.rmdir()
+    # Alias spelling changes neither quantified entry domains nor properties.
+    template = '''
+IMPORT
+table: DICT[int, bool] = {}
+def f(items: LIST[int]) -> LIST[int]:
+    """
+    @formalsw: Returns
+    @formalsw: ReturnType
+    """
+    table[0] = True
+    return items
+'''
+    signatures = []
+    for imported, dictionary, sequence in (
+        ('', 'dict', 'list'),
+        ('from typing import Dict, List', 'Dict', 'List'),
+        ('import typing as t', 't.Dict', 't.List'),
+    ):
+        text = template.replace('IMPORT', imported).replace('DICT', dictionary).replace('LIST', sequence)
+        module = ast.parse(text)
+        requirements = api['collect_requirements'](directory / 'source.py', module, 'Probe', 'ProbeAst')
+        assert not any(item.unsupported for item in requirements), requirements
+        signatures.append([(item.theorem_name, item.property_type) for item in requirements])
+        function = module.body[-1]
+        assert [(item.name, item.kind) for item in call_globals(module, function)] == [('table', 'dict[int,bool]')]
+    assert signatures[0] == signatures[1] == signatures[2]
+
+print(f'Typing aliases: {checks} source checks and matching contract domains passed')

@@ -37,11 +37,12 @@ for body in (
     'return missing(n)',
     'if False: print(n)\n    return n',
     'global counter\n    counter = n\n    return n',
-    'g = n\n    return n',
     'a, *b = n, n + 1\n    return a',
     '(a, b), c = (n, n), n\n    return c',
 ):
     assert issues(base.replace('return n', body)), body
+assert not issues(base.replace('return n', 'g = n\n    return n'))
+assert issues(base.replace('return n', 'g = n\n    return g(n)'))
 # Flat unpacking checks its length at runtime, before assigning either target.
 assert not issues(base.replace('return n', 'a, b = (n,)\n    return a'))
 with_default = base.replace('g(n: int)', 'g(n: int = 0)')
@@ -127,6 +128,8 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("math_factorial_che
 subprocess.run([sys.executable, str(Path(__file__).with_name("link_library_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("minimum_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("range_extremum_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("keyed_extremum_checks"))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name("typing_alias_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("memo_call_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("memo_frontend_checks"))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name("memo_heap_checks"))], check=True)

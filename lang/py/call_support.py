@@ -8,6 +8,7 @@ from lang.py.imports import bindings
 from lang.py.permutation_support import permutation_binding, permutation_arguments
 from lang.py.defaults import literal_default
 from lang.py.memo_support import cache_decorator, uses_memoized
+from lang.py.call_graph import call_targets
 from lang.py.sorting_support import uses_sort_model
 from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays
 from lang.py.class_support import ordinary_attribute, plain_class_methods
@@ -85,6 +86,38 @@ def range_extremum(node):
             and not iterable.keywords):
         return None
     return RangeExtremum(node.func.id == 'max', iterable.args, node.keywords[0].value.id)
+
+
+@dataclass(frozen=True)
+class SequenceExtremum:
+    maximum: bool
+    iterable: ast.expr
+    parameter: str
+    key: ast.expr
+
+
+def sequence_extremum(node):
+    """Recognize an immediately consumed, nonescaping sequence-key callback."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in ('min', 'max') and len(node.args) == 1
+            and len(node.keywords) == 1 and node.keywords[0].arg == 'key'):
+        return None
+    if range_extremum(node) is not None:
+        return None
+    key = node.keywords[0].value
+    if isinstance(key, ast.Name):
+        parameter = '$formalsw.extremum'
+        body = ast.Call(func=key, args=[ast.Name(id=parameter, ctx=ast.Load())], keywords=[])
+        ast.copy_location(body, node)
+        ast.fix_missing_locations(body)
+    elif (isinstance(key, ast.Lambda) and len(key.args.args) == 1
+          and not key.args.posonlyargs and not key.args.kwonlyargs
+          and not key.args.vararg and not key.args.kwarg
+          and not key.args.defaults and not key.args.kw_defaults):
+        parameter, body = key.args.args[0].arg, key.body
+    else:
+        return None
+    return SequenceExtremum(node.func.id == 'max', node.args[0], parameter, body)
 
 
 def zip_iterable(node, module):
@@ -209,11 +242,11 @@ def uses_builtin(module, function, name):
             continue
         visited.add(current.name)
         for node in (part for statement in current.body for part in ast.walk(statement)):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id == name:
+            for target in call_targets(node):
+                if target == name:
                     return True
-                if node.func.id in functions:
-                    pending.append(functions[node.func.id])
+                if target in functions:
+                    pending.append(functions[target])
     return False
 
 
@@ -230,8 +263,7 @@ def uses_method(module, function, name):
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Attribute) and node.func.attr == name:
                     return True
-                if isinstance(node.func, ast.Name) and node.func.id in functions:
-                    pending.append(functions[node.func.id])
+                pending.extend(functions[target] for target in call_targets(node) if target in functions)
     return False
 
 
@@ -248,8 +280,7 @@ def _uses_syntax(module, function, predicate):
             for node in ast.walk(statement):
                 if predicate(node):
                     return True
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
-                    pending.append(functions[node.func.id])
+                pending.extend(functions[target] for target in call_targets(node) if target in functions)
     return False
 
 
@@ -308,8 +339,7 @@ def has_partial_primitives(module, function):
                 return True
             if byte_values and isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Mod):
                 return True
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
-                pending.append(functions[node.func.id])
+            pending.extend(functions[target] for target in call_targets(node) if target in functions)
     return False
 
 
@@ -340,10 +370,10 @@ def uses_set_iteration(module, function):
                 if isinstance(node, ast.For):
                     loops |= not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                                   and node.iter.func.id == 'range')
+                loops |= sequence_extremum(node) is not None
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     sets |= node.func.id == 'set' and not bindings(module, 'set')
-                    if node.func.id in functions:
-                        pending.append(functions[node.func.id])
+                    pending.extend(functions[target] for target in call_targets(node) if target in functions)
         if sets and loops:
             return True
     return False
@@ -380,6 +410,7 @@ def uses_heap_calls(module, function):
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
             if (isinstance(node, (ast.List, ast.ListComp, ast.SetComp, ast.Dict)) or reversed_list(node) is not None
+                    or sequence_extremum(node) is not None
                     or sequence_sum(node) is not None and not bindings(module, "sum")
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
@@ -389,8 +420,7 @@ def uses_heap_calls(module, function):
                     and node.func.id == "divmod" and not bindings(module, "divmod")
                     or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get', 'pop', 'join')):
                 return True
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
-                pending.append(functions[node.func.id])
+            pending.extend(functions[target] for target in call_targets(node) if target in functions)
     return False
 
 
@@ -428,7 +458,7 @@ def uses_calls_model(module, function):
         or identity_comparison(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'ord', 'max', 'min', 'len'}
+        or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'ord', 'abs', 'max', 'min', 'len'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -515,8 +545,8 @@ def check_calls(module, function, reject, *, heap=False):
         except GlobalInputError as error:
             reject(function, str(error))
         hidden_tuples = unpacked_tuple_displays(function) if heap else set()
-        if locals_ & (functions.keys() | classes.keys()):
-            reject(function, 'local bindings must not shadow module-level call targets')
+        # A local may reuse a function/class name as data. Each call site below
+        # separately rejects invoking a shadowed module-level target.
         for index, arg in enumerate(function.args.args):
             if getattr(arg, "formalsw_capture", False):
                 continue
@@ -533,6 +563,15 @@ def check_calls(module, function, reject, *, heap=False):
         def expr(node, scope=None):
             scope = locals_ if scope is None else scope
             recurse = lambda child: expr(child, scope)
+            sequence = sequence_extremum(node)
+            if sequence is not None:
+                if not heap:
+                    reject(node, 'sequence extrema with keys require heap call execution')
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'sequence extrema require the unshadowed builtin min/max')
+                recurse(sequence.iterable)
+                expr(sequence.key, scope | {sequence.parameter})
+                return
             extremum = range_extremum(node)
             if extremum is not None:
                 if heap:
@@ -804,6 +843,13 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'divmod requires the unshadowed builtin divmod')
                 if node.keywords or len(node.args) != 2:
                     reject(node, 'divmod requires exactly two positional arguments')
+                for item in node.args:
+                    recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'abs':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'absolute value requires the unshadowed builtin abs')
+                if node.keywords or len(node.args) != 1:
+                    reject(node, 'abs requires exactly one positional argument')
                 for item in node.args:
                     recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'ord':

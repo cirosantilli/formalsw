@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from lang.py.global_inputs import function_globals, GlobalInputError, annotation_kind, annotation_domain, needs_heap_globals, call_globals
 from lang.py.class_support import resolve_record_inputs
+from lang.py.typing_support import resolve_typing_annotations
 from lang.py.mutable_support import check_mutable
 from lang.py.sorting_support import MERGE_SORT, QUICK_SORT, body_of, matches_sort
 from lang.py.memo_support import cache_decorator, uses_memoized
@@ -39,6 +40,7 @@ def binary_comparison(function: ast.FunctionDef) -> bool:
 
 class SupportChecker:
     def __init__(self, module: ast.Module):
+        resolve_typing_annotations(module)
         resolve_record_inputs(module)
         self.module = module
         self.functions = {f.name: f for f in module.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -690,6 +692,9 @@ class SupportChecker:
             if uses_builtin(self.module, function, 'ord') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'ordinal conversion requires a call interpreter'))
+            if uses_builtin(self.module, function, 'abs') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'absolute value requires a call interpreter'))
             if uses_builtin(self.module, function, 'divmod') and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'divmod returns a tuple and requires the heap call interpreter'))

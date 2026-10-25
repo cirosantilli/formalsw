@@ -20,7 +20,7 @@ from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
-from lang.py.call_support import range_sum, range_extremum, sequence_sum, consumed_generator, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
+from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sum, consumed_generator, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
 from lang.py.permutation_support import permutation_arguments
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
@@ -28,6 +28,7 @@ from lang.py.defaults import literal_default
 from lang.py.tuple_support import flat_unpacking
 from lang.py.imports import bindings, identify_classes, resolve_function, resolve_python_function
 from lang.py.class_support import dataclass_fields, resolve_record_inputs
+from lang.py.typing_support import resolve_typing_annotations
 from lang.py.linking import link_imports
 from lang import spec_setup
 from lang.py.global_inputs import function_globals, merge_globals, annotation_kind, annotation_record, annotation_domain, call_globals, needs_heap_globals, global_input_names, GlobalInputError
@@ -760,6 +761,7 @@ def source_module(source):
                 link_imports(path, module, source_module)
             else:
                 module.formalsw_link_dependencies = ()
+            resolve_typing_annotations(module)
             resolve_record_inputs(module)
             _source_modules[path] = module
         except ContractError as error:
@@ -1476,6 +1478,11 @@ class AstJsonEmitter:
                                            for name in (expr.func.id, "range")):
             return {"type": "ExtremumRange", "maximum": extremum.maximum, "key": extremum.key,
                     "bounds": [self.expr(arg) for arg in extremum.bounds]}
+        sequence = sequence_extremum(expr)
+        if sequence is not None and not bindings(self.bindings_module, expr.func.id):
+            return {"type": "ExtremumSequence", "maximum": sequence.maximum,
+                    "iter": self.expr(sequence.iterable), "parameter": sequence.parameter,
+                    "key": self.expr(sequence.key)}
         comprehension = range_sum(expr)
         if comprehension is not None and not bindings(self.bindings_module, "sum"):
             return {"type": "SumRange", "name": comprehension.name,
@@ -1595,7 +1602,7 @@ class AstJsonEmitter:
                 if (reversed_value is not None
                         and not any(bindings(self.bindings_module, name) for name in ('list', 'reversed'))):
                     return {"type": "ReversedList", "value": self.expr(reversed_value)}
-                if isinstance(func, ast.Name) and func.id in ('int', 'str', 'ord', 'max', 'min', 'divmod', 'bytearray', 'len', 'list', 'set', 'sorted') and not bindings(self.bindings_module, func.id):
+                if isinstance(func, ast.Name) and func.id in ('int', 'str', 'ord', 'abs', 'max', 'min', 'divmod', 'bytearray', 'len', 'list', 'set', 'sorted') and not bindings(self.bindings_module, func.id):
                     return {"type": "BuiltinCall", "name": func.id,
                             "args": [self.expr(arg) for arg in args]}
                 return {

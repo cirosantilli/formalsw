@@ -2,6 +2,7 @@
 import ast
 from dataclasses import dataclass
 import symtable
+from lang.py.call_graph import call_targets
 
 
 class GlobalInputError(ValueError):
@@ -39,8 +40,10 @@ def annotation_kind(annotation):
         return 'record'
     if isinstance(annotation, ast.Name) and annotation.id in ('int', 'str', 'bytes', 'bytearray', 'bool'):
         return annotation.id
-    if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name):
-        container = annotation.value.id
+    if isinstance(annotation, ast.Subscript):
+        container = getattr(annotation.value, 'formalsw_typing_container', None)
+        if container is None and isinstance(annotation.value, ast.Name):
+            container = annotation.value.id
         if container == 'dict' and isinstance(annotation.slice, ast.Tuple) and len(annotation.slice.elts) == 2:
             kinds = tuple('None' if isinstance(part, ast.Constant) and part.value is None
                           else annotation_kind(part) for part in annotation.slice.elts)
@@ -167,8 +170,8 @@ def call_globals(module, function):
                 pending.append(classes[arg.annotation.id])
         for statement in current.body:
             for node in ast.walk(statement):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                    callee = functions.get(node.func.id) or classes.get(node.func.id)
+                for target in call_targets(node):
+                    callee = functions.get(target) or classes.get(target)
                     if callee is not None:
                         pending.append(callee)
     return merge_globals(*groups)

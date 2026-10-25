@@ -20,7 +20,16 @@ def unpacked_tuple_displays(function):
     parts = list(ast.walk(function))
     parents = {child: parent for parent in parts for child in ast.iter_child_nodes(parent)}
     tables = set()
+    immediate = set()
+    def unpacked_branches(value):
+        if isinstance(value, ast.Tuple):
+            immediate.add(value)
+        elif isinstance(value, ast.IfExp):
+            unpacked_branches(value.body)
+            unpacked_branches(value.orelse)
     for node in parts:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and flat_unpacking(node.targets[0]):
+            unpacked_branches(node.value)
         if isinstance(node, (ast.For, ast.comprehension)) and flat_unpacking(node.target) and isinstance(node.iter, ast.List):
             tables.add(node.iter)
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -40,4 +49,4 @@ def unpacked_tuple_displays(function):
                and parents[part].iter is part and flat_unpacking(parents[part].target)
                for part in occurrences):
             tables.add(value)
-    return {item for table in tables for item in table.elts if isinstance(item, ast.Tuple)}
+    return immediate | {item for table in tables for item in table.elts if isinstance(item, ast.Tuple)}

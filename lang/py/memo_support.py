@@ -3,6 +3,7 @@ import ast
 from pathlib import Path
 
 from lang.py.imports import bindings
+from lang.py.call_graph import call_targets
 
 
 def cache_decorator(module, function):
@@ -74,7 +75,7 @@ def memoized_names(module):
 
 
 def uses_memoized(module, function):
-    """Follow ordinary calls and range-key callbacks, including mutual recursion."""
+    """Follow ordinary calls and named callbacks, including mutual recursion."""
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     pending, seen = [function], set()
     while pending:
@@ -85,10 +86,5 @@ def uses_memoized(module, function):
         if cache_decorator(module, current):
             return True
         for node in (part for statement in current.body for part in ast.walk(statement)):
-            if isinstance(node, ast.Call):
-                if isinstance(node.func, ast.Name) and node.func.id in functions:
-                    pending.append(functions[node.func.id])
-                for keyword in node.keywords:
-                    if keyword.arg == 'key' and isinstance(keyword.value, ast.Name) and keyword.value.id in functions:
-                        pending.append(functions[keyword.value.id])
+            pending.extend(functions[target] for target in call_targets(node) if target in functions)
     return False

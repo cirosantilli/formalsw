@@ -87,6 +87,7 @@ deriving Repr, DecidableEq, BEq, Lean.ToExpr
 
 /-- Resolved builtin calls and intrinsic operators emitted by the frontend. -/
 inductive Builtin where
+  | abs
   | int
   | str
   | ord
@@ -138,6 +139,8 @@ inductive Expr where
   | sumRange : String → Expr → List Expr → List Expr → Expr
   /-- Consume a builtin range with a source-checked scalar key function. -/
   | extremumRange (maximum : Bool) (bounds : List Expr) (key : String)
+  /-- Consume a sequence with a nonescaping key expression evaluated for each item. -/
+  | extremumSequence (maximum : Bool) (iterable : Expr) (parameter : String) (key : Expr)
   /-- Consume an ordinary iterable with an optional evaluated starting value. -/
   | sumSequence : Expr → Expr → Expr
   /-- Immediately consumed generator expression, with lazy element evaluation. -/
@@ -435,6 +438,10 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
   | "ExtremumRange" =>
       return .extremumRange (← (← json.getObjVal? "maximum").getBool?)
         (← jsonArray json "bounds" Expr.fromJson?) (← jsonString json "key")
+  | "ExtremumSequence" =>
+      return .extremumSequence (← (← jsonField json "maximum").getBool?)
+        (← Expr.fromJson? (← jsonField json "iter")) (← jsonString json "parameter")
+        (← Expr.fromJson? (← jsonField json "key"))
   | "SumRange" =>
       return .sumRange (← jsonString json "name")
         (← Expr.fromJson? (← jsonField json "element"))
@@ -455,6 +462,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "int" => pure Builtin.int
         | "len" => pure Builtin.len
         | "str" => pure Builtin.str
+        | "abs" => pure Builtin.abs
         | "ord" => pure Builtin.ord
         | "max" => pure Builtin.max
         | "min" => pure Builtin.min
@@ -1030,6 +1038,7 @@ mutual
         1 + consumer.operationCount + element.operationCount + (generators.map fun (target, iterable, filters) =>
           target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
     | .extremumRange _ bounds _ => 3 + (bounds.map Expr.operationCount).sum
+    | .extremumSequence _ iterable _ key => 3 + iterable.operationCount + key.operationCount
     | .sumRange _ element bounds conditions =>
         5 + element.operationCount + (bounds.map Expr.operationCount).sum +
           (conditions.map Expr.operationCount).sum
@@ -1494,6 +1503,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.boolOp _ _ => none
   | Expr.ifExp _ _ _ => none
   | Expr.extremumRange _ _ _ => none
+  | Expr.extremumSequence _ _ _ _ => none
   | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
   | Expr.reversedList _ | Expr.zipIterable _ | Expr.permutationsIterable _ => none

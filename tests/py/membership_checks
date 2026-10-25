@@ -53,11 +53,11 @@ bodies = {
     'short_circuit': 'a = [[n]]\nreturn a in [a, [[n + 1]]]',
     'skip_container': 'return False and n in fail(xs, n)',
 }
+bodies['dict_container'] = 'return n in {n: 0}'
 unsupported = {
     'unknown_equality': 'a = [[n]]\nreturn a in [[[n + 1]], a]',
     'string_container': 'return "a" in "abc"',
     'set_container': 'return n in set([n])',
-    'dict_container': 'return n in {n: 0}',
 }
 for name, body in (bodies | unsupported).items():
     source += f'\ndef {name}(n: int, xs: list[int]) -> bool:\n'
