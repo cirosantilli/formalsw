@@ -1635,6 +1635,14 @@ class AstJsonEmitter:
                 return {"type": "Dict", "entries": [
                     {"key": self.expr(key), "value": self.expr(value)}
                     for key, value in zip(keys, values)]}
+            case ast.DictComp(key=key, value=value, generators=generators):
+                if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
+                       for generator in generators):
+                    raise UnsupportedSyntax('comprehensions require synchronous loops with names or flat tuple/list targets')
+                return {"type": "DictComp", "key": self.expr(key), "value": self.expr(value), "generators": [
+                    {"target": self.expr(generator.target), "iter": self.iterator_expr(generator.iter),
+                     "ifs": [self.expr(condition) for condition in generator.ifs]}
+                    for generator in generators]}
             case ast.List(elts=elts):
                 return {"type": "List", "elts": [self.expr(elt) for elt in elts]}
             case ast.Set(elts=elts):

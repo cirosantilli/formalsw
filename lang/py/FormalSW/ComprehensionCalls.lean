@@ -4,6 +4,71 @@ import lang.py.FormalSW.SumCalls
 namespace FormalSW.PyAst.HeapCalls
 variable {globals : Mutable.Globals}
 
+/-- The key and value run before hashing or storing, in their source order. -/
+theorem BlockContinues.comprehension_store
+    (evaluated : Evaluates.Arguments (globals := globals) module env [keyExpression, valueExpression]
+      heap [key, value] middle)
+    (stored : Mutable.setItem (.ref address) key value middle = some (.ok (.scalar .none), finalHeap)) :
+    BlockContinues (globals := globals) module env
+      [.comprehensionStore address keyExpression valueExpression] heap env finalHeap := by
+  intro following anchors stack
+  apply Reaches.next rfl
+  apply (Evaluates.arguments_reach evaluated (.comprehensionStore address) [] anchors _).trans
+  exact .next (following := ⟨.value (.scalar .none), .discard following env :: stack, finalHeap⟩)
+    (by simp [step, result, run, stored]) (.next rfl .refl)
+
+/-- A fresh dictionary collector uses the same lexical loop scope as list and set comprehensions. -/
+theorem Evaluates.dict_comp_range
+    (arguments : Arguments (globals := globals) module env expressions heap values middle)
+    (bounds : rangeBounds values = .ok (start, stop, stride))
+    (executed : BlockContinues (globals := globals) module
+      (comprehensionTargetsEnv env ((target, .call (.name "range") expressions, filters) :: generators))
+      [.rangeStepLoop (comprehensionTargetName target) start stop stride
+        (comprehensionTargetBody target (comprehensionFilters filters
+          (comprehensionTargetsBody [.comprehensionStore middle.length key value] generators))) []]
+      (middle ++ [.dict []]) finalEnv finalHeap) :
+    Evaluates (globals := globals) module env
+      (.dictComp key value ((target, .call (.name "range") expressions, filters) :: generators))
+      heap (.ref middle.length) finalHeap := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (arguments_reach arguments _ [] anchors stack).trans
+  exact .next (by simp [step, comprehensionTargetsStart, bounds])
+    ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
+      (.next rfl (.next rfl .refl)))
+
+/-- Evaluate and validate the first iterator in the enclosing scope before allocating the dictionary. -/
+theorem Evaluates.dict_comp_sequence
+    (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
+    (notEnumerate : ∀ expressions, iterable ≠ .call (.name "enumerate") expressions)
+    (notZip : ∀ expressions, iterable ≠ .zipIterable expressions)
+    (evaluated : Evaluates (globals := globals) module env iterable heap receiver middle)
+    (sequence : Mutable.sequence receiver middle = some (.ok items, middle))
+    (executed : BlockContinues (globals := globals) module
+      (comprehensionTargetsEnv env ((target, iterable, filters) :: generators))
+      [.sequenceStepLoop (comprehensionTargetName target) (sequenceSource receiver) 0
+        (comprehensionTargetBody target (comprehensionFilters filters
+          (comprehensionTargetsBody [.comprehensionStore middle.length key value] generators))) []]
+      (middle ++ [.dict []]) finalEnv finalHeap) :
+    Evaluates (globals := globals) module env (.dictComp key value ((target, iterable, filters) :: generators))
+      heap (.ref middle.length) finalHeap := by
+  intro anchors stack
+  have first : step (globals := globals) module anchors
+      ⟨.expr (.dictComp key value ((target, iterable, filters) :: generators)) env, stack, heap⟩ =
+      .next (argumentsState
+        (.dictionaryComprehension key value ((target, iterable, filters) :: generators)
+          (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)))
+        env [] [iterable] stack heap) := by
+    have notPermutations := evaluated.not_permutations
+    cases iterable <;> simp_all [step]
+  apply Reaches.next first
+  apply (arguments_reach (.cons evaluated .nil) _ [] anchors stack).trans
+  refine .next ?_
+    ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
+      (.next rfl (.next rfl .refl)))
+  have notPermutations := evaluated.not_permutations
+  cases iterable <;> simp_all [step, comprehensionTargetsStart, run]
+
 /-- Prove a range comprehension by composing ordinary loop proofs. Only its
 first range arguments use the enclosing scope. -/
 theorem Evaluates.list_comp_targets_range

@@ -213,6 +213,8 @@ inductive Expr where
   | listCompTargets : Expr → List (Expr × Expr × List Expr) → Expr
   /-- Eager scalar set comprehension, with explicit binding targets. -/
   | setComp : Expr → List (Expr × Expr × List Expr) → Expr
+  /-- Eager dictionary comprehension, evaluating each key before its value. -/
+  | dictComp : Expr → Expr → List (Expr × Expr × List Expr) → Expr
   /-- Immediately consumed generator sum with explicit unpacking targets. -/
   | sumGeneratorTargets : Expr → List (Expr × Expr × List Expr) → Expr → Expr
   /-- A resolved builtin consumes a fresh generator; the iterator cannot escape. -/
@@ -312,6 +314,8 @@ inductive Stmt where
   | comprehensionAppend : Nat → Expr → Stmt
   /-- Insert a computed scalar into the private result of a set comprehension. -/
   | comprehensionAdd : Nat → Expr → Stmt
+  /-- Store a computed key/value pair in a private dictionary collector. -/
+  | comprehensionStore : Nat → Expr → Expr → Stmt
   /-- A Python `if` statement. -/
   | ifThen : Expr -> List Stmt -> List Stmt -> Stmt
   /-- A Python `while` statement. -/
@@ -445,6 +449,13 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
   | "ListCompTargets" | "SetComp" =>
       let constructor := if (← jsonString json "type") = "SetComp" then Expr.setComp else Expr.listCompTargets
       return constructor (← Expr.fromJson? (← jsonField json "elt"))
+        (← jsonArray json "generators" fun generator => do
+          return (← Expr.fromJson? (← jsonField generator "target"),
+            ← Expr.fromJson? (← jsonField generator "iter"),
+            ← jsonArray generator "ifs" Expr.fromJson?))
+  | "DictComp" =>
+      return .dictComp (← Expr.fromJson? (← jsonField json "key"))
+        (← Expr.fromJson? (← jsonField json "value"))
         (← jsonArray json "generators" fun generator => do
           return (← Expr.fromJson? (← jsonField generator "target"),
             ← Expr.fromJson? (← jsonField generator "iter"),
@@ -1114,6 +1125,9 @@ mutual
     | .listCompTargets element generators | .setComp element generators =>
         1 + element.operationCount + (generators.map fun (target, iterable, filters) =>
           target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
+    | .dictComp key value generators =>
+        1 + key.operationCount + value.operationCount + (generators.map fun (target, iterable, filters) =>
+          target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
     | .sumGeneratorTargets element generators start =>
         2 + element.operationCount + start.operationCount + (generators.map fun (target, iterable, filters) =>
           target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
@@ -1150,6 +1164,7 @@ mutual
           (body.map Stmt.operationCount).sum
     | .return value => 1 + value.operationCount
     | .comprehensionAppend _ value | .comprehensionAdd _ value => 1 + value.operationCount
+    | .comprehensionStore _ key value => 1 + key.operationCount + value.operationCount
     | .assign targets value =>
         1 + (targets.map Expr.operationCount).sum + value.operationCount
     | .annAssign target annotation value =>
@@ -1591,7 +1606,8 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
   | Expr.reversedList _ | Expr.zipIterable _ | Expr.permutationsIterable _ => none
-  | Expr.listComp _ _ | Expr.listCompTargets _ _ | Expr.setComp _ _ | Expr.sumGeneratorTargets _ _ _ | Expr.consumeGenerator _ _ _ => none
+  | Expr.listComp _ _ | Expr.listCompTargets _ _ | Expr.setComp _ _ | Expr.dictComp _ _ _
+      | Expr.sumGeneratorTargets _ _ _ | Expr.consumeGenerator _ _ _ => none
   | Expr.tuple _ | Expr.dict _ => none
   | Expr.binOp
       (Expr.binOp

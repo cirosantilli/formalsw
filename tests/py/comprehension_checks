@@ -138,6 +138,39 @@ bodies.update({
     'set_duplicate_effects': 'return {touch(xs, x % 2) for x in range(n)}',
     'set_unhashable_before_next': 'return {[touch(xs, x)] for x in range(n)}',
     'set_shadow_builtin': 'set = 42\nreturn {x for x in range(n)}',
+    'dict_range': 'return {x: x * x for x in range(n)}',
+    'dict_filtered': 'return {x: 10 // x for x in range(n) if x != 0 if x % 2 == 0}',
+    'dict_dependent': 'return {(x, y): x + y for x in range(n) for y in range(x)}',
+    'dict_duplicates': 'return {x % 2: x for x in range(n)}',
+    'dict_numeric_keys': 'return {x: touch(xs, n) for x in [True, 1, False, 0]}',
+    'dict_tuple_keys': 'return {(x, n): [x] for x in range(n)}',
+    'dict_alias_values': 'return {x: xs for x in range(n)}',
+    'dict_fresh_values': 'return {x: [n] for x in range(n)}',
+    'dict_no_leak': 'x = 42\nout = {x: x + 1 for x in xs}\nreturn [out, x]',
+    'dict_first_scope': 'return {xs: xs + 1 for xs in xs}',
+    'dict_later_target': 'x = 42\nreturn {y: x for y in range(n) if x for x in range(2)}',
+    'dict_same_target': 'return {x: x + 10 for x in range(n) for x in range(x)}',
+    'dict_nested_scope': 'return {x: {x: x + 1 for x in range(x)} for x in range(n)}',
+    'dict_unpack': 'return {x: y for x, y in [[n, n + 1], [2, 3]]}',
+    'dict_unpack_repeat': 'return {x: x + 1 for x, x in [[n, n + 1]]}',
+    'dict_enumerate': 'return {i: x for i, x in enumerate(xs, n)}',
+    'dict_zip': 'return {x: y for x, y in zip(xs, [n, n + 1])}',
+    'dict_text': 'return {x: n for x in "λ😀x"}',
+    'dict_bytes': 'return {x: n for x in b"az"}',
+    'dict_live_growth': 'return {x: grow(xs, x) for x in xs}',
+    'dict_live_replace': 'return {x: replace(xs, x) for x in xs}',
+    'dict_key_value_order': 'return {touch(xs, x): touch(xs, x + 10) for x in range(n)}',
+    'dict_filter_order': 'return {touch(xs, x): touch(xs, x + 10) for x in range(n) if touch(xs, x + 20)}',
+    'dict_first_order': 'return {x: x for x in range(touch(xs, n), touch(xs, n + 2))}',
+    'dict_inner_order': 'return {(x, y): touch(xs, y + 10) for x in range(n) for y in range(touch(xs, x))}',
+    'dict_key_failure': 'return {fail(xs, x): touch(xs, x + 10) for x in range(n)}',
+    'dict_value_failure': 'return {touch(xs, x): fail(xs, x + 10) for x in range(n)}',
+    'dict_hash_after_value': 'return {[touch(xs, x)]: touch(xs, x + 10) for x in range(n)}',
+    'dict_first_failure': 'return {x: x for x in range(touch(xs, n), fail(xs, n + 1))}',
+    'dict_zero_step': 'return {x: x for x in range(touch(xs, n), touch(xs, n + 2), 0)}',
+    'dict_bad_source': 'return {x: x for x in touch(xs, n)}',
+    'dict_empty_lazy': 'return {fail(xs, x): fail(xs, x + 1) for x in [] for y in range(fail(xs, 2))}',
+    'dict_filter_lazy': 'return {fail(xs, x): fail(xs, x + 1) for x in range(n) if False if fail(xs, x)}',
 })
 for name, body in bodies.items():
     source += f'\ndef {name}(xs: list[int], n: int):\n'
@@ -202,4 +235,4 @@ with project_temporary_directory(prefix='comprehension-checks-') as directory:
     proof.write_text('\n'.join(lines) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
 
-print(f'{count} list/set-comprehension Python comparisons passed, including scope, mutations, and errors')
+print(f'{count} list/set/dict-comprehension Python comparisons passed, including scope, mutations, and errors')

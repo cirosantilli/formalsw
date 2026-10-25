@@ -533,7 +533,7 @@ def uses_heap_calls(module, function):
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
             if (isinstance(node, ast.Call) and any(isinstance(argument, ast.Starred) for argument in node.args)
-                    or isinstance(node, (ast.List, ast.Set, ast.ListComp, ast.SetComp, ast.Dict)) or reversed_list(node) is not None
+                    or isinstance(node, (ast.List, ast.Set, ast.ListComp, ast.SetComp, ast.Dict, ast.DictComp)) or reversed_list(node) is not None
                     or sequence_extremum(node) is not None or sequence_sort(node) is not None
                     or generator_extremum(node) is not None
                     or sequence_sum(node) is not None and not bindings(module, "sum")
@@ -887,7 +887,7 @@ def check_calls(module, function, reject, *, heap=False):
                 for bound in extremum.bounds:
                     recurse(bound)
                 return
-            if heap and isinstance(node, (ast.ListComp, ast.SetComp)):
+            if heap and isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
                 if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
                        for generator in node.generators):
                     reject(node, 'comprehensions require synchronous loops with names or flat tuple/list targets')
@@ -943,7 +943,11 @@ def check_calls(module, function, reject, *, heap=False):
                         expr(iterable, iterable_scope)
                     for condition in generator.ifs:
                         expr(condition, inner_scope)
-                expr(node.elt, inner_scope)
+                if isinstance(node, ast.DictComp):
+                    expr(node.key, inner_scope)
+                    expr(node.value, inner_scope)
+                else:
+                    expr(node.elt, inner_scope)
                 return
             consumed = consumed_generator(node)
             if consumed is not None:

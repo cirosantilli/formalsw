@@ -122,6 +122,7 @@ def main() -> int:
         TestCase("shared list inputs and preconditions", Path("tests/py/heap_inputs.py"), 0, "All 8 checks passed"),
         TestCase("nested list inputs and shared rows", Path("tests/py/nested_inputs.py"), 0, "All 6 checks passed"),
         TestCase("list comprehensions", Path("tests/py/comprehensions.py"), 0, "All 3 checks passed"),
+        TestCase("dictionary comprehensions", Path("tests/py/dictionary_comprehensions.py"), 0, "All 2 checks passed"),
         TestCase("unpacked comprehensions", Path("tests/py/unpacked_comprehensions.py"), 0, "All 2 checks passed"),
         TestCase("zip loops and generator sums", Path("tests/py/zip_calls.py"), 0, "All 4 checks passed"),
         TestCase("unpacking loops and local annotations", Path("tests/py/unpack_loops.py"), 0, "All 5 checks passed"),
@@ -532,7 +533,7 @@ def main() -> int:
     if not link_checks_passed:
         print(textwrap.indent((link_checks.stdout + link_checks.stderr).rstrip(), "  "))
     additional_runtime_checks_passed = True
-    for script in ("scalar_contract_checks", "dictionary_items_checks", "key_dictionary_checks", "bitwise_or_shift_checks", "binary_format_checks", "unpacked_return_checks", "set_sum_checks", "set_generator_sum_checks", "global_expression_checks",
+    for script in ("scalar_contract_checks", "comprehension_checks", "dictionary_items_checks", "key_dictionary_checks", "bitwise_or_shift_checks", "binary_format_checks", "unpacked_return_checks", "set_sum_checks", "set_generator_sum_checks", "global_expression_checks",
                    "lean_cache_checks", "cache_cli_checks", "string_replace_checks", "whitespace_checks",
                    "tuple_checks", "tuple_order_checks", "reverse_sort_checks", "bool_conversion_checks", "isinstance_checks", "callee_annotation_checks", "list_count_checks", "sorted_key_checks", "named_callback_checks", "generator_extremum_checks", "starred_call_checks", "heap_memo_checks", "constant_pool_checks", "bytes_constructor_checks", "tuple_set_checks", "container_type_checks", "string_membership_checks", "variadic_tuple_checks", "materialized_range_checks"):
         checked = subprocess.run([sys.executable, f"tests/py/{script}"], cwd=REPO,

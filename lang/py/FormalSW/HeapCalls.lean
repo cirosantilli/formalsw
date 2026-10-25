@@ -504,6 +504,8 @@ inductive Operation where
   | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
   | comprehensionTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
   | setComprehension (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
+  | dictionaryComprehension (key value : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
+  | comprehensionStore (address : Nat)
   | permutationStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | zipStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
@@ -867,16 +869,20 @@ def comprehensionTargetsBody (terminal : List Stmt) : List (Expr × Expr × List
 /-- Capture the first iterator in the outer scope, before allocating the result. -/
 def comprehensionTargetsStart (anchors : Nat) (element : Expr)
     (generators : List (Expr × Expr × List Expr)) (env : Env)
-    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) (isSet : Bool := false) : Step State Completion :=
+    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := [])
+    (isSet : Bool := false) (dictionaryValue : Option Expr := none) : Step State Completion :=
   match generators with
   | [] => .unsupported
   | (target, iterable, filters) :: rest =>
-      let terminal := if isSet then Stmt.comprehensionAdd heap.length element else .comprehensionAppend heap.length element
+      let terminal := match dictionaryValue with
+        | some value => Stmt.comprehensionStore heap.length element value
+        | none => if isSet then Stmt.comprehensionAdd heap.length element else .comprehensionAppend heap.length element
       let body := comprehensionTargetBody target
         (comprehensionFilters filters (comprehensionTargetsBody [terminal] rest))
       let name := comprehensionTargetName target
       let enter := fun loop heap => Step.next
-        ⟨.block [loop] env, .comprehensionResult heap.length :: stack, heap ++ [if isSet then .set [] else .list []]⟩
+        ⟨.block [loop] env, .comprehensionResult heap.length :: stack,
+          heap ++ [if dictionaryValue.isSome then .dict [] else if isSet then .set [] else .list []]⟩
       match iterable with
       | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
           enter (.permutationStepLoop name rows body []) heap
@@ -1706,6 +1712,12 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
         (.generatorEnd :: .generatorConsumer action :: stack) heap
   | .operation (.setComprehension element generators env) values =>
       comprehensionTargetsStart (globals := globals) (isSet := true) anchors element generators env values stack heap
+  | .operation (.dictionaryComprehension key value generators env) values =>
+      comprehensionTargetsStart (globals := globals) (dictionaryValue := some value)
+        anchors key generators env values stack heap
+  | .operation (.comprehensionStore address) values => match values with
+      | [key, value] => result (globals := globals) anchors heap (Mutable.setItem (.ref address) key value) stack
+      | _ => .unsupported
   | .operation (.sumGeneratorTargets element generators env start) values =>
       sumGeneratorTargetsStart (globals := globals) anchors element generators env start values stack heap
   | .operation operation values => result (globals := globals) anchors heap (primitive operation values) stack
@@ -1760,6 +1772,12 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.setComprehension element generators (comprehensionTargetsEnv env generators))
+            env [] expressions stack heap)
+      | .dictComp key value (generators@((_, iterable, _) :: _)) =>
+          let expressions := match iterable with
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+            | _ => [iterable]
+          .next (argumentsState (.dictionaryComprehension key value generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .sumGeneratorTargets element (generators@((_, iterable, _) :: _)) start =>
           let expressions := match iterable with
@@ -1942,6 +1960,9 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           .next (argumentsState (.append address) env [] [expression] (.discard rest env :: stack) heap)
       | .comprehensionAdd address expression :: rest =>
           .next (argumentsState (.add address) env [] [expression] (.discard rest env :: stack) heap)
+      | .comprehensionStore address key value :: rest =>
+          .next (argumentsState (.comprehensionStore address) env [] [key, value]
+            (.discard rest env :: stack) heap)
       | _ => .unsupported
   | .value value =>
       match stack with
@@ -2324,7 +2345,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>
