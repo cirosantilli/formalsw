@@ -111,7 +111,7 @@ cases = [[], [None], [None, None], [1, "a"], [True, False],
          ["λ", "😀", "a", "λ"], [b"z", b"a", b"z"], list(range(12, -1, -1))]
 cases += [list(values) for values in itertools.product((-2, 0, 1), repeat=3)]
 cases += [list(values) for values in itertools.permutations((False, 0, True, 1))]
-for name, initial in itertools.product(('ascending', 'independent', 'effect'), cases):
+for name, initial in itertools.product(('ascending', 'independent', 'effect', 'nested'), cases):
     value = initial.copy()
     heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
     compare(name, '.ref 0', heap, [value], [value])
@@ -121,8 +121,7 @@ for values in itertools.product((-2, 0, 3), repeat=3):
 for name in ('text', 'bytes_value', 'buffer', 'set_value', 'empty_tuple', 'invalid'):
     compare(name, '', '[]', [], [])
 
-# Nested object comparisons and keyword options are outside this scalar model.
-lines.append('example : (HeapCalls.call source "nested" [.ref 0] [.list []]).execution.observe 100 = .unsupported := by decide')
+# Keyword options still require separate semantics.
 for expression in ('sorted()', 'sorted(xs, xs)', 'sorted(xs, key=int)',
                    'sorted(xs, reverse=True)'):
     module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')

@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""
+Compare nested-list sorting, stable references, and permutation ordering with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+from itertools import permutations
+
+def ascending(rows: list[list[int]]):
+    return sorted(rows)
+def mutate(rows: list[list[int]]):
+    result = sorted(rows)
+    if len(result) > 0:
+        result[0].append(9)
+    return result
+def generated(rows: list[list[int]]):
+    return sorted(row for row in rows)
+def permutations_sorted(xs: list[int]):
+    return sorted(list(p) for p in permutations(xs))
+'''
+program = ast.parse(source)
+for function in program.body:
+    if isinstance(function, ast.FunctionDef):
+        assert not SupportChecker(program).check(function.name), function.name
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+
+
+def compare(name, argument):
+    global count
+    objects, addresses = [], {}
+    def edge(value):
+        if type(value) is list:
+            key = id(value)
+            if key not in addresses:
+                addresses[key] = len(objects)
+                objects.append(value)
+            return f'.ref {addresses[key]}'
+        return '.scalar (' + constant(value) + ')'
+    arg = edge(argument)
+    nodes = []
+    cursor = 0
+    while cursor < len(objects):
+        nodes.append('.list [' + ', '.join(map(edge, objects[cursor])) + ']')
+        cursor += 1
+    heap = '[' + ', '.join(nodes) + ']'
+    try:
+        answer = world[name](argument)
+        error = None
+    except TypeError:
+        answer, error = None, 'TypeError'
+    expected = data(snapshot_roots(objects + ([] if error else [answer])))
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if not error else
+               'match c.outcome with | .error e => decide (e = ⟨"TypeError", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {count}',
+        f'example : (match (HeapCalls.call source "{name}" [{arg}] {heap}).execution.observe 10000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 10000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+
+small = [[], [-1], [0], [0, 0], [0, 1], [1]]
+for rows in itertools.product(small, repeat=3):
+    compare('ascending', [list(row) for row in rows])
+for name in ('ascending', 'mutate', 'generated'):
+    for rows in ([], [[], []], [[True], [1], [False], [0]], [[None], [None]],
+                 [["λ"], ["a"]], [[b"z"], [b"a"]], [[None], [0]],
+                 [[[2]], [[1]], []], [[[]], [[]]], [[0, [3]], [0, [2]]]):
+        compare(name, rows)
+    shared = [1]
+    compare(name, [shared, [1], shared, [0]])
+    cycle = []
+    cycle.append(cycle)
+    compare(name, [cycle, cycle])
+for xs in ([], [0], [2, 1, 0], [1, 1, 0], [-3, 12, 2]):
+    compare('permutations_sorted', xs)
+
+# Distinct recursive cycles cannot be resolved by the finite comparison model.
+lines.append('example : HeapSort.sort [.list [.ref 0], .list [.ref 1]] [.ref 0, .ref 1] = none := by decide')
+lines.append('example : HeapSort.sort [.instance "x" "Custom" []] [.ref 0, .ref 0] = none := by decide')
+lines.append('example : HeapCalls.primitive (.builtin .sorted) [.ref 0] [.instance "x" "Iterable" []] = none := by decide')
+with project_temporary_directory(prefix='nested-sort-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'{count} nested sorting comparisons passed, including stable references, cycles, and permutations')

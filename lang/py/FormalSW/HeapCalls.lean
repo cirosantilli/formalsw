@@ -1,6 +1,7 @@
 import lang.py.FormalSW.Instances
 import lang.py.FormalSW.Linking
 import lang.py.FormalSW.ScalarSort
+import lang.py.FormalSW.HeapSort
 import lang.py.FormalSW.Permutations
 
 /-! Function calls with shared lists. Locals and continuations carry references;
@@ -767,14 +768,13 @@ def primitive : Operation → List Value → Eval Value
       let items ← match value with
         | .ref address => match (← get)[address]? with
             | some (.set items) => pure (items.map Mutable.Value.scalar)
+            | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
             | _ => Mutable.sequence value
         | _ => Mutable.sequence value
-      let scalars ← items.mapM fun item => match item with
-        | .scalar value => pure value
-        | .ref _ => Mutable.unsupported
-      match ScalarSort.sort scalars with
-      | .ok values => Mutable.allocate (values.map Mutable.Value.scalar)
-      | .error error => throw error
+      match HeapSort.sort (← get) items with
+      | none => Mutable.unsupported
+      | some (.ok values) => Mutable.allocate values
+      | some (.error error) => throw error
   | .builtin .intBitLength, [.scalar value] => scalarResult (some (Math.bitLengthCall value))
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
   | .builtin .int, [.ref address] => do
@@ -865,16 +865,16 @@ theorem primitive_sorted_list (heap : Heap) (address : Nat) (items sorted : List
     (ordered : ScalarSort.sort items = .ok sorted) :
     primitive (.builtin .sorted) [.ref address] heap =
       some (.ok (.ref heap.length), heap ++ [.list (sorted.map Mutable.Value.scalar)]) := by
-  simp [primitive, found, Mutable.sequence, List.mapM_map, mapM_identity,
-    Function.comp_def, ordered, Mutable.allocate, Except.map]
+  simp [primitive, found, Mutable.sequence, HeapSort.sort_scalars,
+    ordered, Mutable.allocate, Except.map]
 
 theorem primitive_sorted_tuple (heap : Heap) (address : Nat) (items sorted : List Constant)
     (found : heap[address]? = some (.tuple (items.map Mutable.Value.scalar)))
     (ordered : ScalarSort.sort items = .ok sorted) :
     primitive (.builtin .sorted) [.ref address] heap =
       some (.ok (.ref heap.length), heap ++ [.list (sorted.map Mutable.Value.scalar)]) := by
-  simp [primitive, found, Mutable.sequence, List.mapM_map, mapM_identity,
-    Function.comp_def, ordered, Mutable.allocate, Except.map]
+  simp [primitive, found, Mutable.sequence, HeapSort.sort_scalars,
+    ordered, Mutable.allocate, Except.map]
 
 def library (module : Module) (name : String) (values : List Value) : Eval Value := do
   let some function := libraryFunction module name | Mutable.unsupported
