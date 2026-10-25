@@ -440,3 +440,168 @@ theorem EvaluatesRel.sum_range
   fun anchors stack => RunsRel.next (by first | exact True.intro | exact rfl) rfl (evaluated anchors stack)
 
 end FormalSW.PyAst.HeapMemoCalls
+
+
+namespace FormalSW.PyAst.HeapMemoCalls
+variable {globals : Mutable.Globals}
+
+namespace BlockReturnsRel
+
+/-- The loop condition and body share the caller's heap and cache. -/
+theorem while_loop
+    (evaluated : EvaluatesRel (globals := globals) module spec env condition heap expressionPost)
+    (rest : ∀ value middle, expressionPost value middle → ∃ flag,
+      Mutable.truth value middle = some (.ok flag, middle) ∧
+      BlockReturnsRel (globals := globals) module spec env
+        ((if flag then body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)] else otherwise) ++ following)
+        middle post) :
+    BlockReturnsRel (globals := globals) module spec env
+      (.whileDo condition body otherwise :: following) heap post := by
+  intro anchors stack
+  apply RunsRel.next (current := ⟨.block (.whileDo condition body otherwise :: following) env, stack, heap⟩)
+    (following := ⟨.expr condition env,
+      .branch (body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)]) otherwise following env :: stack,
+      heap⟩) (by trivial) rfl
+  apply (evaluated anchors
+    (.branch (body ++ [Calls.loopContinuation body (.whileDo condition body otherwise)]) otherwise following env :: stack)).bind
+  rintro final ⟨value, middle, rfl, holds⟩
+  obtain ⟨flag, truth, continued⟩ := rest value middle holds
+  exact RunsRel.next (by trivial) (by simp [HeapCalls.step, HeapCalls.run, truth]) (continued anchors stack)
+
+/-- Save the previous local value before evaluating an effectful augmented RHS. -/
+theorem augAssign
+    (lookup : env name = some left)
+    (evaluated : EvaluatesRel (globals := globals) module spec env expression heap expressionPost)
+    (selected : ∀ right middle, expressionPost right middle → ∃ value after,
+      HeapCalls.inplace op left right middle = some (.ok value, after) ∧
+      Cache.Preserves spec middle after ∧
+      BlockReturnsRel (globals := globals) module spec (HeapCalls.setLocal env name value) body after post) :
+    BlockReturnsRel (globals := globals) module spec env
+      (.augAssign (.name name) op expression :: body) heap post := by
+  intro anchors stack
+  apply RunsRel.next (current := ⟨.block (.augAssign (.name name) op expression :: body) env, stack, heap⟩)
+    (following := ⟨.expr (.name name) env,
+      .binaryLeft op expression env true :: .assign name body env :: stack, heap⟩) (by trivial) rfl
+  apply (Evaluates.lookup (module := module) (spec := spec) (heap := heap) lookup anchors
+    (.binaryLeft op expression env true :: .assign name body env :: stack)).bind
+  rintro final rfl
+  apply RunsRel.next (current := ⟨.value left,
+    .binaryLeft op expression env true :: .assign name body env :: stack, heap⟩)
+    (following := ⟨.expr expression env, .binaryRight op left true :: .assign name body env :: stack, heap⟩)
+    (by trivial) rfl
+  apply (evaluated anchors (.binaryRight op left true :: .assign name body env :: stack)).bind
+  rintro final ⟨right, middle, rfl, holds⟩
+  obtain ⟨value, after, operation, preserved, continued⟩ := selected right middle holds
+  exact RunsRel.next (current := ⟨.value right, .binaryRight op left true :: .assign name body env :: stack, middle⟩)
+    (following := ⟨.value value, .assign name body env :: stack, after⟩) (by trivial)
+    (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, operation])
+    (RunsRel.next (by trivial) rfl (continued anchors stack)) preserved
+
+/-- Each iteration reacquires the live sequence after the previous body's effects. -/
+theorem sequence_step
+    (sequence : Mutable.sequence (HeapCalls.sequenceValue source) heap = some (.ok items, heap))
+    (item : items[position]? = some value)
+    (rest : BlockReturnsRel (globals := globals) module spec (HeapCalls.setLocal env name value)
+      (body ++ [Calls.loopContinuation body (.sequenceStepLoop name source (position + 1) body otherwise)] ++ following)
+      heap post) :
+    BlockReturnsRel (globals := globals) module spec env
+      (.sequenceStepLoop name source position body otherwise :: following) heap post := by
+  intro anchors stack
+  exact RunsRel.next (by trivial) (by simp [HeapCalls.step, HeapCalls.run, sequence, item]) (rest anchors stack)
+
+theorem sequence_done
+    (sequence : Mutable.sequence (HeapCalls.sequenceValue source) heap = some (.ok items, heap))
+    (finished : items[position]? = none)
+    (rest : BlockReturnsRel (globals := globals) module spec env (otherwise ++ following) heap post) :
+    BlockReturnsRel (globals := globals) module spec env
+      (.sequenceStepLoop name source position body otherwise :: following) heap post := by
+  intro anchors stack
+  exact RunsRel.next (by trivial) (by simp [HeapCalls.step, HeapCalls.run, sequence, finished]) (rest anchors stack)
+
+end BlockReturnsRel
+
+/-- Sequence acquisition precedes the start expression; only iteration is inside
+its generator boundary. Source and start expressions each evaluate once. -/
+theorem EvaluatesRel.sum_generator_sequence
+    {startPost : Value → Heap → Value → Heap → Prop}
+    (iterated : EvaluatesRel (globals := globals) module spec env iterable heap iterablePost)
+    (ordinary : ∀ bounds, iterable ≠ .call (.name "range") bounds)
+    (acquired : ∀ source middle, iterablePost source middle → ∃ items,
+      Mutable.sequence source middle = some (.ok items, middle))
+    (started : ∀ source middle, iterablePost source middle →
+      EvaluatesRel (globals := globals) module spec env start middle (startPost source middle))
+    (executed : ∀ source middle initial afterStart, iterablePost source middle →
+      startPost source middle initial afterStart →
+      HeapCalls.sumInitial initial afterStart = some (.ok initial, afterStart) ∧
+      BlockReturnsRel (globals := globals) module spec
+        (HeapCalls.setLocal (HeapCalls.comprehensionEnv env ((name, iterable, filters) :: generators))
+          HeapCalls.sumAccumulator initial)
+        [.sequenceStepLoop name (HeapCalls.sequenceSource source) 0
+            (HeapCalls.comprehensionFilters filters (HeapCalls.sumBody element generators)) [],
+          .return (.name HeapCalls.sumAccumulator)] afterStart post) :
+    EvaluatesRel (globals := globals) module spec env
+      (.sumGenerator element ((name, iterable, filters) :: generators) start) heap post := by
+  intro anchors stack
+  have first : HeapCalls.step (globals := globals) module anchors
+      ⟨.expr (.sumGenerator element ((name, iterable, filters) :: generators) start) env, stack, heap⟩ =
+      .next (HeapCalls.argumentsState (.sumGenerator element ((name, iterable, filters) :: generators) env start)
+        env [] [iterable] stack heap) := by
+    cases iterable <;> simp_all [HeapCalls.step]
+  have arguments : ArgumentsRel (globals := globals) module spec env [iterable] heap
+      (fun values middle => ∃ source, values = [source] ∧ iterablePost source middle) :=
+    .cons iterated (fun source middle holds => .nil ⟨source, rfl, holds⟩)
+  apply RunsRel.next (current := ⟨.expr
+    (.sumGenerator element ((name, iterable, filters) :: generators) start) env, stack, heap⟩)
+    (following := HeapCalls.argumentsState
+      (.sumGenerator element ((name, iterable, filters) :: generators) env start) env [] [iterable] stack heap)
+    (by rfl) first
+  apply (arguments (.sumGenerator element ((name, iterable, filters) :: generators) env start) [] anchors stack).bind
+  rintro final ⟨values, middle, rfl, source, rfl, sourceHolds⟩
+  obtain ⟨items, sequence⟩ := acquired source middle sourceHolds
+  have enters : HeapCalls.sumGeneratorStart (globals := globals) anchors element
+      ((name, iterable, filters) :: generators) env start [source] stack middle =
+      .next ⟨.expr start env,
+        .sumStart (.sequenceStepLoop name (HeapCalls.sequenceSource source) 0
+          (HeapCalls.comprehensionFilters filters (HeapCalls.sumBody element generators)) [])
+          (HeapCalls.comprehensionEnv env ((name, iterable, filters) :: generators)) :: stack, middle⟩ := by
+    cases iterable <;> simp_all [HeapCalls.sumGeneratorStart, HeapCalls.run]
+  apply RunsRel.next (current := ⟨.operation
+    (.sumGenerator element ((name, iterable, filters) :: generators) env start) [source], stack, middle⟩)
+    (following := ⟨.expr start env,
+      .sumStart (.sequenceStepLoop name (HeapCalls.sequenceSource source) 0
+        (HeapCalls.comprehensionFilters filters (HeapCalls.sumBody element generators)) [])
+        (HeapCalls.comprehensionEnv env ((name, iterable, filters) :: generators)) :: stack, middle⟩)
+    (by trivial) (by simp [HeapCalls.step, enters])
+  apply (started source middle sourceHolds anchors _).bind
+  rintro final ⟨initial, afterStart, rfl, startHolds⟩
+  obtain ⟨accepted, continued⟩ := executed source middle initial afterStart sourceHolds startHolds
+  apply RunsRel.next (current := ⟨.value initial,
+    .sumStart (.sequenceStepLoop name (HeapCalls.sequenceSource source) 0
+      (HeapCalls.comprehensionFilters filters (HeapCalls.sumBody element generators)) [])
+      (HeapCalls.comprehensionEnv env ((name, iterable, filters) :: generators)) :: stack, afterStart⟩)
+    (following := ⟨.block
+      [.sequenceStepLoop name (HeapCalls.sequenceSource source) 0
+          (HeapCalls.comprehensionFilters filters (HeapCalls.sumBody element generators)) [],
+        .return (.name HeapCalls.sumAccumulator)]
+      (HeapCalls.setLocal (HeapCalls.comprehensionEnv env ((name, iterable, filters) :: generators))
+        HeapCalls.sumAccumulator initial), .generatorEnd :: stack, afterStart⟩)
+    (by trivial) (by simp [HeapCalls.step, HeapCalls.sumEnter, HeapCalls.run, accepted])
+  apply (continued anchors (.generatorEnd :: stack)).bind
+  rintro final ⟨value, after, rfl, holds⟩
+  exact RunsRel.next (by trivial) rfl (RunsRel.refl ⟨value, after, rfl, holds⟩)
+
+
+/-- List elements evaluate in source order before allocating the actual list. -/
+theorem Evaluates.list
+    (arguments : Evaluates.Arguments (globals := globals) module spec env expressions heap values middle)
+    (preserved : Cache.Preserves spec middle (middle ++ [.list values])) :
+    Evaluates (globals := globals) module spec env (.list expressions) heap (.ref middle.length)
+      (middle ++ [.list values]) := by
+  intro anchors stack
+  exact Runs.next (by rfl) rfl
+    ((Evaluates.arguments_reach arguments .list [] anchors stack).trans
+      (Runs.next (by trivial)
+        (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, HeapCalls.primitive, Mutable.allocate, Except.map])
+        .refl preserved))
+
+end FormalSW.PyAst.HeapMemoCalls

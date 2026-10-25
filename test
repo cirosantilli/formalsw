@@ -101,6 +101,7 @@ def main() -> int:
         TestCase("reverse sorting", Path("tests/py/reverse_sort.py"), 0, "All 6 checks passed"),
         TestCase("list removal", Path("tests/py/pop_calls.py"), 0, "All 2 checks passed"),
         TestCase("heap-valued memoization", Path("tests/py/heap_memo_calls.py"), 0, "All 2 checks passed"),
+        TestCase("effectful cached loops", Path("tests/py/heap_memo_loops.py"), 0, "All 4 checks passed"),
         TestCase("starred positional calls", Path("tests/py/starred_calls.py"), 0, "All 4 checks passed"),
         TestCase("streaming generator extrema", Path("tests/py/generator_extrema.py"), 0, "All 2 checks passed"),
         TestCase("protected named callbacks", Path("tests/py/named_callbacks.py"), 0, "All 2 checks passed"),
