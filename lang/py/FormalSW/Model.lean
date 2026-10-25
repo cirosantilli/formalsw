@@ -144,6 +144,7 @@ inductive Builtin where
   | identity
   | len
   | bytearray
+  | bytes
   | list
   | tuple
   | set
@@ -542,6 +543,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "min" => pure Builtin.min
         | "divmod" => pure Builtin.divmod
         | "bytearray" => pure Builtin.bytearray
+        | "bytes" => pure Builtin.bytes
         | "list" => pure Builtin.list
         | "tuple" => pure Builtin.tuple
         | "set" => pure Builtin.set

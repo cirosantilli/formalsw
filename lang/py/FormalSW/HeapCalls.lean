@@ -283,12 +283,31 @@ def membershipKey (needle : Value) : Eval HashKey := do
       | _ => Mutable.hashKey needle
   | _ => Mutable.hashKey needle
 
+/-- Integer bytes membership validates its range before examining even an empty container. -/
+def bytesContainsInteger (bytes : List UInt8) (needle : Int) : Eval Bool :=
+  if needle < 0 ∨ 255 < needle then Mutable.error "ValueError"
+  else pure (Py.Builtin.Bytes.containsByte bytes (UInt8.ofNat needle.toNat))
+
+/-- Bytes accept integers or byte subsequences. User-defined index/buffer protocols stay partial. -/
+def bytesContains (needle : Value) (bytes : List UInt8) : Eval Bool := do
+  match needle with
+  | .scalar (.int value) => bytesContainsInteger bytes value
+  | .scalar (.bool value) => bytesContainsInteger bytes (if value then 1 else 0)
+  | .scalar (.bytes substring) => pure (Py.Builtin.Bytes.contains bytes substring)
+  | .scalar (.string _) | .scalar .none => Mutable.error "TypeError"
+  | .ref address => match (← get)[address]? with
+      | some (.bytearray substring) => pure (Py.Builtin.Bytes.contains bytes substring)
+      | some (.list _) | some (.tuple _) | some (.dict _) | some (.keyDict _)
+      | some (.set _) | some (.keySet _) => Mutable.error "TypeError"
+      | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => Mutable.unsupported
+
 /-- Membership covers shared sequences, sets and dictionary keys. Other iterable
 protocols remain partial; a known non-iterable scalar raises Python's TypeError. -/
 def membership (needle container : Value) (negated : Bool) : Eval Value := do
   let found ← match container with
     | .ref address => match (← get)[address]? with
         | some (.list items) | some (.tuple items) => sequenceContains needle items
+        | some (.bytearray bytes) => bytesContains needle bytes
         | some (.dict entries) =>
             match needle with
             | .scalar key => pure (ScalarDict.lookup entries key).isSome
@@ -307,11 +326,11 @@ def membership (needle container : Value) (negated : Bool) : Eval Value := do
             let key ← membershipKey needle
             pure (Mutable.keyContains items key)
         | _ => Mutable.unsupported
+    | .scalar (.bytes bytes) => bytesContains needle bytes
     | .scalar (.string text) => match needle with
         | .scalar (.string substring) => pure (Strings.contains text substring)
         | _ => Mutable.error "TypeError"
     | .scalar (.int _) | .scalar (.bool _) | .scalar .none => Mutable.error "TypeError"
-    | _ => Mutable.unsupported
   return .scalar (.bool (if negated then !found else found))
 
 /-- Substring membership changes no heap objects; operand effects have already run. -/
@@ -320,6 +339,31 @@ theorem membership_string (heap : Heap) (text substring : String) (negated : Boo
       some (.ok (.scalar (.bool (if negated then !Strings.contains text substring
         else Strings.contains text substring))), heap) := by
   simp [membership]
+
+/-- Valid integer membership reads bytes without wrapping out-of-range integers or changing the heap. -/
+theorem membership_bytes_integer (heap : Heap) (bytes : List UInt8) (needle : Int) (negated : Bool)
+    (lower : 0 ≤ needle) (upper : needle ≤ 255) :
+    membership (.scalar (.int needle)) (.scalar (.bytes bytes)) negated heap =
+      some (.ok (.scalar (.bool (if negated then
+        !Py.Builtin.Bytes.containsByte bytes (UInt8.ofNat needle.toNat)
+        else Py.Builtin.Bytes.containsByte bytes (UInt8.ofNat needle.toNat)))), heap) := by
+  simp [membership, bytesContains, bytesContainsInteger, show ¬needle < 0 by omega,
+    show ¬255 < needle by omega]
+
+/-- Immutable byte subsequences include the empty subsequence. -/
+theorem membership_bytes_substring (heap : Heap) (bytes needle : List UInt8) (negated : Bool) :
+    membership (.scalar (.bytes needle)) (.scalar (.bytes bytes)) negated heap =
+      some (.ok (.scalar (.bool (if negated then !Py.Builtin.Bytes.contains bytes needle
+        else Py.Builtin.Bytes.contains bytes needle))), heap) := by
+  simp [membership, bytesContains]
+
+/-- A mutable byte-subsequence needle is read after both operand expressions have finished. -/
+theorem membership_bytes_bytearray (bytes needle : List UInt8) (negated : Bool)
+    (found : heap[address]? = some (.bytearray needle)) :
+    membership (.ref address) (.scalar (.bytes bytes)) negated heap =
+      some (.ok (.scalar (.bool (if negated then !Py.Builtin.Bytes.contains bytes needle
+        else Py.Builtin.Bytes.contains bytes needle))), heap) := by
+  simp [membership, bytesContains, found, Except.map]
 
 /-- Dictionary membership checks normalized scalar keys without reading their values. -/
 theorem membership_dictionary (key : Constant) (negated : Bool)
@@ -445,6 +489,7 @@ inductive Operation where
   | sortReverse (address : Nat)
   | replace (text : String)
   | zfill (text : String)
+  | upper (text : String)
   | strip (text : String)
   | splitWhitespace (text : String)
   | join (separator : String)
@@ -1170,6 +1215,8 @@ def primitive : Operation → List Value → Eval Value
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => Mutable.unsupported
       | _ => Mutable.error "TypeError"
   | .zfill _, _ => Mutable.error "TypeError"
+  | .upper text, [] => scalarResult (Strings.upperCall text [])
+  | .upper _, _ => Mutable.error "TypeError"
   | .join separator, [value] => do
       if let .ref address := value then
         match (← get)[address]? with
@@ -1226,6 +1273,7 @@ def primitive : Operation → List Value → Eval Value
       | none => Mutable.unsupported
   | .builtin .divmod, values => Mutable.divmod values
   | .builtin .bytearray, values => Mutable.bytearray values
+  | .builtin .bytes, values => Mutable.bytes values
   | .builtin .list, [] => Mutable.allocate []
   | .builtin .list, [value] => do
       -- Custom iteration protocols require their own execution model.
@@ -1457,6 +1505,9 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
               | some (.list _) => pure (.count address)
               | _ => Mutable.unsupported
             else if name = "get" ∨ name = "setdefault" then Mutable.error "AttributeError"
+            else if name = "upper" then match (← get)[address]? with
+              | some (.bytearray _) => Mutable.unsupported
+              | _ => Mutable.error "AttributeError"
             else if name = "strip" ∨ name = "split" then match (← get)[address]? with
               | some (.bytearray _) => Mutable.unsupported
               | _ => Mutable.error "AttributeError"
@@ -1469,16 +1520,20 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
             else Mutable.unsupported
         | some (.set _) | some (.keySet _) =>
             if name = "add" then pure (.add address)
-            else if name = "count" ∨ name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+            else if name = "count" ∨ name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
         | some (.dict _) | some (.keyDict _) =>
             if name = "get" then pure (.dictionaryGet address)
             else if name = "setdefault" then pure (.dictionarySetDefault address)
-            else if name = "count" ∨ name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+            else if name = "count" ∨ name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
         | some (.tuple _) =>
-            if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+            if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
         | none => Mutable.unsupported
     | .scalar value =>
-        if name = "strip" then match value with
+        if name = "upper" then match value with
+          | .string text => pure (.upper text)
+          | .bytes _ => Mutable.unsupported
+          | _ => Mutable.error "AttributeError"
+        else if name = "strip" then match value with
           | .string text => pure (.strip text)
           | .bytes _ => Mutable.unsupported
           | _ => Mutable.error "AttributeError"
@@ -1501,7 +1556,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
         else if name = "count" then match value with
           | .string _ | .bytes _ => Mutable.unsupported
           | _ => Mutable.error "AttributeError"
-        else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" then Mutable.error "AttributeError" else Mutable.unsupported
+        else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
   if name = "$formalsw.sort.reverse" then
     match (← resolve "sort") with
     | .sort address => pure (.sortReverse address)
@@ -2269,7 +2324,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>
@@ -2603,6 +2658,32 @@ theorem zfill (receiver : Evaluates (globals := globals) module env base heap (.
     (by simp [step, run, bindMethod])
   apply (arguments_reach arguments (.zfill text) [] anchors stack).trans
   exact .next (by simp [step, result, run, operation]) .refl
+
+/-- Uppercase conversion captures its receiver before evaluating positional arguments. -/
+theorem upper (receiver : Evaluates (globals := globals) module env base heap (.scalar (.string text)) middle)
+    (arguments : Arguments (globals := globals) module env expressions middle values afterArguments)
+    (operation : primitive (.upper text) values afterArguments = some (.ok value, finalHeap))
+    (localName : ∀ name, base = .name name → (env name).isSome = true) :
+    Evaluates (globals := globals) module env (.call (.attribute base "upper") expressions) heap value finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr base env, .methodReceiver "upper" expressions env :: stack, heap⟩)
+    (by cases base <;> simp_all [step])
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := argumentsState (.upper text) env [] expressions stack middle)
+    (by simp [step, run, bindMethod])
+  apply (arguments_reach arguments (.upper text) [] anchors stack).trans
+  exact .next (by simp [step, result, run, operation]) .refl
+
+/-- ASCII uppercase is total and does not allocate or mutate any heap object. -/
+theorem upper_ascii (receiver : Evaluates (globals := globals) module env base heap (.scalar (.string text)) middle)
+    (ascii : Strings.isAscii text = true)
+    (localName : ∀ name, base = .name name → (env name).isSome = true) :
+    Evaluates (globals := globals) module env (.call (.attribute base "upper") []) heap
+      (.scalar (.string (Strings.asciiUpper text))) middle := by
+  apply upper receiver .nil (localName := localName)
+  change scalarResult (Strings.upperCall text []) middle = _
+  rw [Strings.upperCall_ascii text ascii]
+  rfl
 
 /-- Whitespace stripping evaluates its receiver once and leaves the heap unchanged afterward. -/
 theorem strip (receiver : Evaluates (globals := globals) module env base heap (.scalar (.string text)) middle)

@@ -55,6 +55,30 @@ def zfillCall (text : String) : List Constant → Except ExceptionObject Constan
       | none => .error typeError
   | _ => .error typeError
 
+/-- The supported uppercase domain is ASCII; Unicode case expansion is deliberately excluded. -/
+def isAscii (text : String) : Bool :=
+  text.toList.all (fun character => decide (character.toNat < 128))
+
+def asciiUpperChar (character : Char) : Char :=
+  if 97 ≤ character.toNat ∧ character.toNat ≤ 122 then Char.ofNat (character.toNat - 32)
+  else character
+
+def asciiUpper (text : String) : String := String.ofList (text.toList.map asciiUpperChar)
+
+/-- Arity errors precede the partial Unicode mapping, after ordinary argument evaluation. -/
+def upperCall (text : String) : List Constant → Option (Except ExceptionObject Constant)
+  | [] => if isAscii text then some (.ok (.string (asciiUpper text))) else none
+  | _ => some (.error typeError)
+
+theorem upperCall_ascii (text : String) (ascii : isAscii text = true) :
+    upperCall text [] = some (.ok (.string (asciiUpper text))) := by
+  simp [upperCall, ascii]
+
+theorem asciiUpperChar_lowercase (character : Char)
+    (lower : 97 ≤ character.toNat) (upper : character.toNat ≤ 122) :
+    asciiUpperChar character = Char.ofNat (character.toNat - 32) := by
+  simp [asciiUpperChar, lower, upper]
+
 /-- Binary formatting uses the shared signed, arbitrary-precision builtin model. -/
 def binaryRepresentation (value : Int) : String :=
   String.ofList ((Py.Builtin.Function.Conversion.bin value).map Char.ofNat)

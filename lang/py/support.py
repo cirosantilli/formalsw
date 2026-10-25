@@ -711,6 +711,9 @@ class SupportChecker:
             if any(uses_builtin(self.module, function, name) for name in ('all', 'any')) and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction', 'SetCalls.call'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'truth consumers require the heap call interpreter'))
+            if uses_builtin(self.module, function, 'bytes') and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'bytes construction requires the heap call interpreter'))
             if uses_builtin(self.module, function, 'divmod') and model not in ('HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'divmod returns a tuple and requires the heap call interpreter'))

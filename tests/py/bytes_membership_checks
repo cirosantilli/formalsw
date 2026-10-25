@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Compare byte membership, range validation and operand effects with Python."""
+import ast
+import itertools
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.support import SupportChecker
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string "bad"'
+
+
+def byte_list(value):
+    return '[' + ', '.join(map(str, value)) + ']'
+
+
+source = '''
+def needle(events: list[int]) -> int:
+    events.append(1)
+    return 97
+def container(events: list[int]) -> bytes:
+    events.append(2)
+    return b"abc"
+def invalid(events: list[int]) -> int:
+    events.append(3)
+    return 256
+def fail(events: list[int]) -> int:
+    events.append(4)
+    raise ValueError()
+def ordered(events: list[int]) -> bool:
+    return needle(events) in container(events)
+def ordered_not(events: list[int]) -> bool:
+    return needle(events) not in container(events)
+def range_failure(events: list[int]) -> bool:
+    return invalid(events) in container(events)
+def failed_needle(events: list[int]) -> bool:
+    return fail(events) in container(events)
+def failed_container(events: list[int]) -> bool:
+    return needle(events) in fail(events)
+def mutate(items: bytearray) -> bytes:
+    items[0] = 98
+    return b"ab"
+def live_needle(items: bytearray) -> bool:
+    return items in mutate(items)
+'''
+module = ast.parse(source)
+for function in module.body:
+    issues = SupportChecker(module).check(function.name)
+    assert not issues, (function.name, issues)
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 4096',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+comparisons = 0
+for container_value, needle_value, negated in itertools.product(
+        (b'', b'abc', b'aaa', bytes(range(256))),
+        (-257, -1, 0, 1, 97, 98, 99, 127, 255, 256, 257, 2**100,
+         False, True, b'', b'a', b'ab', b'ac', b'aaaa', b'\xff', None, 'bad'),
+        (False, True)):
+    try:
+        result = needle_value not in container_value if negated else needle_value in container_value
+        outcome = '.ok (.scalar (' + constant(result) + '))'
+    except (TypeError, ValueError) as error:
+        outcome = '.error ⟨"' + type(error).__name__ + '", []⟩'
+    lines.append(f'example : HeapCalls.membership (.scalar ({constant(needle_value)})) (.scalar ({constant(container_value)})) '
+                 f'{str(negated).lower()} [] = some ({outcome}, []) := by decide')
+    comparisons += 1
+for container_value, needle_value, negated in itertools.product(
+        (b'', b'abc', b'aaa'), (bytearray(), bytearray(b'ab'), bytearray(b'ac')), (False, True)):
+    result = needle_value not in container_value if negated else needle_value in container_value
+    heap = '[.bytearray ' + byte_list(needle_value) + ']'
+    lines.append(f'example : HeapCalls.membership (.ref 0) (.scalar ({constant(container_value)})) '
+                 f'{str(negated).lower()} {heap} = some (.ok (.scalar (.bool {str(result).lower()})), {heap}) := by decide')
+    comparisons += 1
+for container_value, needle_value in itertools.product((bytearray(), bytearray(b'abc')), (0, 97, b'', b'ab', b'ac')):
+    result = needle_value in container_value
+    heap = '[.bytearray ' + byte_list(container_value) + ']'
+    lines.append(f'example : HeapCalls.membership (.scalar ({constant(needle_value)})) (.ref 0) false {heap} = '
+                 f'some (.ok (.scalar (.bool {str(result).lower()})), {heap}) := by decide')
+    comparisons += 1
+for name in ('ordered', 'ordered_not', 'range_failure', 'failed_needle', 'failed_container'):
+    events = []
+    try:
+        result = world[name](events)
+        outcome = '.ok (.scalar (' + constant(result) + '))'
+    except ValueError:
+        outcome = '.error ⟨"ValueError", []⟩'
+    event_values = ', '.join(f'.scalar (.int {value})' for value in events)
+    lines.append(f'example : (match (HeapCalls.call source "{name}" [.ref 0] [.list []]).execution.observe 500 with\n'
+                 f'  | .done (.ok done) => done.outcome == {outcome} && done.heap[0]? == some (.list [{event_values}])\n'
+                 '  | _ => false) = true := by decide')
+    comparisons += 1
+items = bytearray(b'a')
+result = world['live_needle'](items)
+lines.append('example : (match (HeapCalls.call source "live_needle" [.ref 0] [.bytearray [97]]).execution.observe 500 with\n'
+             f'  | .done (.ok done) => done.outcome == .ok (.scalar (.bool {str(result).lower()})) && '
+             f'done.heap[0]? == some (.bytearray {byte_list(items)})\n'
+             '  | _ => false) = true := by decide')
+for obj in ('.list []', '.tuple []', '.set []', '.dict []'):
+    lines.append(f'example : HeapCalls.membership (.ref 0) (.scalar (.bytes [])) false [{obj}] = '
+                 f'some (.error ⟨"TypeError", []⟩, [{obj}]) := by decide')
+lines += [
+    'example : HeapCalls.membership (.ref 0) (.scalar (.bytes [97])) false [.instance "probe" "Index" []] = none := rfl',
+    'example : HeapCalls.membership (.ref 99) (.scalar (.bytes [97])) false [] = none := rfl',
+]
+with project_temporary_directory(prefix='bytes-membership-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'MembershipChecks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'{comparisons + 7} byte-membership comparisons passed, including range errors and operand effects')

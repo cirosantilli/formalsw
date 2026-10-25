@@ -109,6 +109,7 @@ def main() -> int:
         TestCase("list occurrence counting", Path("tests/py/list_count.py"), 0, "All 3 checks passed"),
         TestCase("Unicode whitespace methods", Path("tests/py/whitespace_calls.py"), 0, "All 6 checks passed"),
         TestCase("string joining", Path("tests/py/join_calls.py"), 0, "All 5 checks passed"),
+        TestCase("ASCII string uppercasing", Path("tests/py/string_upper.py"), 0, "All 2 checks passed"),
         TestCase("generator exception boundaries", Path("tests/py/generator_exceptions.py"), 0, "All 6 checks passed"),
         TestCase("immediate generator consumers", Path("tests/py/consumed_generators.py"), 0, "All 8 checks passed"),
         TestCase("short-circuiting truth consumers", Path("tests/py/truth_consumers.py"), 0, "All 2 checks passed"),
@@ -137,6 +138,7 @@ def main() -> int:
         TestCase("enumerate shared sequences", Path("tests/py/enumerate_calls.py"), 0, "All 3 checks passed"),
         TestCase("enumerated generator sum", Path("tests/py/enumerated_sums.py"), 0, "All 2 checks passed"),
         TestCase("mutable buffers, initialization, and helper reads", Path("tests/py/buffers.py"), 0, "All 6 checks passed"),
+        TestCase("immutable byte construction", Path("tests/py/bytes_constructor.py"), 0, "All 6 checks passed"),
         TestCase("shared heap range loops", Path("tests/py/heap_ranges.py"), 0, "All 2 checks passed"),
         TestCase("prerequisites with unrelated parameters", Path("tests/py/prerequisite_parameters.py"), 0, "All 2 checks passed"),
         TestCase("decimal parsing round-trips arbitrary signed integers", Path("tests/py/decimal_roundtrip.py"), 0, "All 2 checks passed"),
@@ -531,7 +533,7 @@ def main() -> int:
     additional_runtime_checks_passed = True
     for script in ("dictionary_items_checks", "key_dictionary_checks", "bitwise_or_shift_checks", "binary_format_checks", "unpacked_return_checks", "set_sum_checks", "set_generator_sum_checks", "global_expression_checks",
                    "lean_cache_checks", "cache_cli_checks", "string_replace_checks", "whitespace_checks",
-                   "tuple_checks", "tuple_order_checks", "reverse_sort_checks", "bool_conversion_checks", "isinstance_checks", "callee_annotation_checks", "list_count_checks", "sorted_key_checks", "named_callback_checks", "generator_extremum_checks", "starred_call_checks", "heap_memo_checks", "constant_pool_checks", "tuple_set_checks", "container_type_checks", "string_membership_checks", "variadic_tuple_checks", "materialized_range_checks"):
+                   "tuple_checks", "tuple_order_checks", "reverse_sort_checks", "bool_conversion_checks", "isinstance_checks", "callee_annotation_checks", "list_count_checks", "sorted_key_checks", "named_callback_checks", "generator_extremum_checks", "starred_call_checks", "heap_memo_checks", "constant_pool_checks", "bytes_constructor_checks", "tuple_set_checks", "container_type_checks", "string_membership_checks", "variadic_tuple_checks", "materialized_range_checks"):
         checked = subprocess.run([sys.executable, f"tests/py/{script}"], cwd=REPO,
                                  text=True, capture_output=True)
         passed = checked.returncode == 0

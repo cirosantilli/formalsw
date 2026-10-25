@@ -724,6 +724,49 @@ def bytearray : List Value → Eval Value
   | [value] => do allocateBuffer (← byteValues value)
   | _ => error "TypeError"
 
+/-- Integer elements may use custom index protocols, which remain partial. -/
+def bytesElement : Value → Eval UInt8
+  | .ref address => do
+      match (← get)[address]? with
+      | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => unsupported
+      | _ => byte (.ref address)
+  | value => byte value
+
+/-- Immutable byte construction. The signed-32-bit size subset avoids imposing a
+host-dependent Py_ssize_t limit; larger sizes and encoding forms stay partial. -/
+def bytes : List Value → Eval Value
+  | [] => pure (.scalar (.bytes []))
+  | [.scalar (.int n)] =>
+      if n < -2147483648 ∨ 2147483648 ≤ n then unsupported
+      else if n < 0 then error "ValueError"
+      else pure (.scalar (.bytes (List.replicate n.toNat 0)))
+  | [.scalar (.bool b)] => pure (.scalar (.bytes (if b then [0] else [])))
+  | [.ref address] => do
+      match (← get)[address]? with
+      | some (.list items) | some (.tuple items) =>
+          return .scalar (.bytes (← items.mapM bytesElement))
+      | some (.bytearray _) => return .scalar (.bytes (← byteValues (.ref address)))
+      | _ => unsupported
+  | [value] => do return .scalar (.bytes (← byteValues value))
+  | values => if 3 < values.length then error "TypeError" else unsupported
+
+theorem bytesElement_int (n : Int) (lower : 0 ≤ n) (upper : n < 256) (heap : Heap) :
+    bytesElement (.scalar (.int n)) heap = some (.ok (UInt8.ofNat n.toNat), heap) := by
+  simp [bytesElement, byte, integer, lower, upper]
+
+/-- Reading a builtin tuple produces an immutable value without allocating a buffer. -/
+theorem bytes_tuple (heap : Heap) (address : Nat) (items : List Value) (result : List UInt8)
+    (found : heap[address]? = some (.tuple items))
+    (converted : (items.mapM bytesElement) heap = some (.ok result, heap)) :
+    bytes [.ref address] heap = some (.ok (.scalar (.bytes result)), heap) := by
+  simp [bytes, found, converted, Except.map]
+
+theorem bytes_list (heap : Heap) (address : Nat) (items : List Value) (result : List UInt8)
+    (found : heap[address]? = some (.list items))
+    (converted : (items.mapM bytesElement) heap = some (.ok result, heap)) :
+    bytes [.ref address] heap = some (.ok (.scalar (.bytes result)), heap) := by
+  simp [bytes, found, converted, Except.map]
+
 def array (value : Value) : Eval (Nat × List Value) := do
   match value with
   | .ref address =>

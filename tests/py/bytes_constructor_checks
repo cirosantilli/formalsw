@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Compare immutable byte construction, error order and heap/cache routes with Python."""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import memo_heap_runtime, uses_heap_calls, uses_heap_memoized, uses_set_iteration
+from lang.py.constant_pools import identify_constant_pools
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def scalar(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes ' + str(list(value))
+    return '.string ' + json.dumps(value)
+
+
+def data(value):
+    return '.scalar (' + scalar(value) + ')'
+
+
+def outcome(function):
+    try:
+        return '.ok (' + data(function()) + ')'
+    except (TypeError, ValueError) as error:
+        return '.error {typeName := "' + type(error).__name__ + '", args := []}'
+
+
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def program : Module := pyast_from_json% (include_str "source.json")']
+checks = 0
+raw_cases = [((), '[]', '[]')]
+for value in (-2147483648, -3, -1, 0, 1, 4, 32, True, False, None, '', 'abc', b'', b'\x00\xff'):
+    raw_cases.append(((value,), '[' + data(value) + ']', '[]'))
+for values in ([], [0, 1, 255], [True, False], [-1], [256], [10**100], [-10**100], ['x'], [b'a'], [None]):
+    rendered = '[' + ', '.join(map(data, values)) + ']'
+    for constructor, native in (('list', list), ('tuple', tuple)):
+        raw_cases.append(((native(values),), '[.ref 0]', '[.' + constructor + ' ' + rendered + ']'))
+for values in (b'', b'\x00\xff'):
+    raw_cases.append(((bytearray(values),), '[.ref 0]', '[.bytearray ' + str(list(values)) + ']'))
+raw_cases.append(((0, 1, 2, 3), '[.scalar (.int 0), .scalar (.int 1), .scalar (.int 2), .scalar (.int 3)]', '[]'))
+for arguments, rendered, heap in raw_cases:
+    expected = outcome(lambda: bytes(*arguments))
+    lines.append(f'example : Mutable.bytes {rendered} {heap} = some ({expected}, {heap}) := by decide')
+    checks += 1
+
+# The constructor intentionally has no platform-size or custom-protocol policy.
+partial = [
+    ('[.scalar (.int 2147483648)]', '[]'),
+    ('[.scalar (.int (-2147483649))]', '[]'),
+    (f'[.scalar (.int ({10**100}))]', '[]'),
+    (f'[.scalar (.int ({-10**100}))]', '[]'),
+    ('[.scalar (.string "a"), .scalar (.string "ascii")]', '[]'),
+    ('[.ref 0]', '[.instance "probe" "Custom" []]'),
+    ('[.ref 0]', '[.list [.ref 1], .instance "probe" "Index" []]'),
+    ('[.ref 0]', '[.list [.ref 1, .scalar (.int (-1))], .instance "probe" "Index" []]'),
+    ('[.ref 0]', '[.set [.int 1]]'),
+    ('[.ref 0]', '[.dict [(.int 1, .scalar .none)]]'),
+    ('[.ref 0]', '[]'),
+]
+for arguments, heap in partial:
+    lines.append(f'example : Mutable.bytes {arguments} {heap} = none := by decide')
+
+class CustomBytes:
+    def __bytes__(self):
+        return b'Q'
+
+class CustomIndex:
+    def __index__(self):
+        raise AssertionError('the earlier invalid item must prevent this protocol call')
+
+assert bytes(CustomBytes()) == b'Q'
+for early, error_name, rendered in ((-1, 'ValueError', '.int (-1)'), ('x', 'TypeError', '.string "x"')):
+    try:
+        bytes([early, CustomIndex()])
+    except (TypeError, ValueError) as error:
+        assert type(error).__name__ == error_name
+    else:
+        raise AssertionError('expected an error before the unknown later element')
+    heap = f'[.list [.scalar ({rendered}), .ref 1], .instance "probe" "Index" []]'
+    lines.append(f'example : Mutable.bytes [.ref 0] {heap} = some (.error {{typeName := "{error_name}", args := []}}, {heap}) := by decide')
+    checks += 1
+
+source = '''from functools import lru_cache
+@lru_cache(None)
+def increment(n: int) -> int:
+    return n + 1
+@lru_cache(None)
+def packed(n: int) -> bytes:
+    return bytes([n % 256])
+def fallback(n: int) -> tuple[bytes, int]:
+    return b'', 0
+def touch(events: list[int], n: int) -> int:
+    events.append(n)
+    return n
+def sequence_effect(events: list[int], n: int) -> bytes:
+    return bytes([touch(events, n), touch(events, n + 1)])
+def size_effect(events: list[int], n: int) -> bytes:
+    return bytes(touch(events, n))
+'''
+bodies = {
+    'empty': 'return bytes()',
+    'size': 'return bytes(n)',
+    'from_list': 'return bytes([0, n, 255])',
+    'from_tuple': 'return bytes((0, n, 255))',
+    'from_bool': 'return bytes(n > 0)',
+    'from_bytes': 'return bytes(b"\\x00\\xff")',
+    'from_buffer': 'buffer = bytearray([n % 256, 0, 255])\nresult = bytes(buffer)\nbuffer[0] = 99\nreturn result',
+    'fixed_tuple': 'return bytes((0, 1, 255))',
+    'pooled_fallback': 'first = fallback(n)\nif first is fallback(n + 1):\n    return bytes(first[0])\nreturn b"wrong"',
+    'scalar_cache': 'return bytes([increment(n) % 256])',
+    'heap_cache': 'return packed(n) + packed(n)',
+    'set_loop': 'for value in {n}:\n    return bytes([value % 256])\nreturn b""',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int) -> bytes:\n' + ''.join('    ' + line + '\n' for line in body.splitlines())
+world = {}
+exec(source, world)
+with TemporaryDirectory(prefix='bytes-constructor-', dir='/tmp') as temporary:
+    directory = Path(temporary)
+    source_path = directory / 'source.py'
+    source_path.write_text(source)
+    program = ast.parse(source)
+    identify_constant_pools(program, source_path)
+    checker = SupportChecker(program)
+    for name in (*bodies, 'sequence_effect', 'size_effect'):
+        assert not checker.check(name), (name, checker.check(name))
+        function = next(node for node in program.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        assert uses_heap_calls(program, function), name
+        assert checker.requirement(name, f'theorem invalid : (Calls.function Probe.module "{name}" []).Returns'), name
+        if name in ('fixed_tuple', 'pooled_fallback', 'heap_cache'):
+            assert uses_heap_memoized(program, function), name
+        if name == 'scalar_cache':
+            assert memo_heap_runtime(program, function) == 'MemoHeapCalls'
+        if name == 'set_loop':
+            assert uses_set_iteration(program, function)
+        if name not in bodies:
+            continue
+        for n in (-3, 0, 1, 4, 255, 256):
+            for value in world.values():
+                if callable(value) and hasattr(value, 'cache_clear'):
+                    value.cache_clear()
+            expected = outcome(lambda: world[name](n))
+            if name == 'set_loop':
+                execution = f'((SetCalls.call program "{name}" [.scalar (.int ({n}))] []).run (fun _ => 0)).execution'
+                lines.append(f'example : (match {execution}.observe 2000 with\n'
+                             f'  | .done (.ok c) => c.outcome == {expected}\n'
+                             '  | _ => false) = true := by decide')
+            else:
+                runtime = memo_heap_runtime(program, function) if name in ('scalar_cache', 'heap_cache', 'fixed_tuple', 'pooled_fallback') else 'HeapCalls'
+                # Scalar adapters strip only the immutable result, retaining errors.
+                scalar_expected = expected.replace('.ok (.scalar (', '.ok (')
+                if expected.startswith('.ok '):
+                    scalar_expected = scalar_expected[:-1]
+                lines.append(f'example : ({runtime}.scalarFunction program "{name}" [.int ({n})]).observe 2000 = .done ({scalar_expected}) := by decide')
+            checks += 1
+    for name in ('sequence_effect', 'size_effect'):
+        for n in (-3, 0, 1, 4, 255, 256):
+            events = []
+            expected = outcome(lambda: world[name](events, n))
+            stored = '[' + ', '.join(map(data, events)) + ']'
+            allocations = 2 if name == 'sequence_effect' else 1
+            call = f'HeapCalls.call program "{name}" [.ref 0, .scalar (.int ({n}))] [.list []]'
+            lines.append(f'example : (match ({call}).execution.observe 2000 with\n'
+                         f'  | .done (.ok c) => c.outcome == {expected} && c.heap[0]? == some (.list {stored}) && c.heap.length == {allocations}\n'
+                         '  | _ => false) = true := by decide')
+            checks += 1
+
+    base = 'def f(n: int) -> bytes:\n    return bytes(n)\n'
+    bad = [base.replace('bytes(n)', 'bytes(n, "ascii")'), base.replace('bytes(n)', 'bytes(source=n)'),
+           base.replace('bytes(n)', 'bytes(n)') + '\nbytes = 3\n',
+           base.replace('return bytes(n)', 'bytes = n\n    return bytes(n)'),
+           'def f(bytes: int) -> bytes:\n    return bytes(1)\n']
+    for text in bad:
+        assert SupportChecker(ast.parse(text)).check('f'), text
+    shadow = ast.parse('def bytes(n: int) -> int:\n    return n + 7\ndef f(n: int) -> int:\n    return bytes(n)\n')
+    assert not SupportChecker(shadow).check('f')
+    assert '"type": "BuiltinCall"' not in api['AstJsonEmitter'](shadow).emit()
+    # A partial bytes conversion still needs coverage even for reflexive Equiv.
+    module = ast.parse(base.replace('return bytes(n)', '"""\n    @formalsw: Equiv(f)\n    """\n    return bytes(n)'))
+    requirements = api['collect_requirements'](source_path, module, 'Probe', 'ProbeAst')
+    assert any(item.marker == 'execution model coverage' for item in requirements)
+    encoded = api['AstJsonEmitter'](program).emit()
+    assert '"name": "bytes"' in encoded and '"type": "Unsupported"' not in encoded
+    if '--frontend-only' not in sys.argv:
+        (directory / 'source.json').write_text(encoded)
+        proof = directory / 'Checks.lean'
+        proof.write_text('\n'.join(lines) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+        subprocess.run([sys.executable, str(ROOT / 'formalsw'), 'tests/py/bytes_constructor.py'], cwd=ROOT, check=True)
+print(f'Bytes construction: {checks} Python/runtime comparisons '
+      + ('prepared' if '--frontend-only' in sys.argv else 'passed')
+      + f', {len(partial)} partial boundaries and binding/coverage checks passed')

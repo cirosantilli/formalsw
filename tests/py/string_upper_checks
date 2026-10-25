@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Compare ASCII uppercasing, explicit Unicode partiality and method-call effects with Python."""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def string(value):
+    # Numeric characters also cover ASCII controls without depending on literal escape syntax.
+    return '(String.ofList [' + ', '.join(f'Char.ofNat {ord(ch)}' for ch in value) + '])'
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + string(value)
+
+
+source = '''
+def convert(text: str) -> str:
+    return text.upper()
+def receiver(log: list[str]) -> str:
+    log.append("receiver")
+    return "aZ09!"
+def argument(log: list[str]) -> int:
+    log.append("argument")
+    return 1
+def fail(log: list[str]) -> int:
+    log.append("failure")
+    raise ValueError()
+def ordered(log: list[str]) -> str:
+    return receiver(log).upper()
+def wrong_arity(log: list[str]) -> str:
+    return receiver(log).upper(argument(log))
+def argument_failure(log: list[str]) -> str:
+    return receiver(log).upper(fail(log))
+def receiver_failure(log: list[str]) -> str:
+    return fail(log).upper(argument(log))
+def missing_method(log: list[str]) -> str:
+    return (3).upper(argument(log))
+def unicode_wrong_arity(log: list[str]) -> str:
+    return "ß".upper(argument(log))
+def unicode_argument_failure(log: list[str]) -> str:
+    return "é".upper(fail(log))
+class Custom:
+    def upper(self, log: list[str], text: str) -> str:
+        log.append(text)
+        return text
+class Field:
+    def __init__(self):
+        self.upper = 3
+def custom(log: list[str]) -> str:
+    return Custom().upper(log, "ß")
+def field_not_callable(log: list[str]) -> str:
+    return Field().upper(argument(log))
+'''
+module = ast.parse(source)
+for function in module.body:
+    if isinstance(function, ast.FunctionDef):
+        assert not SupportChecker(module).check(function.name), function.name
+assert uses_heap_calls(module, module.body[0])
+assert SupportChecker(ast.parse('def bad(text: str):\n    return text.upper(value=1)\n')).check('bad')
+world = {}
+exec(source, world)
+
+with project_temporary_directory(prefix='upper-check-') as directory:
+    directory = Path(directory)
+    source_path = directory / 'source.py'
+    source_path.write_text(source)
+    module = api['source_module'](source_path)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    equations = ['import FormalSW', 'open FormalSW.PyAst',
+                 'set_option maxRecDepth 4096',
+                 'def source : Module := pyast_from_json% (include_str "source.json")']
+    cases = [chr(code) for code in range(128)] + [
+        '', 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'aZ09! []{}',
+        ''.join(chr(code) for code in range(128)),
+        'é', 'ß', 'ı', 'İ', 'ﬃ', 'δ', '中', '😀', '１２', 'aéZ',
+    ]
+    for text in cases:
+        encoded = string(text)
+        # Only ASCII is claimed. Uncased non-ASCII is rejected too, rather than guessed.
+        if text.isascii():
+            result = string(text.upper())
+            expected = f'some (.ok (.string {result}))'
+            heap_expected = f'some (.ok (.scalar (.string {result})), [.list [.scalar (.int 9)]])'
+            observed = f'.done (.ok (.string {result}))'
+        else:
+            expected = 'none'
+            heap_expected = 'none'
+            observed = '.unsupported'
+        equations.append(f'example : Strings.upperCall {encoded} [] = {expected} := by decide')
+        equations.append(f'example : HeapCalls.primitive (.upper {encoded}) [] [.list [.scalar (.int 9)]] = {heap_expected} := by decide')
+        equations.append(f'example : (HeapCalls.scalarFunction source "convert" [.string {encoded}]).observe 200 = {observed} := by decide')
+        equations.append(f'example : (HeapMemoCalls.scalarFunction source "convert" [.string {encoded}]).observe 200 = {observed} := by decide')
+    for text in ('ascii', 'ß'):
+        for arguments in ('[.int 1]', '[.none]', '[.string "arg"]', '[.int 1, .int 2]'):
+            equations.append(f'example : Strings.upperCall {string(text)} {arguments} = some (.error ⟨"TypeError", []⟩) := by decide')
+        equations.append(f'example : HeapCalls.primitive (.upper {string(text)}) [.ref 99] [] = some (.error ⟨"TypeError", []⟩, []) := by decide')
+    for name in ('ordered', 'wrong_arity', 'argument_failure', 'receiver_failure', 'missing_method',
+                 'unicode_wrong_arity', 'unicode_argument_failure', 'custom', 'field_not_callable'):
+        log = []
+        try:
+            result = world[name](log)
+            outcome = f'.ok (.scalar ({constant(result)}))'
+        except (ValueError, TypeError, AttributeError) as error:
+            outcome = '.error ⟨"' + type(error).__name__ + '", []⟩'
+        values = ', '.join('.scalar (' + constant(value) + ')' for value in log)
+        equations.append(f'example : (match (HeapCalls.call source "{name}" [.ref 0] [.list []]).execution.observe 800 with\n'
+                         f'  | .done (.ok done) => done.outcome == {outcome} && done.heap[0]? == some (.list [{values}])\n'
+                         '  | _ => false) = true := by decide')
+    for receiver in ('.int 1', '.bool false', '.none'):
+        equations.append(f'example : HeapCalls.bindMethod source (.scalar ({receiver})) "upper" [] = some (.error ⟨"AttributeError", []⟩, []) := rfl')
+    for object_value in ('.list []', '.tuple []', '.set []', '.dict []'):
+        equations.append(f'example : HeapCalls.bindMethod source (.ref 0) "upper" [{object_value}] = some (.error ⟨"AttributeError", []⟩, [{object_value}]) := rfl')
+    equations.extend([
+        'example : HeapCalls.bindMethod source (.scalar (.bytes [])) "upper" [] = none := rfl',
+        'example : HeapCalls.bindMethod source (.ref 0) "upper" [.bytearray []] = none := rfl',
+        'example : HeapCalls.bindMethod source (.ref 99) "upper" [] = none := rfl',
+    ])
+    proof = directory / 'UpperChecks.lean'
+    proof.write_text('\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(ROOT / 'formalsw'), str(ROOT / 'tests/py/string_upper.py')], cwd=ROOT, check=True)
+print('ASCII uppercase, explicit Unicode partiality, method dispatch and argument-effect checks passed')

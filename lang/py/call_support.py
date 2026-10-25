@@ -450,7 +450,7 @@ def has_partial_primitives(module, function):
             if identity_comparison(node) and not any(map(singleton_literal, [node.left, *node.comparators])):
                 return True
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id in ('int', 'pow') and not bindings(module, node.func.id)):
+                    and node.func.id in ('int', 'pow', 'bytes') and not bindings(module, node.func.id)):
                 return True
             if isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Pow):
                 return True
@@ -542,8 +542,8 @@ def uses_heap_calls(module, function):
                         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range')
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "list", "tuple", "set", "sorted", "all", "any"}
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "divmod" and not bindings(module, "divmod")
-                    or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get', 'setdefault', 'pop', 'count', 'join', 'replace', 'zfill', 'sort', 'strip', 'split')):
+                    and node.func.id in ("divmod", "bytes") and not bindings(module, node.func.id)
+                    or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get', 'setdefault', 'pop', 'count', 'join', 'replace', 'zfill', 'sort', 'strip', 'split', 'upper')):
                 return True
             pending.extend(functions[target] for target in call_targets(node) if target in functions)
     return False
@@ -1144,11 +1144,11 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'set supports zero or one positional argument')
                 for item in node.args:
                     recurse(item)
-            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'bytearray':
+            elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ('bytes', 'bytearray'):
                 if node.func.id in scope or bindings(module, node.func.id):
-                    reject(node, 'buffer construction requires the unshadowed builtin bytearray')
+                    reject(node, f'buffer construction requires the unshadowed builtin {node.func.id}')
                 if node.keywords or len(node.args) > 1:
-                    reject(node, 'bytearray supports zero or one positional argument; encoding arguments are not modeled')
+                    reject(node, f'{node.func.id} supports zero or one positional argument; encoding arguments are not modeled')
                 for item in node.args:
                     recurse(item)
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'divmod':
