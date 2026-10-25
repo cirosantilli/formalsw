@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""
+Compare in-place scalar sorting, aliases, and call effects with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def in_place(xs: list[int]):
+    xs.sort()
+    return xs
+def result_value(xs: list[int]):
+    return xs.sort()
+def aliases(xs: list[int]):
+    other = xs
+    xs.sort()
+    other.append(9)
+    return [xs, other]
+def touch(xs: list[int]):
+    xs.append(3)
+    return xs
+def effect(xs: list[int]):
+    touch(xs).sort()
+    return xs
+def extra_argument(xs: list[int]):
+    xs.sort(touch(xs))
+def bad_receiver(xs: list[int]):
+    values = (xs, 2)
+    return values.sort(touch(xs))
+def replace(holder: list[list[int]]):
+    holder[0] = []
+    return 0
+def bound_receiver(holder: list[list[int]]):
+    holder[0].sort(replace(holder))
+def buffer():
+    values = bytearray([2, 1])
+    return values.sort()
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    issues = checker.check(function.name, heap_calls=True)
+    assert not issues, (function.name, issues)
+assert uses_heap_calls(program, program.body[0])
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+
+
+def compare(name, arguments, heap, actual, anchors):
+    global count
+    try:
+        result = world[name](*actual)
+        error = None
+    except (TypeError, AttributeError) as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [{arguments}] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, case {count}',
+        f'example : (match ({call}).execution.observe 1000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+
+cases = [[], [None], [True, False],
+         ['λ', '😀', 'a', 'λ'], [b'z', b'a', b'z'], list(range(12, -1, -1))]
+cases += [list(values) for values in itertools.product((-2, 0, 1), repeat=3)]
+cases += [list(values) for values in itertools.permutations((False, 0, True, 1))]
+for name, initial in itertools.product(('in_place', 'result_value', 'aliases'), cases):
+    value = initial.copy()
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    compare(name, '.ref 0', heap, [value], [value])
+for name in ('effect', 'extra_argument', 'bad_receiver'):
+    value = [2, 1]
+    compare(name, '.ref 0', '[.list [.scalar (.int 2), .scalar (.int 1)]]', [value], [value])
+holder = [[2, 1]]
+compare('bound_receiver', '.ref 0', '[.list [.ref 1], .list [.scalar (.int 2), .scalar (.int 1)]]',
+        [holder], [holder, holder[0]])
+compare('buffer', '', '[]', [], [])
+
+# Failing sorts can partially reorder Python's list; references can observe its
+# temporary empty state. Neither case may be reported as supported execution.
+for heap in ('[.list [.scalar .none, .scalar .none]]',
+             '[.list [.scalar (.int 2), .scalar (.int 1), .scalar (.string "a")]]',
+             '[.list [.ref 1], .list [.scalar (.int 1)]]', '[.list [.ref 0]]'):
+    lines.extend([
+        f'example : (match (HeapCalls.call source "in_place" [.ref 0] {heap}).execution.observe 1000 with',
+        '  | .unsupported => true | _ => false) = true := by native_decide',
+    ])
+for expression in ('xs.sort(key=int)', 'xs.sort(reverse=True)'):
+    module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
+    assert SupportChecker(module).check('f'), expression
+
+with project_temporary_directory(prefix='list-sort-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} in-place sorting Python comparisons passed, including aliases and call effects')

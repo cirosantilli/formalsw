@@ -395,6 +395,7 @@ inductive Operation where
   | setSlice (replacement : Value)
   | append (address : Nat)
   | pop (address : Nat)
+  | sort (address : Nat)
   | replace (text : String)
   | zfill (text : String)
   | join (separator : String)
@@ -897,6 +898,18 @@ def primitive : Operation → List Value → Eval Value
   | .pop address, [] => Mutable.popItem address (.scalar (.int (-1)))
   | .pop address, [index] => Mutable.popItem address index
   | .pop _, _ => Mutable.error "TypeError"
+  | .sort address, [] => do
+      let heap ← get
+      let some (.list items) := heap[address]? | Mutable.unsupported
+      -- Scalar comparisons cannot observe Python's temporary empty sort receiver.
+      if !(items.all fun | .scalar _ => true | .ref _ => false) then Mutable.unsupported
+      else match HeapSort.sort heap items with
+        | some (.ok sorted) =>
+            set (heap.set address (.list sorted))
+            return .scalar .none
+        -- A failed Python sort may partially reorder the list.
+        | _ => Mutable.unsupported
+  | .sort _, _ => Mutable.error "TypeError"
   | .replace text, [.scalar old, .scalar new] =>
       scalarResult (some (Strings.replaceCall text [old, new]))
   | .replace text, [.scalar old, .scalar new, .scalar count] =>
@@ -1083,6 +1096,21 @@ theorem primitive_sorted_list (heap : Heap) (address : Nat) (items sorted : List
   simp [primitive, found, Mutable.sequence, HeapSort.sort_scalars,
     ordered, Mutable.allocate, Except.map]
 
+/-- In-place scalar sorting updates the existing cell and returns None. -/
+theorem primitive_sort_list (heap : Heap) (address : Nat) (items sorted : List Constant)
+    (found : heap[address]? = some (.list (items.map Mutable.Value.scalar)))
+    (ordered : ScalarSort.sort items = .ok sorted) :
+    primitive (.sort address) [] heap =
+      some (.ok (.scalar .none), heap.set address (.list (sorted.map Mutable.Value.scalar))) := by
+  simp [primitive, found, HeapSort.sort_scalars, ordered, Except.map]
+  have scalarOnly : ¬ ∃ value, value ∈ items.map Mutable.Value.scalar ∧
+      (match value with | .scalar _ => true | .ref _ => false)=false := by
+    rintro ⟨value, member, impossible⟩
+    obtain ⟨item, _, rfl⟩ := List.mem_map.mp member
+    cases impossible
+  rw [if_neg scalarOnly]
+  rfl
+
 theorem primitive_sorted_tuple (heap : Heap) (address : Nat) (items sorted : List Constant)
     (found : heap[address]? = some (.tuple (items.map Mutable.Value.scalar)))
     (ordered : ScalarSort.sort items = .ok sorted) :
@@ -1118,7 +1146,10 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
               | some (args, body) => pure (.method receiver args body)
               | none => if name.startsWith "__" then Mutable.unsupported else Mutable.error "AttributeError"
       | some (.list _) | some (.bytearray _) =>
-          if name = "append" then pure (.append address)
+          if name = "sort" then match (← get)[address]? with
+            | some (.list _) => pure (.sort address)
+            | _ => Mutable.error "AttributeError"
+          else if name = "append" then pure (.append address)
           else if name = "pop" then pure (.pop address)
           else if name = "get" ∨ name = "setdefault" then Mutable.error "AttributeError"
           else if name = "zfill" then match (← get)[address]? with
@@ -1130,13 +1161,13 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
           else Mutable.unsupported
       | some (.set _) | some (.keySet _) =>
           if name = "add" then pure (.add address)
-          else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.dict _) | some (.keyDict _) =>
           if name = "get" then pure (.dictionaryGet address)
           else if name = "setdefault" then pure (.dictionarySetDefault address)
-          else if name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.tuple _) =>
-          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" then Mutable.error "AttributeError" else Mutable.unsupported
+          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" then Mutable.error "AttributeError" else Mutable.unsupported
       | none => Mutable.unsupported
   | .scalar value =>
       if name = "replace" then match value with
@@ -1151,7 +1182,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
         | .string separator => pure (.join separator)
         | .bytes _ => Mutable.unsupported
         | _ => Mutable.error "AttributeError"
-      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" then Mutable.error "AttributeError" else Mutable.unsupported
+      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" then Mutable.error "AttributeError" else Mutable.unsupported
 
 /-- Stored fields are values; first-class bound methods are outside this model. -/
 def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
@@ -1821,7 +1852,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | replace _ | zfill _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | sort _ | replace _ | zfill _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
   | value value =>
@@ -2155,6 +2186,20 @@ theorem zfill (receiver : Evaluates (globals := globals) module env base heap (.
     (by simp [step, run, bindMethod])
   apply (arguments_reach arguments (.zfill text) [] anchors stack).trans
   exact .next (by simp [step, result, run, operation]) .refl
+
+/-- Successful scalar sorting mutates the captured receiver and returns None. -/
+theorem sort (receiver : Evaluates (globals := globals) module env base heap (.ref address) middle)
+    (found : middle[address]? = some (.list items))
+    (operation : primitive (.sort address) [] middle = some (.ok (.scalar .none), finalHeap))
+    (localName : ∀ name, base = .name name → (env name).isSome = true) :
+    Evaluates (globals := globals) module env (.call (.attribute base "sort") []) heap (.scalar .none) finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr base env, .methodReceiver "sort" [] env :: stack, heap⟩)
+    (by cases base <;> simp_all [step])
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := argumentsState (.sort address) env [] [] stack middle)
+    (by simp [step, run, bindMethod, found])
+  exact .next (by simp [argumentsState, step, result, run, operation]) .refl
 
 /-- The receiver is bound before arguments run; removal reads the resulting live heap. -/
 theorem pop (lookup : env name = some (.ref address))
