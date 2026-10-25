@@ -396,6 +396,7 @@ inductive Operation where
   | append (address : Nat)
   | pop (address : Nat)
   | replace (text : String)
+  | zfill (text : String)
   | join (separator : String)
   | add (address : Nat)
   | dictionaryGet (address : Nat)
@@ -906,6 +907,12 @@ def primitive : Operation → List Value → Eval Value
       | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => Mutable.unsupported
       | _ => Mutable.error "TypeError"
   | .replace _, _ => Mutable.error "TypeError"
+  | .zfill text, [.scalar width] => scalarResult (some (Strings.zfillCall text [width]))
+  | .zfill _, [.ref address] => do
+      match (← get)[address]? with
+      | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => Mutable.unsupported
+      | _ => Mutable.error "TypeError"
+  | .zfill _, _ => Mutable.error "TypeError"
   | .join separator, [value] => do
       if let .ref address := value then
         match (← get)[address]? with
@@ -931,7 +938,16 @@ def primitive : Operation → List Value → Eval Value
               | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => true
               | _ => false) then Mutable.unsupported
       else Mutable.error "TypeError"
-  | .builtin .pow, [_, _, _] => Mutable.unsupported
+  | .builtin .pow, [.scalar base, .scalar exponent, .scalar modulus] =>
+      scalarResult (Calls.modularPower base exponent modulus)
+  | .builtin .pow, [base, exponent, modulus] => do
+      let heap ← get
+      if [base, exponent, modulus].any (fun value => match value with
+          | .scalar _ => false
+          | .ref address => match heap[address]? with
+              | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => true
+              | _ => false) then Mutable.unsupported
+      else Mutable.error "TypeError"
   | .builtin .pow, _ => Mutable.error "TypeError"
   | .builtin .abs, [.scalar value] => scalarResult (some (Calls.absoluteValue value))
   | .builtin .abs, _ => Mutable.error "TypeError"
@@ -1105,30 +1121,37 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
           if name = "append" then pure (.append address)
           else if name = "pop" then pure (.pop address)
           else if name = "get" ∨ name = "setdefault" then Mutable.error "AttributeError"
+          else if name = "zfill" then match (← get)[address]? with
+            | some (.bytearray _) => Mutable.unsupported
+            | _ => Mutable.error "AttributeError"
           else if name = "replace" then match (← get)[address]? with
             | some (.bytearray _) => Mutable.unsupported
             | _ => Mutable.error "AttributeError"
           else Mutable.unsupported
       | some (.set _) | some (.keySet _) =>
           if name = "add" then pure (.add address)
-          else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.dict _) | some (.keyDict _) =>
           if name = "get" then pure (.dictionaryGet address)
           else if name = "setdefault" then pure (.dictionarySetDefault address)
-          else if name = "append" ∨ name = "add" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
+          else if name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.tuple _) =>
-          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
+          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" then Mutable.error "AttributeError" else Mutable.unsupported
       | none => Mutable.unsupported
   | .scalar value =>
       if name = "replace" then match value with
         | .string text => pure (.replace text)
         | .bytes _ => Mutable.unsupported
         | _ => Mutable.error "AttributeError"
+      else if name = "zfill" then match value with
+        | .string text => pure (.zfill text)
+        | .bytes _ => Mutable.unsupported
+        | _ => Mutable.error "AttributeError"
       else if name = "join" then match value with
         | .string separator => pure (.join separator)
         | .bytes _ => Mutable.unsupported
         | _ => Mutable.error "AttributeError"
-      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" then Mutable.error "AttributeError" else Mutable.unsupported
+      else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" then Mutable.error "AttributeError" else Mutable.unsupported
 
 /-- Stored fields are values; first-class bound methods are outside this model. -/
 def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
@@ -1798,7 +1821,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | replace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | replace _ | zfill _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ => rfl
   | value value =>
@@ -2116,6 +2139,21 @@ theorem replace (receiver : Evaluates (globals := globals) module env base heap 
   apply Reaches.next (following := argumentsState (.replace text) env [] expressions stack middle)
     (by simp [step, run, bindMethod])
   apply (arguments_reach arguments (.replace text) [] anchors stack).trans
+  exact .next (by simp [step, result, run, operation]) .refl
+
+/-- Zero filling captures its string before the width argument and preserves argument effects. -/
+theorem zfill (receiver : Evaluates (globals := globals) module env base heap (.scalar (.string text)) middle)
+    (arguments : Arguments (globals := globals) module env expressions middle values afterArguments)
+    (operation : primitive (.zfill text) values afterArguments = some (.ok value, finalHeap))
+    (localName : ∀ name, base = .name name → (env name).isSome = true) :
+    Evaluates (globals := globals) module env (.call (.attribute base "zfill") expressions) heap value finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr base env, .methodReceiver "zfill" expressions env :: stack, heap⟩)
+    (by cases base <;> simp_all [step])
+  apply (receiver anchors _).trans
+  apply Reaches.next (following := argumentsState (.zfill text) env [] expressions stack middle)
+    (by simp [step, run, bindMethod])
+  apply (arguments_reach arguments (.zfill text) [] anchors stack).trans
   exact .next (by simp [step, result, run, operation]) .refl
 
 /-- The receiver is bound before arguments run; removal reads the resulting live heap. -/

@@ -38,8 +38,8 @@ equations.extend([
     'example : scalarBinary .pow (.int 2) (.int (-1)) = none := rfl',
     'example : scalarBinary .pow (.int 0) (.int (-1)) = none := rfl',
     'example : Calls.Primitive.apply (.builtin .pow) [.int 2, .int (-1)] = none := rfl',
-    'example : Calls.Primitive.apply (.builtin .pow) [.int 2, .int 3, .int 5] = none := rfl',
-    'example : HeapCalls.primitive (.builtin .pow) [.scalar (.int 2), .scalar (.int 3), .scalar (.int 5)] [] = none := rfl',
+
+
     'example : HeapCalls.primitive (.builtin .pow) [.scalar (.int 0), .scalar (.int (-1))] [] = none := rfl',
     'example : HeapCalls.primitive (.builtin .pow) [.ref 0, .scalar (.int 2)] [.instance "probe" "Custom" []] = none := rfl',
     'example : HeapCalls.primitive (.builtin .pow) [.scalar (.int 2), .ref 99] [] = none := rfl',
@@ -47,6 +47,34 @@ equations.extend([
     'example : ¬ (Execution.unsupported : Execution Constant).Supported := by intro h; exact h 1 rfl',
     'private def spin : Execution Constant := ⟨Unit, (), fun state => .next state⟩',
     'example : spin.Supported := Execution.Diverges.supported ⟨fun _ => True, trivial, fun _ _ => ⟨(), rfl, trivial⟩⟩',
+])
+
+# Compare scalar and heap calls with Python, including inverse failures, signed
+# moduli, Boolean coercions, explicit None and zero-modulus exceptions.
+for base in (*range(-3, 4), True, False, None, 'bad'):
+    for exponent in (*range(-2, 4), True, False, None, 'bad'):
+        for modulus in (-5, -2, -1, 0, 1, 2, 5, True, False, None, 'bad'):
+            if (modulus is None and isinstance(base, int)
+                    and isinstance(exponent, int) and exponent < 0):
+                expected = None  # Two-argument float results remain outside the model.
+            else:
+                try:
+                    expected = f'Except.ok {constant(pow(base, exponent, modulus))}'
+                except (TypeError, ValueError) as error:
+                    expected = 'Except.error { typeName := "' + type(error).__name__ + '", args := [] }'
+            values = ', '.join(constant(value) for value in (base, exponent, modulus))
+            heap_values = ', '.join('.scalar ' + constant(value) for value in (base, exponent, modulus))
+            scalar_result = 'none' if expected is None else 'some (' + expected + ')'
+            heap_result = 'none' if expected is None else 'some (' + expected + ', [])'
+            equations.append(f'example : Calls.Primitive.apply (.builtin .pow) [{values}] = {scalar_result} := by decide')
+            # Wrap scalar completions for the heap representation.
+            if expected is not None:
+                heap_outcome = expected.replace('Except.ok ', 'Except.ok (.scalar ', 1) + ')' if expected.startswith('Except.ok ') else expected
+                heap_result = 'some (' + heap_outcome + ', [])'
+            equations.append(f'example : HeapCalls.primitive (.builtin .pow) [{heap_values}] [] = {heap_result} := by decide')
+equations.extend([
+    'example : HeapCalls.primitive (.builtin .pow) [.ref 0, .scalar (.int 2), .scalar (.int 3)] [.instance "probe" "Custom" []] = none := rfl',
+    'example : HeapCalls.primitive (.builtin .pow) [.ref 0, .scalar (.int 2), .scalar (.int 3)] [.list []] = some (.error ⟨"TypeError", []⟩, [.list []]) := rfl',
 ])
 
 with project_temporary_directory(prefix='power-check-') as directory:
@@ -66,24 +94,34 @@ def ordered(events: list[int]) -> int:
     return pow(touch(events, 2), touch(events, 3))
 def stopped(events: list[int]) -> int:
     return pow(fail(events), touch(events, 3))
+def ordered_mod(events: list[int]) -> int:
+    return pow(touch(events, 2), touch(events, 3), touch(events, 5))
+def stopped_mod(events: list[int]) -> int:
+    return pow(fail(events), touch(events, 3), touch(events, 5))
+def middle_failure(events: list[int]) -> int:
+    return pow(touch(events, 2), fail(events), touch(events, 5))
+def zero_mod(events: list[int]) -> int:
+    return pow(touch(events, 2), touch(events, 3), touch(events, 0))
 def scalar(a: int, b: int) -> int:
     return pow(a, b)
+def scalar_mod(a: int, b: int, m: int) -> int:
+    return pow(a, b, m)
 '''
     module = ast.parse(source)
-    for name in ('ordered', 'stopped', 'scalar'):
+    for name in ('ordered', 'stopped', 'ordered_mod', 'stopped_mod', 'middle_failure', 'zero_mod', 'scalar', 'scalar_mod'):
         assert not SupportChecker(module).check(name)
     (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
     world = {}
     exec(source, world)
     lines = ['import FormalSW', 'open FormalSW.PyAst',
              'def source : Module := pyast_from_json% (include_str "source.json")']
-    for name in ('ordered', 'stopped'):
+    for name in ('ordered', 'stopped', 'ordered_mod', 'stopped_mod', 'middle_failure', 'zero_mod'):
         events = []
         try:
             result = world[name](events)
             outcome = f'.ok (.scalar {constant(result)})'
-        except ZeroDivisionError:
-            outcome = '.error ⟨"ZeroDivisionError", []⟩'
+        except (ZeroDivisionError, ValueError) as error:
+            outcome = '.error ⟨"' + type(error).__name__ + '", []⟩'
         values = ', '.join(f'.scalar {constant(value)}' for value in events)
         lines.append(f'example : (match (HeapCalls.call source "{name}" [.ref 0] [.list []]).execution.observe 500 with\n'
                      f'  | .done (.ok c) => c.outcome == {outcome} && c.heap[0]? == some (.list [{values}])\n'
@@ -95,7 +133,7 @@ def scalar(a: int, b: int) -> int:
     proof.write_text('\n'.join(lines) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
 
-    for expression in ('pow(n)', 'pow(n, 2, 3)', 'pow(base=n, exp=2)', 'pow(n, 2, mod=3)'):
+    for expression in ('pow(n)', 'pow(n, 2, 3, 4)', 'pow(base=n, exp=2)', 'pow(n, 2, mod=3)'):
         assert SupportChecker(ast.parse(f'def f(n: int):\n    return {expression}\n')).check('f')
     plain = 'def f(n: int):\n    return pow(n, 2)\n'
     for suffix in ('pow = 3\n', 'from other import pow\n'):

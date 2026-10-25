@@ -26,6 +26,19 @@ def str : List Constant → Except ExceptionObject Constant
   | [value] => .ok (.string (convert value))
   | _ => .error typeError
 
+/-- Zero padding counts Unicode characters and follows an optional ASCII sign. -/
+def zfill (text : String) (width : Int) : String :=
+  let padding := List.replicate (width-text.toList.length).toNat '0'
+  String.ofList (match text.toList with
+    | sign::rest => if sign='+' ∨ sign='-' then sign::padding++rest else padding++text.toList
+    | [] => padding)
+
+def zfillCall (text : String) : List Constant → Except ExceptionObject Constant
+  | [width] => match scalarNumber width with
+      | some width => .ok (.string (zfill text width))
+      | none => .error typeError
+  | _ => .error typeError
+
 /-- Binary formatting uses the shared signed, arbitrary-precision builtin model. -/
 def binaryRepresentation (value : Int) : String :=
   String.ofList ((Py.Builtin.Function.Conversion.bin value).map Char.ofNat)

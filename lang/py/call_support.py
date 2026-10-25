@@ -446,7 +446,7 @@ def uses_heap_calls(module, function):
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "list", "set", "sorted", "all", "any"}
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "divmod" and not bindings(module, "divmod")
-                    or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get', 'setdefault', 'pop', 'join', 'replace')):
+                    or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get', 'setdefault', 'pop', 'join', 'replace', 'zfill')):
                 return True
             pending.extend(functions[target] for target in call_targets(node) if target in functions)
     return False
@@ -903,8 +903,8 @@ def check_calls(module, function, reject, *, heap=False):
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'pow':
                 if node.func.id in scope or bindings(module, node.func.id):
                     reject(node, 'power requires the unshadowed builtin pow')
-                if node.keywords or len(node.args) != 2:
-                    reject(node, 'pow requires two positional arguments; modular powers are not modeled')
+                if node.keywords or len(node.args) not in (2, 3):
+                    reject(node, 'pow requires two or three positional arguments')
                 for item in node.args:
                     recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'abs':

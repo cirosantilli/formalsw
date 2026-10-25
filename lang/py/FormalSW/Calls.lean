@@ -65,6 +65,18 @@ def absoluteValue : Constant → Except ExceptionObject Constant
   | .bool value => .ok (.int (if value then 1 else 0))
   | _ => .error { typeName := "TypeError", args := [] }
 
+/-- The modulus may be None; otherwise integer and Boolean arguments use exact modular arithmetic. -/
+def modularPower (base exponent modulus : Constant) : Option (Except ExceptionObject Constant) :=
+  match modulus with
+  | .none => scalarBinary .pow base exponent
+  | _ => match scalarNumber base, scalarNumber exponent, scalarNumber modulus with
+      | some base, some exponent, some modulus =>
+          match Py.Builtin.Int.powMod base exponent modulus with
+          | .ok value => some (.ok (.int value))
+          | .error (.valueError _) => some (.error { typeName := "ValueError", args := [] })
+          | .error _ => none
+      | _, _, _ => some (.error { typeName := "TypeError", args := [] })
+
 def Primitive.apply : Primitive → List Constant → Option (Except ExceptionObject Constant)
   | .raiseException typeName, args => some (.error { typeName, args })
   | .builtin .identity, [left, right] => (scalarIdentity left right).map (fun value => .ok (.bool value))
@@ -73,7 +85,7 @@ def Primitive.apply : Primitive → List Constant → Option (Except ExceptionOb
   | .builtin .str, values => some (Strings.str values)
   | .builtin .bin, values => some (Strings.bin values)
   | .builtin .pow, [base, exponent] => scalarBinary .pow base exponent
-  | .builtin .pow, [_, _, _] => none
+  | .builtin .pow, [base, exponent, modulus] => modularPower base exponent modulus
   | .builtin .pow, _ => some (.error { typeName := "TypeError", args := [] })
   | .builtin .abs, [value] => some (absoluteValue value)
   | .builtin .abs, _ => some (.error { typeName := "TypeError", args := [] })

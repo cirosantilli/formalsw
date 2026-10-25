@@ -71,15 +71,38 @@ def modularInverse? (value modulus : IntValue) : Option IntValue :=
     | none => none
     | some inverse => some (rawMod inverse modulus)
 
-/-- Three-argument `pow` for non-negative integer exponents. -/
+/-- Three-argument integer `pow`, including invertible negative exponents. -/
 def powMod (base exponent modulus : IntValue) : Result IntValue :=
   if modulus = 0 then
     .error (.valueError "pow() 3rd argument cannot be 0")
+  else if modulus = 1 ∨ modulus = -1 then .ok 0
   else if exponent < 0 then
     match modularInverse? base modulus with
     | none => .error (.valueError "base is not invertible for the given modulus")
     | some inverse => .ok (powModNat inverse (-exponent).toNat modulus)
   else .ok (powModNat base exponent.toNat modulus)
+
+private theorem rawMod_nonnegative (value : Int) (modulus : Nat) :
+    rawMod value modulus=value%modulus := by
+  simp only [rawMod, Int.fdiv_eq_ediv_of_nonneg _ (Int.natCast_nonneg modulus), Int.emod_def]
+
+private theorem powModNat_nonnegative (base : Int) (exponent modulus : Nat) :
+    powModNat base exponent modulus=base^exponent%modulus := by
+  induction exponent with
+  | zero => simp [powModNat, rawMod_nonnegative]
+  | succ exponent ih =>
+      rw [powModNat, rawMod_nonnegative, ih, Int.pow_succ']
+      rw [Int.mul_emod, Int.emod_emod, ← Int.mul_emod]
+
+/-- On a positive modulus, nonnegative powers compute the usual exact integer remainder. -/
+theorem powMod_nonnegative (base : Int) (exponent modulus : Nat) (positive : 0<modulus) :
+    powMod base exponent modulus=.ok (base^exponent%modulus) := by
+  by_cases unit : modulus=1
+  · subst modulus
+    simp [powMod]
+  · simp only [powMod, show (modulus : Int)≠0 by omega, if_false,
+      show ¬ ((modulus : Int)=1 ∨ (modulus : Int) = -1) by omega,
+      show ¬ (exponent : Int)<0 by omega, Int.toNat_natCast, powModNat_nonnegative]
 
 def bitAnd : IntValue → IntValue → IntValue
   | .ofNat left, .ofNat right => .ofNat (left &&& right)

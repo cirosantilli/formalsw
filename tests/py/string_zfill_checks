@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""
+Compare sign-aware Unicode zero filling and its evaluation order with Python.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+source = '''
+def fill(text: str, width: int) -> str:
+    return text.zfill(width)
+def receiver(log: list[str]) -> str:
+    log.append("receiver")
+    return "-λ"
+def width(log: list[str]) -> int:
+    log.append("width")
+    return 5
+def fail(log: list[str]) -> int:
+    log.append("failure")
+    raise ValueError()
+def ordered(log: list[str]) -> str:
+    return receiver(log).zfill(width(log))
+def argument_failure(log: list[str]) -> str:
+    return receiver(log).zfill(fail(log))
+def missing_method(log: list[str]) -> str:
+    return (1).zfill(width(log))
+def bad_width(log: list[str]) -> str:
+    return receiver(log).zfill("bad")
+def wrong_arity(log: list[str]) -> str:
+    return receiver(log).zfill(width(log), width(log))
+def mutate(texts: list[str]) -> int:
+    texts[0] = "changed"
+    return 5
+def captured(texts: list[str]) -> str:
+    return texts[0].zfill(mutate(texts))
+'''
+module = ast.parse(source)
+for function in module.body:
+    assert not SupportChecker(module).check(function.name), function.name
+assert uses_heap_calls(module, module.body[0])
+world = {}
+exec(source, world)
+
+with project_temporary_directory(prefix='zfill-check-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    equations = ['import FormalSW', 'open FormalSW.PyAst',
+                 'def source : Module := pyast_from_json% (include_str "source.json")']
+    for text in ('', '+', '-', '42', '-42', '+42', '--42', '++42', 'λ', '-λ', '💡', '１２'):
+        for width in (*range(-2, 9), True, False, None, 'bad'):
+            try:
+                result = text.zfill(width)
+                expected = '.ok (.string ' + json.dumps(result, ensure_ascii=False) + ')'
+            except TypeError:
+                expected = '.error ⟨"TypeError", []⟩'
+            equations.append(f'example : Strings.zfillCall {json.dumps(text, ensure_ascii=False)} [{constant(width)}] = {expected} := by decide')
+    for name in ('ordered', 'argument_failure', 'missing_method', 'bad_width', 'wrong_arity'):
+        log = []
+        try:
+            result = world[name](log)
+            outcome = '.ok (.scalar (' + constant(result) + '))'
+        except (ValueError, TypeError, AttributeError) as error:
+            outcome = '.error ⟨"' + type(error).__name__ + '", []⟩'
+        values = ', '.join('.scalar (' + constant(value) + ')' for value in log)
+        equations.append(f'example : (match (HeapCalls.call source "{name}" [.ref 0] [.list []]).execution.observe 800 with\n'
+                         f'  | .done (.ok done) => done.outcome == {outcome} && done.heap[0]? == some (.list [{values}])\n'
+                         '  | _ => false) = true := by decide')
+    texts = ['-λ']
+    result = world['captured'](texts)
+    equations.append('example : (match (HeapCalls.call source "captured" [.ref 0] [.list [.scalar (.string "-λ")]]).execution.observe 800 with\n'
+                     f'  | .done (.ok done) => done.outcome == .ok (.scalar ({constant(result)})) && done.heap[0]? == some (.list [.scalar ({constant(texts[0])})])\n'
+                     '  | _ => false) = true := by decide')
+    equations.extend([
+        'example : HeapCalls.primitive (.zfill "x") [.ref 0] [.instance "probe" "Index" []] = none := rfl',
+        'example : HeapCalls.primitive (.zfill "x") [.ref 0] [.list []] = some (.error ⟨"TypeError", []⟩, [.list []]) := rfl',
+        'example : HeapCalls.bindMethod source (.scalar (.bytes [])) "zfill" [] = none := rfl',
+    ])
+    proof = directory / 'ZfillChecks.lean'
+    proof.write_text('\n'.join(equations) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(ROOT / 'formalsw'), str(ROOT / 'tests/py/string_zfill.py')], cwd=ROOT, check=True)
+print('Unicode zero filling and receiver/argument evaluation checks passed')
