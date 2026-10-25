@@ -10,6 +10,26 @@ namespace HashDict
     lookup (entry :: rest) key =
       if HashKey.equal entry.1 key then some entry.2.2 else lookup rest key := by
   cases equal : HashKey.equal entry.1 key <;> simp [lookup, find?, equal]
+
+/-- Lookup keeps the first matching entry across concatenated insertion histories. -/
+theorem lookup_append (left right : List (Entry α)) (key : HashKey) :
+    lookup (left ++ right) key = (lookup left key).orElse (fun _ => lookup right key) := by
+  induction left with
+  | nil => rfl
+  | cons entry rest ih =>
+      cases same : HashKey.equal entry.1 key <;> simp [lookup_cons, same, ih]
+
+/-- A fresh key appends its original representative and value without changing earlier entries. -/
+theorem insert_absent (entries : List (Entry α)) (key : HashKey) (original value : α)
+    (absent : lookup entries key = none) :
+    insert entries key original value = entries ++ [(key, original, value)] := by
+  induction entries with
+  | nil => rfl
+  | cons entry rest ih =>
+      cases same : HashKey.equal entry.1 key
+      · have missing : lookup rest key = none := by simpa [lookup_cons, same] using absent
+        simp [insert, same, ih missing]
+      · simp [lookup_cons, same] at absent
 end HashDict
 
 namespace Mutable
