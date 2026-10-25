@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+Check combined heap/cache selection and the scalar boundary of cached dependencies.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.contracts import input_condition
+from lang.py.global_inputs import call_globals
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+base = """
+from functools import lru_cache
+
+@lru_cache(None)
+def count(n: int) -> int:
+    if n <= 0:
+        return 0
+    return 1 + count(n - 1)
+
+
+def caller(n: int) -> int:
+    items = [count(n), count(n)]
+    return items[0] + items[1]
+"""
+
+
+def parsed(text):
+    module = ast.parse(text)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'caller')
+    return module, function
+
+
+def contract(module, function):
+    return api['scalar_contract_type'](module, function, 'Probe', 'Returns', [], 0)
+
+
+module, function = parsed(base)
+assert not SupportChecker(module).check('caller')
+assert 'MemoHeapCalls.scalarFunction' in contract(module, function)
+for model in ('MemoHeapCalls.call', 'MemoHeapCalls.scalarFunction'):
+    marker = f'theorem valid : ({model} Probe.module "caller" []).Returns'
+    assert not SupportChecker(module).requirement('caller', marker), marker
+for model in ('HeapCalls.call', 'HeapCalls.scalarFunction', 'Calls.function', 'MemoCalls.sourceFunction'):
+    marker = f'theorem invalid : ({model} Probe.module "caller" []).Returns'
+    assert SupportChecker(module).requirement('caller', marker), marker
+raw = api['RawTheoremRequirement']('raw', '', 'this_function 1 |>.Returns')
+assert 'MemoHeapCalls.scalarFunction' in api['raw_theorem_type_for_function'](raw, function, 'Probe', module)
+
+# Scalar-only entry points keep the original cache interpreter.
+scalar, scalar_function = parsed(base.replace('items = [count(n), count(n)]\n    return items[0] + items[1]', 'return count(n)'))
+assert 'MemoCalls.sourceFunction' in contract(scalar, scalar_function)
+assert not SupportChecker(scalar).check('caller')
+
+# Heap entry arguments and returned references use the full completion model.
+for body in ('return count(items[0])', 'items.append(count(1))\n    return len(items)'):
+    text = base[:base.index('def caller')] + f'def caller(items: list[int]) -> int:\n    {body}\n'
+    module, function = parsed(text)
+    assert not SupportChecker(module).check('caller'), SupportChecker(module).check('caller')
+    assert 'MemoHeapCalls.call' in contract(module, function)
+    predicate = input_condition('count(len(items)) >= 0', function, module)
+    assert predicate.heap and predicate.memoized and not predicate.unsupported
+    markers = [api['Marker']('Requires(count(len(items)) >= 0)', 1), api['Marker']('Returns', 2)]
+    module.formalsw_conditions = {}
+    module.formalsw_condition_coverage = []
+    conditions, _, unsupported = api['collect_conditions'](markers, function, module, 'Probe')
+    assert not unsupported, unsupported
+    assert 'MemoHeapCalls.Condition' in conditions[0]
+    assert 'MemoHeapCalls.evaluate' in module.formalsw_condition_coverage[0][1]
+
+module, function = parsed(base.replace('-> int:\n    items =', '-> list[int]:\n    items =').replace('return items[0] + items[1]', 'return items'))
+assert not SupportChecker(module).check('caller')
+assert 'MemoHeapCalls.call' in contract(module, function)
+
+# Ordinary heap callers may use globals; cache keys cannot depend on them.
+global_text = base[:base.index('def caller')] + """
+items: list[int] = []
+def caller(n: int) -> int:
+    items.append(count(n))
+    return len(items)
+"""
+module, function = parsed(global_text)
+assert not SupportChecker(module).check('caller'), SupportChecker(module).check('caller')
+function.formalsw_globals = call_globals(module, function)
+assert 'MemoHeapCalls.call' in contract(module, function)
+assert 'MemoHeapCalls.call' in api['raw_theorem_type_for_function'](raw, function, 'Probe', module)
+assert not SupportChecker(module).requirement('caller',
+    'theorem valid : (MemoHeapCalls.call Probe.module "caller" []).Returns')
+assert SupportChecker(module).requirement('caller',
+    'theorem invalid : (MemoHeapCalls.scalarFunction Probe.module "caller" []).Returns')
+
+# Every callee of a cached function must also satisfy scalar execution, even
+# when the same helper has already been visited through an ordinary heap call.
+bad = [
+    base.replace('return 1 + count(n - 1)', 'items = [n]\n    return items[0]'),
+    base.replace('return 1 + count(n - 1)', 'return helper(n)') + '\ndef helper(n: int) -> int:\n    items = [n]\n    return items[0]\n',
+    base.replace('return 1 + count(n - 1)', 'return helper(n)').replace('items = [count(n), count(n)]', 'items = [helper(n), count(n)]') + '\ndef helper(n: int) -> int:\n    items = [n]\n    return items[0]\n',
+    base[:base.index('def caller')] + '''
+class Box:
+    def __init__(self, n: int):
+        self.n = n
+    def value(self) -> int:
+        return count(self.n)
+def caller(n: int) -> int:
+    box = Box(n)
+    return box.value()
+''',
+    base.replace('return 1 + count(n - 1)', 'return setting') + '\nsetting: int = 1\n',
+    base.replace('return 1 + count(n - 1)', 'return helper(n)') + '\nsetting: int = 1\ndef helper(n: int) -> int:\n    return setting\n',
+    base.replace('items = [count(n), count(n)]\n    return items[0] + items[1]', 'items = {count(n)}\n    for item in items:\n        return item\n    return 0'),
+]
+for text in bad:
+    module, _ = parsed(text)
+    assert SupportChecker(module).check('caller'), text
+
+subprocess.run([str(REPO / 'formalsw'), 'tests/py/memo_heap_calls.py'], cwd=REPO, check=True)
+print(f'Memo/heap frontend: runtime, predicate, reference, global and {len(bad)} rejection checks passed')

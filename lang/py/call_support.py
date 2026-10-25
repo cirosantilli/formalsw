@@ -442,8 +442,8 @@ def check_calls(module, function, reject, *, heap=False):
     visited = set()
     visited_classes = set()
     memoized_execution = uses_memoized(module, function)
-    if memoized_execution and heap:
-        reject(function, 'memoized calls require scalar execution without mutable state')
+    if memoized_execution and uses_set_iteration(module, function):
+        reject(function, 'set traversal and memoized calls need a combined execution model')
 
     def visit_class(cls):
         if cls.name in visited_classes:
@@ -476,6 +476,15 @@ def check_calls(module, function, reject, *, heap=False):
                             for alias in item.names)):
                     reject(item, 'module-level call targets must not be rebound')
         cached = cache_decorator(module, function)
+        if cached and heap:
+            if not memoized_execution:
+                reject(function, 'cached helpers reached through methods require cache-aware call discovery')
+            # Cache entries run in the scalar interpreter. Validate the whole
+            # dependency graph there, even when another caller uses the heap.
+            check_calls(module, function, reject, heap=False)
+            return
+        if uses_parallel_model(function):
+            reject(function, 'call execution does not support parallel workers')
         if cached and (function.args.defaults or any(annotation_kind(arg.annotation) != 'int'
                                                    for arg in function.args.args)):
             reject(function, 'memoized functions require integer positional arguments without defaults')
@@ -500,7 +509,7 @@ def check_calls(module, function, reject, *, heap=False):
         globals_ = set()
         try:
             global_inputs = function_globals(module, function, heap_calls=heap)
-            if global_inputs and (not heap or memoized_execution):
+            if global_inputs and not heap:
                 reject(function, 'global inputs require heap call execution')
             globals_.update(item.name for item in global_inputs)
         except GlobalInputError as error:

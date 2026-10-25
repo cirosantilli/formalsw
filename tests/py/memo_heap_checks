@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""
+Compare shared caches, heap effects, and generator exceptions with Python.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = """
+from functools import lru_cache
+
+@lru_cache(None)
+def count(n: int) -> int:
+    if n <= 0:
+        return 0
+    return 1 + count(n - 1)
+
+@lru_cache(None)
+def fail(n: int) -> int:
+    return 10 // n
+
+@lru_cache(None)
+def stop(n: int) -> int:
+    raise StopIteration(n)
+
+def twice(n: int) -> int:
+    values = []
+    values.append(count(n))
+    values.append(count(n))
+    return sum(values)
+
+def mutate(items: list[int], n: int) -> int:
+    items.append(count(n))
+    return fail(n)
+
+def wrapped(n: int) -> int:
+    return sum(stop(n) for x in [0])
+
+def iterable(n: int) -> int:
+    values = []
+    return sum(x for x in range(stop(n)))
+"""
+lines = ['import FormalSW', 'import lang.py.FormalSW.MemoHeapCalls',
+         'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")', '''
+def inspect (fuel : Nat) (state : MemoHeapCalls.State) (hits misses size : Nat) :
+    Option (Nat × Nat × Nat) :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 => Id.run do
+      let mut hits := hits
+      let mut misses := misses
+      let mut size := size
+      match state with
+      | .scalar current _ _ =>
+          match current.current with
+          | ⟨.invoke name values, _⟩ =>
+              if name ∈ source.memoizedFunctions then
+                if let some arguments := MemoCalls.integerArguments values then
+                  if (current.cache ⟨name, arguments⟩).isSome then hits := hits + 1
+                  else misses := misses + 1
+          | ⟨.value _, []⟩ =>
+              if let caller :: _ := current.callers then
+                if (current.cache caller.key).isNone then size := size + 1
+          | _ => pure ()
+      | _ => pure ()
+      match MemoHeapCalls.step source 0 state with
+      | .next next => return inspect fuel next hits misses size
+      | .done _ => return some (hits, misses, size)
+      | .unsupported => return none
+''']
+checks = 0
+for n in (-2, 0, 1, 8):
+    world = {}
+    exec(source, world)
+    expected = world['twice'](n)
+    info = world['count'].cache_info()
+    lines.append(f'example : inspect 10000 (.heap ⟨.operation (.call "twice") [.scalar (.int ({n}))], [], []⟩ MemoCalls.Cache.empty) 0 0 0 = some ({info.hits}, {info.misses}, {info.currsize}) := by native_decide')
+    lines.append(f'example : (MemoHeapCalls.scalarFunction source "twice" [.int ({n})]).observe 10000 = .done (.ok (.int ({expected}))) := by native_decide')
+    items = [7]
+    try:
+        value = world['mutate'](items, n)
+        outcome = f'.ok (.scalar (.int ({value})))'
+    except ZeroDivisionError:
+        outcome = '.error { typeName := "ZeroDivisionError", args := [] }'
+    values = ', '.join(f'.scalar (.int ({item}))' for item in items)
+    lines.append(f'example : (MemoHeapCalls.call source "mutate" [.ref 0, .scalar (.int ({n}))] [.list [.scalar (.int 7)]]).execution.observe 10000 = .done (.ok ⟨{outcome}, [], [.list [{values}]], 1⟩) := by native_decide')
+    checks += 3
+for name in ('wrapped', 'iterable'):
+    world = {}
+    exec(source, world)
+    try:
+        world[name](3)
+        raise AssertionError('expected exception')
+    except (StopIteration, RuntimeError) as error:
+        kind = type(error).__name__
+    args = '[]' if kind == 'RuntimeError' else '[.int 3]'
+    lines.append(f'example : (MemoHeapCalls.scalarFunction source "{name}" [.int 3]).observe 1000 = .done (.error {{ typeName := "{kind}", args := {args} }}) := by native_decide')
+    checks += 1
+
+with project_temporary_directory(prefix='memo-heap-check-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](ast.parse(source)).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'Memoized heap calls: {checks} Python comparisons passed')

@@ -75,7 +75,7 @@ bad += [base + suffix for suffix in
 bad += [variants[-1] + suffix for suffix in
         ('ft.lru_cache = count\n', 'import functools as other\nother.lru_cache = count\n',
          'setattr(ft, "lru_cache", count)\n', 'alias = ft\n')]
-bad += [base.replace('return count(n)', 'items = []\n    return count(n)')]
+assert not SupportChecker(parse(base.replace('return count(n)', 'items = []\n    return count(n)'))).check('caller')
 for text in bad:
     assert SupportChecker(parse(text)).check('caller'), text
 

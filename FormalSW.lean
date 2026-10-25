@@ -24,6 +24,7 @@ import Lean
 import lang.py.FormalSW.Model
 import lang.py.FormalSW.Calls
 import lang.py.FormalSW.MemoCallRules
+import lang.py.FormalSW.MemoHeapCalls
 import lang.py.FormalSW.Linking
 import lang.py.FormalSW.GraphEquivalence
 import lang.py.FormalSW.GraphPreservation

@@ -466,7 +466,8 @@ def raw_heap_global_type(requirement, function, ast_namespace, conditions, modul
     params = ' '.join(f'({name} : {"Nat" if reference_kind(kind) else scalar_lean_type(kind)})'
                       for name, kind in zip(names, kinds))
     values = ', '.join(heap_term(name, kind) for name, kind in zip(names, kinds))
-    runtime = 'SetCalls' if uses_set_iteration(module, function) else 'HeapCalls'
+    runtime = ('SetCalls' if uses_set_iteration(module, function) else
+               'MemoHeapCalls' if uses_memoized(module, function) else 'HeapCalls')
     binding = f'FormalSW.PyAst.{runtime}.call {ast_namespace}.module {lean_string(function.name)} [{values}] {heap} {contract_globals(function)}'
     if names:
         binding = f'fun {params} => {binding}'
@@ -541,7 +542,8 @@ def raw_theorem_type_for_function(
             lambda_params = " ".join(f"({name} : {'Nat' if reference_kind(kind) else scalar_lean_type(kind)})"
                                      for name, kind in zip(names, kinds))
             values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))
-            runtime = 'SetCalls' if uses_set_iteration(module, function) else 'HeapCalls'
+            runtime = ('SetCalls' if uses_set_iteration(module, function) else
+                       'MemoHeapCalls' if uses_memoized(module, function) else 'HeapCalls')
             entry_heap = f'«{raw_heap}»' if raw_heap else '[]'
             binding = f'FormalSW.PyAst.{runtime}.call {ast_namespace}.module {lean_string(function.name)} [{values}] {entry_heap}'
             if names:
@@ -573,7 +575,9 @@ def raw_theorem_type_for_function(
                     [(name, annotation.id) for name, annotation in zip(names, annotations)],
                     [(item.name, item.name, item.kind) for item in global_args])
             else:
-                runtime = ("MemoCalls.sourceFunction" if module is not None and uses_memoized(module, function)
+                runtime = (("MemoHeapCalls.scalarFunction" if uses_memoized(module, function) else "HeapCalls.scalarFunction")
+                           if module is not None and uses_heap_calls(module, function) else
+                           "MemoCalls.sourceFunction" if module is not None and uses_memoized(module, function)
                            else "Calls.function" if module is not None and uses_calls_model(module, function) else "scalarFunction")
                 binding = (f"FormalSW.PyAst.{runtime} {ast_namespace}.module "
                            f"{lean_string(function.name)} [{values}]")
@@ -894,7 +898,9 @@ def collect_conditions(markers, function, module, namespace, prior_conditions=()
             value = (heap_term if predicate.heap else scalar_term)('«' + arg.arg + '»', kind)
             env = f"if {query} = {lean_string(arg.arg)} then some ({value}) else {env}"
         binders, domain, heap = contract_domain(function)
-        runtime = 'SetCalls' if predicate.choices else 'HeapCalls' if predicate.heap else 'MemoCalls' if predicate.memoized else 'Calls'
+        runtime = ('SetCalls' if predicate.choices else
+                   'MemoHeapCalls' if predicate.heap and predicate.memoized else
+                   'HeapCalls' if predicate.heap else 'MemoCalls' if predicate.memoized else 'Calls')
         evaluator = 'sourceEvaluate' if runtime == 'MemoCalls' else 'evaluate'
         condition = 'SourceCondition' if runtime == 'MemoCalls' else 'Condition'
         inputs = f'{namespace}.module (fun {query} => {env}) {namespace}.{name}'
@@ -940,19 +946,21 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
             raise InvalidRequirement("set traversal and memoized calls need a combined execution model")
         if choices or heap_inputs or getattr(inputs, "formalsw_globals", ()):
             values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))
-            runtime = 'SetCalls' if choices else 'HeapCalls'
+            runtime = ('SetCalls' if choices else
+                       'MemoHeapCalls' if uses_memoized(program, func) else 'HeapCalls')
             result = f'FormalSW.PyAst.{runtime}.call {ns}.module {lean_string(func.name)} [{values}] {heap}'
             if getattr(inputs, 'formalsw_globals', ()):
                 result += f' {contract_globals(inputs)}'
             return result
         if uses_heap_calls(program, func):
+            heap_runtime = 'MemoHeapCalls' if uses_memoized(program, func) else 'HeapCalls'
             kind = annotation_kind(func.returns)
             if reference_kind(kind):
                 values = ", ".join(f'.scalar ({scalar_term(name, kind)})' for name, kind in zip(names, kinds))
-                return f'FormalSW.PyAst.HeapCalls.call {ns}.module {lean_string(func.name)} [{values}] []'
+                return f'FormalSW.PyAst.{heap_runtime}.call {ns}.module {lean_string(func.name)} [{values}] []'
             if kind not in ('int', 'str', 'bytes', 'bool') and not (isinstance(func.returns, ast.Constant) and func.returns.value is None):
                 raise InvalidRequirement("heap call contracts require a supported return annotation")
-            runtime = "HeapCalls.scalarFunction"
+            runtime = heap_runtime + ".scalarFunction"
         else:
             runtime = ("MemoCalls.sourceFunction" if uses_memoized(program, func)
                        else "Calls.function" if uses_calls_model(program, func) else "scalarFunction")
