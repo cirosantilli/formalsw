@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""
+Compare compiler-backed tuple pooling across cache keys, functions and source units.
+"""
+import ast
+from copy import deepcopy
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+
+ROOT = Path(__file__).resolve().parents[2]
+if not (ROOT / 'tests/py/test_support.py').is_file():
+    ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'tests/py'))
+from test_support import project_temporary_directory
+from lang.py.call_support import uses_heap_memoized
+from lang.py.constant_pools import identify_constant_pools
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+left_source = '''from functools import lru_cache
+@lru_cache(None)
+def left(n: int) -> tuple[int, int]:
+    return 3, 2
+
+def ordinary_left(n: int) -> tuple[int, int]:
+    return 3, 2
+
+@lru_cache(None)
+def nested_left(n: int) -> tuple[int, tuple[int, int]]:
+    return 7, (3, 2)
+
+@lru_cache(None)
+def bool_left(n: int) -> tuple[bool, int]:
+    return True, 1
+
+@lru_cache(None)
+def int_left(n: int) -> tuple[int, bool]:
+    return 1, True
+
+@lru_cache(None)
+def empty_left(n: int) -> tuple[int, ...]:
+    return ()
+
+def scalar_unpack(n: int) -> int:
+    left, right = 3, 2
+    return n + left + right
+'''
+right_source = '''from functools import lru_cache
+@lru_cache(None)
+def right(n: int) -> tuple[int, int]:
+    return 3, 2
+
+@lru_cache(None)
+def nested_right(n: int) -> tuple[int, tuple[int, int]]:
+    return 7, (3, 2)
+
+@lru_cache(None)
+def empty_right(n: int) -> tuple[int, ...]:
+    return ()
+'''
+bodies = {
+    'across_keys': 'if left(n) is left(n + 1):\n    return 1\nreturn 0',
+    'across_functions': 'if left(n) is ordinary_left(n):\n    return 1\nreturn 0',
+    'nested_identity': 'if left(n) is nested_left(n)[1]:\n    return 1\nreturn 0',
+    'separate_units': 'if left(n) is right(n):\n    return 1\nreturn 0',
+    'nested_separate_units': 'if left(n) is nested_right(n)[1]:\n    return 1\nreturn 0',
+    'typed_constants': 'if bool_left(n) is int_left(n):\n    return -1\nreturn int(bool_left(n) == int_left(n))',
+    'empty_singleton': 'if empty_left(n) is empty_right(n):\n    return 1\nreturn 0',
+    'across_allocation': 'first = left(n)\nitems = [n]\nsecond = ordinary_left(n)\nif first is second:\n    return len(items) + first[0]\nreturn -1',
+}
+caller_source = ''
+for name, body in bodies.items():
+    caller_source += f'\ndef {name}(n: int) -> int:\n' + ''.join('    ' + line + '\n' for line in body.splitlines())
+
+# Compiling the two units independently reproduces import-time constant sharing;
+# executing a concatenated source string would incorrectly merge their pools.
+world = {}
+exec(compile(left_source, '<left-unit>', 'exec'), world)
+exec(compile(right_source, '<right-unit>', 'exec'), world)
+exec(compile(caller_source, '<caller-unit>', 'exec'), world)
+with TemporaryDirectory(prefix='pool-metadata-') as temporary:
+    units = []
+    for name, source in (('left', left_source), ('right', right_source), ('caller', caller_source)):
+        path = Path(temporary) / (name + '.py')
+        path.write_text(source)
+        unit = ast.parse(source)
+        identify_constant_pools(unit, path)
+        units.append(unit)
+    # Imported copies retain the compiler-origin metadata. Identical immutable
+    # functools bindings are merged as by the normal local-source linker.
+    module = ast.Module(body=[*deepcopy(units[0].body),
+        *(deepcopy(node) for node in units[1].body if not isinstance(node, ast.ImportFrom)),
+        *deepcopy(units[2].body)], type_ignores=[])
+    checker = SupportChecker(module)
+    for name in (*bodies, 'ordinary_left'):
+        assert not checker.check(name), (name, checker.check(name))
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        assert uses_heap_memoized(module, function), name
+    scalar = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'scalar_unpack')
+    assert not uses_heap_memoized(module, scalar), 'scalar unpacking must keep its original optimization'
+    encoded = api['AstJsonEmitter'](module).emit()
+    assert '$formalsw.constant.tuple' in encoded
+    assert api['AstJsonEmitter'](module).emit() == encoded
+
+    lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+             'def source : Module := pyast_from_json% (include_str "source.json")']
+    checks = 0
+    for name in bodies:
+        for n in (-3, 0, 1, 7):
+            for value in world.values():
+                if callable(value) and hasattr(value, 'cache_clear'):
+                    value.cache_clear()
+            result = world[name](n)
+            lines.append(f'example : (HeapMemoCalls.scalarFunction source "{name}" [.int ({n})]).observe 5000 = .done (.ok (.int ({result}))) := by native_decide')
+            checks += 1
+    lines.append('example : (Calls.function source "scalar_unpack" [.int 4]).observe 1000 = .done (.ok (.int 9)) := by native_decide')
+    checks += 1
+
+    # Unprotected raw ASTs retain the old constant-tuple rejection. A genuine
+    # compiler tuple constant is required; annotations alone cannot bypass it.
+    raw = ast.parse(left_source)
+    assert SupportChecker(raw).check('left')
+    default_source = left_source.replace('left(n: int)', 'left(n: int = (3, 2))', 1)
+    defaults = ast.parse(default_source)
+    identify_constant_pools(defaults, Path(temporary) / 'defaults.py', default_source)
+    assert SupportChecker(defaults).check('left')
+    # Existing entry references may already denote a compiler constant from an
+    # earlier external call. Their pool origins are not carried by Heap objects.
+    incoming = [
+        'def incoming(value: tuple[int, int]) -> int:\n    return int(left(0) is value)\n',
+        'def incoming(values: list[tuple[int, int]]) -> int:\n    return int(left(0) is values[0])\n',
+        'external: list[int] = [3, 2]\ndef incoming(n: int) -> int:\n    return left(n)[0] + len(external)\n',
+    ]
+    for text in incoming:
+        candidate = ast.Module(body=[*deepcopy(units[0].body), *ast.parse(text).body], type_ignores=[])
+        issues = SupportChecker(candidate).check('incoming')
+        assert any('origin metadata' in issue.reason for issue in issues), issues
+    if '--frontend-only' in sys.argv:
+        print(f'Constant pools: {checks} Python/runtime cases prepared; metadata, scope and rejection checks passed')
+        raise SystemExit(0)
+    with project_temporary_directory(prefix='constant-pools-') as proof_directory:
+        proof_directory = Path(proof_directory)
+        # Exercise the production linker too, using separate protected source
+        # files; identical functools bindings must merge without merging pools.
+        (proof_directory / 'left_unit.py').write_text(left_source)
+        (proof_directory / 'right_unit.py').write_text(right_source)
+        imports = ('from left_unit import left, ordinary_left, nested_left, bool_left, int_left, empty_left\n'
+                   'from right_unit import right, nested_right, empty_right\n')
+        marked = caller_source.replace('def across_keys(n: int) -> int:\n',
+            'def across_keys(n: int) -> int:\n    """\n    @formalsw: Returns\n    """\n')
+        linked_path = proof_directory / 'linked.py'
+        linked_path.write_text(imports + marked)
+        linked = api['source_module'](linked_path)
+        linked_checker = SupportChecker(linked)
+        for name in bodies:
+            assert not linked_checker.check(name), (name, linked_checker.check(name))
+        (proof_directory / 'source.json').write_text(api['AstJsonEmitter'](linked).emit())
+        proof = proof_directory / 'Checks.lean'
+        proof.write_text('\n'.join(lines) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'Constant pools: {checks} Python/Lean comparisons passed across keys, functions and source units')

@@ -9,6 +9,7 @@ import types
 from pathlib import Path
 from lang.py.contracts import ContractError
 from lang.py.defaults import literal_default
+from lang.py.constant_pools import identify_constant_pools
 
 
 def identify_classes(module, source):
@@ -29,6 +30,7 @@ def resolve_python_function(value):
     text = path.read_text()
     program = ast.parse(text, filename=str(path))
     program.formalsw_source_text = text
+    identify_constant_pools(program, path, text)
     identify_classes(program, path)
     definitions = bindings(program, value.__code__.co_name)
     if len(definitions) != 1 or not isinstance(definitions[0], ast.FunctionDef) or definitions[0] not in program.body:

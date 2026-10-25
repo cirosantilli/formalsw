@@ -556,6 +556,66 @@ def uses_parallel_model(function: ast.FunctionDef) -> bool:
             or bool(re.search(r'\bParallel\(', ast.get_docstring(function, clean=False) or '')))
 
 
+def observable_pool_tuples(module, function):
+    """Retain scalar unpacking and the existing unobservable-wrapper optimizations."""
+    hidden = (unpacked_tuple_displays(function) | unpacked_return_tuple_displays(module, function)
+              | compared_set_tuple_displays(function) | compared_local_tuple_displays(module, function))
+    hidden.update(node.value for statement in function.body for node in ast.walk(statement)
+                  if isinstance(node, ast.Assign) and len(node.targets) == 1
+                  and isinstance(node.targets[0], ast.Tuple) and isinstance(node.value, ast.Tuple)
+                  and len(node.targets[0].elts) == len(node.value.elts)
+                  and all(isinstance(target, ast.Name) for target in node.targets[0].elts))
+    return {node for statement in function.body for node in ast.walk(statement)
+            if isinstance(node, ast.Tuple) and hasattr(node, 'formalsw_constant_pool') and node not in hidden}
+
+
+def heap_pool_functions(module):
+    """Select protected tuple constants when heap-valued caching needs their identities."""
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    if not any(cache_decorator(module, node) and uses_heap_calls(module, node)
+               for node in functions.values()):
+        return set()
+    return {name for name, function in functions.items() if observable_pool_tuples(module, function)}
+
+
+def uses_pooled_tuples(module, function):
+    """Find source constants that require this invocation's private tuple pool."""
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    pools = heap_pool_functions(module)
+    pending, seen = [function], set()
+    while pending:
+        current = pending.pop()
+        if current.name in seen:
+            continue
+        seen.add(current.name)
+        if current.name in pools:
+            return True
+        for node in (part for statement in current.body for part in ast.walk(statement)):
+            pending.extend(functions[target] for target in call_targets(node) if target in functions)
+    return False
+
+
+def uses_heap_memoized(module, function):
+    """Select heap-value caching for reached heap caches or their pooled literals."""
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    pending, seen = [function], set()
+    pools = heap_pool_functions(module)
+    while pending:
+        current = pending.pop()
+        if current.name in seen:
+            continue
+        seen.add(current.name)
+        if current.name in pools or cache_decorator(module, current) and uses_heap_calls(module, current):
+            return True
+        for node in (part for statement in current.body for part in ast.walk(statement)):
+            pending.extend(functions[target] for target in call_targets(node) if target in functions)
+    return False
+
+
+def memo_heap_runtime(module, function):
+    return 'HeapMemoCalls' if uses_heap_memoized(module, function) else 'MemoHeapCalls'
+
+
 def uses_calls_model(module, function):
     if (uses_parallel_model(function) or uses_sort_model(module, function)
             or any(annotation_kind(arg.annotation) is None for arg in function.args.args)):
@@ -599,7 +659,26 @@ def check_calls(module, function, reject, *, heap=False):
     visited_classes = set()
     return_tuples = unpacked_return_tuple_displays(module, function) if heap else set()
     memoized_execution = uses_memoized(module, function)
-    if memoized_execution and uses_set_iteration(module, function):
+    heap_memoized_execution = uses_heap_memoized(module, function)
+    pool_functions = heap_pool_functions(module)
+    pool_execution = uses_pooled_tuples(module, function)
+    if pool_execution:
+        for arg in function.args.args:
+            kind = annotation_kind(arg.annotation)
+            if (kind and (kind.startswith(('list[', 'tuple[', 'set[', 'dict[')) or kind in ('bytearray', 'record'))
+                    or isinstance(arg.annotation, ast.Name) and arg.annotation.id in classes):
+                reject(arg, 'compiler tuple pools require scalar entry inputs; incoming pooled-object aliases need origin metadata')
+    # Heap caching retains its existing prohibition on cached global dependencies.
+    cached_dependencies = set()
+    functions_pending = [node for node in functions.values() if cache_decorator(module, node)] if heap_memoized_execution else []
+    while functions_pending:
+        dependency = functions_pending.pop()
+        if dependency.name in cached_dependencies:
+            continue
+        cached_dependencies.add(dependency.name)
+        for node in (part for statement in dependency.body for part in ast.walk(statement)):
+            functions_pending.extend(functions[target] for target in call_targets(node) if target in functions)
+    if (memoized_execution or heap_memoized_execution) and uses_set_iteration(module, function):
         reject(function, 'set traversal and memoized calls need a combined execution model')
 
     def visit_class(cls):
@@ -635,7 +714,7 @@ def check_calls(module, function, reject, *, heap=False):
                             for alias in item.names)):
                     reject(item, 'module-level call targets must not be rebound')
         cached = cache_decorator(module, function)
-        if cached and heap:
+        if cached and heap and not heap_memoized_execution:
             if not memoized_execution:
                 reject(function, 'cached helpers reached through methods require cache-aware call discovery')
             # Cache entries run in the scalar interpreter. Validate the whole
@@ -670,6 +749,11 @@ def check_calls(module, function, reject, *, heap=False):
             global_inputs = function_globals(module, function, heap_calls=heap)
             if global_inputs and not heap:
                 reject(function, 'global inputs require heap call execution')
+            if global_inputs and function.name in cached_dependencies:
+                reject(function, 'heap-memoized functions and their callees must be independent of global inputs')
+            if pool_execution and any(item.kind.startswith(('list[', 'tuple[', 'set[', 'dict['))
+                                      or item.kind in ('bytearray', 'record') for item in global_inputs):
+                reject(function, 'compiler tuple pools do not support incoming reference globals without origin metadata')
             globals_.update(item.name for item in global_inputs)
         except GlobalInputError as error:
             reject(function, str(error))
@@ -920,7 +1004,9 @@ def check_calls(module, function, reject, *, heap=False):
                 return
             if heap and isinstance(node, (ast.List, ast.Tuple)):
                 if (isinstance(node, ast.Tuple) and node.elts and node not in hidden_tuples
-                        and not any(runtime_tuple_element(item) for item in node.elts)):
+                        and not any(runtime_tuple_element(item) for item in node.elts)
+                        and not (heap_memoized_execution and owner is None and function.name in pool_functions
+                                 and node in observable_pool_tuples(module, function))):
                     reject(node, 'nonempty tuple displays need a runtime element; constant-tuple pooling is not modeled')
                 for item in node.elts:
                     recurse(item)

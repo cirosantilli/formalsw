@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-Check combined heap/cache selection and the scalar boundary of cached dependencies.
+Check combined heap/cache selection and supported cached heap dependencies.
 """
 import ast
 from pathlib import Path
 import runpy
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
+from lang.py.call_support import memo_heap_runtime
 from lang.py.contracts import input_condition
 from lang.py.global_inputs import call_globals
 from lang.py.support import SupportChecker
@@ -95,12 +97,36 @@ assert not SupportChecker(module).requirement('caller',
 assert SupportChecker(module).requirement('caller',
     'theorem invalid : (MemoHeapCalls.scalarFunction Probe.module "caller" []).Returns')
 
-# Every callee of a cached function must also satisfy scalar execution, even
-# when the same helper has already been visited through an ordinary heap call.
-bad = [
+# Cached helpers can allocate local lists, including through a transitive
+# helper already discovered by an ordinary caller before the cached call.
+accepted = [
     base.replace('return 1 + count(n - 1)', 'items = [n]\n    return items[0]'),
     base.replace('return 1 + count(n - 1)', 'return helper(n)') + '\ndef helper(n: int) -> int:\n    items = [n]\n    return items[0]\n',
     base.replace('return 1 + count(n - 1)', 'return helper(n)').replace('items = [count(n), count(n)]', 'items = [helper(n), count(n)]') + '\ndef helper(n: int) -> int:\n    items = [n]\n    return items[0]\n',
+]
+comparisons = []
+for index, text in enumerate(accepted):
+    module, function = parsed(text)
+    assert not SupportChecker(module).check('caller'), text
+    assert memo_heap_runtime(module, function) == 'HeapMemoCalls'
+    assert 'HeapMemoCalls.scalarFunction' in contract(module, function)
+    assert not SupportChecker(module).requirement('caller',
+        'theorem valid : (HeapMemoCalls.scalarFunction Probe.module "caller" []).Returns')
+    assert SupportChecker(module).requirement('caller',
+        'theorem invalid : (MemoHeapCalls.scalarFunction Probe.module "caller" []).Returns')
+    for n in (-3, 0, 1, 4):
+        world = {}
+        exec(text, world)
+        expected = world['caller'](n)
+        # Every caller allocates its result list. A positive cached miss
+        # allocates one local list, and a hit must reuse the scalar result.
+        # The third source also calls the allocating helper before count().
+        allocations = 1 + int(n > 0) + int(index == 2)
+        comparisons.append((index, n, expected, allocations))
+
+# Cache discovery through methods, cached global reads and set execution
+# still exceed the modeled cache boundary.
+bad = [
     base[:base.index('def caller')] + '''
 class Box:
     def __init__(self, n: int):
@@ -119,5 +145,26 @@ for text in bad:
     module, _ = parsed(text)
     assert SupportChecker(module).check('caller'), text
 
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192']
+for index in range(len(accepted)):
+    lines.append(f'def source{index} : Module := pyast_from_json% (include_str "source{index}.json")')
+for index, n, expected, allocations in comparisons:
+    lines.append(f'example : (HeapMemoCalls.scalarFunction source{index} "caller" [.int ({n})]).observe 10000 = '
+                 f'.done (.ok (.int ({expected}))) := by native_decide')
+    lines.append(f'example : (match (HeapMemoCalls.call source{index} "caller" [.scalar (.int ({n}))] []).execution.observe 10000 with\n'
+                 f'  | .done (.ok completion) => completion.outcome == .ok (.scalar (.int ({expected}))) && completion.heap.length == {allocations}\n'
+                 '  | _ => false) = true := by native_decide')
+if '--frontend-only' in sys.argv:
+    print(f'Memo/heap frontend: {len(comparisons)} Python/runtime cases prepared, '
+          f'{len(accepted)} cached heap cases accepted and {len(bad)} rejection checks passed')
+    raise SystemExit(0)
+with TemporaryDirectory(prefix='memo-heap-frontend-', dir='/tmp') as temporary:
+    directory = Path(temporary)
+    for index, text in enumerate(accepted):
+        (directory / f'source{index}.json').write_text(api['AstJsonEmitter'](ast.parse(text)).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
 subprocess.run([str(REPO / 'formalsw'), 'tests/py/memo_heap_calls.py'], cwd=REPO, check=True)
-print(f'Memo/heap frontend: runtime, predicate, reference, global and {len(bad)} rejection checks passed')
+print(f'Memo/heap frontend: {len(comparisons)} Python comparisons and allocation checks, '
+      f'predicate, reference, global and {len(bad)} rejection checks passed')

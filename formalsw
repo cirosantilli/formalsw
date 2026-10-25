@@ -22,10 +22,11 @@ from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
 from lang.py.named_callbacks import lower_named_callbacks
-from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, generator_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
+from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, generator_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration, uses_heap_memoized, memo_heap_runtime, heap_pool_functions, observable_pool_tuples
 from lang.py.permutation_support import permutation_arguments
 from lang.py.call_support import reverse_keyword, integer_instance
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
+from lang.py.constant_pools import identify_constant_pools
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
 from lang.py.tuple_support import flat_unpacking
@@ -475,7 +476,7 @@ def raw_heap_global_type(requirement, function, ast_namespace, conditions, modul
                       for name, kind in zip(names, kinds))
     values = ', '.join(heap_term(name, kind) for name, kind in zip(names, kinds))
     runtime = ('SetCalls' if uses_set_iteration(module, function) else
-               'MemoHeapCalls' if uses_memoized(module, function) else 'HeapCalls')
+               memo_heap_runtime(module, function) if uses_memoized(module, function) or uses_heap_memoized(module, function) else 'HeapCalls')
     binding = f'FormalSW.PyAst.{runtime}.call {ast_namespace}.module {lean_string(function.name)} [{values}] {heap} {contract_globals(function)}'
     if names:
         binding = f'fun {params} => {binding}'
@@ -551,7 +552,7 @@ def raw_theorem_type_for_function(
                                      for name, kind in zip(names, kinds))
             values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))
             runtime = ('SetCalls' if uses_set_iteration(module, function) else
-                       'MemoHeapCalls' if uses_memoized(module, function) else 'HeapCalls')
+                       memo_heap_runtime(module, function) if uses_memoized(module, function) or uses_heap_memoized(module, function) else 'HeapCalls')
             entry_heap = f'«{raw_heap}»' if raw_heap else '[]'
             binding = f'FormalSW.PyAst.{runtime}.call {ast_namespace}.module {lean_string(function.name)} [{values}] {entry_heap}'
             if names:
@@ -583,7 +584,7 @@ def raw_theorem_type_for_function(
                     [(name, annotation.id) for name, annotation in zip(names, annotations)],
                     [(item.name, item.name, item.kind) for item in global_args])
             else:
-                runtime = (("MemoHeapCalls.scalarFunction" if uses_memoized(module, function) else "HeapCalls.scalarFunction")
+                runtime = (((memo_heap_runtime(module, function) + ".scalarFunction") if uses_memoized(module, function) or uses_heap_memoized(module, function) else "HeapCalls.scalarFunction")
                            if module is not None and uses_heap_calls(module, function) else
                            "MemoCalls.sourceFunction" if module is not None and uses_memoized(module, function)
                            else "Calls.function" if module is not None and uses_calls_model(module, function) else "scalarFunction")
@@ -760,6 +761,7 @@ def source_module(source):
             module = ast.parse(text, filename=str(source))
             module.formalsw_source = path
             module.formalsw_source_text = text
+            identify_constant_pools(module, path, text)
             identify_classes(module, path)
             prepare_specification(source, module)
             lower_local_functions(module)
@@ -909,6 +911,7 @@ def collect_conditions(markers, function, module, namespace, prior_conditions=()
             env = f"if {query} = {lean_string(arg.arg)} then some ({value}) else {env}"
         binders, domain, heap = contract_domain(function)
         runtime = ('SetCalls' if predicate.choices else
+                   'HeapMemoCalls' if predicate.heap and predicate.heap_memoized else
                    'MemoHeapCalls' if predicate.heap and predicate.memoized else
                    'HeapCalls' if predicate.heap else 'MemoCalls' if predicate.memoized else 'Calls')
         evaluator = 'sourceEvaluate' if runtime == 'MemoCalls' else 'evaluate'
@@ -952,18 +955,18 @@ def scalar_contract_type(module, function, namespace, property_name, conditions,
             raise InvalidRequirement("cross-file Equiv references with globals need separate module contexts")
         if [annotation_domain(arg.annotation) for arg in func.args.args] != [annotation_domain(arg.annotation) for arg in arguments]:
             raise InvalidRequirement("Equiv requires matching supported argument domains")
-        if choices and uses_memoized(program, func):
+        if choices and (uses_memoized(program, func) or uses_heap_memoized(program, func)):
             raise InvalidRequirement("set traversal and memoized calls need a combined execution model")
         if choices or heap_inputs or getattr(inputs, "formalsw_globals", ()):
             values = ", ".join(heap_term(name, kind) for name, kind in zip(names, kinds))
             runtime = ('SetCalls' if choices else
-                       'MemoHeapCalls' if uses_memoized(program, func) else 'HeapCalls')
+                       memo_heap_runtime(program, func) if uses_memoized(program, func) or uses_heap_memoized(program, func) else 'HeapCalls')
             result = f'FormalSW.PyAst.{runtime}.call {ns}.module {lean_string(func.name)} [{values}] {heap}'
             if getattr(inputs, 'formalsw_globals', ()):
                 result += f' {contract_globals(inputs)}'
             return result
         if uses_heap_calls(program, func):
-            heap_runtime = 'MemoHeapCalls' if uses_memoized(program, func) else 'HeapCalls'
+            heap_runtime = memo_heap_runtime(program, func) if uses_memoized(program, func) or uses_heap_memoized(program, func) else 'HeapCalls'
             kind = annotation_kind(func.returns)
             if reference_kind(kind):
                 values = ", ".join(f'.scalar ({scalar_term(name, kind)})' for name, kind in zip(names, kinds))
@@ -1315,6 +1318,11 @@ class AstJsonEmitter:
         lower_named_callbacks(module)
         self.module = module
         self.bindings_module = module if bindings_module is None else bindings_module
+        self.pool_functions = heap_pool_functions(self.bindings_module)
+        self.pool_context = False
+        self.pool_nodes = set().union(*(observable_pool_tuples(self.bindings_module, function)
+            for function in self.bindings_module.body if isinstance(function, ast.FunctionDef)
+            and function.name in self.pool_functions))
 
     def emit(self) -> str:
         """Render the complete JSON document."""
@@ -1378,7 +1386,7 @@ class AstJsonEmitter:
                     "name": name,
                     "args": self.arguments(args),
                     "returns": self.expr(returns) if returns is not None else None,
-                    "body": [self.stmt(child) for child in body],
+                    "body": self.function_body(stmt),
                 }
             case ast.Pass():
                 return {"type": "Expr", "value": self.constant(None)}
@@ -1469,6 +1477,22 @@ class AstJsonEmitter:
             case _:
                 raise UnsupportedSyntax(f"unsupported statement: {type(stmt).__name__}")
 
+    def function_body(self, function):
+        previous = self.pool_context
+        self.pool_context = function in self.module.body and function.name in self.pool_functions
+        try:
+            return [self.stmt(child) for child in function.body]
+        finally:
+            self.pool_context = previous
+
+    def pooled_tuple(self, descriptor):
+        items = [self.pooled_tuple(item) if isinstance(item, dict) else self.constant(item)
+                 for item in descriptor['items']]
+        return {'type': 'ConsumeGenerator',
+                'consumer': {'type': 'Call', 'func': {'type': 'Name', 'id': '$formalsw.constant.tuple'},
+                             'args': [self.constant(descriptor['identity'])]},
+                'elt': {'type': 'Tuple', 'elts': items}, 'generators': []}
+
     def arguments(self, args: ast.arguments) -> list[dict[str, object]]:
         """Encode supported Python function arguments."""
         if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
@@ -1504,6 +1528,8 @@ class AstJsonEmitter:
                     "consumer": {"type": "Call", "func": {"type": "Name", "id": "$formalsw.star.call"}, "args": []},
                     "elt": {"type": "Call", "func": self.expr(expr.func), "args": encoded_args},
                     "generators": []}
+        if self.pool_context and isinstance(expr, ast.Tuple) and expr in self.pool_nodes:
+            return self.pooled_tuple(expr.formalsw_constant_pool)
         extremum = range_extremum(expr)
         if extremum is not None and not any(bindings(self.bindings_module, name)
                                            for name in (expr.func.id, "range")):

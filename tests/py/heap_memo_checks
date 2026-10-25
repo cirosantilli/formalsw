@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""
+Compare heap-valued caching with Python, including aliases, nesting and errors.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if not (ROOT / 'tests/py/test_support.py').is_file():
+    ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'tests/py'))
+from test_support import project_temporary_directory
+from lang.py.support import SupportChecker
+from lang.py.call_support import memo_heap_runtime
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = """
+from functools import lru_cache
+
+@lru_cache(None)
+def pair(n: int) -> tuple[int, int]:
+    return n, n + 1
+
+@lru_cache(None)
+def mutable(n: int) -> list[int]:
+    return [n]
+
+@lru_cache(None)
+def empty(n: int) -> list[int]:
+    return []
+
+@lru_cache(None)
+def nested(n: int) -> tuple[int, list[int]]:
+    return n, mutable(n)
+
+@lru_cache(None)
+def recurrence(n: int) -> tuple[int, int]:
+    if n <= 0:
+        return n - n, 1
+    previous = recurrence(n - 1)
+    return previous[0] + previous[1], previous[0] + 2 * previous[1]
+
+@lru_cache(None)
+def scalar(n: int) -> int:
+    return n * 3
+
+@lru_cache(None)
+def sum_pair(n: int) -> int:
+    values = pair(n)
+    return values[0] + values[1]
+
+@lru_cache(None)
+def risky(n: int) -> tuple[int, int]:
+    return 10 // n, n
+
+@lru_cache(None)
+def nested_error(n: int) -> tuple[int, int]:
+    values = pair(n)
+    return 1 // 0, values[1]
+
+@lru_cache(None)
+def stop(n: int) -> tuple[int, int]:
+    if n > 0:
+        return n, n
+    raise StopIteration()
+"""
+bodies = {
+    'tuple_hit': 'first = pair(n)\nsecond = pair(n)\nif first is second:\n    return first[0] + second[1]\nreturn -999',
+    'list_hit': 'first = mutable(n)\nfirst.append(n + 1)\nsecond = mutable(n)\nif first is second:\n    return 100 * len(second) + second[1]\nreturn -999',
+    'nested_alias': 'first = nested(n)\nsecond = mutable(n)\nfirst[1].append(n + 1)\nif first[1] is second:\n    return 100 * len(second) + second[1]\nreturn -999',
+    'across_allocation': 'first = pair(n)\nunrelated = [n]\nsecond = pair(n)\nif first is second:\n    return second[1] + len(unrelated)\nreturn -999',
+    'different_keys': 'first = empty(n)\nsecond = empty(n + 1)\nif first is second:\n    return -999\nfirst.append(n)\nreturn 100 * len(first) + len(second)',
+    'mixed_scalar': 'first = pair(n)\nreturn scalar(n) + sum_pair(n) + sum_pair(n) + first[0]',
+    'recursive': 'first = recurrence(n)\nsecond = recurrence(n)\nif first is second:\n    return first[0] + second[1]\nreturn -999',
+    'generator_hits': 'return sum(1 for i in range(n) if pair(i)[1] > pair(i)[0])',
+    'division': 'return risky(n)[0]',
+    'exception_after_cache': 'return nested_error(n)[0]',
+    'stop_direct': 'return stop(n)[0]',
+    'stop_generator': 'return sum(stop(i)[0] for i in range(n))',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int) -> int:\n' + ''.join('    ' + line + '\n' for line in body.splitlines())
+module = ast.parse(source)
+world = {}
+exec(source, world)
+checker = SupportChecker(module)
+for name in bodies:
+    assert not checker.check(name), (name, checker.check(name))
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    assert memo_heap_runtime(module, function) == 'HeapMemoCalls'
+
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+checks = 0
+for name in bodies:
+    for n in (-3, 0, 1, 4, 7):
+        for value in world.values():
+            if callable(value) and hasattr(value, 'cache_clear'):
+                value.cache_clear()
+        try:
+            result = world[name](n)
+            expected = f'.ok (.int ({result}))'
+        except (TypeError, ValueError, ZeroDivisionError, StopIteration, RuntimeError) as error:
+            expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+        lines.append(f'example : (HeapMemoCalls.scalarFunction source "{name}" [.int ({n})]).observe 50000 = .done ({expected}) := by native_decide')
+        checks += 1
+
+# A hit reuses the original tuple rather than allocating another one.
+lines.extend([
+    'example : (match (HeapMemoCalls.call source "across_allocation" [.scalar (.int 4)] []).execution.observe 3000 with',
+    '  | .done (.ok completion) => completion.heap.length == 2',
+    '  | _ => false) = true := by native_decide',
+    'def failedMissCache (fuel : Nat) (state : HeapMemoCalls.State) : Bool :=',
+    '  match fuel with',
+    '  | 0 => false',
+    '  | fuel + 1 => match HeapMemoCalls.step source 0 state with',
+    '    | .next following => failedMissCache fuel following',
+    '    | .done (.ok completion) => match completion.outcome with',
+    '      | .error error => (error.typeName == "ZeroDivisionError") &&',
+    '          (state.cache ⟨"nested_error", [4]⟩).isNone && (state.cache ⟨"pair", [4]⟩).isSome',
+    '      | _ => false',
+    '    | _ => false',
+    'example : failedMissCache 3000 ⟨⟨.operation (.call "nested_error") [.scalar (.int 4)], [], []⟩, [], HeapMemoCalls.Cache.empty⟩ = true := by native_decide',
+])
+checks += 2
+
+base = '''from functools import lru_cache
+@lru_cache(None)
+def pair(n: int) -> tuple[int, int]:
+    return n, n + 1
+def root(n: int) -> int:
+    return pair(n)[0]
+'''
+bad = [
+    base.replace('lru_cache(None)', 'lru_cache(4)'),
+    base.replace('lru_cache(None)', 'lru_cache(None, typed=True)'),
+    base.replace('pair(n: int)', 'pair(n: int = 1)'),
+    base.replace('pair(n: int)', 'pair(n: list[int])'),
+    base.replace('return n, n + 1', 'return setting, n + 1') + '\nsetting: int = 7\n',
+    base.replace('return n, n + 1', 'return read(n), n + 1') + '\ndef read(n: int) -> int:\n    return setting\nsetting: int = 7\n',
+    base.replace('return pair(n)[0]', 'return pair.cache_info()[0]'),
+    base + '\npair = root\n',
+    base + '\nlru_cache = 3\n',
+    base.replace('return pair(n)[0]', 'return sum(pair(i)[0] for i in {n})'),
+]
+for text in bad:
+    assert SupportChecker(ast.parse(text)).check('root'), text
+
+# Existing scalar-only memoized execution keeps its established runtime.
+scalar_module = ast.parse('from functools import lru_cache\n@lru_cache(None)\ndef f(n: int) -> int:\n    return n + 1\n')
+assert memo_heap_runtime(scalar_module, scalar_module.body[1]) == 'MemoHeapCalls'
+if '--frontend-only' in sys.argv:
+    print(f'Heap memoization: {checks} Python/runtime cases prepared and {len(bad)} rejections passed')
+    raise SystemExit(0)
+with project_temporary_directory(prefix='heap-memo-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'Heap memoization: {checks} Python/Lean cases and {len(bad)} rejections passed')

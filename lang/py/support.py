@@ -17,7 +17,7 @@ from lang.py.mutable_support import check_mutable
 from lang.py.sorting_support import MERGE_SORT, QUICK_SORT, body_of, matches_sort
 from lang.py.memo_support import cache_decorator, uses_memoized
 from lang.py.named_callbacks import lower_named_callbacks
-from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_set_iteration, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
+from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_set_iteration, uses_heap_memoized, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
 
 
 @dataclass(frozen=True)
@@ -572,7 +572,7 @@ class SupportChecker:
 
     @staticmethod
     def execution_targets(marker: str):
-        return re.findall(r'\b(SetCalls\.call|MemoHeapCalls\.call|MemoHeapCalls\.scalarFunction|HeapCalls\.call|HeapCalls\.scalarFunction|MemoCalls\.sourceFunction|Calls\.function|Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
+        return re.findall(r'\b(SetCalls\.call|HeapMemoCalls\.call|HeapMemoCalls\.scalarFunction|MemoHeapCalls\.call|MemoHeapCalls\.scalarFunction|HeapCalls\.call|HeapCalls\.scalarFunction|MemoCalls\.sourceFunction|Calls\.function|Mutable\.function|scalarFunctionWithGlobals|scalarFunction|listFunction|parallelFunction)\s+(?:\S+\.module|_this_module)\s+"([^"]+)"', marker)
 
     def requirement(self, name: str | None, marker: str) -> tuple[UnsupportedConstruct, ...]:
         """Check the enclosing function and any explicitly named proof dependencies."""
@@ -583,7 +583,7 @@ class SupportChecker:
                           for item in function_globals(self.module, self.functions[target]))
         except GlobalInputError:
             pass
-        explicit_heap = any(model in ("HeapCalls.call", "MemoHeapCalls.call", "SetCalls.call") and target == name
+        explicit_heap = any(model in ("HeapCalls.call", "MemoHeapCalls.call", "HeapMemoCalls.call", "SetCalls.call") and target == name
                             for model, target in self.execution_targets(marker))
         issues = list(self.check(name, mutable=mutable and not explicit_heap, heap_calls=explicit_heap)) if name else []
         if name:
@@ -646,7 +646,7 @@ class SupportChecker:
         targets += [target for _, target in executions]
         for target in dict.fromkeys(targets):
             if target != name:
-                target_heap = any(model in ("HeapCalls.call", "MemoHeapCalls.call", "SetCalls.call")
+                target_heap = any(model in ("HeapCalls.call", "MemoHeapCalls.call", "HeapMemoCalls.call", "SetCalls.call")
                                   and dependency == target for model, dependency in executions)
                 issues.extend(self.check(target, (name,) if name else (), parallel=target in parallel_targets,
                     mutable=(mutable or ("Mutable.function", target) in executions) and not target_heap, heap_calls=target_heap))
@@ -667,12 +667,16 @@ class SupportChecker:
             # SetCalls extends supported heap steps, so it has the same builtin coverage.
             if model == 'SetCalls.call':
                 model = 'HeapCalls.call'
-            if uses_memoized(self.module, function) and model not in ('MemoCalls.sourceFunction', 'MemoHeapCalls.call', 'MemoHeapCalls.scalarFunction'):
+            if uses_memoized(self.module, function) and model not in ('MemoCalls.sourceFunction', 'MemoHeapCalls.call', 'MemoHeapCalls.scalarFunction', 'HeapMemoCalls.call', 'HeapMemoCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'cached functions require MemoCalls.sourceFunction or MemoHeapCalls with source cache metadata'))
+            if uses_heap_memoized(self.module, function) and model not in ('HeapMemoCalls.call', 'HeapMemoCalls.scalarFunction'):
+                issues.append(UnsupportedConstruct(target, function.lineno,
+                    'heap-valued cached functions require HeapMemoCalls with source cache metadata'))
             # Combined execution inherits ordinary heap coverage after the cache gate.
-            if model.startswith('MemoHeapCalls.'):
-                model = model.replace('MemoHeapCalls.', 'HeapCalls.', 1)
+            for cache_model in ('MemoHeapCalls.', 'HeapMemoCalls.'):
+                if model.startswith(cache_model):
+                    model = model.replace(cache_model, 'HeapCalls.', 1)
             if uses_assertions(self.module, function) and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction', 'Mutable.function'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'assertions require an interpreter that executes their conditions and messages'))
