@@ -201,6 +201,68 @@ theorem all_map_loop {α : Type} {values : List α} {encode : α → Value} {pre
             (by simp [List.drop_add_one_eq_tail_drop, suffix])
           simpa [truthBody, Calls.loopContinuation, Calls.loopControl, Calls.loopControlStmt] using rest
 
+/-- A sequence predicate can read captured locals whose bindings survive each iteration. -/
+theorem all_map_loop_with_invariant {α : Type} {values : List α} {encode : α → Value} {predicate : α → Bool}
+    (invariant : Env → Prop)
+    (preserved : ∀ inner item, invariant inner → invariant (setLocal inner name (encode item)))
+    (evaluated : ∀ inner item, invariant inner → inner name = some (encode item) →
+      Evaluates (globals := globals) module inner element heap (.scalar (.bool (predicate item))) heap)
+    (remaining : List α)
+    (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok (values.map encode), heap))
+    (valid : invariant env) (suffix : values.drop position = remaining) :
+    BlockReturns (globals := globals) module env
+      [.sequenceStepLoop name source position (truthBody true element) [],
+        .return (.constant (.bool true))] heap
+      (.scalar (.bool (remaining.all predicate))) heap := by
+  induction remaining generalizing position env with
+  | nil =>
+      apply BlockReturns.sequence_done sequence
+      · have missing : values[position]? = none := by
+          simpa [suffix] using (List.head?_drop (l := values) (i := position)).symm
+        simp [missing]
+      · exact BlockReturns.return_value Evaluates.constant
+  | cons head tail ih =>
+      have item : values[position]? = some head := by
+        simpa [suffix] using (List.head?_drop (l := values) (i := position)).symm
+      let bound := setLocal env name (encode head)
+      have validBound : invariant bound := preserved env head valid
+      have tested := evaluated bound head validBound (by simp [bound, setLocal])
+      apply BlockReturns.sequence_step (value := encode head) sequence (by simp [item])
+      rw [List.all_cons]
+      cases accepted : predicate head with
+      | false =>
+          simp only [Bool.false_and]
+          apply BlockReturns.branch (flag := false) (by simpa only [accepted] using tested) rfl
+          exact BlockReturns.return_value Evaluates.constant
+      | true =>
+          simp only [Bool.true_and]
+          apply BlockReturns.branch (flag := true) (by simpa only [accepted] using tested) rfl
+          have rest := ih (position := position + 1) (env := bound) validBound
+            (by simp [List.drop_add_one_eq_tail_drop, suffix])
+          simpa [truthBody, Calls.loopContinuation, Calls.loopControl, Calls.loopControlStmt] using rest
+
+/-- Lazily evaluate a sequence predicate while retaining an invariant for its captured locals. -/
+theorem Evaluates.all_map_with_invariant {α : Type} {values : List α} {encode : α → Value} {predicate : α → Bool}
+    (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
+    (notEnumerate : ∀ expressions, iterable ≠ .call (.name "enumerate") expressions)
+    (notZip : ∀ expressions, iterable ≠ .zipIterable expressions)
+    (evaluated : Evaluates (globals := globals) module env iterable heap source middle)
+    (sequence : Mutable.sequence source middle = some (.ok (values.map encode), middle))
+    (invariant : Env → Prop)
+    (preserved : ∀ inner item, invariant inner → invariant (setLocal inner name (encode item)))
+    (valid : invariant (comprehensionTargetsEnv env [(.name name, iterable, [])]))
+    (elementValue : ∀ inner item, invariant inner → inner name = some (encode item) →
+      Evaluates (globals := globals) module inner element middle (.scalar (.bool (predicate item))) middle) :
+    Evaluates (globals := globals) module env
+      (.consumeGenerator (.builtinCall .all []) element [(.name name, iterable, [])]) heap
+      (.scalar (.bool (values.all predicate))) middle := by
+  apply Evaluates.truth_generator_sequence (universal := true)
+    ordinary notEnumerate notZip evaluated sequence
+  apply all_map_loop_with_invariant invariant preserved elementValue values
+  · cases source <;> exact sequence
+  · exact valid
+  · rfl
+
 /-- Map a pure boolean predicate lazily over an existing sequence. -/
 theorem Evaluates.all_map {α : Type} {values : List α} {encode : α → Value} {predicate : α → Bool}
     (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
