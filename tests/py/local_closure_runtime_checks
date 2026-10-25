@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""
+Compare shared, recursive closure results and aliases in Python and Lean.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.local_functions import lower_local_functions
+from lang.py.object_snapshot import snapshot_roots
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+fixtures = runpy.run_path(str(ROOT / 'tests/py/local_closure_cell_checks'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+with project_temporary_directory(prefix='local-closure-runtime-') as directory:
+    directory = Path(directory)
+    lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192']
+    count = 0
+    for index, (name, body) in enumerate(fixtures['CASES'].items()):
+        source = fixtures['PRELUDE'] + body
+        original = {}
+        exec(source, original)
+        module = ast.parse(source)
+        lower_local_functions(module)
+        encoded = directory / f'source{index}.json'
+        encoded.write_text(api['AstJsonEmitter'](module).emit())
+        lines.append(f'def source{index} : Module := pyast_from_json% (include_str "{encoded.name}")')
+        for n in (-2, 0, 5):
+            expected = original['outer'](n)
+            snapshot = data(snapshot_roots([expected]))
+            call = f'HeapCalls.call source{index} "outer" [.scalar (.int ({n}))] []'
+            lines.extend([
+                f'-- {name}, n={n}',
+                f'example : (match ({call}).execution.observe 20000 with',
+                '  | .done (.ok c) => (match c.outcome with | .ok _ => true | _ => false) &&',
+                f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+                '  | _ => false) = true := by native_decide',
+            ])
+            count += 1
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} Python/Lean shared-closure graph comparisons passed')

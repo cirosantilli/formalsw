@@ -1,4 +1,5 @@
-"""Lift direct local calls while retaining late-bound captures and heap aliases.
+"""
+Lift direct local calls while retaining late-bound captures and heap aliases.
 
 Only nonescaping, unconditionally defined functions are lowered. Anything outside
 this subset stays in the source AST, where ordinary coverage checking rejects it.
@@ -6,6 +7,8 @@ this subset stays in the source AST, where ordinary coverage checking rejects it
 import ast
 import copy
 import symtable
+
+from lang.py.closure_cells import lower_closure_cells
 
 
 def lower_local_functions(module):
@@ -26,9 +29,13 @@ def lower_local_functions(module):
             continue
         try:
             lifted, body = _lower(outer, children, postponed, occupied)
-        except (ValueError, SyntaxError) as error:
-            outer.formalsw_local_function_error = str(error)
-            continue
+        except (ValueError, SyntaxError):
+            try:
+                lifted, body, guards = lower_closure_cells(module, outer, children, postponed, occupied)
+            except (ValueError, SyntaxError) as error:
+                outer.formalsw_local_function_error = str(error)
+                continue
+            outer.formalsw_callback_bindings = guards
         outer.body = body
         additions.extend(lifted)
     module.body.extend(additions)
@@ -67,7 +74,15 @@ def _lower(outer, children, postponed, occupied):
     # and global names. Adding parameters preserves those lexical distinctions.
     table = next(scope for scope in symtable.symtable(ast.unparse(outer), '<local-functions>', 'exec').get_children()
                  if scope.get_type() == 'function' and scope.get_name() == outer.name)
-    scopes = {scope.get_name(): scope for scope in table.get_children() if scope.get_type() == 'function'}
+    # Comprehensions can have the same synthetic scope name as a real local
+    # function (for example genexpr). Resolve the namespace of its binding.
+    scopes = {}
+    for child in children:
+        namespaces = table.lookup(child.name).get_namespaces()
+        if (len(namespaces) != 1 or namespaces[0].get_type() != 'function'
+                or namespaces[0].get_name() != child.name):
+            reject('local function bindings need one unambiguous lexical namespace')
+        scopes[child.name] = namespaces[0]
     captures = {child.name: scopes[child.name].get_frees() for child in children}
     available = {arg.arg for arg in outer.args.posonlyargs + outer.args.args + outer.args.kwonlyargs}
     defined = set()
@@ -92,6 +107,50 @@ def _lower(outer, children, postponed, occupied):
             available.update(target.id for target in statement.targets if isinstance(target, ast.Name))
         elif isinstance(statement, ast.AnnAssign) and statement.value is not None and isinstance(statement.target, ast.Name):
             available.add(statement.target.id)
+
+    # Capture arguments are loaded at the call site. A comprehension can
+    # shadow an owner binding there, so use private cells for those calls.
+    class SourceCaptureScope(ast.NodeVisitor):
+        def __init__(self):
+            self.shadowed = set()
+
+        def visit_FunctionDef(self, node):
+            return
+
+        def visit_Call(self, node):
+            if (isinstance(node.func, ast.Name) and node.func.id in captures
+                    and set(captures[node.func.id]) & self.shadowed):
+                reject('comprehension call sites shadow captured owner bindings')
+            self.generic_visit(node)
+
+        def comprehension(self, node):
+            # Only the first iterable uses the enclosing scope. Nested
+            # comprehensions retain any shadowing from their enclosing one.
+            self.visit(node.generators[0].iter)
+            previous = self.shadowed
+            targets = {part.id for generator in node.generators
+                       for part in ast.walk(generator.target)
+                       if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)}
+            self.shadowed = previous | targets
+            for index, generator in enumerate(node.generators):
+                self.visit(generator.target)
+                if index:
+                    self.visit(generator.iter)
+                for condition in generator.ifs:
+                    self.visit(condition)
+            for field in ('elt', 'key', 'value'):
+                if hasattr(node, field):
+                    self.visit(getattr(node, field))
+            self.shadowed = previous
+
+        visit_ListComp = comprehension
+        visit_SetComp = comprehension
+        visit_DictComp = comprehension
+        visit_GeneratorExp = comprehension
+
+    validator = SourceCaptureScope()
+    for statement in outer.body:
+        validator.visit(statement)
 
     replacements = {}
     lifted = []

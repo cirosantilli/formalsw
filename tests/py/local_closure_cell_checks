@@ -1,0 +1,521 @@
+#!/usr/bin/env python3
+"""Compare recursive shared closure cells with Python and check coverage guards."""
+import ast
+from pathlib import Path
+import sys
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py import local_functions as new
+from lang.py.support import SupportChecker
+from lang.py.call_support import uses_heap_calls
+
+PRELUDE = 'from __future__ import annotations\n'
+CASES = {
+    'nonlocal_accumulator': '''
+def outer(n: int):
+    total = n
+    def add(x):
+        nonlocal total
+        total += x
+        return total
+    a = add(2)
+    b = add(3)
+    return total, a, b
+''',
+    'recursive_shared': '''
+def outer(n: int):
+    total = n
+    saved = [n]
+    def read(x):
+        return total + x
+    def rec(k):
+        nonlocal total, saved
+        if k <= 0:
+            return read(1)
+        total += k
+        saved = saved + [k]
+        return rec(k - 1) + read(k)
+    result = rec(4)
+    return total, saved, result
+''',
+    'mutual': '''
+def outer(n: int):
+    count = n
+    def even(k):
+        nonlocal count
+        count += 1
+        if k == 0:
+            return True
+        return odd(k - 1)
+    def odd(k):
+        nonlocal count
+        count += 2
+        if k == 0:
+            return False
+        return even(k - 1)
+    result = even(7)
+    return result, count
+''',
+    'parameter_shadow': '''
+def outer(n: int):
+    x = n
+    def read(x):
+        return x + 1
+    def bump(k):
+        nonlocal x
+        x += read(k)
+    bump(4)
+    return x
+''',
+    'comprehension_shadow': '''
+def outer(n: int):
+    x = n
+    def bump():
+        nonlocal x
+        x += sum(x for x in range(4))
+        return x
+    result = bump()
+    return x, result
+''',
+    'comprehension_first_iterable': '''
+def outer(n: int):
+    x = [n, n + 1]
+    def bump():
+        nonlocal x
+        answer = [x for x in x]
+        x = answer + [3]
+    bump()
+    return x
+''',
+    'augmented_order': '''
+def outer(n: int):
+    x = n
+    def rhs():
+        nonlocal x
+        x += 10
+        return 2
+    def bump():
+        nonlocal x
+        x += rhs()
+    bump()
+    return x
+''',
+    'argument_order': '''
+def outer(n: int):
+    x = n
+    def writer():
+        nonlocal x
+        x += 7
+        return 2
+    def reader(ignored):
+        return x
+    result = reader(writer())
+    return x, result
+''',
+    'rebind_aliases': '''
+def outer(n: int):
+    items = [n]
+    old = items
+    def replace():
+        nonlocal items
+        items = [n + 1]
+        items.append(4)
+    replace()
+    old.append(9)
+    return old, items
+''',
+    'late_owner': '''
+def outer(n: int):
+    x = n
+    def read():
+        return x
+    def writer():
+        nonlocal x
+        x += 1
+    x = n + 10
+    writer()
+    return read(), x
+''',
+    'captured_parameter': '''
+def outer(n: int):
+    def rec(k):
+        nonlocal n
+        if k == 0:
+            return n
+        n += k
+        return rec(k - 1)
+    result = rec(3)
+    return n, result
+''',
+    'captured_none': '''
+def outer(n: int):
+    x = None
+    def change():
+        nonlocal x
+        previous = x
+        x = n
+        return previous
+    previous = change()
+    return previous, x
+''',
+    'owner_annotation_reassignment': '''
+def outer(n: int):
+    x: int = n
+    def writer():
+        nonlocal x
+        x += 2
+    x: int = n + 1
+    x: int
+    writer()
+    return x
+''',
+    'stable_module_alias': '''
+def target(n):
+    return n * 3
+def outer(n: int):
+    invoke = target
+    count = 0
+    def rec(k):
+        nonlocal count
+        count += 1
+        if k == 0:
+            return invoke(n)
+        return rec(k - 1)
+    result = rec(3)
+    return count, result
+''',
+    'cache_and_siblings': '''
+def target(n):
+    return n >= -100
+def outer(n: int):
+    cache = {}
+    local_cache = cache
+    prime = target
+    best = 100
+    chosen = []
+    def pair(a, b):
+        key = (a, b)
+        found = local_cache.get(key)
+        if found is not None:
+            return found
+        result = prime(a + b)
+        local_cache[key] = result
+        return result
+    def dfs(k, total):
+        nonlocal best, chosen
+        if k == 0:
+            if total < best:
+                best = total
+                chosen = [total]
+            return
+        if pair(k, n):
+            dfs(k - 1, total + k)
+    dfs(4, n)
+    return best, chosen, cache
+''',
+}
+
+
+def translate(source):
+    module = ast.parse(PRELUDE + source)
+    new.lower_local_functions(module)
+    errors = [(node.name, node.formalsw_local_function_error) for node in module.body
+              if isinstance(node, ast.FunctionDef) and hasattr(node, 'formalsw_local_function_error')]
+    return module, errors
+
+
+CASES.update({
+    'capture_call_list_target': '''
+def outer(n: int):
+    x = n
+    def read():
+        return x
+    return [read() for x in [1, 2]]
+''',
+    'capture_call_generator_target': '''
+def outer(n: int):
+    x = n
+    def read():
+        return x
+    return sum(read() for x in [1, 2])
+''',
+    'capture_call_dict_unpack_target': '''
+def outer(n: int):
+    x = n
+    def read():
+        return x
+    return {i: read() for i, x in enumerate([1, 2])}
+''',
+    'capture_call_before_later_target': '''
+def outer(n: int):
+    x = n
+    def read():
+        return x
+    return [read() for i in [0] if read() for x in [1]]
+''',
+    'capture_call_nested_enclosing_target': '''
+def outer(n: int):
+    x = n
+    def read():
+        return x
+    return [[read() for y in [x]] for x in [1, 2]]
+''',
+    'capture_call_nested_first_iterable': '''
+def outer(n: int):
+    x = [n, n + 1]
+    def read():
+        return x
+    return [[y for y in read()] for x in [[1], [2]]]
+''',
+    'capture_call_first_iterable': '''
+def outer(n: int):
+    x = [n, n + 1]
+    def read():
+        return x
+    return [item for x in [read()] for item in x]
+''',
+    'capture_read_child_comprehension': '''
+def outer(n: int):
+    x = n
+    def read(k):
+        nonlocal x
+        if k > 0:
+            return read(k - 1)
+        return sum(x for x in [x, x + 1])
+    return read(1)
+''',
+})
+
+comparisons = 0
+for name, source in CASES.items():
+    module, errors = translate(source)
+    assert not errors, (name, errors)
+    original, lowered = {}, {}
+    exec(PRELUDE + source, original)
+    exec(compile(module, '<lowered-closure>', 'exec'), lowered)
+    for n in [-8, -1, 0, 1, 4, 11, 2**70]:
+        assert original['outer'](n) == lowered['outer'](n), (name, n, ast.unparse(module))
+        # A second activation must have a fresh set of private cells.
+        assert original['outer'](n + 1) == lowered['outer'](n + 1), (name, 'second activation')
+        comparisons += 2
+    checker = SupportChecker(module)
+    assert not checker.check('outer', heap_calls=True), (name, checker.check('outer', heap_calls=True))
+    entry = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'outer')
+    assert uses_heap_calls(module, entry), name
+
+# Guard metadata must still reject a newly conflicting module binding after lowering.
+module, errors = translate(CASES['stable_module_alias'])
+module.body.append(ast.Assign(targets=[ast.Name(id='target', ctx=ast.Store())], value=ast.Constant(value=0)))
+ast.fix_missing_locations(module)
+assert SupportChecker(module).check('outer', heap_calls=True)
+
+BAD = [
+    # Function values may not escape; direct recursion only triggers the new path.
+    '''
+def outer(n):
+    x = n
+    def read(k):
+        if k: return read(k-1)
+        return x
+    return read
+''',
+    '''
+def outer(n):
+    x = n
+    def read(k):
+        nonlocal x
+        x += k
+    alias = read
+    return alias(n)
+''',
+    '''
+def outer(n):
+    x = n
+    def read(k):
+        return other(k)
+    result = read(n)
+    def other(k):
+        return x + k
+    return result
+''',
+    '''
+def outer(n):
+    def read(k):
+        nonlocal x
+        x = k
+    x = n
+    read(1)
+    return x
+''',
+    '''
+def outer(n):
+    x = n
+    def read(k=1):
+        nonlocal x
+        x += k
+    read()
+    return x
+''',
+    '''
+def outer(n):
+    x = n
+    def read(k):
+        nonlocal x
+        x += k
+    read(k=n)
+    return x
+''',
+    '''
+def outer(n):
+    x = n
+    def read(k):
+        nonlocal x
+        x, k = k, x
+    read(n)
+    return x
+''',
+    '''
+def target(n): return n
+def outer(n):
+    invoke = target
+    x = n
+    def read(k):
+        nonlocal x
+        x += invoke(k)
+    invoke = n
+    read(1)
+    return x
+''',
+    '''
+def target(n): return n
+def mutate():
+    global target
+    target = None
+def outer(n):
+    invoke = target
+    x = n
+    def read(k):
+        nonlocal x
+        x += invoke(k)
+    read(1)
+    return x
+''',
+    '''
+def outer(n):
+    x = n
+    def read(k):
+        nonlocal x
+        x += k
+    return locals()
+''',
+    '''
+def target(n): return n
+def outer(invoke):
+    x = 0
+    def read(k):
+        nonlocal x
+        x += invoke(k)
+    invoke = target
+    read(1)
+    return x
+''',
+    '''
+def target(n): return n
+def outer(n):
+    invoke = target
+    x = n
+    def read(k):
+        nonlocal x
+        x += sum(invoke(k) for target in [k])
+    read(1)
+    return x
+''',
+    '''
+def outer(n):
+    x = n
+    def read(k):
+        nonlocal x
+        x += k
+    import math as x
+    read(1)
+    return x
+''',
+    '''
+def outer(n):
+    x = n
+    def read(k):
+        nonlocal x
+        x += k
+    try:
+        raise ValueError()
+    except ValueError as x:
+        pass
+    read(1)
+    return x
+''',
+    '''
+def outer(n):
+    x = n
+    def read(k):
+        nonlocal x
+        x += k
+    match n:
+        case x:
+            pass
+    read(1)
+    return x
+''',
+    '''
+def outer(n):
+    def read(k):
+        if k:
+            return read(k-1)
+        return k
+    import math as read
+    return read(n)
+''',
+]
+# A real local function and an incidental generator scope can share a name.
+# Reject an ambiguous symbol namespace instead of lifting with the wrong frees.
+BAD.extend([
+    """
+def genexpr(k): return 100
+
+def outer(n):
+    def genexpr(k):
+        if k > 0:
+            return genexpr(k - 1)
+        return 0
+    dummy = sum(i for i in [n])
+    return genexpr(1)
+""",
+    """
+x = 100
+
+def outer(n):
+    x = n
+    def genexpr(k):
+        return x + k
+    dummy = sum(i for i in [n])
+    return genexpr(1)
+""",
+    """
+def outer(n):
+    x = n
+    def genexpr(k):
+        nonlocal x
+        x += k
+        return x
+    dummy = sum(i for i in [n])
+    return genexpr(1)
+""",
+])
+for source in BAD:
+    original = ast.parse(PRELUDE + source)
+    before = ast.dump(original, include_attributes=True)
+    new.lower_local_functions(original)
+    assert any(hasattr(node, 'formalsw_local_function_error') for node in original.body), source
+    assert ast.dump(original, include_attributes=True) == before, source
+
+print(f'Local closure cells: {comparisons} Python comparisons, {len(CASES)} coverage checks, {len(BAD)} rejections passed')
