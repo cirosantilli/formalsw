@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+Compare source permutation loops and comprehensions with Python.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+from itertools import permutations
+
+def collected(xs: list[int]):
+    return [list(p) for p in permutations(xs)]
+def generated(xs: list[int]):
+    return list(list(p) for p in permutations(xs))
+def summed(xs: list[int]):
+    return sum(len(p) for p in permutations(xs))
+def ordered(xs: list[int]):
+    return sorted(p[0] for p in permutations(xs, 1))
+def joined(xs: list[int]):
+    return ",".join(str(p[0]) for p in permutations(xs, r=1))
+def unpacked(xs: list[int]):
+    out = []
+    for a, b in permutations(xs, 2):
+        out.append(a - b)
+    else:
+        out.append(99)
+    return out
+def transfers(xs: list[int]):
+    out = []
+    for p in permutations(xs):
+        if len(p) == 0:
+            continue
+        out.append(p[0])
+        if p[0] == 0:
+            break
+    else:
+        out.append(99)
+    return out
+def nested(xs: list[int]):
+    return [list(q) for p in permutations(xs, 2) for q in permutations(p)]
+def snapshot(xs: list[int]):
+    out = []
+    for p in permutations(xs):
+        xs.append(9)
+        out.append(list(p))
+    return out
+def aliases(xs: list[int]):
+    out = []
+    for p in permutations([xs, xs]):
+        xs.append(7)
+        out.append(p)
+    return out
+def change_length(xs: list[int]) -> int:
+    xs.append(8)
+    return 2
+def argument_effect(xs: list[int]):
+    return [list(p) for p in permutations(xs, change_length(xs))]
+def negative(xs: list[int]):
+    return [list(p) for p in permutations(xs, -1)]
+def bad_length(xs: list[int]):
+    return [list(p) for p in permutations(xs, "bad")]
+def bad_unpack(xs: list[int]):
+    return [a + b for a, b in permutations(xs, 1)]
+def fail(xs: list[int]):
+    xs.append(3)
+    raise StopIteration(7)
+def outside(xs: list[int]):
+    return list(p for p in permutations(fail(xs)))
+def inside(xs: list[int]):
+    return list(q for p in permutations(xs) for q in permutations(fail(xs)))
+def no_leak(xs: list[int]):
+    p = 42
+    return [[list(p) for p in permutations(xs)], p]
+'''
+names = ['collected', 'generated', 'summed', 'ordered', 'joined', 'unpacked',
+         'transfers', 'nested', 'snapshot', 'aliases', 'argument_effect', 'negative',
+         'bad_length', 'bad_unpack', 'outside', 'inside', 'no_leak']
+
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    if isinstance(function, ast.FunctionDef):
+        issues = checker.check(function.name, heap_calls=True)
+        assert not issues, (function.name, issues)
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name in names:
+    for initial in ([], [0], [2, -1, 0], [True, False, 1]):
+        value = initial.copy()
+        try:
+            answer = world[name](value)
+            error = None
+        except (StopIteration, RuntimeError, TypeError, ValueError) as exception:
+            answer = None
+            # Implicit errors omit interpreter-specific messages.
+            args = list(exception.args) if type(exception) is StopIteration else []
+            error = (type(exception).__name__, args)
+        heap = '[.list [' + ', '.join('.scalar (' + constant(n) + ')' for n in initial) + ']]'
+        snapshot = data(snapshot_roots([value] + ([] if error else [answer])))
+        if error:
+            label, args = error
+            error_value = '⟨' + json.dumps(label) + ', [' + ', '.join(map(constant, args)) + ']⟩'
+            outcome = f'match c.outcome with | .error e => decide (e = {error_value}) | _ => false'
+        else:
+            outcome = 'match c.outcome with | .ok _ => true | _ => false'
+        lines.extend([
+            f'-- {name}, input {initial}',
+            f'example : (match (HeapCalls.call source "{name}" [.ref 0] {heap}).execution.observe 15000 with',
+            f'  | .done (.ok c) => ({outcome}) &&',
+            f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+            '  | _ => false) = true := by native_decide',
+        ])
+        count += 1
+
+# Imports must identify the unmodified standard library, without escaping aliases.
+for imported, call in [('from itertools import permutations', 'permutations'),
+                       ('from itertools import permutations as perm', 'perm'),
+                       ('import itertools', 'itertools.permutations'),
+                       ('import itertools as it', 'it.permutations')]:
+    base = imported + f'\ndef f(xs: list[int]):\n    return [p for p in {call}(xs)]\n'
+    module = ast.parse(base)
+    assert not SupportChecker(module).check('f'), imported
+    encoded = api['AstJsonEmitter'](module).emit()
+    assert 'PermutationsIterable' in encoded
+    root = call.split('.')[0]
+    for extra in (f'{root} = 1\n', f'alias = {root}\n', f'del {root}\n'):
+        assert SupportChecker(ast.parse(imported + '\n' + extra + base.split('\n', 1)[1])).check('f'), extra
+    assert SupportChecker(ast.parse(base.replace('xs: list[int]', f'xs: list[int], {root}: int'))).check('f')
+    for expression in (f'{call}(xs, 1, 2)', f'{call}(xs, unknown=1)'):
+        assert SupportChecker(ast.parse(base.replace(f'{call}(xs)', expression))).check('f')
+for statement in ('it.permutations = 1', 'setattr(it, "permutations", 1)',
+                  'import itertools as other\nother.permutations = 1'):
+    module = ast.parse('import itertools as it\n' + statement +
+                      '\ndef f(xs: list[int]):\n    return [p for p in it.permutations(xs)]\n')
+    assert SupportChecker(module).check('f'), statement
+module = ast.parse('from itertools import permutations\ndef f(xs: list[int]):\n    it = permutations(xs)\n    return list(it)\n')
+assert SupportChecker(module).check('f')
+with project_temporary_directory(prefix='permutation-shadow-') as directory:
+    directory = Path(directory)
+    (directory / 'itertools.py').write_text('def permutations(xs): return xs\n')
+    module = ast.parse('from itertools import permutations\ndef f(xs: list[int]):\n    return [p for p in permutations(xs)]\n')
+    module.formalsw_source = directory / 'source.py'
+    assert SupportChecker(module).check('f')
+
+with project_temporary_directory(prefix='permutation-source-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} permutation source comparisons passed, including imports, snapshot effects, and loop control')

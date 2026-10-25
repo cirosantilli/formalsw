@@ -1,6 +1,7 @@
 import lang.py.FormalSW.Instances
 import lang.py.FormalSW.Linking
 import lang.py.FormalSW.ScalarSort
+import lang.py.FormalSW.Permutations
 
 /-! Function calls with shared lists. Locals and continuations carry references;
 all frames use one heap, including when a helper raises after mutating a list. -/
@@ -331,6 +332,7 @@ inductive Operation where
   | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
   | comprehensionTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
   | setComprehension (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
+  | permutationStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | zipStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
   | generatorCollect (action : GeneratorAction) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
@@ -467,6 +469,13 @@ def sequenceValue : SequenceSource → Value
 @[simp] theorem sequenceValue_source (value : Value) :
     sequenceValue (sequenceSource value) = value := by cases value <;> rfl
 
+/-- Capture positional permutations after all constructor arguments evaluate. -/
+def permutationRows : List Value → Eval (List (List SequenceSource))
+  | [source, length] => do
+      let cursor ← Permutations.acquire source length
+      return cursor.remaining.map (List.map sequenceSource)
+  | _ => Mutable.error "TypeError"
+
 /-- All argument expressions finish before zip acquires any of its iterators. -/
 def zipSources (values : List Value) : Eval (List SequenceSource) :=
   values.mapM fun value => do
@@ -581,6 +590,8 @@ def comprehensionTargetsStart (anchors : Nat) (element : Expr)
       let enter := fun loop heap => Step.next
         ⟨.block [loop] env, .comprehensionResult heap.length :: stack, heap ++ [if isSet then .set [] else .list []]⟩
       match iterable with
+      | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
+          enter (.permutationStepLoop name rows body []) heap
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
           enter (.zipStepLoop name sources 0 body []) heap
       | .call (.name "enumerate") _ => match enumerateTarget target, values with
@@ -603,7 +614,7 @@ def generatorArguments (action : GeneratorAction) (element : Expr)
     (generators : List (Expr × Expr × List Expr)) (env : Env) (stack : List Frame) (heap : Heap) : State :=
   let expressions := match generators with
     | (_, iterable, _) :: _ => match iterable with
-        | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
+        | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
         | _ => [iterable]
     | [] => []
   argumentsState (.generatorCollect action element generators (comprehensionTargetsEnv env generators))
@@ -676,6 +687,8 @@ def sumGeneratorTargetsStart (anchors : Nat) (element : Expr)
       let enter := fun loop heap => Step.next
         ⟨.expr start env, .sumStart loop (comprehensionTargetsEnv env generators) :: stack, heap⟩
       match iterable with
+      | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
+          enter (.permutationStepLoop name rows body []) heap
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
           enter (.zipStepLoop name sources 0 body []) heap
       | .call (.name "enumerate") _ => match enumerateTarget target, values with
@@ -978,6 +991,10 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       sumGeneratorStart (globals := globals) anchors element generators env start values stack heap
   | .operation (.comprehension element generators env) values =>
       comprehensionStart (globals := globals) anchors element generators env values stack heap
+  | .operation (.permutationStart target body otherwise following env) values =>
+      run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
+        .next ⟨.block (.permutationStepLoop (comprehensionTargetName target) rows
+          (comprehensionTargetBody target body) otherwise :: following) env, stack, heap⟩
   | .operation (.zipStart target body otherwise following env) values =>
       run (globals := globals) anchors heap (zipSources values) fun sources heap =>
         .next ⟨.block (.zipStepLoop (comprehensionTargetName target) sources 0
@@ -1028,19 +1045,19 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             env [] expressions stack heap)
       | .listCompTargets element (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
-            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.comprehensionTargets element generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .setComp element (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
-            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.setComprehension element generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .sumGeneratorTargets element (generators@((_, iterable, _) :: _)) start =>
           let expressions := match iterable with
-            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
       | .consumeGenerator (.builtinCall .list []) element generators =>
@@ -1114,6 +1131,16 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             | some value => .next ⟨.block (body ++ [Calls.loopContinuation body
                 (.reverseSequenceStepLoop name source (position - 1) body otherwise)] ++ rest)
                 (setLocal env name value), stack, heap⟩
+      | .forIn target (.permutationsIterable expressions) body otherwise :: rest =>
+          .next (argumentsState (.permutationStart target body otherwise rest env) env [] expressions stack heap)
+      | .permutationStepLoop name rows body otherwise :: rest =>
+          match rows with
+          | [] => .next ⟨.block (otherwise ++ rest) env, stack, heap⟩
+          | row :: remaining =>
+              run (globals := globals) anchors heap (Mutable.allocateTuple (row.map sequenceValue)) fun value heap =>
+                .next ⟨.block (body ++ [Calls.loopContinuation body
+                  (.permutationStepLoop name remaining body otherwise)] ++ rest)
+                  (setLocal env name value), stack, heap⟩
       | .forZip target expressions body otherwise :: rest =>
           .next (argumentsState (.zipStart target body otherwise rest env) env [] expressions stack heap)
       | .zipStepLoop name sources position body otherwise :: rest =>
@@ -1364,6 +1391,16 @@ def Evaluates (module : Module) (env : Env) (expression : Expr)
     (heap : Heap) (value : Value) (finalHeap : Heap) (globals : Mutable.Globals := []) : Prop :=
   ∀ anchors stack, Reaches (globals := globals) module anchors ⟨.expr expression env, stack, heap⟩ ⟨.value value, stack, finalHeap⟩
 
+/-- Private iterators are consumed by loops, never evaluated as Python values. -/
+theorem Evaluates.not_permutations
+    (evaluated : Evaluates (globals := globals) module env iterable heap value finalHeap)
+    (expressions : List Expr) : iterable ≠ .permutationsIterable expressions := by
+  intro equal
+  subst iterable
+  have reached := evaluated 0 []
+  cases reached with
+  | next transition _ => simp [step] at transition
+
 theorem Evaluates.finishes (h : Evaluates (globals := globals) module env expression heap value finalHeap) :
     (evaluate (globals := globals) module env expression heap).Finishes ⟨.ok value, globals, finalHeap, heap.length⟩ :=
   (h heap.length []).finishes (.done rfl)
@@ -1528,7 +1565,7 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | join _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | join _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>
@@ -2021,6 +2058,7 @@ theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "ran
   intro anchors stack
   have start : step (globals := globals) module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
+    have notPermutations := evaluated.not_permutations
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
     (.next (by simp [step, run, sequence]) (rest anchors stack)))
@@ -2253,6 +2291,7 @@ theorem for_sequence (ordinary : ∀ expressions, iterable ≠ .call (.name "ran
   intro following anchors stack
   have start : step (globals := globals) module anchors ⟨.block (.forIn (.name name) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .sequence name body otherwise following env :: stack, heap⟩ := by
+    have notPermutations := evaluated.not_permutations
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
     (.next (by simp [step, run, sequence]) (rest following anchors stack)))
@@ -2289,6 +2328,7 @@ theorem for_unpack
   have start : step (globals := globals) module anchors
       ⟨.block (.forIn (.tuple expressions) iterable body otherwise :: following) env, stack, heap⟩ =
       .next ⟨.expr iterable env, .unpackSequence names body otherwise following env :: stack, heap⟩ := by
+    have notPermutations := evaluated.not_permutations
     cases iterable <;> simp_all [step]
   exact .next start ((evaluated anchors _).trans
     (.next (by simp [step, run, sequence]) (rest following anchors stack)))
@@ -2461,6 +2501,7 @@ theorem Evaluates.list_comp_sequence
         (.comprehension element ((name, iterable, filters) :: generators)
           (comprehensionEnv env ((name, iterable, filters) :: generators)))
         env [] [iterable] stack heap) := by
+    have notPermutations := evaluated.not_permutations
     cases iterable <;> simp_all [step]
   apply Reaches.next first
   apply (arguments_reach (.cons evaluated .nil) _ [] anchors stack).trans

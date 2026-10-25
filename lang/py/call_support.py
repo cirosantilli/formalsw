@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from lang.py.global_inputs import GlobalInputError, function_globals, annotation_kind, needs_heap_globals
 from lang.py.imports import bindings
+from lang.py.permutation_support import permutation_binding, permutation_arguments
 from lang.py.defaults import literal_default
 from lang.py.memo_support import cache_decorator, uses_memoized
 from lang.py.sorting_support import uses_sort_model
@@ -567,6 +568,18 @@ def check_calls(module, function, reject, *, heap=False):
                         else:
                             for argument in arguments:
                                 expr(argument, iterable_scope)
+                    elif permutation_binding(iterable, module) is not None:
+                        name = permutation_binding(iterable, module)
+                        if name in iterable_scope:
+                            reject(iterable, 'permutations requires an unshadowed standard-library import')
+                        arguments = permutation_arguments(iterable, module)
+                        if arguments is None:
+                            reject(iterable, 'permutations requires a positional iterable and optional length')
+                        else:
+                            for argument in arguments:
+                                if isinstance(argument, ast.Tuple):
+                                    hidden_tuples.add(argument)
+                                expr(argument, iterable_scope)
                     elif zip_iterable(iterable, module):
                         if 'zip' in iterable_scope:
                             reject(iterable, 'zip iteration requires the unshadowed builtin zip')
@@ -931,6 +944,21 @@ def check_calls(module, function, reject, *, heap=False):
                         if isinstance(argument, ast.Tuple):
                             hidden_tuples.add(argument)
                         expr(argument)
+                    block(node.body, loop_depth + 1)
+                    block(node.orelse, loop_depth)
+                elif heap and isinstance(node, ast.For) and permutation_binding(node.iter, module) is not None:
+                    if permutation_binding(node.iter, module) in locals_:
+                        reject(node.iter, 'permutations requires an unshadowed standard-library import')
+                    if not (isinstance(node.target, ast.Name) or flat_unpacking(node.target)):
+                        reject(node, 'permutation loops require a name or flat tuple/list target')
+                    arguments = permutation_arguments(node.iter, module)
+                    if arguments is None:
+                        reject(node.iter, 'permutations requires a positional iterable and optional length')
+                    else:
+                        for argument in arguments:
+                            if isinstance(argument, ast.Tuple):
+                                hidden_tuples.add(argument)
+                            expr(argument)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)
                 elif heap and isinstance(node, ast.For) and zip_iterable(node.iter, module):

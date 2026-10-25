@@ -41,6 +41,7 @@ roots = [
   "lang.py.FormalSW.MembershipCalls",
   "lang.py.FormalSW.ComprehensionCalls",
   "lang.py.FormalSW.GeneratorCalls",
+  "lang.py.FormalSW.PermutationCalls",
   "lang.py.FormalSW.ZipCalls",
   "lang.py.FormalSW.ReverseCalls",
   "lang.py.FormalSW.LoopCalls",

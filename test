@@ -100,6 +100,7 @@ def main() -> int:
         TestCase("string joining", Path("tests/py/join_calls.py"), 0, "All 5 checks passed"),
         TestCase("generator exception boundaries", Path("tests/py/generator_exceptions.py"), 0, "All 6 checks passed"),
         TestCase("immediate generator consumers", Path("tests/py/consumed_generators.py"), 0, "All 8 checks passed"),
+        TestCase("permutation counting", Path("tests/py/permutation_calls.py"), 0, "All 2 checks passed"),
         TestCase("shared list inputs and preconditions", Path("tests/py/heap_inputs.py"), 0, "All 8 checks passed"),
         TestCase("nested list inputs and shared rows", Path("tests/py/nested_inputs.py"), 0, "All 6 checks passed"),
         TestCase("list comprehensions", Path("tests/py/comprehensions.py"), 0, "All 3 checks passed"),
@@ -458,6 +459,14 @@ def main() -> int:
     print(f"{'PASS' if permutation_checks_passed else 'FAIL'} positional permutation iterator", flush=True)
     if not permutation_checks_passed:
         print(textwrap.indent((permutation_checks.stdout + permutation_checks.stderr).rstrip(), "  "))
+    permutation_source_checks = subprocess.run(
+        [sys.executable, "tests/py/permutation_source_checks"],
+        cwd=REPO, text=True, capture_output=True,
+    )
+    permutation_source_checks_passed = permutation_source_checks.returncode == 0
+    print(f"{'PASS' if permutation_source_checks_passed else 'FAIL'} permutation source execution", flush=True)
+    if not permutation_source_checks_passed:
+        print(textwrap.indent((permutation_source_checks.stdout + permutation_source_checks.stderr).rstrip(), "  "))
     project_checks = subprocess.run(
         [sys.executable, "tests/py/project_checks"],
         cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
@@ -522,6 +531,7 @@ def main() -> int:
         and generator_exception_checks_passed
         and consumed_generator_checks_passed
         and permutation_checks_passed
+        and permutation_source_checks_passed
     ) else 1
 
 

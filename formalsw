@@ -21,6 +21,7 @@ from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
 from lang.py.call_support import range_sum, range_extremum, sequence_sum, consumed_generator, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
+from lang.py.permutation_support import permutation_arguments
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
@@ -1401,7 +1402,9 @@ class AstJsonEmitter:
                 return {
                     "type": "For",
                     "target": self.expr(target),
-                    "iter": (self.iterator_expr(iter_expr) if isinstance(iter_expr, ast.Call) and iter_expr.keywords
+                    "iter": (self.iterator_expr(iter_expr)
+                             if permutation_arguments(iter_expr, self.bindings_module) is not None
+                             or isinstance(iter_expr, ast.Call) and iter_expr.keywords
                              else self.expr(iter_expr)),
                     "body": [self.stmt(child) for child in body],
                     "orelse": [self.stmt(child) for child in orelse],
@@ -1528,7 +1531,8 @@ class AstJsonEmitter:
                        for generator in generators):
                     raise UnsupportedSyntax('comprehensions require synchronous loops with names or flat tuple/list targets')
                 if isinstance(expr, ast.SetComp) or any(not isinstance(generator.target, ast.Name)
-                       or zip_iterable(generator.iter, self.bindings_module) for generator in generators):
+                       or zip_iterable(generator.iter, self.bindings_module)
+                       or permutation_arguments(generator.iter, self.bindings_module) is not None for generator in generators):
                     return {"type": "SetComp" if isinstance(expr, ast.SetComp) else "ListCompTargets", "elt": self.expr(elt), "generators": [
                         {"target": self.expr(generator.target), "iter": self.iterator_expr(generator.iter),
                          "ifs": [self.expr(condition) for condition in generator.ifs]}
@@ -1616,6 +1620,9 @@ class AstJsonEmitter:
                 raise UnsupportedSyntax('enumerate supports an iterable and optional positional or keyword start')
             return {"type": "Call", "func": {"type": "Name", "id": "enumerate"},
                     "args": [self.expr(arg) for arg in arguments]}
+        permutation = permutation_arguments(node, self.bindings_module)
+        if permutation is not None:
+            return {"type": "PermutationsIterable", "args": [self.expr(arg) for arg in permutation]}
         if zip_iterable(node, self.bindings_module):
             if node.keywords:
                 raise UnsupportedSyntax('zip iteration supports positional sequence arguments, without strict')

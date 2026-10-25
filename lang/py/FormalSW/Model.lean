@@ -146,6 +146,8 @@ inductive Expr where
   | reversedList : Expr → Expr
   /-- Resolved builtin zip, only supported as an immediately consumed iterable. -/
   | zipIterable : List Expr → Expr
+  /-- A fresh positional permutation iterator, consumed without escaping. -/
+  | permutationsIterable : List Expr → Expr
   /-- Eager list comprehension: local target, iterable, and ordered filters. -/
   | listComp : Expr → List (String × Expr × List Expr) → Expr
   /-- Comprehensions with flat tuple/list targets, retaining explicit binding syntax. -/
@@ -229,6 +231,8 @@ inductive Stmt where
   | reverseSequenceStepLoop : String → SequenceSource → Int → List Stmt → List Stmt → Stmt
   /-- Private zip cursors retain every original sequence reference. -/
   | zipStepLoop : String → List SequenceSource → Nat → List Stmt → List Stmt → Stmt
+  /-- Snapshot rows retain references; each iteration allocates its tuple. -/
+  | permutationStepLoop : String → List (List SequenceSource) → List Stmt → List Stmt → Stmt
   /-- Internal state of an evaluated `range(stop)` iterator, not source syntax. -/
   | rangeLoop : String -> Int -> Int -> List Stmt -> List Stmt -> Stmt
   /-- Internal iterator state for the scalar call interpreter's stepped ranges. -/
@@ -368,6 +372,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
           return (← jsonString generator "name",
             ← Expr.fromJson? (← jsonField generator "iter"),
             ← jsonArray generator "ifs" Expr.fromJson?))
+  | "PermutationsIterable" => return .permutationsIterable (← jsonArray json "args" Expr.fromJson?)
   | "ZipIterable" => return .zipIterable (← jsonArray json "args" Expr.fromJson?)
   | "ListCompTargets" | "SetComp" =>
       let constructor := if (← jsonString json "type") = "SetComp" then Expr.setComp else Expr.listCompTargets
@@ -1014,7 +1019,7 @@ mutual
     | .listComp element generators =>
         1 + element.operationCount + (generators.map fun (_, iterable, filters) =>
           1 + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
-    | .zipIterable arguments => 1 + (arguments.map Expr.operationCount).sum
+    | .permutationsIterable arguments | .zipIterable arguments => 1 + (arguments.map Expr.operationCount).sum
     | .listCompTargets element generators | .setComp element generators =>
         1 + element.operationCount + (generators.map fun (target, iterable, filters) =>
           target.operationCount + iterable.operationCount + (filters.map Expr.operationCount).sum).sum
@@ -1043,7 +1048,7 @@ mutual
     | .rangeStepLoop _ _ _ _ body otherwise | .sequenceStepLoop _ _ _ body otherwise
       | .setStepLoop _ _ _ _ body otherwise
       | .enumerateStepLoop _ _ _ _ _ body otherwise | .unpackStepLoop _ _ _ body otherwise
-      | .zipStepLoop _ _ _ body otherwise | .reverseSequenceStepLoop _ _ _ body otherwise =>
+      | .permutationStepLoop _ _ body otherwise | .zipStepLoop _ _ _ body otherwise | .reverseSequenceStepLoop _ _ _ body otherwise =>
         1 + (body.map Stmt.operationCount).sum + (otherwise.map Stmt.operationCount).sum
     | .classDef _ body => 1 + (body.map Stmt.operationCount).sum
     | .dataclassFields _ fields => 1 + fields.length
@@ -1491,7 +1496,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.extremumRange _ _ _ => none
   | Expr.sumRange _ _ _ _ | Expr.sumSequence _ _ | Expr.sumGenerator _ _ _ => none
   | Expr.builtinCall _ _ => none
-  | Expr.reversedList _ | Expr.zipIterable _ => none
+  | Expr.reversedList _ | Expr.zipIterable _ | Expr.permutationsIterable _ => none
   | Expr.listComp _ _ | Expr.listCompTargets _ _ | Expr.setComp _ _ | Expr.sumGeneratorTargets _ _ _ | Expr.consumeGenerator _ _ _ => none
   | Expr.tuple _ | Expr.dict _ => none
   | Expr.binOp
