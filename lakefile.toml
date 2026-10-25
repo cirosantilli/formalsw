@@ -31,6 +31,7 @@ roots = [
   "lang.py.FormalSW.ScalarDicts",
   "lang.py.FormalSW.ScalarSort",
   "lang.py.FormalSW.MutableGlobals",
+  "lang.py.FormalSW.Permutations",
   "lang.py.FormalSW.Instances",
   "lang.py.FormalSW.HeapCalls",
   "lang.py.FormalSW.Choices",

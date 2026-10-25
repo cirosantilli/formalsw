@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""
+Compare the finite permutation iterator with itertools, including shared pools.
+"""
+import itertools
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path[0] = str(ROOT)
+
+
+def value(item):
+    if item is None:
+        return '.scalar .none'
+    if type(item) is bool:
+        return '.scalar (.bool ' + str(item).lower() + ')'
+    if type(item) is int:
+        return f'.scalar (.int ({item}))'
+    return '.scalar (.string ' + json.dumps(item, ensure_ascii=False) + ')'
+
+
+def values(items):
+    return '[' + ', '.join(map(value, items)) + ']'
+
+
+lines = ['import lang.py.FormalSW.Permutations',
+         'open FormalSW.PyAst FormalSW.PyAst.Mutable FormalSW.PyAst.Permutations',
+         'set_option maxRecDepth 10000', 'set_option maxHeartbeats 0']
+checks = 0
+for size in range(5):
+    for pool in itertools.product((-1, 0, 1), repeat=size):
+        for length in range(size + 2):
+            expected = '[' + ', '.join(values(row) for row in itertools.permutations(pool, length)) + ']'
+            lines.append(f'example : rows (α := Mutable.Value) {length} {values(pool)} = {expected} := by native_decide')
+            checks += 1
+
+sources = [[], [3, 1, 3], [True, 1, False], ('z', 'λ'), 'λ😀a', b'aba', bytearray(b'ab'), None, 3]
+for source in sources:
+    if source is None or type(source) in (str, int):
+        argument, heap = value(source), '[]'
+    elif type(source) is bytes:
+        argument = '.scalar (.bytes [' + ', '.join(map(str, source)) + '])'
+        heap = '[]'
+    else:
+        argument = '.ref 0'
+        if type(source) is bytearray:
+            heap = '[.bytearray [' + ', '.join(map(str, source)) + ']]'
+        else:
+            kind = 'tuple' if type(source) is tuple else 'list'
+            heap = f'[.{kind} {values(source)}]'
+    for length in (None, False, True, -1, 0, 1, 2, 4, 'bad'):
+        try:
+            actual = list(itertools.permutations(source, length))
+        except (TypeError, ValueError) as error:
+            expected = f'.error {{typeName := "{type(error).__name__}", args := []}}'
+        else:
+            result = '[' + ', '.join(values(row) for row in actual) + ']'
+            expected = f'.ok ⟨{result}⟩'
+        lines.append(f'example : acquire ({argument}) ({value(length)}) {heap} = '
+                     f'some ({expected}, {heap}) := by native_decide')
+        checks += 1
+
+# Snapshot the outer sequence, retain inner aliases, and allocate tuples on next.
+inner = [7]
+pool = [inner, inner]
+iterator = itertools.permutations(pool)
+pool.clear()
+inner.append(8)
+first, second = next(iterator), next(iterator)
+assert first is not second and first[0] is inner and first[1] is inner
+assert second[0] is inner and second[1] is inner
+lines.extend(['''
+example : acquire (.ref 0) (.scalar .none) [.list [.ref 1, .ref 1], .list [.scalar (.int 7)]] =
+    some (.ok ⟨[[.ref 1, .ref 1], [.ref 1, .ref 1]]⟩,
+      [.list [.ref 1, .ref 1], .list [.scalar (.int 7)]]) := by decide
+example : next ⟨[[.ref 1, .ref 1], [.ref 1, .ref 1]]⟩
+    [.list [], .list [.scalar (.int 7), .scalar (.int 8)]] =
+    some (.ok (some (.ref 2, ⟨[[.ref 1, .ref 1]]⟩)),
+      [.list [], .list [.scalar (.int 7), .scalar (.int 8)], .tuple [.ref 1, .ref 1]]) := by decide
+example : next ⟨[[.ref 1, .ref 1]]⟩
+    [.list [], .list [.scalar (.int 7), .scalar (.int 8)], .tuple [.ref 1, .ref 1]] =
+    some (.ok (some (.ref 3, ⟨[]⟩)),
+      [.list [], .list [.scalar (.int 7), .scalar (.int 8)],
+        .tuple [.ref 1, .ref 1], .tuple [.ref 1, .ref 1]]) := by decide
+example : next ⟨[[]]⟩ [.tuple []] = some (.ok (some (.ref 0, ⟨[]⟩)), [.tuple []]) := by decide
+example : next ⟨[[]]⟩ [] = some (.ok (some (.ref 0, ⟨[]⟩)), [.tuple []]) := by decide
+example : next ⟨[]⟩ [.list []] = some (.ok none, [.list []]) := by decide
+example : acquire (.ref 0) (.scalar .none) [.instance "source" "Custom" []] = none := by decide
+example : acquire (.ref 0) (.scalar .none) [.set [.int 1]] = none := by decide
+example : acquire (.ref 0) (.scalar .none) [.dict []] = none := by decide
+example : acquire (.ref 0) (.scalar .none) [] = none := by decide
+'''])
+
+with project_temporary_directory(prefix='permutations-') as temporary:
+    path = Path(temporary) / 'checks.lean'
+    path.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', str(path)], cwd=ROOT, check=True)
+
+print(f'{checks} permutation comparisons passed, plus snapshot, tuple identity, and unsupported-protocol checks')
