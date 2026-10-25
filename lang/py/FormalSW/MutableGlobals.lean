@@ -986,6 +986,41 @@ def appendItem (address : Nat) (value : Value) : Eval Value := do
   | some (.set _) | some (.dict _) | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => error "AttributeError"
   | none => unsupported
 
+/-- Remove an element from the live sequence, retaining all remaining references.
+Indices use the unbounded integer semantics of the builtin sequence model. -/
+def popItem (address : Nat) (subscript : Value) : Eval Value := do
+  let position ← match subscript with
+    | .ref indexAddress => match (← get)[indexAddress]? with
+        | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) => unsupported
+        | some _ => error "TypeError"
+        | none => unsupported
+    | _ => integer subscript
+  match (← get)[address]? with
+  | some (.list items) =>
+      let (value, remaining) ← sequenceResult (Py.Builtin.List.pop items position)
+      modify fun heap => heap.set address (.list remaining)
+      return value
+  | some (.bytearray bytes) =>
+      let (value, remaining) ← sequenceResult (Py.Builtin.List.pop bytes position)
+      modify fun heap => heap.set address (.bytearray remaining)
+      return .scalar (.int value.toNat)
+  | some _ => error "AttributeError"
+  | none => unsupported
+
+theorem popItem_list (heap : Heap) (address position : Nat) (items : List Value)
+    (found : heap[address]? = some (.list items)) (valid : position < items.length) :
+    popItem address (.scalar (.int position)) heap =
+      some (.ok items[position], heap.set address (.list (items.eraseIdx position))) := by
+  simp [popItem, integer, found, Py.Builtin.List.pop_getElem items position valid,
+    sequenceResult, Except.map]
+
+theorem popItem_buffer (heap : Heap) (address position : Nat) (bytes : List UInt8)
+    (found : heap[address]? = some (.bytearray bytes)) (valid : position < bytes.length) :
+    popItem address (.scalar (.int position)) heap =
+      some (.ok (.scalar (.int bytes[position].toNat)), heap.set address (.bytearray (bytes.eraseIdx position))) := by
+  simp [popItem, integer, found, Py.Builtin.List.pop_getElem bytes position valid,
+    sequenceResult, Except.map]
+
 def expr (env : Env) : Expr → Eval Value
   | .constant c => pure (.scalar c)
   | .name name => match env name with

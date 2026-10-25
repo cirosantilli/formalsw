@@ -313,6 +313,7 @@ inductive Operation where
   | setItem (replacement : Value)
   | setSlice (replacement : Value)
   | append (address : Nat)
+  | pop (address : Nat)
   | add (address : Nat)
   | dictionaryGet (address : Nat)
   | builtin (name : Builtin)
@@ -666,6 +667,9 @@ def primitive : Operation → List Value → Eval Value
   | .dictionaryGet address, [key, defaultValue] => Mutable.dictionaryGet address key defaultValue
   | .dictionaryGet _, _ => Mutable.error "TypeError"
   | .append address, [value] => Mutable.appendItem address value
+  | .pop address, [] => Mutable.popItem address (.scalar (.int (-1)))
+  | .pop address, [index] => Mutable.popItem address index
+  | .pop _, _ => Mutable.error "TypeError"
   | .add address, [value] => Mutable.addItem address value
   | .append _, _ | .add _, _ => Mutable.error "TypeError"
   | .builtin .identity, [left, right] => identity left right
@@ -812,6 +816,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
               | none => if name.startsWith "__" then Mutable.unsupported else Mutable.error "AttributeError"
       | some (.list _) | some (.bytearray _) =>
           if name = "append" then pure (.append address)
+          else if name = "pop" then pure (.pop address)
           else if name = "get" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.set _) =>
           if name = "add" then pure (.add address)
@@ -820,10 +825,10 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
           if name = "get" then pure (.dictionaryGet address)
           else if name = "append" ∨ name = "add" then Mutable.error "AttributeError" else Mutable.unsupported
       | some (.tuple _) =>
-          if name = "append" ∨ name = "add" ∨ name = "get" then Mutable.error "AttributeError" else Mutable.unsupported
+          if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" then Mutable.error "AttributeError" else Mutable.unsupported
       | none => Mutable.unsupported
   | .scalar _ =>
-      if name = "append" ∨ name = "add" ∨ name = "get" then Mutable.error "AttributeError" else Mutable.unsupported
+      if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "pop" then Mutable.error "AttributeError" else Mutable.unsupported
 
 /-- Stored fields are values; first-class bound methods are outside this model. -/
 def getAttribute (module : Module) (receiver : Value) (name : String) : Eval Value := do
@@ -1417,7 +1422,7 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>
@@ -1699,6 +1704,23 @@ theorem builtin (arguments : Arguments (globals := globals) module env expressio
   intro anchors stack
   exact .next rfl ((arguments_reach arguments (.builtin name) [] anchors stack).trans
     (.next (by simp [step, result, run, operation]) .refl))
+
+/-- The receiver is bound before arguments run; removal reads the resulting live heap. -/
+theorem pop (lookup : env name = some (.ref address))
+    (bound : bindMethod module (.ref address) "pop" heap = some (.ok (.pop address), heap))
+    (arguments : Arguments (globals := globals) module env expressions heap values middle)
+    (operation : primitive (.pop address) values middle = some (.ok value, finalHeap)) :
+    Evaluates (globals := globals) module env (.call (.attribute (.name name) "pop") expressions)
+      heap value finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := ⟨.expr (.name name) env, .methodReceiver "pop" expressions env :: stack, heap⟩)
+    (by simp [step, lookup])
+  apply Reaches.next (following := ⟨.value (.ref address), .methodReceiver "pop" expressions env :: stack, heap⟩)
+    (by simp [step, lookup])
+  apply Reaches.next (following := argumentsState (.pop address) env [] expressions stack heap)
+    (by simp [step, run, bound])
+  apply (arguments_reach arguments (.pop address) [] anchors stack).trans
+  exact .next (by simp [step, result, run, operation]) .refl
 
 theorem append (receiver : Evaluates (globals := globals) module env base heap (.ref address) middle)
     (found : middle[address]? = some (.list old))

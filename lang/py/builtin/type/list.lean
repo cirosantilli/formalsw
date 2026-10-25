@@ -35,6 +35,20 @@ def pop (values : ListValue α) (index : Int := -1) : Result (α × ListValue α
     | none => .error (.indexError "pop index out of range")
   return (value, values.take normalized ++ values.drop (normalized + 1))
 
+/-- A valid nonnegative index removes exactly that occurrence. -/
+theorem pop_getElem (values : ListValue α) (position : Nat) (valid : position < values.length) :
+    pop values position = .ok (values[position], values.eraseIdx position) := by
+  have nonnegative : ¬ (position : Int) < 0 := by omega
+  have bounded : ¬ (values.length : Int) ≤ position := by omega
+  have normalized : Sequence.normalizeIndex values.length position = some position := by
+    simp [Sequence.normalizeIndex, nonnegative, bounded, Int.toNat_natCast]
+  unfold pop
+  rw [normalized]
+  change (match values[position]? with
+    | some value => Except.ok (value, values.take position ++ values.drop (position + 1))
+    | none => Except.error (Error.indexError "pop index out of range")) = _
+  simp [valid, List.eraseIdx_eq_take_drop_succ]
+
 def remove [BEq α] (values : ListValue α) (needle : α) : Result (ListValue α) :=
   match Sequence.index? values needle with
   | none => .error (.valueError "list.remove(x): x not in list")
