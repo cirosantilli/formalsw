@@ -94,4 +94,41 @@ theorem three_top (a b c : Int) (ac : a ≤ c) (bc : b ≤ c) :
   · have ba : b < a := by omega
     simp [sort, insert, scalarCompare, evalCmpOp, cb, ca, ba, Int.min_def, Int.max_def, ab]
 
+/-- The same stable scalar sort on Unicode strings. -/
+def insertString (value : String) : List String → List String
+  | [] => [value]
+  | first :: rest => if first < value then first :: insertString value rest else value :: first :: rest
+
+def strings (values : List String) : List String := values.foldr insertString []
+
+theorem insertString_perm (value : String) (values : List String) :
+    (insertString value values).Perm (value :: values) := by
+  induction values with
+  | nil => exact .refl _
+  | cons first rest ih =>
+      by_cases smaller : first < value
+      · simp only [insertString, if_pos smaller]
+        exact (ih.cons first).trans (.swap _ _ _)
+      · simp only [insertString, if_neg smaller]
+        exact .refl _
+
+theorem strings_perm (values : List String) : (strings values).Perm values := by
+  induction values with
+  | nil => exact .refl _
+  | cons first rest ih => exact (insertString_perm first (strings rest)).trans (ih.cons first)
+
+theorem insert_strings (value : String) (values : List String) :
+    insert (.string value) (values.map Constant.string) = .ok ((insertString value values).map Constant.string) := by
+  induction values with
+  | nil => rfl
+  | cons first rest ih =>
+      by_cases smaller : first < value <;>
+        simp [insert, insertString, scalarCompare, evalCmpOp, smaller, ih]
+
+theorem sort_strings (values : List String) :
+    sort (values.map Constant.string) = .ok ((strings values).map Constant.string) := by
+  induction values with
+  | nil => rfl
+  | cons first rest ih => simp [sort, ih, insert_strings, strings]
+
 end FormalSW.PyAst.ScalarSort
