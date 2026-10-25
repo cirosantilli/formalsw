@@ -3,6 +3,15 @@ import lang.py.FormalSW.Calls
 /-! Composable source proofs for short-circuiting scalar comparison chains. -/
 namespace FormalSW.PyAst.Calls.Evaluates
 
+/-- Recover an integer comparison from a source precondition with evaluated operands. -/
+theorem condition_compare
+    (holds : Condition module env (.compare left [(op, right)]))
+    (leftValue : Evaluates module env left (.int a))
+    (rightValue : Evaluates module env right (.int b)) : evalCmpOp op a b = true := by
+  have run : Evaluates module env (.compare left [(op, right)])
+      (.bool (evalCmpOp op a b)) := compare leftValue rightValue rfl
+  simpa using run.condition_iff.mp holds
+
 def Compares (module : Module) (env : ScalarEnv) (left : Constant) (op : CmpOp) (right : Expr)
     (rest : List (CmpOp × Expr)) (answer : Bool) : Prop :=
   ∀ stack, Reaches module ⟨.expr right env, .chainRight op left rest env :: stack⟩
