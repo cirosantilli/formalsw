@@ -94,6 +94,9 @@ bodies = {
     'equal': 'return (n, True) == (n, 1)',
     'unequal_types': 'return (n, xs) == [n, xs]',
     'equal_aliases': 'return (xs, n) == (xs, n)',
+    'constant_comparison': 'known = (1, True, "x")\nreturn (n, 1, "x") == known',
+    'constant_comparison_reverse': 'known = (1, 2)\nreturn known != (n, n + 1)',
+    'annotated_constant_comparison': 'known: tuple[int, int] = (1, 2)\nreturn (n, n + 1) == known != (n + 1, n)',
     'maximum': 'return max((n, 7, -2))',
     'buffer': 'return bytearray((n, 3))',
     'loop': 'for value in (n, n + 1):\n    xs.append(value)\nreturn xs',
@@ -142,6 +145,23 @@ assert not SupportChecker(scalar_swap).check('f')
 for expression in ('(1, 2)', '(1 + 2, 3)', '(1 if True else n, 2)'):
     module = ast.parse(f'def f(n: int) -> int:\n    pair = {expression}\n    return pair[0]\n')
     assert SupportChecker(module).check('f'), expression
+for body in (
+    'known = (1, 2)\nreturn known is (n, n + 1)',
+    'known = (1, 2)\nreturn known',
+    'known = (1, 2)\nreturn known[0]',
+    'known = (1, 2)\nalias = known\nreturn alias == (n, n + 1)',
+    'known = (1, 2)\nknown = (n, n + 1)\nreturn known == (n, n + 1)',
+    'known = (1, 2)\nxs.append(known)\nreturn known == (n, n + 1)',
+    'known = (1, 2)\nreturn (n, n + 1) == known is known',
+    'known = ((1, 2),)\nreturn known == (n,)',
+    'n = (1, 2)\nreturn n == (3, 4)',
+):
+    module = ast.parse('def f(n: int, xs: list[int]):\n'
+                       + ''.join('    ' + line + '\n' for line in body.splitlines()))
+    assert SupportChecker(module).check('f'), body
+class_comparison = ast.parse('class C:\n    pass\n'
+                             'def f(n: int):\n    known = (1, 2)\n    return n == known\n')
+assert SupportChecker(class_comparison).check('f')
 for target in ('a, (b, c)', 'a, *rest', 'a, xs[0]'):
     module = ast.parse(f'def f(n: int, xs: list[int]) -> int:\n    {target} = (n, xs)\n    return a\n')
     assert SupportChecker(module).check('f'), target

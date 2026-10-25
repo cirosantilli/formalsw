@@ -10,7 +10,7 @@ from lang.py.defaults import literal_default
 from lang.py.memo_support import cache_decorator, uses_memoized
 from lang.py.call_graph import call_targets
 from lang.py.sorting_support import uses_sort_model
-from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays, unpacked_return_tuple_displays, compared_set_tuple_displays, runtime_tuple_element
+from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays, unpacked_return_tuple_displays, compared_set_tuple_displays, compared_local_tuple_displays, runtime_tuple_element
 from lang.py.class_support import ordinary_attribute, plain_class_methods
 
 
@@ -574,7 +574,8 @@ def check_calls(module, function, reject, *, heap=False):
         except GlobalInputError as error:
             reject(function, str(error))
         hidden_tuples = (unpacked_tuple_displays(function) | return_tuples
-                         | compared_set_tuple_displays(function)) if heap else set()
+                         | compared_set_tuple_displays(function)
+                         | compared_local_tuple_displays(module, function)) if heap else set()
         # A local may reuse a function/class name as data. Each call site below
         # separately rejects invoking a shadowed module-level target.
         for index, arg in enumerate(function.args.args):

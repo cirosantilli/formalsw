@@ -58,6 +58,42 @@ def compared_set_tuple_displays(function):
     return hidden
 
 
+def compared_local_tuple_displays(module, function):
+    """
+    Hide flat scalar constants stored in locals used only by equality tests.
+
+    A single binding and no aliases keep the wrapper private. Classes are
+    excluded because a custom equality method could retain the compared tuple
+    and observe its pooled identity on a later call.
+    """
+    if any(isinstance(node, ast.ClassDef) for node in ast.walk(module)):
+        return set()
+    parts = list(ast.walk(function))
+    parents = {child: parent for parent in parts for child in ast.iter_child_nodes(parent)}
+    parameters = {arg.arg for arg in ast.walk(function.args) if isinstance(arg, ast.arg)}
+    hidden = set()
+    for node in parts:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign):
+            target, value = node.target, node.value
+        else:
+            continue
+        if not (isinstance(target, ast.Name) and target.id not in parameters
+                and isinstance(value, ast.Tuple) and value.elts
+                and all(isinstance(item, ast.Constant)
+                        and type(item.value) in (int, str, bytes, bool, type(None))
+                        for item in value.elts)):
+            continue
+        occurrences = [part for part in parts if isinstance(part, ast.Name) and part.id == target.id]
+        if all(part is target or isinstance(part.ctx, ast.Load)
+               and isinstance(parents.get(part), ast.Compare)
+               and all(isinstance(op, (ast.Eq, ast.NotEq)) for op in parents[part].ops)
+               for part in occurrences):
+            hidden.add(value)
+    return hidden
+
+
 def unpacked_return_tuple_displays(module, entry):
     """
     Hide returned tuple wrappers only when every reachable use immediately
