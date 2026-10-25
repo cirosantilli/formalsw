@@ -43,6 +43,8 @@ All 5 checks passed
 
 and exit status 0.
 
+The first check builds the Lean models and specification parser. Lake reuses these build products on later runs, rebuilding them when their sources or dependencies change. Each invocation still checks the current Python sources, adjacent proofs, and requested properties, including imported Python references.
+
 == Getting started
 
 Consider the following two alternative implementations of the sum of integers 0 to n, one naive and one optimized:

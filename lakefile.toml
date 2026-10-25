@@ -1,11 +1,15 @@
 # Lake package configuration for the Python-to-Lean AST framework.
 name = "formalsw"
 version = "0.3.0"
-defaultTargets = ["FormalSW", "lang.py.FormalSW"]
+defaultTargets = ["FormalSW", "lang.py.FormalSW", "lang.py.SpecFrontend"]
 
 # Umbrella module re-exporting installed language models.
 [[lean_lib]]
 name = "FormalSW"
+
+# The CLI imports the compiled parser rather than elaborating it on each run.
+[[lean_lib]]
+name = "lang.py.SpecFrontend"
 
 # Language-specific models live below `lang/`.
 [[lean_lib]]

@@ -20,7 +20,7 @@ def main():
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
         for required in ('formalsw', 'FormalSW.lean', 'lakefile.toml', 'lean-toolchain',
-                         'lang/py/spec_frontend.lean', 'lang/py/quotation.py',
+                         'lang/py/spec_frontend.lean', 'lang/py/SpecFrontend.lean', 'lang/py/quotation.py',
                          'lang/py/builtin/type/str.py', 'lang/py/FormalSW/Model.lean'):
             assert 'formalsw/_runtime/' + required in names, required
         assert not any('/tests/' in name or '/.lake/' in name or '/.formalsw/' in name

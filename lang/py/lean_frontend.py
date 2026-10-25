@@ -52,10 +52,10 @@ def lean_env():
         return _environment
     if shutil.which('lake') is None:
         raise ScenarioError('required executable not found on PATH: lake')
-    built = subprocess.run(lake_command('build', 'FormalSW', 'lang.py.FormalSW'),
+    built = subprocess.run(lake_command('build', 'FormalSW', 'lang.py.FormalSW', 'lang.py.SpecFrontend'),
                            env=runtime_env(), capture_output=True, text=True)
     if built.returncode:
-        raise ScenarioError('failed to build the FormalSW core or Python model:\n'
+        raise ScenarioError('failed to build the FormalSW core, Python model, or specification parser:\n'
                             + built.stdout + built.stderr)
     completed = subprocess.run(
         lake_command('env', sys.executable, '-c',

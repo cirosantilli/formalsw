@@ -27,6 +27,11 @@ with patch.object(subprocess, 'run', record):
             with frontend.lean_session():
                 assert frontend.parse_theorem('theorem example_check : True')['name'] == 'example_check'
                 assert frontend.lean_env() == environment
+            quoted = frontend.parse_theorem('theorem quoted (n : Int) : Returns(py("n + 1"))')
+            assert quoted['quotes'] == [{'mode': 'Returns', 'expression': 'n + 1'}], quoted
+            guarded = frontend.guard_proposition('∀ (n : Int), True', 'n ≥ 0', [], ['n'], [])
+            assert guarded['bound'] == ['n'] and '(n ≥ 0) →' in guarded['type'], guarded
+            assert ['Foo', '1.py'] in frontend.parse_imports('import Foo.«1.py» -- nested module\n')
             assert parser.poll() is None
         assert parser.poll() == 0
         assert frontend._parser is None
