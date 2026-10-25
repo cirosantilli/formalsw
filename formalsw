@@ -21,7 +21,7 @@ from lang.py.trial import ScenarioError, ScenarioUnsupported
 from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
-from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sum, consumed_generator, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
+from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
 from lang.py.permutation_support import permutation_arguments
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
@@ -1511,6 +1511,9 @@ class AstJsonEmitter:
                 kind = "SumGeneratorTargets" if encoded["type"] == "ListCompTargets" else "SumGenerator"
                 return {**encoded, "type": kind, "start": self.expr(start)}
             return {"type": "SumSequence", "iter": self.expr(iterable), "start": self.expr(start)}
+        materialized = materialized_range(expr)
+        if materialized is not None and not any(bindings(self.bindings_module, name) for name in ('list', 'range')):
+            return self.expr(materialized)
         mapped = mapped_list(expr)
         if mapped is not None and not any(bindings(self.bindings_module, name)
                 for name in ('list', 'map', expr.args[0].args[0].id)):

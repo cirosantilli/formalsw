@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""
+Compare list(range(...)) values, identities, evaluation order, and failures with Python.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+source = '''
+def one(stop: int) -> list[int]:
+    return list(range(stop))
+def two(start: int, stop: int) -> list[int]:
+    return list(range(start, stop))
+def three(start: int, stop: int, step: int) -> list[int]:
+    return list(range(start, stop, step))
+def fresh(n: int) -> bool:
+    left = list(range(n))
+    right = list(range(n))
+    return left is right
+def tick(log: list[int], tag: int, bound: int) -> int:
+    log.append(tag)
+    return bound
+def ordered(log: list[int], step: int) -> list[int]:
+    return list(range(tick(log, 1, 5), tick(log, 2, -2), tick(log, 3, step)))
+def invalid_bound(log: list[int]) -> list[int]:
+    return list(range(tick(log, 1, 0), 'bad', tick(log, 3, 1)))
+def failing_argument(log: list[int]) -> list[int]:
+    return list(range(tick(log, 1, 0), 1 // 0, tick(log, 3, 1)))
+def reference_bound(n: int) -> list[int]:
+    return list(range([n]))
+'''
+module = ast.parse(source)
+world = {}
+exec(source, world)
+for name in world:
+    if name != '__builtins__':
+        issues = SupportChecker(module).check(name)
+        assert not issues, (name, issues)
+
+
+def scalar(value):
+    if type(value) is bool:
+        return f'(.scalar (.bool {str(value).lower()}))'
+    if type(value) is int:
+        return f'(.scalar (.int ({value})))'
+    if type(value) is str:
+        return f'(.scalar (.string "{value}"))'
+    return '(.scalar .none)'
+
+
+def list_object(values):
+    return '.list [' + ', '.join(map(scalar, values)) + ']'
+
+
+def exception(error):
+    return f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+
+
+lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst',
+         'def source : Module := pyast_from_json% (include_str "source.json")',
+         'set_option maxRecDepth 4096']
+comparisons = 0
+
+
+def check(name, arguments, outcome, heap, initial='[]', initial_size=0):
+    global comparisons
+    values = '[' + ', '.join(arguments) + ']'
+    lines.append(f'example : (HeapCalls.call source "{name}" {values} {initial}).execution.observe 2000 = '
+                 f'.done (.ok ⟨{outcome}, [], {heap}, {initial_size}⟩) := by decide')
+    comparisons += 1
+
+
+for name, cases in (
+    ('one', [(stop,) for stop in [-3, -1, 0, 1, 5, True, False, None, 'bad']]),
+    ('two', [(start, stop) for start in [-2, 0, 3] for stop in [-3, 0, 4]]),
+    ('three', [(start, stop, step) for start in [-2, 3] for stop in [-3, 0, 4]
+               for step in [-3, -1, 0, 1, 2]]
+              + [(False, True, True), (0, 4, False), (0, 3, 'bad'), ('bad', 4, 1)]),
+):
+    for args in cases:
+        try:
+            result = world[name](*args)
+            outcome, heap = '.ok (.ref 0)', '[' + list_object(result) + ']'
+        except (TypeError, ValueError) as error:
+            outcome, heap = exception(error), '[]'
+        check(name, list(map(scalar, args)), outcome, heap)
+
+for n in (-1, 0, 3):
+    result = world['fresh'](n)
+    values = list(range(n))
+    check('fresh', [scalar(n)], '.ok ' + scalar(result),
+          '[' + list_object(values) + ', ' + list_object(values) + ']')
+for step in (-2, 0, 1):
+    log = []
+    try:
+        result = world['ordered'](log, step)
+        outcome = '.ok (.ref 1)'
+        heap = '[' + list_object(log) + ', ' + list_object(result) + ']'
+    except ValueError as error:
+        outcome, heap = exception(error), '[' + list_object(log) + ']'
+    check('ordered', ['.ref 0', scalar(step)], outcome, heap, '[.list []]', 1)
+for name in ('invalid_bound', 'failing_argument'):
+    log = []
+    try:
+        world[name](log)
+        raise AssertionError('expected an exception')
+    except (TypeError, ZeroDivisionError) as error:
+        check(name, ['.ref 0'], exception(error), '[' + list_object(log) + ']', '[.list []]', 1)
+check('reference_bound', [scalar(7)], '.error { typeName := "TypeError", args := [] }', '[' + list_object([7]) + ']')
+
+base = 'def f(n: int) -> list[int]:\n    return list(range(n))\n'
+for replacement in ('list(range())', 'list(range(0, n, 1, 2))', 'list(range(stop=n))',
+                    'list(range(*n))', 'list(range(n), n)', 'list(range(n), copy=True)'):
+    assert SupportChecker(ast.parse(base.replace('list(range(n))', replacement))).check('f'), replacement
+for builtin in ('list', 'range'):
+    for extra in (f'{builtin} = 1\n', f'def {builtin}(n: int) -> int:\n    return n\n'):
+        assert SupportChecker(ast.parse(base + extra)).check('f'), extra
+    rebound = base.replace('    return', f'    {builtin} = n\n    return')
+    assert SupportChecker(ast.parse(rebound)).check('f'), rebound
+assert SupportChecker(ast.parse(base.replace('list(range(n))', 'range(n)'))).check('f')
+custom_index = '''
+class Index:
+    def __index__(self) -> int:
+        return 3
+def custom() -> list[int]:
+    return list(range(Index()))
+'''
+assert SupportChecker(ast.parse(custom_index)).check('custom')
+
+with project_temporary_directory(prefix='materialized-range-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+print(f'Materialized ranges: {comparisons} Python/Lean comparisons, fresh identity, argument order, exceptions, and coverage checks passed')

@@ -165,6 +165,22 @@ def sequence_sum(node):
     return iterable, start
 
 
+def materialized_range(node):
+    """Lower list(range(...)) to a private range comprehension."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'list' and len(node.args) == 1 and not node.keywords):
+        return None
+    iterable = node.args[0]
+    if not (isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+            and iterable.func.id == 'range'):
+        return None
+    name = '$formalsw.range.item'
+    return ast.copy_location(ast.ListComp(
+        elt=ast.Name(id=name, ctx=ast.Load()),
+        generators=[ast.comprehension(target=ast.Name(id=name, ctx=ast.Store()),
+                                      iter=iterable, ifs=[], is_async=0)]), node)
+
+
 def mapped_list(node):
     """Lower an immediately materialized unary builtin map to its private iterator."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'list'
@@ -594,6 +610,15 @@ def check_calls(module, function, reject, *, heap=False):
         def expr(node, scope=None):
             scope = locals_ if scope is None else scope
             recurse = lambda child: expr(child, scope)
+            materialized = materialized_range(node)
+            if materialized is not None:
+                if not heap:
+                    reject(node, 'materialized ranges require heap call execution')
+                for builtin in ('list', 'range'):
+                    if builtin in scope or bindings(module, builtin):
+                        reject(node, f'materialized ranges require the unshadowed builtin {builtin}')
+                expr(materialized, scope)
+                return
             mapped = mapped_list(node)
             if mapped is not None:
                 if not heap:
