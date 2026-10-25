@@ -95,7 +95,7 @@ with project_temporary_directory(prefix='global-contracts-') as temporary:
         properties.extend(item.property_type for item in requirements)
     document = directory / 'source.json'
     document.write_text(api['AstJsonEmitter'](module).emit())
-    bridge = 'import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
+    bridge = 'import lang.py.FormalSW.HeapCalls\nimport lang.py.FormalSW.Syntax\n' + api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
     lines = [bridge, 'open FormalSW.PyAst'] + [f'#check ({term})' for term in properties]
     # The source initializer is not a hypothesis: these arbitrary entry values differ from it.
     for n, limit, accepted in ((3, 2, True), (1, 2, False)):
@@ -147,7 +147,7 @@ def f(_formalsw_heap: int, input_0: int, _arg: int) -> int:
         assert f'«{binder}»' in term, term
     document = directory / 'collisions.json'
     document.write_text(api['AstJsonEmitter'](module).emit())
-    bridge = 'import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
+    bridge = 'import lang.py.FormalSW.HeapCalls\nimport lang.py.FormalSW.Syntax\n' + api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
     proof = directory / 'Collisions.lean'
     proof.write_text(bridge + '\n' + '\n'.join(f'#check ({item.property_type})' for item in requirements))
     checked = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT,
