@@ -88,13 +88,13 @@ private def guardRequest (env : Environment) (request : Json) : Except String Js
   let guarded ← guardType stx condition pending
   return Json.mkObj [("type", toJson guarded), ("bound", toJson names)]
 
-private def parseRequest (env : Environment) (line : String) : IO (Except String Json) := do
+private def parseRequest (getEnv : IO Environment) (line : String) : IO (Except String Json) := do
   match Json.parse line with
   | .error error => return .error error
-  | .ok (.str text) => return parseSpec env text
+  | .ok (.str text) => return parseSpec (← getEnv) text
   | .ok request =>
       if (request.getObjVal? "guard").isOk then
-        return guardRequest env request
+        return guardRequest (← getEnv) request
       match request.getObjValAs? String "imports" with
       | .error error => return .error error
       | .ok text =>
@@ -106,13 +106,20 @@ private def parseRequest (env : Environment) (line : String) : IO (Except String
 unsafe def run : IO Unit := do
   enableInitializersExecution
   initSearchPath (← findSysroot)
-  let env ← importModules #[{ module := `FormalSW }] {} (loadExts := true)
+  -- Import headers need no elaboration environment. Short DSL checks often use
+  -- only headers, so load the specification syntax lazily and at most once.
+  let environment ← IO.mkRef (none : Option Environment)
+  let getEnv : IO Environment := do
+    if let some env ← environment.get then return env
+    let env ← importModules #[{ module := `FormalSW }] {} (loadExts := true)
+    environment.set (some env)
+    return env
   let input ← IO.getStdin
   let output ← IO.getStdout
   repeat
     let line ← input.getLine
     if line.isEmpty then break
-    let result ← parseRequest env line
+    let result ← parseRequest getEnv line
     let response := match result with
       | .ok value => value
       | .error error => Json.mkObj [("error", toJson error)]
