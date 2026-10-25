@@ -93,6 +93,7 @@ def Primitive.apply : Primitive → List Constant → Option (Except ExceptionOb
   | .builtin .max, values => positionalMaximum values
   | .builtin .min, values => positionalMinimum values
   | .builtin .intBitLength, [value] => some (Math.bitLengthCall value)
+  | .builtin .intBitCount, [value] => some (Math.bitCountCall value)
   | .subscript, [value, index] => some (Strings.get value index)
   | .slice, [value, lower, upper, stride] => some (Strings.slice value lower upper stride)
   | _, _ => none

@@ -55,8 +55,8 @@ def dataclass_fields(module, cls, reject):
             name = node.target.id
             if name.startswith('__') or name in names:
                 return fail('dataclass fields require unique ordinary names', node)
-            if name == 'bit_length':
-                return fail('bit_length is currently reserved for the modeled integer method', node)
+            if name in ('bit_length', 'bit_count'):
+                return fail(f'{name} is currently reserved for the modeled integer method', node)
             if annotation_kind(node.annotation) is None or any(
                     bindings(module, part.id) for part in ast.walk(node.annotation) if isinstance(part, ast.Name)):
                 return fail('dataclass fields need unshadowed supported scalar or container annotations', node)
@@ -103,8 +103,8 @@ def plain_class_methods(module, cls, reject):
         names.add(node.name)
         if node.name.startswith('__') and node.name != '__init__':
             reject(node, 'custom special methods and private-name mangling are unsupported')
-        if node.name == 'bit_length':
-            reject(node, 'bit_length is currently reserved for the modeled integer method')
+        if node.name in ('bit_length', 'bit_count'):
+            reject(node, f'{node.name} is currently reserved for the modeled integer method')
         if not node.args.args:
             reject(node, 'instance methods require a receiver parameter')
         methods.append(node)

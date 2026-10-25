@@ -1006,6 +1006,8 @@ def primitive : Operation → List Value → Eval Value
       | some (.error error) => throw error
   | .builtin .intBitLength, [.scalar value] => scalarResult (some (Math.bitLengthCall value))
   | .builtin .intBitLength, [.ref _] => Mutable.error "AttributeError"
+  | .builtin .intBitCount, [.scalar value] => scalarResult (some (Math.bitCountCall value))
+  | .builtin .intBitCount, [.ref _] => Mutable.error "AttributeError"
   | .builtin .int, [.ref address] => do
       match (← get)[address]? with
       | some (.bytearray bytes) => scalarResult (Calls.integerConversion [.bytes bytes])

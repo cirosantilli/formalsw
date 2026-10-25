@@ -492,7 +492,7 @@ def uses_calls_model(module, function):
     names.update(library_functions(module))
     if (any(annotation_kind(arg.annotation) == 'bytes' for arg in function.args.args)
             or function.args.defaults or uses_heap_calls(module, function)
-            or uses_method(module, function, "bit_length")):
+            or any(uses_method(module, function, method) for method in ("bit_length", "bit_count"))):
         return True
     return any(
         isinstance(node, (ast.BoolOp, ast.IfExp, ast.GeneratorExp, ast.Break, ast.Continue, ast.Subscript, ast.Assert, ast.JoinedStr, ast.AnnAssign))
@@ -831,9 +831,9 @@ def check_calls(module, function, reject, *, heap=False):
                             recurse(bound)
                 else:
                     recurse(node.slice)
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'bit_length':
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ('bit_length', 'bit_count'):
                 if node.args or node.keywords:
-                    reject(node, 'int.bit_length requires no arguments')
+                    reject(node, f'int.{node.func.attr} requires no arguments')
                 recurse(node.func.value)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
                 if node.func.id in scope:

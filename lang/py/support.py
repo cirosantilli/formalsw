@@ -680,9 +680,10 @@ class SupportChecker:
             if uses_library_calls(self.module, function) and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'standard-library calls require a call interpreter'))
-            if uses_method(self.module, function, 'bit_length') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
-                issues.append(UnsupportedConstruct(target, function.lineno,
-                    'int.bit_length requires a call interpreter'))
+            for method in ('bit_length', 'bit_count'):
+                if uses_method(self.module, function, method) and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
+                    issues.append(UnsupportedConstruct(target, function.lineno,
+                        f'int.{method} requires a call interpreter'))
             if uses_builtin(self.module, function, 'sum') and model not in ('Calls.function', 'MemoCalls.sourceFunction', 'HeapCalls.call', 'HeapCalls.scalarFunction'):
                 issues.append(UnsupportedConstruct(target, function.lineno,
                     'sums require a call interpreter'))
@@ -789,10 +790,11 @@ class SupportChecker:
                        for f in (target, other) if f in self.functions):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
                         'legacy Function properties omit ordinal conversion; use the short DSL or Calls'))
-                if any(uses_method(self.module, self.functions[f], 'bit_length')
-                       for f in (target, other) if f in self.functions):
-                    issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
-                        'legacy Function properties omit int.bit_length; use the short DSL or Calls'))
+                for method in ('bit_length', 'bit_count'):
+                    if any(uses_method(self.module, self.functions[f], method)
+                           for f in (target, other) if f in self.functions):
+                        issues.append(UnsupportedConstruct(target, self.functions[target].lineno,
+                            f'legacy Function properties omit int.{method}; use the short DSL or Calls'))
                 if any(uses_builtin(self.module, self.functions[f], 'sum')
                        for f in (target, other) if f in self.functions):
                     issues.append(UnsupportedConstruct(target, self.functions[target].lineno,

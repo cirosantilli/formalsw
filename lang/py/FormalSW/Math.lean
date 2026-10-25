@@ -9,6 +9,12 @@ def bitLengthCall (value : Constant) : Except ExceptionObject Constant :=
   | some n => .ok (.int (FormalSW.Py.Builtin.Int.bitLength n))
   | none => .error { typeName := "AttributeError", args := [] }
 
+/-- Count set bits of the absolute value, using the same integer and Boolean receiver rules. -/
+def bitCountCall (value : Constant) : Except ExceptionObject Constant :=
+  match scalarNumber value with
+  | some n => .ok (.int (FormalSW.Py.Builtin.Int.bitCount n))
+  | none => .error { typeName := "AttributeError", args := [] }
+
 /-- Binary search for the integer square root. The interval, rather than a
 fixed machine word or evaluation budget, bounds the recursion. -/
 def sqrtSearch (n lo hi : Nat) : Nat :=

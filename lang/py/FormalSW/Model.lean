@@ -129,6 +129,7 @@ inductive Builtin where
   | min
   | divmod
   | intBitLength
+  | intBitCount
   /-- Python identity, never resolved through a user-visible function name. -/
   | identity
   | len
@@ -524,6 +525,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "set" => pure Builtin.set
         | "sorted" => pure Builtin.sorted
         | "int.bit_length" => pure Builtin.intBitLength
+        | "int.bit_count" => pure Builtin.intBitCount
         | "identity" => pure Builtin.identity
         | builtinName => throw s!"unsupported scalar builtin: {builtinName}"
       return .builtinCall builtin (← jsonArray json "args" Expr.fromJson?)
