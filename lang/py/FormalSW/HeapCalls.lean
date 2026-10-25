@@ -463,6 +463,8 @@ inductive Operation where
   | zipStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
   | truthGenerator (universal : Bool) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
+  | extremumGenerator (maximum : Bool) (fallback : Option Expr) (element : Expr)
+      (generators : List (Expr × Expr × List Expr)) (env : Env)
   | generatorCollect (action : GeneratorAction) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
 
 /-- The sequence reference and lexical key environment persist across key calls. -/
@@ -491,6 +493,8 @@ inductive Frame where
   | dictionaryKey (value : Expr) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | dictionaryValue (key : Constant) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | sumStart (loop : Stmt) (env : Env)
+  | extremumStart (hasDefault : Bool) (loop : Stmt) (env : Env)
+  | extremumResume (original : List Frame)
   /-- Installed after the first iterable and ordinary consumer arguments finish. -/
   | generatorEnd
   | generatorConsumer (action : GeneratorAction)
@@ -943,6 +947,87 @@ def truthGeneratorStart (anchors : Nat) (universal : Bool) (element : Expr)
       let name := comprehensionTargetName target
       let enter := fun loop heap => Step.next
         ⟨.block [loop, .return (.constant (.bool universal))] env, .generatorEnd :: stack, heap⟩
+      match iterable with
+      | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
+          enter (.permutationStepLoop name rows body []) heap
+      | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
+          enter (.zipStepLoop name sources 0 body []) heap
+      | .call (.name "enumerate") _ => match enumerateTarget target, values with
+          | some (index, name), [source, start] =>
+              run (globals := globals) anchors heap (enumerateStart start) fun counter heap =>
+                run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
+                  enter (.enumerateStepLoop index name (sequenceSource source) 0 counter
+                    (comprehensionFilters filters (comprehensionTargetsBody terminal rest)) []) heap
+          | _, _ => .unsupported
+      | .call (.name "range") _ => match rangeBounds values with
+          | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
+          | .error error => done (globals := globals) anchors heap (.error error)
+      | _ => match values with
+          | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
+              enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
+          | _ => .unsupported
+
+/-- Private extremum locals cannot occur in Python source identifiers. -/
+def extremumBest : String := "$formalsw.extremum.best"
+def extremumSeen : String := "$formalsw.extremum.seen"
+def extremumCandidate : String := "$formalsw.extremum.candidate"
+
+/-- Consumer comparisons suspend only their generator's boundary. Nested caller
+boundaries remain active, while default expressions never enter this boundary. -/
+def withoutGenerator : List Frame → List Frame
+  | [] => []
+  | .generatorEnd :: rest => rest
+  | first :: rest => first :: withoutGenerator rest
+
+def extremumComparison (expression : Expr) : Expr :=
+  .consumeGenerator (.call (.name "$formalsw.extremum.compare") []) expression []
+
+/-- A fallback is returned only on empty input; it never competes with yielded items. -/
+def extremumBody (maximum : Bool) (element : Expr) : List Stmt :=
+  [.assign [.name extremumCandidate] element,
+   .ifThen (.name extremumSeen)
+     [.ifThen (extremumComparison (.compare (.name extremumCandidate) [(if maximum then .gt else .lt, .name extremumBest)]))
+       [.assign [.name extremumBest] (.name extremumCandidate)] []]
+     [.assign [.name extremumBest] (.name extremumCandidate),
+      .assign [.name extremumSeen] (.constant (.bool true))]]
+
+def extremumFinish (hasDefault : Bool) : List Stmt :=
+  if hasDefault then [.return (.name extremumBest)]
+  else [.ifThen (.name extremumSeen) [.return (.name extremumBest)]
+    [.raise (some (.call (.name "ValueError") []))]]
+
+def extremumEnv (env : Env) (initial : Value) : Env :=
+  setLocal (setLocal env extremumSeen (.scalar (.bool false))) extremumBest initial
+
+/-- Only the checked frontend emits these impossible source names as consumer nodes. -/
+def extremumConsumer (maximum : Bool) (fallback : Option Expr) : Expr :=
+  .call (.name (if maximum then "$formalsw.max.generator" else "$formalsw.min.generator")) fallback.toList
+
+/-- Acquire the generator's first iterator before evaluating the fallback. -/
+def extremumGeneratorArguments (maximum : Bool) (fallback : Option Expr) (element : Expr)
+    (generators : List (Expr × Expr × List Expr)) (env : Env) (stack : List Frame) (heap : Heap) : State :=
+  let expressions := match generators with
+    | (_, iterable, _) :: _ => match iterable with
+        | .call (.name "range") expressions | .call (.name "enumerate") expressions
+          | .zipIterable expressions | .permutationsIterable expressions => expressions
+        | _ => [iterable]
+    | [] => []
+  argumentsState (.extremumGenerator maximum fallback element generators env) env [] expressions stack heap
+
+/-- Filters, inner iterators, items and comparisons execute one yielded item at a time. -/
+def extremumGeneratorStart (anchors : Nat) (maximum : Bool) (fallback : Option Expr) (element : Expr)
+    (generators : List (Expr × Expr × List Expr)) (env : Env) (values : List Value)
+    (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  match generators with
+  | [] => .unsupported
+  | (target, iterable, filters) :: rest =>
+      let terminal := extremumBody maximum element
+      let body := comprehensionTargetBody target
+        (comprehensionFilters filters (comprehensionTargetsBody terminal rest))
+      let name := comprehensionTargetName target
+      let enter := fun loop heap => Step.next
+        ⟨.expr (fallback.getD (.constant .none)) env,
+          .extremumStart fallback.isSome loop (comprehensionTargetsEnv env generators) :: stack, heap⟩
       match iterable with
       | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
           enter (.permutationStepLoop name rows body []) heap
@@ -1500,6 +1585,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       invokeMethod (globals := globals) anchors receiver args body values stack heap
   | .operation (.builtin .all) values => truthSequenceStart (globals := globals) anchors true values stack heap
   | .operation (.builtin .any) values => truthSequenceStart (globals := globals) anchors false values stack heap
+  | .operation (.extremumGenerator maximum fallback element generators env) values =>
+      extremumGeneratorStart (globals := globals) anchors maximum fallback element generators env values stack heap
   | .operation (.truthGenerator universal element generators env) values =>
       truthGeneratorStart (globals := globals) anchors universal element generators env values stack heap
   | .operation .sumSequence values => sumSequenceStart (globals := globals) anchors values stack heap
@@ -1580,6 +1667,16 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
+      | .consumeGenerator (.call (.name "$formalsw.extremum.compare") []) expression [] =>
+          .next ⟨.expr expression env, .extremumResume stack :: withoutGenerator stack, heap⟩
+      | .consumeGenerator (.call (.name "$formalsw.max.generator") []) element generators =>
+          .next (extremumGeneratorArguments true none element generators env stack heap)
+      | .consumeGenerator (.call (.name "$formalsw.min.generator") []) element generators =>
+          .next (extremumGeneratorArguments false none element generators env stack heap)
+      | .consumeGenerator (.call (.name "$formalsw.max.generator") [fallback]) element generators =>
+          .next (extremumGeneratorArguments true (some fallback) element generators env stack heap)
+      | .consumeGenerator (.call (.name "$formalsw.min.generator") [fallback]) element generators =>
+          .next (extremumGeneratorArguments false (some fallback) element generators env stack heap)
       | .consumeGenerator (.builtinCall .all []) element generators =>
           .next (truthGeneratorArguments true element generators env stack heap)
       | .consumeGenerator (.builtinCall .any []) element generators =>
@@ -1760,6 +1857,9 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
               | .ref _ => .unsupported
           | .dictionaryValue key rest entries env =>
               .next ⟨.dictionary rest (ScalarDict.insert entries key value) env, stack, heap⟩
+          | .extremumResume original => .next ⟨.value value, original, heap⟩
+          | .extremumStart hasDefault loop env =>
+              .next ⟨.block ([loop] ++ extremumFinish hasDefault) (extremumEnv env value), .generatorEnd :: stack, heap⟩
           | .sumStart loop env => sumEnter (globals := globals) anchors loop env value (.generatorEnd :: stack) heap
           | .generatorEnd => .next ⟨.value value, stack, heap⟩
           | .generatorConsumer .list => .next ⟨.value value, stack, heap⟩
@@ -2120,7 +2220,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>
@@ -3148,7 +3248,7 @@ theorem Evaluates.list_comp_range
       heap (.ref middle.length) finalHeap := by
   intro anchors stack
   apply Reaches.next rfl
-  apply (arguments_reach arguments _ [] anchors stack).trans
+  apply (Evaluates.arguments_reach arguments _ [] anchors stack).trans
   exact .next (by simp [step, comprehensionStart, bounds])
     ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
       (.next rfl (.next rfl .refl)))
@@ -3219,6 +3319,123 @@ theorem Evaluates.sorted_sequence
   exact .next rfl ((iterable anchors (.sortedSource parameter key reverseExpression env :: stack)).trans
     (.next rfl ((reverse anchors (.sortedReverse source parameter key env :: stack)).trans
       (.next (by simp [step, run, acquired]) (rest anchors stack)))))
+
+/-- Successful consumer comparisons preserve the original continuation, with
+only the current generator boundary suspended while the expression runs. -/
+theorem Evaluates.extremum_comparison
+    (evaluated : Evaluates (globals := globals) module env expression heap value finalHeap) :
+    Evaluates (globals := globals) module env (extremumComparison expression) heap value finalHeap := by
+  intro anchors stack
+  exact .next rfl ((evaluated anchors (.extremumResume stack :: withoutGenerator stack)).trans
+    (.next rfl .refl))
+
+/-- The first iterator precedes fallback evaluation; nested iterators remain in the executed loop. -/
+theorem Evaluates.extremum_generator_range
+    (arguments : Evaluates.Arguments (globals := globals) module env expressions heap boundValues middle)
+    (bounds : rangeBounds boundValues = .ok (first, stop, stride))
+    (defaultEval : Evaluates (globals := globals) module env (fallback.getD (.constant .none))
+      middle defaultValue afterDefault)
+    (executed : BlockReturns (globals := globals) module
+      (extremumEnv (comprehensionTargetsEnv env
+        ((.name name, .call (.name "range") expressions, filters) :: generators)) defaultValue)
+      ([.rangeStepLoop name first stop stride
+        (comprehensionFilters filters (comprehensionTargetsBody (extremumBody maximum element) generators)) []] ++
+          extremumFinish fallback.isSome)
+      afterDefault answer finalHeap) :
+    Evaluates (globals := globals) module env
+      (.consumeGenerator (extremumConsumer maximum fallback) element
+        ((.name name, .call (.name "range") expressions, filters) :: generators)) heap answer finalHeap := by
+  intro anchors stack
+  have initial : step (globals := globals) module anchors
+      ⟨.expr (.consumeGenerator (extremumConsumer maximum fallback) element
+        ((.name name, .call (.name "range") expressions, filters) :: generators)) env, stack, heap⟩ =
+      .next (argumentsState (.extremumGenerator maximum fallback element
+        ((.name name, .call (.name "range") expressions, filters) :: generators) env) env [] expressions stack heap) := by
+    cases maximum <;> cases fallback <;> rfl
+  apply Reaches.next initial
+  apply (Evaluates.arguments_reach arguments _ [] anchors stack).trans
+  apply Reaches.next (following := ⟨.expr (fallback.getD (.constant .none)) env,
+    .extremumStart fallback.isSome
+      (.rangeStepLoop name first stop stride
+        (comprehensionFilters filters (comprehensionTargetsBody (extremumBody maximum element) generators)) [])
+      (comprehensionTargetsEnv env ((.name name, .call (.name "range") expressions, filters) :: generators)) :: stack,
+    middle⟩)
+  · simp [step, extremumGeneratorStart, bounds, comprehensionTargetName, comprehensionTargetBody]
+  apply (defaultEval anchors _).trans
+  exact .next rfl ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))
+
+/-- One yielded integer updates the streaming maximum, independently of fallback magnitude.
+The complete element evaluation and all its heap effects precede the comparison. -/
+theorem BlockContinues.extremum_max_int
+    (evaluated : Evaluates (globals := globals) module env expression heap (.scalar (.int item)) after)
+    (getSeen : env extremumSeen = some (.scalar (.bool seen)))
+    (getBest : env extremumBest = some (.scalar (.int best))) :
+    ∃ updated, BlockContinues (globals := globals) module env (extremumBody true expression) heap updated after ∧
+      updated extremumSeen = some (.scalar (.bool true)) ∧
+      updated extremumBest = some (.scalar (.int (if seen then max best item else item))) ∧
+      (∀ name, name ≠ extremumBest → name ≠ extremumSeen → name ≠ extremumCandidate → updated name = env name) := by
+  let candidateEnv := setLocal env extremumCandidate (.scalar (.int item))
+  have seenFound : candidateEnv extremumSeen = some (.scalar (.bool seen)) := by
+    simpa [candidateEnv, setLocal, extremumSeen, extremumCandidate] using getSeen
+  have bestFound : candidateEnv extremumBest = some (.scalar (.int best)) := by
+    simpa [candidateEnv, setLocal, extremumBest, extremumCandidate] using getBest
+  have candidateFound : candidateEnv extremumCandidate = some (.scalar (.int item)) := by simp [candidateEnv, setLocal]
+  have assigned : BlockContinues (globals := globals) module env [.assign [.name extremumCandidate] expression]
+      heap candidateEnv after := BlockContinues.assign evaluated
+  cases seen with
+  | false =>
+      let bestEnv := setLocal candidateEnv extremumBest (.scalar (.int item))
+      let updated := setLocal bestEnv extremumSeen (.scalar (.bool true))
+      have selected : BlockContinues (globals := globals) module candidateEnv
+          [.ifThen (.name extremumSeen)
+            [.ifThen (extremumComparison (.compare (.name extremumCandidate) [(.gt, .name extremumBest)]))
+              [.assign [.name extremumBest] (.name extremumCandidate)] []]
+            [.assign [.name extremumBest] (.name extremumCandidate), .assign [.name extremumSeen] (.constant (.bool true))]]
+          after updated after := by
+        apply BlockContinues.branch (flag := false) (Evaluates.lookup seenFound) rfl
+        exact (BlockContinues.assign (Evaluates.lookup candidateFound)).append
+          (BlockContinues.assign Evaluates.constant)
+      refine ⟨updated, assigned.append selected, ?_, ?_, ?_⟩
+      · simp [updated, setLocal]
+      · simp [updated, bestEnv, setLocal, extremumBest, extremumSeen]
+      · intro name notBest notSeen notCandidate
+        simp [updated, bestEnv, candidateEnv, setLocal, notBest, notSeen, notCandidate]
+  | true =>
+      have compared : Evaluates (globals := globals) module candidateEnv
+          (extremumComparison (.compare (.name extremumCandidate) [(.gt, .name extremumBest)]))
+          after (.scalar (.bool (decide (best < item)))) after := by
+        apply Evaluates.extremum_comparison
+        exact Evaluates.compare (Evaluates.lookup candidateFound) (Evaluates.lookup bestFound) rfl
+      by_cases better : best < item
+      · let updated := setLocal candidateEnv extremumBest (.scalar (.int item))
+        have selected : BlockContinues (globals := globals) module candidateEnv
+            [.ifThen (.name extremumSeen)
+              [.ifThen (extremumComparison (.compare (.name extremumCandidate) [(.gt, .name extremumBest)]))
+                [.assign [.name extremumBest] (.name extremumCandidate)] []]
+              [.assign [.name extremumBest] (.name extremumCandidate), .assign [.name extremumSeen] (.constant (.bool true))]]
+            after updated after := by
+          apply BlockContinues.branch (flag := true) (Evaluates.lookup seenFound) rfl
+          apply BlockContinues.branch (flag := true) (by simpa only [better, decide_true] using compared) rfl
+          exact BlockContinues.assign (Evaluates.lookup candidateFound)
+        refine ⟨updated, assigned.append selected, ?_, ?_, ?_⟩
+        · simpa [updated, setLocal, extremumSeen, extremumBest] using seenFound
+        · simp [updated, setLocal, Int.max_eq_right (show best ≤ item by omega)]
+        · intro name notBest notSeen notCandidate
+          simp [updated, candidateEnv, setLocal, notBest, notCandidate]
+      · have selected : BlockContinues (globals := globals) module candidateEnv
+            [.ifThen (.name extremumSeen)
+              [.ifThen (extremumComparison (.compare (.name extremumCandidate) [(.gt, .name extremumBest)]))
+                [.assign [.name extremumBest] (.name extremumCandidate)] []]
+              [.assign [.name extremumBest] (.name extremumCandidate), .assign [.name extremumSeen] (.constant (.bool true))]]
+            after candidateEnv after := by
+          apply BlockContinues.branch (flag := true) (Evaluates.lookup seenFound) rfl
+          apply BlockContinues.branch (flag := false) (by simpa only [better, decide_false] using compared) rfl
+          exact BlockContinues.nil
+        refine ⟨candidateEnv, assigned.append selected, seenFound, ?_, ?_⟩
+        · simpa [Int.max_eq_left (show item ≤ best by omega)] using bestFound
+        · intro name notBest notSeen notCandidate
+          simp [candidateEnv, setLocal, notCandidate]
+
 
 /-- Sequence extrema preserve both retained item identities and every key's heap effects. -/
 def ExtremumReturns (module : Module) (cursor : SequenceExtremum) (position : Nat)

@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""
+Compare streaming generator extrema with Python and test rejection boundaries.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'tests/py'))
+from test_support import project_temporary_directory
+from lang.py.support import SupportChecker
+from lang.py.call_support import uses_set_iteration
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = """
+def mark(items: list[int], value: int) -> int:
+    items.append(value)
+    return value
+
+def grow(items: list[int], value: int) -> int:
+    items.append(value + 5)
+    return 1000
+
+def stop(value: int) -> int:
+    raise StopIteration()
+
+def add(values: set[int], value: int) -> int:
+    values.add(value)
+    return 999
+
+def mixed(index: int, value: int):
+    if index == 0:
+        return value
+    if index == 1:
+        return "bad"
+    return 1 // 0
+
+def live(items: list[list[int]], index: int, value: int) -> list[int]:
+    if index == 1:
+        items[0][0] = value + 100
+    return items[index]
+"""
+bodies = {
+    'maximum': 'return max((i for i in range(n)), default=-1)',
+    'minimum': 'return min((i for i in range(n)), default=-1)',
+    'required_maximum': 'return max(i for i in range(n))',
+    'required_minimum': 'return min(i for i in range(n))',
+    'maximum_default_only_empty': 'return max((-i - 1 for i in range(n)), default=1000)',
+    'minimum_default_only_empty': 'return min((i + 1 for i in range(n)), default=-1000)',
+    'eager_default': 'return max((i for i in range(n)), default=1 // 0)',
+    'nested': 'return max((a * 10 + b for a in range(n) for b in range(n + 1) if b % 2 == 0), default=-1000)',
+    'lazy_effect_order': 'items = []\nvalue = max((mark(items, 100 * a + b) for a in range(mark(items, n)) for b in range(mark(items, n + 1)) if mark(items, b % 2 == 0)), default=mark(items, -1000))\nreturn value * 100000 + len(items) * 100 + items[0] * 10 + items[1]',
+    'default_mutates_iterator': 'items = [n]\nreturn max((x for x in items), default=grow(items, n))',
+    'first_maximum_tie': 'items = [[n], [n]]\nvalue = max((x for x in items), default=[999])\nvalue.append(2)\nreturn 100 * len(items[0]) + len(items[1])',
+    'first_minimum_tie': 'items = [[n], [n]]\nvalue = min((x for x in items), default=[-999])\nvalue.append(2)\nreturn 100 * len(items[0]) + len(items[1])',
+    'live_previous_candidate': 'items = [[n], [n + 1]]\nvalue = max((live(items, i, n) for i in range(2)), default=[999])\nvalue.append(2)\nreturn 100 * len(items[0]) + len(items[1])',
+    'compare_before_next_item': 'return max((mixed(i, n) for i in range(3)), default=0)',
+    'element_stop': 'return max((stop(i) for i in range(n)), default=0)',
+    'filter_stop': 'return max((i for i in range(n) if stop(i)), default=0)',
+    'inner_iterable_stop': 'return max((j for i in range(n) for j in range(stop(i))), default=0)',
+    'default_stop': 'return max((i for i in range(n)), default=stop(n))',
+    'outer_iterable_stop': 'return max((i for i in range(stop(n))), default=1 // 0)',
+    'inner_invalid_iterable': 'return max((j for i in range(n) for j in i), default=0)',
+    'fallback_outer_scope': 'items = []\nvalue = max((n for n in range(1)), default=mark(items, n))\nreturn items[0]',
+    'empty_default_identity': 'items = [n]\nvalue = max((x for x in range(0)), default=items)\nvalue.append(2)\nreturn len(items)',
+    'nested_consumers': 'return min((max((b for b in range(a)), default=n) for a in range(n)), default=-100)',
+    'set_generator': 'return max((x for x in {n, n + 1}), default=999)',
+    'set_default_mutation': 'values = {n}\nreturn max((x for x in values), default=add(values, n + 1))',
+    'set_body_mutation': 'values = {n}\nreturn max((add(values, n + 1) for x in values), default=0)',
+    'set_duplicate_add': 'values = {n}\nreturn max((add(values, n) for x in values), default=0)',
+    'set_stop': 'return max((stop(x) for x in {n}), default=0)',
+    'nested_set': 'return max((x + y for x in range(2) for y in {n, n + 1}), default=0)',
+    'zip_generator': 'return max((a + b for a, b in zip([n, n + 1], [1, 2])), default=999)',
+    'enumerate_generator': 'return min((a + b for a, b in enumerate([n, n + 1])), default=-999)',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(n: int) -> int:\n' + ''.join('    ' + line + '\n' for line in body.splitlines())
+source += """
+def invalid_outer(items: list[int], n: int) -> int:
+    return max((x for x in n), default=mark(items, n))
+"""
+module = ast.parse(source)
+world = {}
+exec(source, world)
+checker = SupportChecker(module)
+for name in (*bodies, 'invalid_outer'):
+    assert not checker.check(name), (name, checker.check(name))
+
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+checks = 0
+for name in bodies:
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    scheduled = uses_set_iteration(module, function)
+    for n in (-3, 0, 1, 4):
+        try:
+            value = world[name](n)
+            assert type(value) is int, (name, value)
+            expected = f'.ok (.int ({value}))'
+        except (ValueError, TypeError, ZeroDivisionError, StopIteration, RuntimeError) as error:
+            error_type = type(error).__name__
+            expected = f'.error {{ typeName := "{error_type}", args := [] }}'
+        if scheduled:
+            if expected.startswith('.ok '):
+                outcome = f'match completion.outcome with | .ok (.scalar (.int value)) => value == ({value}) | _ => false'
+            else:
+                outcome = f'match completion.outcome with | .error error => error.typeName == "{error_type}" | _ => false'
+            for schedule in ('fun _ => 0', 'fun _ => 17', 'fun index => index + 1'):
+                lines.append(f'example : (match ((SetCalls.call source "{name}" [.scalar (.int ({n}))] []).run ({schedule})).execution.observe 30000 with | .done (.ok completion) => ({outcome}) | _ => false) = true := by native_decide')
+                checks += 1
+            continue
+        lines.append(f'example : (HeapCalls.scalarFunction source "{name}" [.int ({n})]).observe 30000 = .done ({expected}) := by native_decide')
+        checks += 1
+
+# Acquiring the outer iterator precedes the default expression, including errors.
+items = [7]
+try:
+    world['invalid_outer'](items, 4)
+    raise AssertionError('expected TypeError')
+except TypeError:
+    pass
+assert items == [7]
+lines.append('example : (HeapCalls.call source "invalid_outer" [.ref 0, .scalar (.int 4)] [.list [.scalar (.int 7)]]).execution.observe 2000 = .done (.ok ⟨.error { typeName := "TypeError", args := [] }, [], [.list [.scalar (.int 7)]], 1⟩) := by native_decide')
+checks += 1
+
+# Rich comparison callbacks are outside the current modeled class operations.
+# Exercise the private comparison continuation directly: only the nearest
+# generator boundary is suspended, while caller generators remain protected.
+lines.extend([
+    'def stopExpression : Expr := .call (.name "stop") [.constant (.int 7)]',
+    'def boundaryException (expression : Expr) (stack : List HeapCalls.Frame) (expected : String) : Bool :=',
+    '  let execution : Execution Mutable.Completion := ⟨HeapCalls.State, ⟨.expr expression (fun _ => none), stack, []⟩, HeapCalls.step source 0⟩',
+    '  match execution.observe 1000 with',
+    '  | .done (.ok completion) => match completion.outcome with',
+    '    | .error error => error.typeName == expected',
+    '    | _ => false',
+    '  | _ => false',
+    'example : boundaryException stopExpression [.generatorEnd] "RuntimeError" = true := by native_decide',
+    'example : boundaryException (HeapCalls.extremumComparison stopExpression) [.generatorEnd] "StopIteration" = true := by native_decide',
+    'example : boundaryException (HeapCalls.extremumComparison stopExpression) [.generatorEnd, .generatorEnd] "RuntimeError" = true := by native_decide',
+])
+checks += 3
+
+base = 'def root(n: int) -> int:\n    return max((x for x in range(n)), default=0)\n'
+bad = [
+    base.replace('default=0', 'key=abs'),
+    base.replace('default=0', 'default=0, key=abs'),
+    base.replace('default=0', 'unknown=0'),
+    base.replace('default=0', '**{}'),
+    base.replace('max((x for x in range(n)), default=0)', 'max(*(x for x in range(n)))'),
+    base.replace('root(n: int)', 'root(n: int, max: int)'),
+    base.replace('    return', '    max = n\n    return'),
+    base + '\nmax = 3\n',
+    base.replace('max(', 'min(') + '\nmin = 3\n',
+    'def root(n: int) -> int:\n    return max((x async for x in range(n)), default=0)\n',
+    'class Box:\n    def __gt__(self, other):\n        raise StopIteration()\ndef root(n: int) -> int:\n    return max((Box() for x in range(n)), default=0)\n',
+]
+for text in bad:
+    candidate = ast.parse(text)
+    assert SupportChecker(candidate).check('root'), text
+
+# The lowered consumer cannot be named by an ordinary Python identifier.
+assert '$formalsw.max.generator'.isidentifier() is False
+emitted = api['AstJsonEmitter'](module).emit()
+assert '$formalsw.max.generator' in emitted
+assert '$formalsw.min.generator' in emitted
+if '--frontend-only' in sys.argv:
+    print(f'Generator extrema: {checks} Python/runtime checks prepared and {len(bad)} frontend rejections passed')
+    raise SystemExit(0)
+with project_temporary_directory(prefix='generator-extrema-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(emitted)
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+print(f'Generator extrema: {checks} Python/Lean comparisons and {len(bad)} frontend rejections passed')

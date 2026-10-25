@@ -33,6 +33,21 @@ def iteratorStep (choices : ChoiceSchedule) (anchors : Nat) (state : State)
                 (comprehensionEnv env ((name, iterable, filters) :: generators)) :: stack,
               heap⟩, used⟩
           | _ => .unsupported
+  | .operation (.extremumGenerator maximum fallback element
+      ((target, iterable, filters) :: generators) env) [.ref address], stack =>
+      match iterable with
+      | .call (.name "range") _ | .call (.name "enumerate") _
+      | .zipIterable _ | .permutationsIterable _ => .unsupported
+      | _ => match heap[address]? with
+          | some (.set items) =>
+              let body := comprehensionTargetBody target
+                (comprehensionFilters filters (comprehensionTargetsBody (extremumBody maximum element) generators))
+              .next ⟨⟨.expr (fallback.getD (.constant .none)) env,
+                .extremumStart fallback.isSome
+                  (.setStepLoop (comprehensionTargetName target) address items items body [])
+                  (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)) :: stack,
+                heap⟩, used⟩
+          | _ => .unsupported
   | .operation .sumSequence [.ref address, start], stack =>
       match heap[address]? with
       | some (.set items) => liftStep used

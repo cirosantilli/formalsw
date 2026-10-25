@@ -163,6 +163,23 @@ def sequence_sort(node):
                    ast.Constant(value=False))
     return SequenceSort(node.args[0], parameter, body, reverse)
 
+@dataclass(frozen=True)
+class GeneratorExtremum:
+    maximum: bool
+    generator: ast.GeneratorExp
+    default: ast.expr | None
+
+
+def generator_extremum(node):
+    """Recognize a streaming generator maximum/minimum with an optional fallback."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in ('min', 'max') and len(node.args) == 1
+            and isinstance(node.args[0], ast.GeneratorExp)
+            and (not node.keywords or len(node.keywords) == 1 and node.keywords[0].arg == 'default')):
+        return None
+    return GeneratorExtremum(node.func.id == 'max', node.args[0],
+                             node.keywords[0].value if node.keywords else None)
+
 
 def zip_iterable(node, module):
     """Recognize the builtin only where its iterator is immediately consumed."""
@@ -472,7 +489,7 @@ def uses_set_iteration(module, function):
                     loops |= not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                                   and node.iter.func.id == 'range')
                 loops |= (sequence_extremum(node) is not None or sequence_sort(node) is not None
-                          or sequence_sum(node) is not None)
+                          or sequence_sum(node) is not None or generator_extremum(node) is not None)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     sets |= node.func.id == 'set' and not bindings(module, 'set')
                     pending.extend(functions[target] for target in call_targets(node) if target in functions)
@@ -517,6 +534,7 @@ def uses_heap_calls(module, function):
         for node in parts:
             if (isinstance(node, (ast.List, ast.Set, ast.ListComp, ast.SetComp, ast.Dict)) or reversed_list(node) is not None
                     or sequence_extremum(node) is not None or sequence_sort(node) is not None
+                    or generator_extremum(node) is not None
                     or sequence_sum(node) is not None and not bindings(module, "sum")
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
@@ -709,6 +727,17 @@ def check_calls(module, function, reject, *, heap=False):
                 recurse(sorting.iterable)
                 recurse(sorting.reverse)
                 expr(sorting.key, scope | {sorting.parameter})
+                return
+            maximum = generator_extremum(node)
+            if maximum is not None:
+                if not heap:
+                    reject(node, 'generator extrema require heap call execution')
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'generator extrema require the unshadowed builtin min/max')
+                recurse(ast.copy_location(ast.ListComp(elt=maximum.generator.elt,
+                    generators=maximum.generator.generators), maximum.generator))
+                if maximum.default is not None:
+                    recurse(maximum.default)
                 return
             sequence = sequence_extremum(node)
             if sequence is not None:

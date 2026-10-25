@@ -22,7 +22,7 @@ from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
 from lang.py.named_callbacks import lower_named_callbacks
-from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
+from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, generator_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration
 from lang.py.permutation_support import permutation_arguments
 from lang.py.call_support import reverse_keyword, integer_instance
 from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
@@ -1501,6 +1501,17 @@ class AstJsonEmitter:
             return {"type": "SortedSequence", "iter": self.expr(sorting.iterable),
                     "parameter": sorting.parameter, "key": self.expr(sorting.key),
                     "reverse": self.expr(sorting.reverse)}
+        maximum = generator_extremum(expr)
+        if maximum is not None and not bindings(self.bindings_module, expr.func.id):
+            encoded = self.expr(ast.ListComp(elt=maximum.generator.elt, generators=maximum.generator.generators))
+            generators = encoded['generators']
+            if encoded['type'] == 'ListComp':
+                generators = [{'target': {'type': 'Name', 'id': item['name']},
+                               'iter': item['iter'], 'ifs': item['ifs']} for item in generators]
+            consumer = {'type': 'Call',
+                        'func': {'type': 'Name', 'id': '$formalsw.' + expr.func.id + '.generator'},
+                        'args': [] if maximum.default is None else [self.expr(maximum.default)]}
+            return {'type': 'ConsumeGenerator', 'consumer': consumer, 'elt': encoded['elt'], 'generators': generators}
         sequence = sequence_extremum(expr)
         if sequence is not None and not bindings(self.bindings_module, expr.func.id):
             return {"type": "ExtremumSequence", "maximum": sequence.maximum,
