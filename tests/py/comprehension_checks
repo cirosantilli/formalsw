@@ -27,6 +27,8 @@ def constant(value):
         return '.bool ' + str(value).lower()
     if type(value) is int:
         return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
     return '.string ' + json.dumps(value, ensure_ascii=False)
 
 
@@ -117,6 +119,26 @@ bodies = {
     'filter_lazy': 'return [fail(xs, x) for x in range(n) if False if fail(xs, x)]',
     'builtin_target': 'return [range for range in range(n)]',
 }
+
+
+class SetComprehensions(ast.NodeTransformer):
+    def visit_ListComp(self, node):
+        self.generic_visit(node)
+        return ast.copy_location(ast.SetComp(elt=node.elt, generators=node.generators), node)
+
+
+# The same scope, iterator, filter, and effect cases must hold for sets too.
+for name, body in list(bodies.items()):
+    bodies['set_' + name] = ast.unparse(SetComprehensions().visit(ast.parse(body)))
+bodies.update({
+    'set_duplicates': 'return {x % 2 for x in range(n)}',
+    'set_first_bool': 'return {x for x in [True, 1, False, 0]}',
+    'set_first_int': 'return {x for x in [1, True, 0, False]}',
+    'set_scalar_types': 'return {x for x in [None, "λ", b"az", n, True]}',
+    'set_duplicate_effects': 'return {touch(xs, x % 2) for x in range(n)}',
+    'set_unhashable_before_next': 'return {[touch(xs, x)] for x in range(n)}',
+    'set_shadow_builtin': 'set = 42\nreturn {x for x in range(n)}',
+})
 for name, body in bodies.items():
     source += f'\ndef {name}(xs: list[int], n: int):\n'
     source += ''.join('    ' + line + '\n' for line in body.splitlines())
@@ -180,4 +202,4 @@ with project_temporary_directory(prefix='comprehension-checks-') as directory:
     proof.write_text('\n'.join(lines) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
 
-print(f'{count} list-comprehension Python comparisons passed, including scope, mutations, and errors')
+print(f'{count} list/set-comprehension Python comparisons passed, including scope, mutations, and errors')

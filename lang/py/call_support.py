@@ -332,7 +332,7 @@ def uses_heap_calls(module, function):
                            and len(node.targets[0].elts) == len(node.value.elts)
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
-            if (isinstance(node, (ast.List, ast.ListComp, ast.Dict)) or reversed_list(node) is not None
+            if (isinstance(node, (ast.List, ast.ListComp, ast.SetComp, ast.Dict)) or reversed_list(node) is not None
                     or sequence_sum(node) is not None and not bindings(module, "sum")
                     or isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load) and id(node) not in scalar_displays
                     or isinstance(node, ast.For) and not (isinstance(node.iter, ast.Call)
@@ -491,7 +491,7 @@ def check_calls(module, function, reject, *, heap=False):
                 for bound in extremum.bounds:
                     recurse(bound)
                 return
-            if heap and isinstance(node, ast.ListComp):
+            if heap and isinstance(node, (ast.ListComp, ast.SetComp)):
                 if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
                        for generator in node.generators):
                     reject(node, 'comprehensions require synchronous loops with names or flat tuple/list targets')

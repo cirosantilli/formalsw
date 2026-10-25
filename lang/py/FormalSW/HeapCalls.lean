@@ -319,6 +319,7 @@ inductive Operation where
   | sumGenerator (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env) (start : Expr)
   | comprehension (element : Expr) (generators : List (String × Expr × List Expr)) (env : Env)
   | comprehensionTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
+  | setComprehension (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
   | zipStart (target : Expr) (body otherwise following : List Stmt) (env : Env)
   | sumGeneratorTargets (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
 
@@ -529,15 +530,16 @@ def comprehensionTargetsBody (terminal : List Stmt) : List (Expr × Expr × List
 /-- Capture the first iterator in the outer scope, before allocating the result. -/
 def comprehensionTargetsStart (anchors : Nat) (element : Expr)
     (generators : List (Expr × Expr × List Expr)) (env : Env)
-    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) (isSet : Bool := false) : Step State Completion :=
   match generators with
   | [] => .unsupported
   | (target, iterable, filters) :: rest =>
+      let terminal := if isSet then Stmt.comprehensionAdd heap.length element else .comprehensionAppend heap.length element
       let body := comprehensionTargetBody target
-        (comprehensionFilters filters (comprehensionTargetsBody [.comprehensionAppend heap.length element] rest))
+        (comprehensionFilters filters (comprehensionTargetsBody [terminal] rest))
       let name := comprehensionTargetName target
       let enter := fun loop heap => Step.next
-        ⟨.block [loop] env, .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩
+        ⟨.block [loop] env, .comprehensionResult heap.length :: stack, heap ++ [if isSet then .set [] else .list []]⟩
       match iterable with
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
           enter (.zipStepLoop name sources 0 body []) heap
@@ -546,7 +548,7 @@ def comprehensionTargetsStart (anchors : Nat) (element : Expr)
               run (globals := globals) anchors heap (enumerateStart start) fun counter heap =>
                 run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
                   enter (.enumerateStepLoop index name (sequenceSource source) 0 counter
-                    (comprehensionFilters filters (comprehensionTargetsBody [.comprehensionAppend heap.length element] rest)) []) heap
+                    (comprehensionFilters filters (comprehensionTargetsBody [terminal] rest)) []) heap
           | _, _ => .unsupported
       | .call (.name "range") _ => match rangeBounds values with
           | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
@@ -871,6 +873,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           (comprehensionTargetBody target body) otherwise :: following) env, stack, heap⟩
   | .operation (.comprehensionTargets element generators env) values =>
       comprehensionTargetsStart (globals := globals) anchors element generators env values stack heap
+  | .operation (.setComprehension element generators env) values =>
+      comprehensionTargetsStart (globals := globals) (isSet := true) anchors element generators env values stack heap
   | .operation (.sumGeneratorTargets element generators env start) values =>
       sumGeneratorTargetsStart (globals := globals) anchors element generators env start values stack heap
   | .operation operation values => result (globals := globals) anchors heap (primitive operation values) stack
@@ -913,6 +917,12 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.comprehensionTargets element generators (comprehensionTargetsEnv env generators))
+            env [] expressions stack heap)
+      | .setComp element (generators@((_, iterable, _) :: _)) =>
+          let expressions := match iterable with
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions => expressions
+            | _ => [iterable]
+          .next (argumentsState (.setComprehension element generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .sumGeneratorTargets element (generators@((_, iterable, _) :: _)) start =>
           let expressions := match iterable with
@@ -1050,6 +1060,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       | .expr expression :: rest => .next ⟨.expr expression env, .discard rest env :: stack, heap⟩
       | .comprehensionAppend address expression :: rest =>
           .next (argumentsState (.append address) env [] [expression] (.discard rest env :: stack) heap)
+      | .comprehensionAdd address expression :: rest =>
+          .next (argumentsState (.add address) env [] [expression] (.discard rest env :: stack) heap)
       | _ => .unsupported
   | .value value =>
       match stack with
@@ -1379,7 +1391,7 @@ theorem step_extend (extension : Extends target source) (state : State)
           | some declaration =>
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | add _ | dictionaryGet _ | builtin _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | sumGeneratorTargets _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ => rfl
   | value value =>
@@ -2221,6 +2233,20 @@ theorem BlockContinues.comprehension_append
   exact .next (following := ⟨.value (.scalar .none), .discard following env :: stack,
     middle.set address (.list (items ++ [value]))⟩)
     (by simp [step, result, run, primitive, Mutable.appendItem, found, Except.map])
+    (.next rfl .refl)
+
+/-- Insert after evaluating element effects, retaining the first equal representative. -/
+theorem BlockContinues.comprehension_add
+    (evaluated : Evaluates (globals := globals) module env expression heap (.scalar value) middle)
+    (found : middle[address]? = some (.set items)) :
+    BlockContinues (globals := globals) module env [.comprehensionAdd address expression] heap env
+      (middle.set address (.set (ScalarSet.insert items value))) := by
+  intro following anchors stack
+  apply Reaches.next rfl
+  apply (Evaluates.arguments_reach (.cons evaluated .nil) (.add address) [] anchors _).trans
+  exact .next (following := ⟨.value (.scalar .none), .discard following env :: stack,
+    middle.set address (.set (ScalarSet.insert items value))⟩)
+    (by simp [step, result, run, primitive, Mutable.addItem, found, Except.map])
     (.next rfl .refl)
 
 /-- Prove a range comprehension by composing ordinary loop proofs. Only its

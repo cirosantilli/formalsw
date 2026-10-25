@@ -56,6 +56,58 @@ theorem Evaluates.list_comp_targets_sequence
       (.next rfl (.next rfl .refl)))
   cases iterable <;> simp_all [step, comprehensionTargetsStart, run]
 
+/-- Prove a range comprehension by composing ordinary loop proofs. Only its
+first range arguments use the enclosing scope. -/
+theorem Evaluates.set_comp_range
+    (arguments : Arguments (globals := globals) module env expressions heap values middle)
+    (bounds : rangeBounds values = .ok (start, stop, stride))
+    (executed : BlockContinues (globals := globals) module
+      (comprehensionTargetsEnv env ((target, .call (.name "range") expressions, filters) :: generators))
+      [.rangeStepLoop (comprehensionTargetName target) start stop stride
+        (comprehensionTargetBody target (comprehensionFilters filters
+          (comprehensionTargetsBody [.comprehensionAdd middle.length element] generators))) []]
+      (middle ++ [.set []]) finalEnv finalHeap) :
+    Evaluates (globals := globals) module env
+      (.setComp element ((target, .call (.name "range") expressions, filters) :: generators))
+      heap (.ref middle.length) finalHeap := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (arguments_reach arguments _ [] anchors stack).trans
+  exact .next (by simp [step, comprehensionTargetsStart, bounds])
+    ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
+      (.next rfl (.next rfl .refl)))
+
+/-- The first sequence is evaluated and validated outside the comprehension's
+local scope; the loop continues to read the same shared object. -/
+theorem Evaluates.set_comp_sequence
+    (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
+    (notEnumerate : ∀ expressions, iterable ≠ .call (.name "enumerate") expressions)
+    (notZip : ∀ expressions, iterable ≠ .zipIterable expressions)
+    (evaluated : Evaluates (globals := globals) module env iterable heap value middle)
+    (sequence : Mutable.sequence value middle = some (.ok items, middle))
+    (executed : BlockContinues (globals := globals) module
+      (comprehensionTargetsEnv env ((target, iterable, filters) :: generators))
+      [.sequenceStepLoop (comprehensionTargetName target) (sequenceSource value) 0
+        (comprehensionTargetBody target (comprehensionFilters filters
+          (comprehensionTargetsBody [.comprehensionAdd middle.length element] generators))) []]
+      (middle ++ [.set []]) finalEnv finalHeap) :
+    Evaluates (globals := globals) module env (.setComp element ((target, iterable, filters) :: generators))
+      heap (.ref middle.length) finalHeap := by
+  intro anchors stack
+  have first : step (globals := globals) module anchors
+      ⟨.expr (.setComp element ((target, iterable, filters) :: generators)) env, stack, heap⟩ =
+      .next (argumentsState
+        (.setComprehension element ((target, iterable, filters) :: generators)
+          (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)))
+        env [] [iterable] stack heap) := by
+    cases iterable <;> simp_all [step]
+  apply Reaches.next first
+  apply (arguments_reach (.cons evaluated .nil) _ [] anchors stack).trans
+  refine .next ?_
+    ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
+      (.next rfl (.next rfl .refl)))
+  cases iterable <;> simp_all [step, comprehensionTargetsStart, run]
+
 /-- Generator creation evaluates its first range before the ordinary start argument. -/
 theorem Evaluates.sum_generator_targets_range
     (arguments : Arguments (globals := globals) module env expressions heap values middle)

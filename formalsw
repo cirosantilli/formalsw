@@ -1500,13 +1500,13 @@ class AstJsonEmitter:
                     for key, value in zip(keys, values)]}
             case ast.List(elts=elts):
                 return {"type": "List", "elts": [self.expr(elt) for elt in elts]}
-            case ast.ListComp(elt=elt, generators=generators):
+            case ast.ListComp(elt=elt, generators=generators) | ast.SetComp(elt=elt, generators=generators):
                 if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
                        for generator in generators):
-                    raise UnsupportedSyntax('list comprehensions require synchronous loops with names or flat tuple/list targets')
-                if any(not isinstance(generator.target, ast.Name)
+                    raise UnsupportedSyntax('comprehensions require synchronous loops with names or flat tuple/list targets')
+                if isinstance(expr, ast.SetComp) or any(not isinstance(generator.target, ast.Name)
                        or zip_iterable(generator.iter, self.bindings_module) for generator in generators):
-                    return {"type": "ListCompTargets", "elt": self.expr(elt), "generators": [
+                    return {"type": "SetComp" if isinstance(expr, ast.SetComp) else "ListCompTargets", "elt": self.expr(elt), "generators": [
                         {"target": self.expr(generator.target), "iter": self.iterator_expr(generator.iter),
                          "ifs": [self.expr(condition) for condition in generator.ifs]}
                         for generator in generators]}
