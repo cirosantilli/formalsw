@@ -11,7 +11,7 @@ from lang.py.named_callbacks import callback_bindings_valid, callback_signature
 from lang.py.memo_support import cache_decorator, uses_memoized
 from lang.py.call_graph import call_targets
 from lang.py.sorting_support import uses_sort_model
-from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays, unpacked_return_tuple_displays, compared_set_tuple_displays, compared_local_tuple_displays, runtime_tuple_element
+from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays, unpacked_return_tuple_displays, globally_private_return_tuple_displays, compared_set_tuple_displays, compared_local_tuple_displays, runtime_tuple_element
 from lang.py.class_support import ordinary_attribute, plain_class_methods
 
 
@@ -556,26 +556,44 @@ def uses_parallel_model(function: ast.FunctionDef) -> bool:
             or bool(re.search(r'\bParallel\(', ast.get_docstring(function, clean=False) or '')))
 
 
-def observable_pool_tuples(module, function):
-    """Retain scalar unpacking and the existing unobservable-wrapper optimizations."""
-    hidden = (unpacked_tuple_displays(function) | unpacked_return_tuple_displays(module, function)
+def hidden_tuple_displays(module, function, returned=()):
+    """Wrappers already erased by ordinary call coverage must not select pooling."""
+    hidden = (unpacked_tuple_displays(function) | set(returned)
               | compared_set_tuple_displays(function) | compared_local_tuple_displays(module, function))
-    hidden.update(node.value for statement in function.body for node in ast.walk(statement)
-                  if isinstance(node, ast.Assign) and len(node.targets) == 1
-                  and isinstance(node.targets[0], ast.Tuple) and isinstance(node.value, ast.Tuple)
-                  and len(node.targets[0].elts) == len(node.value.elts)
-                  and all(isinstance(target, ast.Name) for target in node.targets[0].elts))
+    for statement in function.body:
+        for node in ast.walk(statement):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and flat_unpacking(node.targets[0]) and isinstance(node.value, ast.Tuple)
+                    and len(node.targets[0].elts) == len(node.value.elts)):
+                hidden.add(node.value)
+            if (isinstance(node, ast.Compare) and len(node.ops) == 1
+                    and isinstance(node.ops[0], (ast.In, ast.NotIn))
+                    and isinstance(node.comparators[0], ast.Tuple)):
+                hidden.add(node.comparators[0])
+            if isinstance(node, ast.Call):
+                hidden.update(argument.value for argument in node.args
+                              if isinstance(argument, ast.Starred) and isinstance(argument.value, ast.Tuple))
+            if isinstance(node, (ast.For, ast.comprehension)):
+                iterable = node.iter
+                if (zip_iterable(iterable, module) or permutation_binding(iterable, module) is not None
+                        or isinstance(node, ast.For) and reversed_sequence(iterable, module)):
+                    hidden.update(argument for argument in iterable.args if isinstance(argument, ast.Tuple))
+    return hidden
+
+
+def observable_pool_tuples(module, function):
+    """Preserve all existing private-wrapper paths before selecting compiler pools."""
+    hidden = hidden_tuple_displays(module, function, globally_private_return_tuple_displays(module))
     return {node for statement in function.body for node in ast.walk(statement)
             if isinstance(node, ast.Tuple) and hasattr(node, 'formalsw_constant_pool') and node not in hidden}
 
 
 def heap_pool_functions(module):
-    """Select protected tuple constants when heap-valued caching needs their identities."""
+    """Select protected, observable nonempty tuple constants for the pool runtime."""
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
-    if not any(cache_decorator(module, node) and uses_heap_calls(module, node)
-               for node in functions.values()):
-        return set()
-    return {name for name, function in functions.items() if observable_pool_tuples(module, function)}
+    # Empty tuples already have singleton semantics in ordinary heap execution.
+    return {name for name, function in functions.items()
+            if any(node.elts for node in observable_pool_tuples(module, function))}
 
 
 def uses_pooled_tuples(module, function):
@@ -757,9 +775,7 @@ def check_calls(module, function, reject, *, heap=False):
             globals_.update(item.name for item in global_inputs)
         except GlobalInputError as error:
             reject(function, str(error))
-        hidden_tuples = (unpacked_tuple_displays(function) | return_tuples
-                         | compared_set_tuple_displays(function)
-                         | compared_local_tuple_displays(module, function)) if heap else set()
+        hidden_tuples = hidden_tuple_displays(module, function, return_tuples) if heap else set()
         # A local may reuse a function/class name as data. Each call site below
         # separately rejects invoking a shadowed module-level target.
         for index, arg in enumerate(callback_signature(module, function)):

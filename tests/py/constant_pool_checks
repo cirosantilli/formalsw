@@ -3,6 +3,8 @@
 Compare compiler-backed tuple pooling across cache keys, functions and source units.
 """
 import ast
+import json
+import os
 from copy import deepcopy
 from pathlib import Path
 import runpy
@@ -139,6 +141,171 @@ with TemporaryDirectory(prefix='pool-metadata-') as temporary:
         candidate = ast.Module(body=[*deepcopy(units[0].body), *ast.parse(text).body], type_ignores=[])
         issues = SupportChecker(candidate).check('incoming')
         assert any('origin metadata' in issue.reason for issue in issues), issues
+    # Ordinary modules need the same protected identities without cache
+    # decorators. Use the actual linker so source units remain separate.
+    ordinary_left = left_source.replace('from functools import lru_cache\n', '').replace('@lru_cache(None)\n', '')
+    ordinary_right = right_source.replace('from functools import lru_cache\n', '').replace('@lru_cache(None)\n', '')
+    ordinary_world = {}
+    exec(compile(ordinary_left, '<ordinary-left-unit>', 'exec'), ordinary_world)
+    exec(compile(ordinary_right, '<ordinary-right-unit>', 'exec'), ordinary_world)
+    exec(compile(caller_source, '<ordinary-caller-unit>', 'exec'), ordinary_world)
+    ordinary_directory = Path(temporary) / 'ordinary'
+    ordinary_directory.mkdir()
+    (ordinary_directory / 'left_unit.py').write_text(ordinary_left)
+    (ordinary_directory / 'right_unit.py').write_text(ordinary_right)
+    ordinary_imports = ('from left_unit import left, ordinary_left, nested_left, bool_left, int_left, empty_left\n'
+                        'from right_unit import right, nested_right, empty_right\n')
+    ordinary_marked = caller_source.replace('def across_keys(n: int) -> int:\n',
+        'def across_keys(n: int) -> int:\n    """\n    @formalsw: Returns\n    """\n')
+    ordinary_path = ordinary_directory / 'linked.py'
+    ordinary_path.write_text(ordinary_imports + ordinary_marked)
+    previous_directory = Path.cwd()
+    try:
+        os.chdir(ordinary_directory)
+        ordinary = api['source_module'](ordinary_path)
+    finally:
+        os.chdir(previous_directory)
+    assert len(ordinary.formalsw_link_dependencies) == 2
+    ordinary_checker = SupportChecker(ordinary)
+    for name in (*bodies, 'ordinary_left', 'scalar_unpack', 'empty_left'):
+        assert not ordinary_checker.check(name), (name, ordinary_checker.check(name))
+        function = next(node for node in ordinary.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        pooled = name not in ('scalar_unpack', 'empty_left', 'empty_singleton')
+        assert uses_heap_memoized(ordinary, function) == pooled, name
+        if name in bodies:
+            runtime = 'HeapMemoCalls' if pooled else 'HeapCalls'
+            marker = f'theorem valid : ({runtime}.scalarFunction Probe.module "{name}" []).Returns'
+            assert not ordinary_checker.requirement(name, marker), name
+            assert f'{runtime}.scalarFunction' in api['scalar_contract_type'](ordinary, function, 'Probe', 'Returns', [], 0)
+            if pooled:
+                assert ordinary_checker.requirement(name,
+                    f'theorem invalid : (HeapCalls.scalarFunction Probe.module "{name}" []).Returns'), name
+            for n in (-3, 0, 1, 7):
+                result = ordinary_world[name](n)
+                lines.append(f'example : ({runtime}.scalarFunction ordinarySource "{name}" [.int ({n})]).observe 5000 = .done (.ok (.int ({result}))) := by native_decide')
+                checks += 1
+    ordinary_encoded = api['AstJsonEmitter'](ordinary).emit()
+    assert json.loads(ordinary_encoded)['ast']['memoized_functions'] == []
+    assert '$formalsw.constant.tuple' in ordinary_encoded
+    # Insert the separate ordinary module before the examples that use it.
+    lines.insert(4, 'def ordinarySource : Module := pyast_from_json% (include_str "ordinary.json")')
+    # No compiler provenance means no pooling; a mismatched source snapshot
+    # cannot manufacture metadata for an unrelated raw AST.
+    ordinary_raw = ast.parse(ordinary_left)
+    assert SupportChecker(ordinary_raw).check('left')
+    identify_constant_pools(ordinary_raw, ordinary_directory / 'left_unit.py', ordinary_left + '\npass\n')
+    assert not any(hasattr(node, 'formalsw_constant_pool') for node in ast.walk(ordinary_raw))
+    assert SupportChecker(ordinary_raw).check('left')
+    # Empty tuples and scalar simultaneous unpacking keep their established
+    # runtimes even in a protected source unit that also contains pooled tuples.
+    lines.append('example : (HeapCalls.scalarFunction ordinarySource "empty_singleton" [.int 4]).observe 1000 = .done (.ok (.int 1)) := by native_decide')
+    lines.append('example : (Calls.function ordinarySource "scalar_unpack" [.int 4]).observe 1000 = .done (.ok (.int 9)) := by native_decide')
+    checks += 2
+    # Coverage and pool discovery share the established private-wrapper cases.
+    # Script assertions must not change a helper's function-call execution model.
+    context_source = """
+from itertools import permutations
+
+def private_pair(n: int) -> tuple[int, int]:
+    return -1, 0
+
+def private_unpack(n: int) -> int:
+    first, second = private_pair(n)
+    return n + first + second
+
+def private_index(n: int) -> int:
+    return n + private_pair(n)[0]
+
+def literal_membership(n: int) -> int:
+    return int(n in (3, 2))
+
+def literal_nonmembership(n: int) -> int:
+    return int(n not in (3, 2))
+
+def unpacked_display(n: int) -> int:
+    first, second = 3, 2
+    return n + first + second
+
+def add(first: int, second: int) -> int:
+    return first + second
+
+def starred_display(n: int) -> int:
+    return n + add(*(3, 2))
+
+def zipped_display(n: int) -> int:
+    total = n
+    for first, second in zip((3, 2), (2, 3)):
+        total += first + second
+    return total
+
+def reversed_display(n: int) -> int:
+    total = n
+    for value in reversed((3, 2)):
+        total += value
+    return total
+
+def permuted_display(n: int) -> int:
+    total = n
+    for first, second in permutations((3, 2)):
+        total += first + second
+    return total
+
+def bases_loop(n: int) -> int:
+    total = n
+    for value in (3, 2):
+        total += value
+    return total
+
+def mixed_pair(n: int) -> tuple[int, int]:
+    return 3, 2
+
+def mixed_unpack(n: int) -> int:
+    first, second = mixed_pair(n)
+    return n + first + second
+
+def mixed_observed(n: int) -> int:
+    first = mixed_pair(n)
+    return int(first is mixed_pair(n + 1))
+
+if __name__ == '__main__':
+    assert private_pair(0) == (-1, 0)
+"""
+    context_path = Path(temporary) / 'contexts.py'
+    context_path.write_text(context_source)
+    contexts = ast.parse(context_source)
+    identify_constant_pools(contexts, context_path)
+    context_world = {}
+    exec(compile(context_source, str(context_path), 'exec'), context_world)
+    private_entries = ('private_unpack', 'private_index', 'literal_membership', 'literal_nonmembership',
+                       'unpacked_display', 'starred_display', 'zipped_display', 'reversed_display', 'permuted_display')
+    pooled_entries = ('bases_loop', 'mixed_unpack', 'mixed_observed')
+    context_checker = SupportChecker(contexts)
+    for name in (*private_entries, *pooled_entries):
+        assert not context_checker.check(name), (name, context_checker.check(name))
+        function = next(node for node in contexts.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        pooled = name in pooled_entries
+        assert uses_heap_memoized(contexts, function) == pooled, name
+        if pooled:
+            assert context_checker.requirement(name,
+                f'theorem invalid : (HeapCalls.scalarFunction Probe.module "{name}" []).Returns'), name
+        runtime = 'HeapMemoCalls' if pooled else 'HeapCalls'
+        for n in (-3, 0, 1, 7):
+            result = context_world[name](n)
+            lines.append(f'example : ({runtime}.scalarFunction contextSource "{name}" [.int ({n})]).observe 5000 = .done (.ok (.int ({result}))) := by native_decide')
+            checks += 1
+    raw_contexts = ast.parse(context_source)
+    assert not SupportChecker(raw_contexts).check('private_unpack')
+    assert not SupportChecker(raw_contexts).check('private_index')
+    assert SupportChecker(raw_contexts).check('mixed_observed')
+    # A top-level alias is an observed use even when another caller unpacks.
+    aliased_source = context_source + '\nsaved = private_pair\ndef alias_entry(n: int) -> int:\n    return saved(n)[0]\n'
+    aliased = ast.parse(aliased_source)
+    identify_constant_pools(aliased, context_path, aliased_source)
+    private_function = next(node for node in aliased.body if isinstance(node, ast.FunctionDef) and node.name == 'private_pair')
+    assert uses_heap_memoized(aliased, private_function)
+    assert SupportChecker(aliased).check('alias_entry')
+    context_encoded = api['AstJsonEmitter'](contexts).emit()
+    lines.insert(4, 'def contextSource : Module := pyast_from_json% (include_str "contexts.json")')
     if '--frontend-only' in sys.argv:
         print(f'Constant pools: {checks} Python/runtime cases prepared; metadata, scope and rejection checks passed')
         raise SystemExit(0)
@@ -159,6 +326,8 @@ with TemporaryDirectory(prefix='pool-metadata-') as temporary:
         for name in bodies:
             assert not linked_checker.check(name), (name, linked_checker.check(name))
         (proof_directory / 'source.json').write_text(api['AstJsonEmitter'](linked).emit())
+        (proof_directory / 'ordinary.json').write_text(ordinary_encoded)
+        (proof_directory / 'contexts.json').write_text(context_encoded)
         proof = proof_directory / 'Checks.lean'
         proof.write_text('\n'.join(lines) + '\n')
         subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)

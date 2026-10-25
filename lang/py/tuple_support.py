@@ -94,6 +94,49 @@ def compared_local_tuple_displays(module, function):
     return hidden
 
 
+
+def _private_function_reference(node, parents):
+    """Only immediate unpacking or a literal element index hides the return wrapper."""
+    parent = parents.get(node)
+    consumer = parents.get(parent)
+    unpacked = (isinstance(consumer, ast.Assign) and consumer.value is parent
+                and len(consumer.targets) == 1 and flat_unpacking(consumer.targets[0]))
+    indexed = (isinstance(consumer, ast.Subscript) and consumer.value is parent
+               and isinstance(consumer.ctx, ast.Load)
+               and (isinstance(consumer.slice, ast.Constant) and type(consumer.slice.value) is int
+                    or isinstance(consumer.slice, ast.UnaryOp) and isinstance(consumer.slice.op, ast.USub)
+                    and isinstance(consumer.slice.operand, ast.Constant)
+                    and type(consumer.slice.operand.value) is int))
+    return isinstance(parent, ast.Call) and parent.func is node and (unpacked or indexed)
+
+
+def globally_private_return_tuple_displays(module):
+    """Keep shared helper ASTs fresh only if every relevant caller hides the wrapper.
+
+    Any stored, aliased, forwarded or identity-observing use requires the pool.
+    Script-only __main__ tests do not execute during modeled function calls.
+    """
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    roots = []
+    for statement in module.body:
+        test = statement.test if isinstance(statement, ast.If) else None
+        main_guard = (isinstance(test, ast.Compare) and len(test.ops) == 1
+                      and isinstance(test.ops[0], ast.Eq) and len(test.comparators) == 1
+                      and isinstance(test.left, ast.Name) and test.left.id == '__name__'
+                      and isinstance(test.comparators[0], ast.Constant)
+                      and test.comparators[0].value == '__main__')
+        roots.extend(statement.orelse if main_guard else [statement])
+    parts = [part for root in roots for part in ast.walk(root)]
+    parents = {child: parent for parent in parts for child in ast.iter_child_nodes(parent)}
+    uses = {}
+    for node in parts:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in functions:
+            uses.setdefault(node.id, []).append(_private_function_reference(node, parents))
+    return {node.value for name, private in uses.items() if private and all(private)
+            for node in ast.walk(functions[name])
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)}
+
+
 def unpacked_return_tuple_displays(module, entry):
     """
     Hide returned tuple wrappers only when every reachable use immediately
@@ -116,18 +159,7 @@ def unpacked_return_tuple_displays(module, entry):
             if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load) or node.id not in functions:
                 continue
             callee = functions[node.id]
-            parent = parents.get(node)
-            consumer = parents.get(parent)
-            unpacked = (isinstance(consumer, ast.Assign) and consumer.value is parent
-                        and len(consumer.targets) == 1 and flat_unpacking(consumer.targets[0]))
-            indexed = (isinstance(consumer, ast.Subscript) and consumer.value is parent
-                       and isinstance(consumer.ctx, ast.Load)
-                       and (isinstance(consumer.slice, ast.Constant) and type(consumer.slice.value) is int
-                            or isinstance(consumer.slice, ast.UnaryOp) and isinstance(consumer.slice.op, ast.USub)
-                            and isinstance(consumer.slice.operand, ast.Constant)
-                            and type(consumer.slice.operand.value) is int))
-            consumed = (isinstance(parent, ast.Call) and parent.func is node
-                        and (unpacked or indexed))
+            consumed = _private_function_reference(node, parents)
             calls.setdefault(callee, []).append(consumed)
             pending.append(callee)
     hidden = set()
