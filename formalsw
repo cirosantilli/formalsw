@@ -1491,6 +1491,19 @@ class AstJsonEmitter:
 
     def expr(self, expr: ast.expr) -> dict[str, object]:
         """Encode one Python expression."""
+        if isinstance(expr, ast.Call) and any(isinstance(arg, ast.Starred) for arg in expr.args):
+            # These internal names cannot be spelled as Python identifiers.
+            # A whole-call wrapper leaves every ordinary Call AST unchanged.
+            if expr.keywords:
+                raise UnsupportedSyntax("starred calls support positional arguments without keywords")
+            encoded_args = [
+                {"type": "Call", "func": {"type": "Name", "id": "$formalsw.star.argument"},
+                 "args": [self.expr(arg.value)]} if isinstance(arg, ast.Starred) else self.expr(arg)
+                for arg in expr.args]
+            return {"type": "ConsumeGenerator",
+                    "consumer": {"type": "Call", "func": {"type": "Name", "id": "$formalsw.star.call"}, "args": []},
+                    "elt": {"type": "Call", "func": self.expr(expr.func), "args": encoded_args},
+                    "generators": []}
         extremum = range_extremum(expr)
         if extremum is not None and not any(bindings(self.bindings_module, name)
                                            for name in (expr.func.id, "range")):

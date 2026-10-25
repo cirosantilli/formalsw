@@ -162,8 +162,28 @@ bad_signatures = ('helper(value, /)', 'helper(*value)', 'helper(value, *, extra=
                   'helper(value, **extras)', 'helper(value=[])', 'helper(value=1 + 1)')
 for signature in bad_signatures:
     assert issues(base.replace('helper(value)', signature)), signature
-for call in ('helper()', 'helper(n, n)', 'helper(value=n)', 'helper(*n)'):
+for call in ('helper()', 'helper(n, n)', 'helper(value=n)'):
     assert issues(base.replace('return helper(n)', f'return {call}')), call
+
+# Expanding a noniterable argument is supported execution that raises TypeError.
+star_source = base.replace('return helper(n)', 'return helper(*n)')
+star_program = ast.parse(star_source)
+assert not issues(star_source)
+star_encoded = api['AstJsonEmitter'](star_program).emit()
+assert '"type": "Unsupported"' not in star_encoded
+star_world = {}
+exec(star_source, star_world)
+lines.append('def starredProgram : Module := pyast_from_json% (include_str "starred.json")')
+for value in (-3, 0, 1, 4):
+    try:
+        star_world['f'](value)
+    except TypeError as error:
+        answer = f'.error ⟨"{type(error).__name__}", []⟩'
+    else:
+        raise AssertionError(f'expected TypeError expanding integer {value}')
+    lines.append(f'example : (HeapCalls.scalarFunction starredProgram "f" [.int ({value})]).observe 200 = '
+                 f'.done ({answer}) := by decide')
+    count += 1
 for body in ('return missing(value)', 'if False:\n        print(value)\n    return value',
              'int = value\n    return int(value)', 'helper = value\n    return helper(value)',
              'global counter\n    counter = value\n    return value'):
@@ -222,6 +242,7 @@ if not options.frontend_only:
     with project_temporary_directory(prefix='callee-annotation-check-') as temporary:
         directory = Path(temporary)
         (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+        (directory / 'starred.json').write_text(star_encoded)
         proof = directory / 'Checks.lean'
         proof.write_text('\n'.join(lines) + '\n')
         subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)

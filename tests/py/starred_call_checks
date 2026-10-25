@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Compare expanded positional calls with Python, including snapshots, aliases, errors and binding guards."""
+import argparse
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.support import SupportChecker
+from lang.py.linking import link_imports
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--frontend-only', action='store_true')
+options = parser.parse_args()
+
+source = '''
+def two(a: int, b: int) -> int:
+    return 10 * a + b
+
+def four(a: int, b: int, c: int, d: int) -> int:
+    return 1000 * a + 100 * b + 10 * c + d
+
+def optional(a: int = 11, b: int = 7) -> int:
+    return a + b
+
+def nothing() -> int:
+    return 3
+
+def join3(a: str, b: str, c: str) -> str:
+    return a + b + c
+
+def note(events: list[int], n: int) -> int:
+    events.append(n)
+    return n
+
+def pair(events: list[int], n: int) -> list[int]:
+    events.append(n + 100)
+    return [n, n + 1]
+
+def fail(events: list[int], n: int) -> int:
+    events.append(n + 200)
+    return n // 0
+
+def replace(events: list[int], n: int) -> int:
+    events.pop()
+    events.append(n + 300)
+    return n + 9
+
+def same(a: list[int], b: list[int]) -> bool:
+    return a is b
+'''
+bodies = {
+    'mixed': 'return four(note(events, n), *pair(events, n + 1), note(events, n + 3))',
+    'several': 'return four(*[n], *(n + 1, n + 2), n + 3)',
+    'tuple_only': 'return two(*(n, n + 1))',
+    'list_only': 'return two(*[n, n + 1])',
+    'default_one': 'return optional(*(n,))',
+    'default_empty': 'return optional(*())',
+    'no_arguments': 'return nothing(*[])',
+    'missing': 'return two(*[])',
+    'excess': 'return two(*pair(events, n), note(events, n + 3))',
+    'snapshot': 'return two(*events, replace(events, n))',
+    'operand_error': 'return two(*fail(events, n), note(events, n + 1))',
+    'late_error_before_arity': 'return two(*pair(events, n), fail(events, n + 2))',
+    'noniterable': 'return two(*note(events, n), note(events, n + 1))',
+    'none': 'return two(*None, note(events, n + 1))',
+    'boolean': 'return two(*True, note(events, n + 1))',
+    'text': 'return join3(*"abc")',
+    'unicode_text': 'return join3(*"λ🙂x")',
+    'text_excess': 'return two(*"abc")',
+    'empty_text': 'return optional(*"")',
+    'octets': "return two(*b'ab')",
+    'buffer': "return two(*bytearray(b'ab'))",
+    'alias': 'return same(*[events], events)',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(events: list[int], n: int):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    issues = checker.check(name)
+    assert not issues, (name, issues)
+    function = next(node for node in program.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    assert uses_heap_calls(program, function), name
+encoded = json.loads(api['AstJsonEmitter'](program).emit())
+assert '"type": "Unsupported"' not in json.dumps(encoded)
+assert '$formalsw.star.call' in json.dumps(encoded)
+assert '$formalsw.star.argument' in json.dumps(encoded)
+ordinary = ast.parse('def f(n: int):\n    return optional(n)\n')
+normal = json.loads(api['AstJsonEmitter'](ordinary).emit())['ast']['body'][0]['body'][0]['value']
+assert normal['type'] == 'Call' and normal['func']['id'] == 'optional'
+
+rejected = [
+    'def f(n: int):\n    return len(*[n])\n',
+    'class C:\n    pass\ndef f(n: int):\n    return C(*[])\n',
+    'def f(xs: list[int], n: int):\n    return xs.append(*[n])\n',
+    'def f(n: int):\n    return (optional if n else two)(*[n])\n',
+    'def f(n: int):\n    return two(*[n], b=n)\n',
+    'def f(two: int):\n    return two(*[])\n',
+    'def f(n: int):\n    alias = two\n    return alias(*[n, n])\n',
+    'def f(n: int):\n    return two(**{n: n})\n',
+    'def f(n: int):\n    return two(*(x for x in range(n)))\n',
+    'def broken(n: int):\n    if False:\n        print(n)\n    return n\ndef f(n: int):\n    return broken(*[n])\n',
+]
+for text in rejected:
+    probe = ast.parse(source + '\n' + text)
+    assert SupportChecker(probe).check('f'), text
+rebound = ast.parse('def target(a: int):\n    return a\ndef f(n: int):\n    return target(*[n])\ntarget = 1\n')
+assert SupportChecker(rebound).check('f')
+try:
+    ast.parse('$formalsw.star.call()')
+except SyntaxError:
+    pass
+else:
+    raise AssertionError('the private source encoding became forgeable')
+
+world = {}
+exec(source, world)
+
+
+def scalar(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is str:
+        return '.string ' + json.dumps(value, ensure_ascii=False)
+    raise AssertionError(type(value))
+
+
+def items(values):
+    return '[' + ', '.join('.scalar (' + scalar(value) + ')' for value in values) + ']'
+
+
+lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst',
+         'set_option maxRecDepth 8192',
+         'def program : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, n in itertools.product(bodies, ([], [4], [4, 5], [4, 5, 6]), (-5, 0, 1, 9, 10**20)):
+    events = initial.copy()
+    try:
+        result = world[name](events, n)
+        expected = '.ok (.scalar (' + scalar(result) + '))'
+    except (TypeError, ZeroDivisionError, IndexError) as error:
+        expected = '.error {typeName := "' + type(error).__name__ + '", args := []}'
+    call = f'HeapCalls.call program "{name}" [.ref 0, .scalar (.int ({n}))] [.list {items(initial)}]'
+    lines.append(f'example : (match ({call}).execution.observe 3000 with\n'
+                 f'  | .done (.ok c) => c.outcome == {expected} && c.heap[0]? == some (.list {items(events)})\n'
+                 '  | _ => false) = true := by native_decide')
+    count += 1
+
+# Real iterable protocols that have not been modeled remain Unsupported.
+lines.extend([
+    'example : HeapCalls.starItems (.ref 0) [.set [.int 1]] = none := by native_decide',
+    'example : HeapCalls.starItems (.ref 0) [.dict [(.int 1, .scalar (.int 2))]] = none := by native_decide',
+    'example : HeapCalls.starItems (.ref 0) [.instance "Probe" "CustomIterator" []] = none := by native_decide',
+    'example : HeapCalls.starItems (.ref 0) [.dataInstance "Probe" "CustomIterator" false [] []] = none := by native_decide',
+])
+
+with project_temporary_directory(prefix='starred-calls-') as temporary:
+    directory = Path(temporary)
+    # Source-linked aliases still resolve their original helper definitions.
+    reference = directory / 'helper.py'
+    reference.write_text('def target(a: int, b: int = 7) -> int:\n    return a + b\n')
+    Path(str(reference) + '.lean').write_text('-- proof file required for linked source discovery\n')
+    linked_path = directory / 'linked.py'
+    linked_path.write_text('from helper import target as target_alias\ndef f(n: int):\n    return target_alias(*[n])\n')
+    linked = ast.parse(linked_path.read_text())
+    linked.formalsw_source = linked_path.resolve()
+    link_imports(linked_path, linked, api['source_module'])
+    assert not SupportChecker(linked).check('f')
+    assert '$formalsw.star.call' in api['AstJsonEmitter'](linked).emit()
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    if not options.frontend_only:
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(('Prepared ' if options.frontend_only else 'Passed ') + str(count)
+      + ' starred-call Python comparisons; snapshots, effects, errors, aliases, defaults and binding guards passed')

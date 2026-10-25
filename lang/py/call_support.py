@@ -532,7 +532,8 @@ def uses_heap_calls(module, function):
                            and len(node.targets[0].elts) == len(node.value.elts)
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
-            if (isinstance(node, (ast.List, ast.Set, ast.ListComp, ast.SetComp, ast.Dict)) or reversed_list(node) is not None
+            if (isinstance(node, ast.Call) and any(isinstance(argument, ast.Starred) for argument in node.args)
+                    or isinstance(node, (ast.List, ast.Set, ast.ListComp, ast.SetComp, ast.Dict)) or reversed_list(node) is not None
                     or sequence_extremum(node) is not None or sequence_sort(node) is not None
                     or generator_extremum(node) is not None
                     or sequence_sum(node) is not None and not bindings(module, "sum")
@@ -697,6 +698,27 @@ def check_calls(module, function, reject, *, heap=False):
         def expr(node, scope=None):
             scope = locals_ if scope is None else scope
             recurse = lambda child: expr(child, scope)
+            if isinstance(node, ast.Call) and any(isinstance(argument, ast.Starred) for argument in node.args):
+                if not heap:
+                    reject(node, 'starred positional calls require heap execution')
+                if node.keywords:
+                    reject(node, 'starred calls support positional arguments without keywords')
+                target = functions.get(node.func.id) if isinstance(node.func, ast.Name) else None
+                if target is None:
+                    reject(node, 'starred calls require a statically resolved Python module function')
+                elif node.func.id in scope:
+                    reject(node, 'local bindings must not shadow module-level call targets')
+                for argument in node.args:
+                    operand = argument.value if isinstance(argument, ast.Starred) else argument
+                    if isinstance(argument, ast.Starred) and isinstance(operand, ast.Tuple):
+                        # The expanded outer tuple never escapes as an object.
+                        hidden_tuples.add(operand)
+                    recurse(operand)
+                if target is not None:
+                    # Declared arity is checked only after all expanded arguments
+                    # have evaluated. Callee body/default/binding checks remain.
+                    visit(target)
+                return
             materialized = materialized_range(node)
             if materialized is not None:
                 if not heap:

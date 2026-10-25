@@ -517,6 +517,8 @@ inductive Frame where
   | boolean (op : BoolOp) (rest : List Expr) (env : Env)
   | conditional (yes no : Expr) (env : Env)
   | arguments (operation : Operation) (done : List Value) (rest : List Expr) (env : Env)
+  /-- Starred operands are expanded before evaluating the following argument. -/
+  | starredArguments (operation : Operation) (done : List Value) (rest : List Expr) (env : Env) (starred : Bool)
   /-- Resolve the bound method before evaluating its argument. -/
   | appendReceiver (item : Expr) (env : Env)
   | addReceiver (item : Expr) (env : Env)
@@ -597,6 +599,46 @@ def argumentsState (operation : Operation) (env : Env) (done : List Value)
   match expressions with
   | [] => ⟨.operation operation done, stack, heap⟩
   | first :: rest => ⟨.expr first env, .arguments operation done rest env :: stack, heap⟩
+
+/-- These encodings are private to argument positions and cannot be spelled by Python source. -/
+def starArgument (expression : Expr) : Expr := .call (.name "$formalsw.star.argument") [expression]
+
+def starCall (name : String) (expressions : List Expr) : Expr :=
+  .consumeGenerator (.call (.name "$formalsw.star.call") []) (.call (.name name) expressions) []
+
+def starSource? : Expr → Option Expr
+  | .call (.name "$formalsw.star.argument") [source] => some source
+  | _ => none
+
+/-- Expansion copies builtin finite sequence elements, retaining their references.
+Other iterable protocols remain unsupported rather than being reported as noniterable. -/
+def starItems (value : Value) : Eval (List Value) := do
+  match value with
+  | .scalar (.string _) | .scalar (.bytes _) => Mutable.sequence value
+  | .scalar _ => Mutable.error "TypeError"
+  | .ref address =>
+      match (← get)[address]? with
+      | some (.list _) | some (.tuple _) | some (.bytearray _) => Mutable.sequence value
+      | _ => Mutable.unsupported
+
+theorem starItems_list (heap : Heap) (address : Nat) (items : List Value)
+    (found : heap[address]? = some (.list items)) :
+    starItems (.ref address) heap = some (.ok items, heap) := by
+  simp [starItems, Mutable.sequence, found]
+
+theorem starItems_tuple (heap : Heap) (address : Nat) (items : List Value)
+    (found : heap[address]? = some (.tuple items)) :
+    starItems (.ref address) heap = some (.ok items, heap) := by
+  simp [starItems, Mutable.sequence, found]
+
+/-- A snapshot is appended immediately; later argument effects cannot change the expanded vector. -/
+def expandedArgumentsState (operation : Operation) (env : Env) (done : List Value)
+    (expressions : List Expr) (stack : List Frame) (heap : Heap) : State :=
+  match expressions with
+  | [] => ⟨.operation operation done, stack, heap⟩
+  | first :: rest => match starSource? first with
+      | some source => ⟨.expr source env, .starredArguments operation done rest env true :: stack, heap⟩
+      | none => ⟨.expr first env, .starredArguments operation done rest env false :: stack, heap⟩
 
 /-- Evaluate all range arguments before converting their values to indices. -/
 def rangeBounds (values : List Value) : Except ExceptionObject (Int × Int × Int) := do
@@ -1614,6 +1656,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
   | .operation operation values => result (globals := globals) anchors heap (primitive operation values) stack
   | .expr expression env =>
       match expression with
+      | .consumeGenerator (.call (.name "$formalsw.star.call") []) (.call (.name name) expressions) [] =>
+          .next (expandedArgumentsState (.call name) env [] expressions stack heap)
       | .sortedSequence iterable parameter key reverse =>
           .next ⟨.expr iterable env, .sortedSource parameter key reverse env :: stack, heap⟩
       | .extremumSequence maximum iterable parameter key =>
@@ -1911,6 +1955,11 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           | .conditional yes no env => run (globals := globals) anchors heap (Mutable.truth value) fun truth heap =>
               .next ⟨.expr (if truth then yes else no) env, stack, heap⟩
           | .arguments operation done rest env => .next (argumentsState operation env (done ++ [value]) rest stack heap)
+          | .starredArguments operation done rest env starred =>
+              if starred then
+                run (globals := globals) anchors heap (starItems value) fun expanded heap =>
+                  .next (expandedArgumentsState operation env (done ++ expanded) rest stack heap)
+              else .next (expandedArgumentsState operation env (done ++ [value]) rest stack heap)
           | .addReceiver item env =>
               match value with
               | .ref address => match heap[address]? with
@@ -3487,3 +3536,57 @@ theorem Returns.supported {call : Call} (h : call.Returns) : call.Supported := b
   exact Execution.supported_of_finishes run
 
 end FormalSW.PyAst.Mutable.Call
+
+namespace FormalSW.PyAst.HeapCalls
+
+/-- Mixed arguments retain evaluation order and each starred operand's immediate snapshot. -/
+inductive StarArguments (module : Module) (env : Env) :
+    List Expr → Heap → List Value → Heap → (globals : Mutable.Globals := []) → Prop where
+  | nil {globals : Mutable.Globals} : StarArguments (globals := globals) module env [] heap [] heap
+  | cons {globals : Mutable.Globals} : starSource? expression = none →
+      Evaluates (globals := globals) module env expression heap value middle →
+      StarArguments (globals := globals) module env expressions middle values finalHeap →
+      StarArguments (globals := globals) module env (expression :: expressions) heap (value :: values) finalHeap
+  | star {globals : Mutable.Globals} :
+      Evaluates (globals := globals) module env expression heap value middle →
+      starItems value middle = some (.ok expanded, afterExpansion) →
+      StarArguments (globals := globals) module env expressions afterExpansion values finalHeap →
+      StarArguments (globals := globals) module env (starArgument expression :: expressions)
+        heap (expanded ++ values) finalHeap
+
+/-- Expansion completes before the ordinary operation checks its final arity. -/
+theorem StarArguments.reach
+    (h : StarArguments (globals := globals) module env expressions heap values finalHeap)
+    (operation : Operation) (done : List Value) (anchors : Nat) (stack : List Frame) :
+    Reaches (globals := globals) module anchors (expandedArgumentsState operation env done expressions stack heap)
+      ⟨.operation operation (done ++ values), stack, finalHeap⟩ := by
+  induction h generalizing done with
+  | nil => simpa only [expandedArgumentsState, List.append_nil] using Reaches.refl
+  | @cons expression heap value middle expressions values finalHeap globals ordinary head tail ih =>
+      simp only [expandedArgumentsState, ordinary]
+      change Reaches module anchors
+        ⟨.expr expression env, .starredArguments operation done expressions env false :: stack, heap⟩ _ globals
+      apply (head anchors _).trans
+      apply Reaches.next (following := expandedArgumentsState operation env (done ++ [value]) expressions stack middle)
+        (by simp [step])
+      simpa only [List.append_assoc, List.singleton_append] using ih (done ++ [value])
+  | @star expression heap value middle afterExpansion expanded expressions values finalHeap globals head expandedRun tail ih =>
+      simp only [expandedArgumentsState, starArgument, starSource?]
+      change Reaches module anchors
+        ⟨.expr expression env, .starredArguments operation done expressions env true :: stack, heap⟩ _ globals
+      apply (head anchors _).trans
+      apply Reaches.next (following := expandedArgumentsState operation env (done ++ expanded) expressions stack afterExpansion)
+        (by simp [step, run, expandedRun])
+      simpa only [List.append_assoc] using ih (done ++ expanded)
+
+/-- The actual source star-call wrapper invokes the declared target once with its fully expanded vector. -/
+theorem Evaluates.call_star
+    (arguments : StarArguments (globals := globals) module env expressions heap values middle)
+    (callee : ReturnsValue (globals := globals) module name values middle answer finalHeap) :
+    Evaluates (globals := globals) module env (starCall name expressions) heap answer finalHeap := by
+  intro anchors stack
+  apply Reaches.next (following := expandedArgumentsState (.call name) env [] expressions stack heap)
+    (by simp [starCall, step])
+  exact (arguments.reach (.call name) [] anchors stack).trans (callee anchors stack)
+
+end FormalSW.PyAst.HeapCalls
