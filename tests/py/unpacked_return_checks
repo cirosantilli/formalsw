@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Returned constant tuples are safe only when all reachable calls unpack them.
+Returned constant tuples stay private when all calls unpack or index them.
 """
 import ast
 from pathlib import Path
@@ -38,6 +38,12 @@ def check(body, accepted, extra=''):
 
 check('    a, b = pair(n)\n    c, d = pair(-1)\n    return a + b + c + d\n', True)
 check('    [a, b] = pair(n)\n    return a + b\n', True)
+check('    return pair(n)[0]\n', True)
+check('    return pair(n)[-1]\n', True)
+check('    return pair(n)[7]\n', True)
+check('    a, b = pair(n)\n    return a + b + pair(-1)[0]\n', True)
+check('    return pair(n)[0] + worker(n)\n', True,
+      '\ndef worker(n: int) -> int:\n    return pair(n)[1]\n')
 check('    a, b = pair(n)\n    return a + b\n', True,
       '\ndef unrelated(n: int):\n    return pair(n)\n')
 check('    a, b = pair(n)\n    c, d = worker(n)\n    return a + b + c + d\n', False,
@@ -50,12 +56,25 @@ check('    a, b = pair(n)\n    pair(n)\n    return a + b\n', False)
 check('    a, b = pair(n)\n    alias = pair\n    return a + b\n', False)
 check('    a, *b = pair(n)\n    return a\n', False)
 check('    other = a, b = pair(n)\n    return a + b\n', False)
+check('    return pair(n)[n]\n', False)
+check('    return pair(n)[:]\n', False)
+check('    return pair(n)[0] + pair(n)[n]\n', False)
+check('    pair(n)[0] = 3\n    return n\n', False)
 
 source = helper + '''
 def entry(n: int) -> int:
     a, b = pair(n)
     c, d = pair(-1)
     return a + b + c + d
+def first_index(n: int) -> int:
+    return pair(n)[0]
+def last_index(n: int) -> int:
+    return pair(n)[-1]
+def mixed(n: int) -> int:
+    a, b = pair(n)
+    return a + b + pair(-1)[0]
+def out_of_range(n: int) -> int:
+    return pair(n)[7]
 '''
 world = {}
 exec(source, world)
@@ -63,11 +82,16 @@ assert world['pair'](-1) is world['pair'](-2)
 api = runpy.run_path(str(ROOT / 'formalsw'))
 lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst',
          'def source : Module := pyast_from_json% (include_str "source.json")']
-for n in range(-3, 4):
-    result = world['entry'](n)
-    lines.append(f'example : (match (HeapCalls.call source "entry" [.scalar (.int ({n}))] []).execution.observe 200 with'
-                 f' | .done (.ok c) => decide (c.outcome = .ok (.scalar (.int ({result}))))'
-                 ' | _ => false) = true := by native_decide')
+for name in ('entry', 'first_index', 'last_index', 'mixed', 'out_of_range'):
+    for n in range(-3, 4):
+        try:
+            result = world[name](n)
+            expected = f'.ok (.scalar (.int ({result})))'
+        except IndexError:
+            expected = '.error ⟨"IndexError", []⟩'
+        lines.append(f'example : (match (HeapCalls.call source "{name}" [.scalar (.int ({n}))] []).execution.observe 200 with'
+                     f' | .done (.ok c) => decide (c.outcome = {expected})'
+                     ' | _ => false) = true := by native_decide')
 with project_temporary_directory(prefix='unpacked-returns-') as directory:
     directory = Path(directory)
     (directory / 'source.json').write_text(api['AstJsonEmitter'](ast.parse(source)).emit())
@@ -75,4 +99,4 @@ with project_temporary_directory(prefix='unpacked-returns-') as directory:
     proof.write_text('\n'.join(lines) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
 
-print('Returned-tuple escape checks and 7 Python comparisons passed')
+print('Returned-tuple escape checks and 35 Python comparisons passed')

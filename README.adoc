@@ -1623,7 +1623,7 @@ Integer `|`, `|=`, `^`, `^=`, `<<`, and `<<=` also support arbitrary signed valu
 
 `sum` can consume scalar sets through the arbitrary-order interpreter. Integer and Boolean members have an exact sum independent of the iteration order; the proof quantifies over every order. Start values and errors follow the ordinary sequence-sum rules. See link:tests/py/set_sum_checks[].
 
-Constant tuples returned by helpers are accepted when every reachable use immediately unpacks the result into local names. This prevents the tuple's pooled identity from escaping. A contract on the tuple-returning helper itself, or a caller that retains or forwards its result, still requires constant-pool support. link:tests/py/unpacked_return_checks[] checks these boundaries.
+Constant tuples returned by helpers are accepted when every reachable use immediately unpacks the result into local names or reads one element with a literal integer index. This prevents the tuple's pooled identity from escaping. Dynamic indices and slices remain unsupported in this case. A contract on the tuple-returning helper itself, or a caller that retains or forwards its result, still requires constant-pool support. link:tests/py/unpacked_return_checks[] checks these boundaries.
 
 `all` and `any` consume builtin sequences and fresh generator expressions lazily, stopping as soon as the result is known. Generator filters, nested loops, unpacking, shared-list mutations, and exception boundaries retain their Python behavior. Empty iterables return `True` for `all` and `False` for `any`. General iterator objects and set traversal remain unsupported for these consumers. See link:tests/py/truth_consumers.py[] for an arbitrary-input proof and link:tests/py/truth_checks[] for Python comparisons.
 

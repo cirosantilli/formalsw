@@ -97,9 +97,9 @@ def compared_local_tuple_displays(module, function):
 def unpacked_return_tuple_displays(module, entry):
     """
     Hide returned tuple wrappers only when every reachable use immediately
-    unpacks them. The entry function's own return remains observable. This is
-    deliberately conservative about forwarding, aliases, and discarded calls;
-    none of those qualify as an unpacking use.
+    unpacks them or reads one element with a literal integer index. The entry
+    function's own return remains observable. Forwarding, aliases, slices,
+    dynamic indices, and discarded calls do not qualify.
     """
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     reachable = set()
@@ -117,10 +117,17 @@ def unpacked_return_tuple_displays(module, entry):
                 continue
             callee = functions[node.id]
             parent = parents.get(node)
-            assignment = parents.get(parent)
+            consumer = parents.get(parent)
+            unpacked = (isinstance(consumer, ast.Assign) and consumer.value is parent
+                        and len(consumer.targets) == 1 and flat_unpacking(consumer.targets[0]))
+            indexed = (isinstance(consumer, ast.Subscript) and consumer.value is parent
+                       and isinstance(consumer.ctx, ast.Load)
+                       and (isinstance(consumer.slice, ast.Constant) and type(consumer.slice.value) is int
+                            or isinstance(consumer.slice, ast.UnaryOp) and isinstance(consumer.slice.op, ast.USub)
+                            and isinstance(consumer.slice.operand, ast.Constant)
+                            and type(consumer.slice.operand.value) is int))
             consumed = (isinstance(parent, ast.Call) and parent.func is node
-                        and isinstance(assignment, ast.Assign) and assignment.value is parent
-                        and len(assignment.targets) == 1 and flat_unpacking(assignment.targets[0]))
+                        and (unpacked or indexed))
             calls.setdefault(callee, []).append(consumed)
             pending.append(callee)
     hidden = set()
