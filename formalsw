@@ -1060,7 +1060,9 @@ def collect_requirements(
                                and all(annotation_kind(arg.annotation) is not None for arg in stmt.args.args)
                                and not support.check(stmt.name)
                                and (getattr(stmt, "formalsw_globals", ()) or not function_globals(module, stmt)))
-            if scalar_equiv or scalar_property and (conditions or uses_calls_model(module, stmt)):
+            # Typed short markers need a structured Lean property even when the
+            # small scalar backend suffices. Raw theorem syntax has its own path.
+            if scalar_equiv or scalar_property:
                 property_name, args, negations = parsed
                 theorem_name = proof_name_for_short_requirement(
                     proof_namespace, stmt.name, property_name, args, marker.text)

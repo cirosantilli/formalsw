@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""
+Check that short scalar contracts emit Lean properties for the selected backend.
+"""
+from pathlib import Path
+import runpy
+import sys
+from tempfile import TemporaryDirectory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_calls_model, uses_heap_calls
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+cases = [
+    ('n: int', 'int', 'return n'),
+    ('value: bool', 'bool', 'return value'),
+    ('text: str', 'str', 'return text'),
+    ('', 'int', 'return 1'),
+    ('n: int', 'int', 'p = 1\nwhile p <= n:\n    p *= 10\nreturn p'),
+]
+with TemporaryDirectory(prefix='scalar-contract-checks-') as directory:
+    for index, (arguments, returns, body) in enumerate(cases):
+        for marker_index, marker in enumerate(('Returns', 'Halts', 'Not Returns', 'Not Halts')):
+            source = Path(directory) / f'source{index}_{marker_index}.py'
+            text = f'def f({arguments}) -> {returns}:\n    """\n    @formalsw: {marker}\n    """\n'
+            text += ''.join('    ' + line + '\n' for line in body.splitlines())
+            source.write_text(text)
+            module = api['source_module'](source)
+            function = module.body[0]
+            assert not uses_calls_model(module, function)
+            assert not uses_heap_calls(module, function)
+            requirements = api['collect_requirements'](source, module, 'Probe', 'ProbeAst')
+            assert len(requirements) == 1
+            requirement = requirements[0]
+            assert not requirement.unsupported
+            assert 'FormalSW.PyAst.scalarFunction ProbeAst.module "f"' in requirement.property_type
+            assert '.' + marker.split()[-1] in requirement.property_type
+            assert 'this_function' not in requirement.property_type
+            assert 'Returns(' not in requirement.property_type
+            assert 'Halts(' not in requirement.property_type
+            assert requirement.property_type.startswith('Not (') == marker.startswith('Not ')
+print(f'{len(cases) * 4} scalar contract backend/emission checks passed')
