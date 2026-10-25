@@ -95,6 +95,39 @@ theorem Evaluates.truth_generator_sequence
   exact .next (by simp only [step, List.nil_append, entered, protectGenerator_next])
     ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))
 
+/-- A lazy existential range scan preserves captured locals through an explicit invariant. -/
+theorem any_range_loop (invariant : Env → Prop) (predicate : Nat → Bool)
+    (preserved : ∀ inner (n : Nat), invariant inner → invariant (setLocal inner name (.scalar (.int n))))
+    (evaluated : ∀ inner (n : Nat), invariant inner → inner name = some (.scalar (.int n)) →
+      Evaluates (globals := globals) module inner element heap (.scalar (.bool (predicate n))) heap)
+    (first count stop : Nat) (length : first+count=stop) (valid : invariant env) :
+    BlockReturns (globals := globals) module env
+      [.rangeStepLoop name first stop 1 (truthBody false element) [],
+        .return (.constant (.bool false))]
+      heap (.scalar (.bool ((List.range' first count).any predicate))) heap := by
+  induction count generalizing first env with
+  | zero =>
+      apply BlockReturns.range_done (by simp [Calls.rangeContinues]; omega)
+      exact BlockReturns.return_value Evaluates.constant
+  | succ count ih =>
+      let bound := setLocal env name (.scalar (.int first))
+      have validBound : invariant bound := preserved env first valid
+      have tested := evaluated bound first validBound (by simp [bound, setLocal])
+      rw [List.range'_succ, List.any_cons]
+      apply BlockReturns.range_step (by simp [Calls.rangeContinues]; omega)
+      cases accepted : predicate first with
+      | true =>
+          simp only [Bool.true_or]
+          apply BlockReturns.branch (flag := true) (by simpa only [accepted] using tested) rfl
+          exact BlockReturns.return_value Evaluates.constant
+      | false =>
+          simp only [Bool.false_or]
+          apply BlockReturns.branch (flag := false) (by simpa only [accepted] using tested) rfl
+          have rest := ih (first+1) (by omega) validBound
+          simpa only [truthBody, Calls.loopContinuation, Calls.loopControl, Calls.loopControlStmt,
+            Bool.false_or, Bool.false_eq_true, if_false, List.nil_append,
+            Int.natCast_add, Int.natCast_one] using rest
+
 /-- A pure boolean predicate stops at its first false element. -/
 theorem all_map_loop {α : Type} {values : List α} {encode : α → Value} {predicate : α → Bool}
     (remaining : List α)
