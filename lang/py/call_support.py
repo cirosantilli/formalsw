@@ -583,9 +583,12 @@ def hidden_tuple_displays(module, function, returned=()):
 
 def observable_pool_tuples(module, function):
     """Preserve all existing private-wrapper paths before selecting compiler pools."""
+    candidates = {node for statement in function.body for node in ast.walk(statement)
+                  if isinstance(node, ast.Tuple) and hasattr(node, 'formalsw_constant_pool')}
+    if not candidates:
+        return set()
     hidden = hidden_tuple_displays(module, function, globally_private_return_tuple_displays(module))
-    return {node for statement in function.body for node in ast.walk(statement)
-            if isinstance(node, ast.Tuple) and hasattr(node, 'formalsw_constant_pool') and node not in hidden}
+    return candidates - hidden
 
 
 def heap_pool_functions(module):

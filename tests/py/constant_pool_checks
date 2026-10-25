@@ -18,6 +18,7 @@ if not (ROOT / 'tests/py/test_support.py').is_file():
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'tests/py'))
 from test_support import project_temporary_directory
+from lang.py import call_support
 from lang.py.call_support import uses_heap_memoized
 from lang.py.constant_pools import identify_constant_pools
 from lang.py.support import SupportChecker
@@ -195,7 +196,17 @@ with TemporaryDirectory(prefix='pool-metadata-') as temporary:
     assert SupportChecker(ordinary_raw).check('left')
     identify_constant_pools(ordinary_raw, ordinary_directory / 'left_unit.py', ordinary_left + '\npass\n')
     assert not any(hasattr(node, 'formalsw_constant_pool') for node in ast.walk(ordinary_raw))
-    assert SupportChecker(ordinary_raw).check('left')
+    # Raw ASTs have no compiler tuple candidates. Model discovery must avoid
+    # repeatedly analyzing every unrelated function's private return wrappers.
+    original_private_analysis = call_support.globally_private_return_tuple_displays
+    def unnecessary_private_analysis(module):
+        raise AssertionError('private-wrapper analysis without protected candidates')
+    call_support.globally_private_return_tuple_displays = unnecessary_private_analysis
+    try:
+        assert not call_support.heap_pool_functions(ordinary_raw)
+        assert SupportChecker(ordinary_raw).check('left')
+    finally:
+        call_support.globally_private_return_tuple_displays = original_private_analysis
     # Empty tuples and scalar simultaneous unpacking keep their established
     # runtimes even in a protected source unit that also contains pooled tuples.
     lines.append('example : (HeapCalls.scalarFunction ordinarySource "empty_singleton" [.int 4]).observe 1000 = .done (.ok (.int 1)) := by native_decide')
