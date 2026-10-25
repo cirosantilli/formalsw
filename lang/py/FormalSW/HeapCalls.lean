@@ -202,6 +202,9 @@ def membership (needle container : Value) (negated : Bool) : Eval Value := do
   let found ← match container with
     | .ref address => match (← get)[address]? with
         | some (.list items) | some (.tuple items) => sequenceContains needle items
+        | some (.set items) => match needle with
+            | .scalar value => pure (ScalarSet.contains items value)
+            | .ref _ => Mutable.unsupported
         | _ => Mutable.unsupported
     | .scalar (.int _) | .scalar (.bool _) | .scalar .none => Mutable.error "TypeError"
     | _ => Mutable.unsupported

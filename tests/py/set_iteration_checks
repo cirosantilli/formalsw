@@ -39,6 +39,7 @@ bodies = {
     'count_else': 'out = 0\nfor value in values:\n    out += 1\nelse:\n    out += 100\nreturn out',
     'nested': 'out = 0\nfor a in values:\n    for b in values:\n        out += a + b\nreturn out',
     'pair_sums': 'out = set()\nfor a in values:\n    for b in values:\n        out.add(a + b)\nreturn out',
+    'pair_sum_total': 'out = set()\nfor a in values:\n    for b in values:\n        out.add(a + b)\nreturn sum(n for n in range(1, 20) if n not in out)',
     'duplicate': 'for value in values:\n    values.add(value)\nreturn len(values)',
     'grow': 'for value in values:\n    values.add(100)\nreturn len(values)',
     'continue_grow': 'for value in values:\n    values.add(100)\n    continue\nreturn len(values)',

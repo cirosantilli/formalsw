@@ -53,6 +53,11 @@ def difference(items: set[int]) -> set[int]:
 bodies = {
     'add': 'items.add(n)\nreturn alias',
     'duplicate': 'items.add(n)\nitems.add(n)\nreturn len(items)',
+    'contains': 'return n in items',
+    'not_contains': 'return n not in items',
+    'membership_mutation': 'return touch(alias, events, n) in items',
+    'membership_failure': 'return fail(events, n) in items',
+    'mixed_membership': 'out = set()\nout.add(True)\nout.add(None)\nout.add("λ")\nout.add(b"abc")\nreturn [1 in out, 0 in out, False in out, True in out, None in out, "λ" in out, b"abc" in out, "abc" in out, n not in out]',
     'result': 'return items.add(n)',
     'argument_mutation': 'items.add(touch(alias, events, n))\nreturn items',
     'argument_failure': 'items.add(fail(events, n))\nreturn items',
@@ -116,6 +121,7 @@ for name, initial, n, shared in itertools.product(bodies, ([], [1, -2]), (-2, 0,
 # Unmodeled set iteration and arithmetic must not manufacture Python outcomes.
 for name in ('iterate', 'difference'):
     lines.append(f'example : (HeapCalls.call source "{name}" [.ref 0] [.set [.int 1]]).execution.observe 100 = .unsupported := by decide')
+lines.append('example : HeapCalls.membership (.ref 1) (.ref 0) false [.set [.int 1], .list []] = none := by decide')
 
 # Binding validation must not silently substitute the builtin for user code.
 plain = 'def f(n: int) -> set[int]:\n    out = set()\n    out.add(n)\n    return out\n'
