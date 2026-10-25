@@ -1265,6 +1265,15 @@ theorem getSlice_list_suffix (heap : Heap) (address : Nat) (items : List Value) 
   simp [getSlice, found, sliceBounds, sliceBound, integer, Py.Builtin.Sequence.slice_suffix,
     sequenceResult, allocate, Except.map]
 
+/-- An interval slice allocates a fresh list while preserving the input and its element references. -/
+theorem getSlice_list_interval (heap : Heap) (address : Nat) (items : List Value) (start stop : Nat)
+    (ordered : start ≤ stop) (bound : stop ≤ items.length)
+    (found : heap[address]? = some (.list items)) :
+    getSlice (.ref address) (.scalar (.int start)) (.scalar (.int stop)) (.scalar .none) heap =
+      some (.ok (.ref heap.length), heap ++ [.list ((items.drop start).take (stop - start))]) := by
+  simp [getSlice, found, sliceBounds, sliceBound, integer,
+    Py.Builtin.Sequence.slice_interval items start stop ordered bound, sequenceResult, allocate, Except.map]
+
 /-- A whole-list slice allocates a new list and retains each element's identity. -/
 theorem getSlice_list_copy (heap : Heap) (address : Nat) (items : List Value)
     (found : heap[address]? = some (.list items)) :

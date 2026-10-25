@@ -62,6 +62,19 @@ theorem slice_suffix (values : List α) (start : Nat) :
   congr 1
   simpa [List.length_drop, List.getElem?_drop, Function.comp_def] using get_range (values.drop start)
 
+/-- An interval within the sequence copies exactly its selected contiguous values. -/
+theorem slice_interval (values : List α) (start stop : Nat) (ordered : start ≤ stop)
+    (bound : stop ≤ values.length) :
+    slice values { start := some start, stop := some stop } =
+      .ok ((values.drop start).take (stop - start)) := by
+  unfold slice
+  rw [Slice.indexList_interval]
+  simp only [Nat.min_eq_left (Nat.le_trans ordered bound), Nat.min_eq_left bound]
+  change Except.ok ((List.range' start (stop - start)).filterMap (fun index => values[index]?)) = _
+  rw [List.range'_eq_map_range, List.filterMap_map]
+  congr 1
+  simpa only [List.getElem?_drop, Function.comp_def] using get_range_prefix (values.drop start) (stop - start)
+
 /-- A full unit-stride slice selects every value in its original order. -/
 theorem slice_full (values : List α) : slice values {} = .ok values := by
   unfold slice

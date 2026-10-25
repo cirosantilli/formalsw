@@ -211,6 +211,22 @@ theorem indexList_prefix (length : Nat) (stop : Int) :
     indexListFuel_positive length 0 (prefixLength length stop) 1 (by decide)
       (by simpa using prefixLength_le length stop)
 
+/-- Nonnegative interval bounds select contiguous indices after clipping to the sequence. -/
+theorem indexList_interval (length start stop : Nat) :
+    indexList { start := some start, stop := some stop } length =
+      .ok (List.range' (min start length) (min stop length - min start length)) := by
+  have startNonnegative : ¬ (start : Int) < 0 := by omega
+  have stopNonnegative : ¬ (stop : Int) < 0 := by omega
+  have startClamped : max (0 : Int) (min (start : Int) length) = ((min start length : Nat) : Int) := by omega
+  have stopClamped : max (0 : Int) (min (stop : Int) length) = ((min stop length : Nat) : Int) := by omega
+  simp only [indexList, indices, Option.getD_none, show (1 : Int) ≠ 0 by decide,
+    show (1 : Int) > 0 by decide, ↓reduceIte, normalizePositiveBound, startNonnegative,
+    stopNonnegative, clamp, startClamped, stopClamped]
+  change Except.ok (indexListFuel length ((min start length : Nat) : Int)
+    ((min stop length : Nat) : Int) 1) = _
+  congr 1
+  simpa using indexListFuel_positive length (min start length) (min stop length) 1 (by decide) (by omega)
+
 /-- Omitting the stride in a suffix selects every remaining position. -/
 theorem indexList_suffix (length start : Nat) :
     indexList { start := some start } length = .ok (List.range' start (length - start)) := by
