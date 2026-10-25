@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""
+Compare tuple slicing values, wrapper identity, aliases, and errors with Python.
+"""
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+source_text = '''
+def sliced(n: int, start: int, stop: int, stride: int) -> str:
+    values = (n, n + 1, n + 2, n + 3)
+    result = values[start:stop:stride]
+    text = str(result is tuple(result)) + ":" + str(result is values) + ":"
+    for value in result:
+        text += str(value) + ","
+    return text
+
+
+def repeated(n: int) -> str:
+    values = (n, n, n)
+    return str(values[::-1] is values) + str(values[:] is values)
+
+
+def empty(n: int) -> str:
+    values = tuple()
+    return str(values[:] is values) + str(values[::-1] is values) + str(values[1:] is values)
+
+
+def singleton(n: int) -> str:
+    values = (n,)
+    return str(values[:] is values) + str(values[::-1] is values) + str(values[::2] is values)
+
+
+def shared(n: int) -> str:
+    item = [n]
+    values = (item, item, [n + 1])
+    prefix = values[:2]
+    prefix[0].append(n + 2)
+    return str(values[0][1]) + str(prefix[0] is values[1]) + str(prefix is values)
+
+
+def mark(trace: list[int], value: int) -> int:
+    trace.append(value)
+    return value
+
+
+def effects(n: int) -> str:
+    values = (n, n + 1, n + 2, n + 3)
+    trace = []
+    result = values[mark(trace, 0):mark(trace, 3):mark(trace, 2)]
+    text = ""
+    for value in trace:
+        text += str(value)
+    for value in result:
+        text += ":" + str(value)
+    return text
+'''
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value)
+
+
+with project_temporary_directory(prefix='tuple-slices-') as temporary:
+    directory = Path(temporary)
+    source = directory / 'program.py'
+    source.write_text(source_text)
+    program = api['source_module'](source)
+    scope = runpy.run_path(str(source))
+    bounds = (None, -9, -1, 0, 1, 4, 9)
+    steps = (None, -3, -1, 0, 1, 2, 9)
+    cases = [('sliced', [7, start, stop, stride])
+             for start, stop, stride in itertools.product(bounds, bounds, steps)]
+    cases += [('sliced', [7, start, stop, stride]) for start, stop, stride in (
+        (False, True, True), (None, None, False), ('x', None, 1), (None, 'x', 1),
+        (None, None, 'x'), ('x', None, 0))]
+    cases += [(name, [7]) for name in ('repeated', 'empty', 'singleton', 'shared', 'effects')]
+    for name in {name for name, _ in cases}:
+        issues = SupportChecker(program).check(name)
+        assert not issues, (name, issues)
+    (directory / 'program.json').write_text(api['AstJsonEmitter'](program).emit())
+    lines = ['import FormalSW', 'open FormalSW.PyAst',
+             'def program : Module := pyast_from_json% (include_str "program.json")']
+    expected = []
+    for index, (name, arguments) in enumerate(cases):
+        try:
+            outcome = 'ok:' + scope[name](*arguments)
+        except Exception as error:
+            outcome = 'error:' + type(error).__name__
+        expected.append(f'case{index}:' + outcome)
+        values = ', '.join(constant(value) for value in arguments)
+        lines.append(f'''
+#eval IO.println ("case{index}:" ++
+  match (HeapCalls.scalarFunction program "{name}" [{values}]).observe 20000 with
+  | .done (.ok (.string text)) => "ok:" ++ text
+  | .done (.error error) => "error:" ++ error.typeName
+  | _ => "unfinished or unexpected result")''')
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    result = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)],
+                            cwd=REPO, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = [line for line in result.stdout.splitlines() if line.startswith('case')]
+    mismatches = [(actual, wanted) for actual, wanted in itertools.zip_longest(observed, expected)
+                  if actual != wanted]
+    assert not mismatches, mismatches[:5]
+
+print(f'Tuple slicing: {len(cases)} Python execution comparisons passed')

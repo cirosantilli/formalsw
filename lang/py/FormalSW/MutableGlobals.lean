@@ -1241,7 +1241,11 @@ def getSlice (value lower upper stride : Value) : Eval Value := do
       | some (.list items) =>
           let bounds ← sliceBounds lower upper stride
           allocate (← sequenceResult (Py.Builtin.Sequence.slice items bounds))
-      | some (.tuple _) => unsupported
+      | some (.tuple items) =>
+          let bounds ← sliceBounds lower upper stride
+          let normalized ← sequenceResult (Py.Builtin.Slice.indices bounds items.length)
+          if normalized = (0, (items.length : Int), 1) then return .ref address
+          else allocateTuple (← sequenceResult (Py.Builtin.Sequence.slice items bounds))
       | some (.bytearray bytes) =>
           let bounds ← sliceBounds lower upper stride
           allocateBuffer (← sequenceResult (Py.Builtin.Sequence.slice bytes bounds))
@@ -1281,6 +1285,51 @@ theorem getSlice_list_copy (heap : Heap) (address : Nat) (items : List Value)
       some (.ok (.ref heap.length), heap ++ [.list items]) := by
   simp [getSlice, found, sliceBounds, sliceBound, Py.Builtin.Sequence.slice_full,
     sequenceResult, allocate, Except.map]
+
+/-- A proper tuple prefix preserves its element references and its immutable type. -/
+theorem getSlice_tuple_prefix (heap : Heap) (address : Nat) (items : List Value) (stop : Nat)
+    (proper : stop < items.length) (found : heap[address]? = some (.tuple items)) :
+    getSlice (.ref address) (.scalar .none) (.scalar (.int stop)) (.scalar .none) heap =
+      allocateTuple (items.take stop) heap := by
+  have normalized : Py.Builtin.Slice.indices { stop := some stop } items.length =
+      .ok (0, (stop : Int), 1) := by
+    change Except.ok ((0 : Int), max (0 : Int)
+      (min (if (stop : Int) < 0 then (stop : Int) + items.length else (stop : Int))
+        (items.length : Int)), (1 : Int)) = _
+    simp [show ¬ (stop : Int) < 0 by omega,
+      Int.min_eq_left (by omega : (stop : Int) ≤ items.length),
+      Int.max_eq_right (by omega : (0 : Int) ≤ stop)]
+  simp [getSlice, found, sliceBounds, sliceBound, integer, normalized,
+    show (stop : Int) ≠ items.length by omega,
+    Py.Builtin.Sequence.slice_prefix, Py.Builtin.Slice.prefixLength_nonnegative,
+    Nat.min_eq_left (Nat.le_of_lt proper), sequenceResult]
+
+/-- A nonzero tuple suffix allocates only its wrapper; selected elements stay shared. -/
+theorem getSlice_tuple_suffix (heap : Heap) (address : Nat) (items : List Value) (start : Nat)
+    (positive : 0 < start) (within : start ≤ items.length)
+    (found : heap[address]? = some (.tuple items)) :
+    getSlice (.ref address) (.scalar (.int start)) (.scalar .none) (.scalar .none) heap =
+      allocateTuple (items.drop start) heap := by
+  have normalized : Py.Builtin.Slice.indices { start := some start } items.length =
+      .ok ((start : Int), (items.length : Int), 1) := by
+    change Except.ok (max (0 : Int)
+      (min (if (start : Int) < 0 then (start : Int) + items.length else (start : Int))
+        (items.length : Int)), (items.length : Int), (1 : Int)) = _
+    simp [show ¬ (start : Int) < 0 by omega,
+      Int.min_eq_left (by omega : (start : Int) ≤ items.length),
+      Int.max_eq_right (by omega : (0 : Int) ≤ start)]
+  simp [getSlice, found, sliceBounds, sliceBound, integer, normalized,
+    show start ≠ 0 by omega,
+    Py.Builtin.Sequence.slice_suffix, sequenceResult]
+
+/-- A full unit-stride tuple slice preserves the original wrapper as well as its elements. -/
+theorem getSlice_tuple_full (heap : Heap) (address : Nat) (items : List Value)
+    (found : heap[address]? = some (.tuple items)) :
+    getSlice (.ref address) (.scalar .none) (.scalar .none) (.scalar .none) heap =
+      some (.ok (.ref address), heap) := by
+  have normalized : Py.Builtin.Slice.indices {} items.length =
+      .ok (0, (items.length : Int), 1) := rfl
+  simp [getSlice, found, sliceBounds, sliceBound, normalized, sequenceResult]
 
 def setSlice (value lower upper stride replacement : Value) : Eval Value := do
   match value with
