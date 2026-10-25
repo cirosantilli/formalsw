@@ -52,10 +52,32 @@ def pow (base exponent : IntValue) : Result IntValue :=
 
 private def rawMod (left right : Int) : Int := left - right * Int.fdiv left right
 
-private def powModNat (base : Int) : Nat → Int → Int
+private def powModNatLinear (base : Int) : Nat → Int → Int
   | 0, modulus => rawMod 1 modulus
   | exponent + 1, modulus =>
-      rawMod (base * powModNat base exponent modulus) modulus
+      rawMod (base * powModNatLinear base exponent modulus) modulus
+
+private def powModBinaryAux (base : Int) (modulus : Nat) : Nat → Nat → Int
+  | 0, _ => 1 % (modulus : Int)
+  | fuel + 1, exponent =>
+      if exponent = 0 then
+        1 % (modulus : Int)
+      else
+        let half := powModBinaryAux base modulus fuel (exponent / 2)
+        if exponent % 2 = 0 then
+          (half * half) % (modulus : Int)
+        else
+          (half * half * base) % (modulus : Int)
+
+/-- Binary modular exponentiation with structurally recursive fuel and logarithmically many calls. -/
+def powModBinary (base : Int) (exponent modulus : Nat) : Int :=
+  powModBinaryAux base modulus exponent exponent
+
+private def powModNat (base : Int) (exponent : Nat) (modulus : Int) : Int :=
+  if 0 ≤ modulus then
+    powModBinary base exponent modulus.toNat
+  else
+    powModNatLinear base exponent modulus
 
 private def inverseSearch : Nat → Nat → Int → Int → Option Int
   | 0, _, _, _ => none
@@ -86,13 +108,74 @@ private theorem rawMod_nonnegative (value : Int) (modulus : Nat) :
     rawMod value modulus=value%modulus := by
   simp only [rawMod, Int.fdiv_eq_ediv_of_nonneg _ (Int.natCast_nonneg modulus), Int.emod_def]
 
-private theorem powModNat_nonnegative (base : Int) (exponent modulus : Nat) :
-    powModNat base exponent modulus=base^exponent%modulus := by
+private theorem powModBinaryAux_correct (base : Int) (modulus fuel exponent : Nat)
+    (bound : exponent ≤ fuel) :
+    powModBinaryAux base modulus fuel exponent = base ^ exponent % (modulus : Int) := by
+  induction fuel generalizing exponent with
+  | zero =>
+      have zero : exponent = 0 := by omega
+      subst exponent
+      simp [powModBinaryAux]
+  | succ fuel ih =>
+      by_cases zero : exponent = 0
+      · subst exponent
+        simp [powModBinaryAux]
+      · rw [powModBinaryAux, if_neg zero]
+        have halfBound : exponent / 2 ≤ fuel := by
+          have smaller := Nat.div_lt_self (Nat.pos_of_ne_zero zero) (by decide : 1 < 2)
+          omega
+        rw [ih (exponent / 2) halfBound]
+        have remainder := Nat.mod_lt exponent (by decide : 0 < 2)
+        have division := Nat.mod_add_div exponent 2
+        by_cases even : exponent % 2 = 0
+        · rw [if_pos even]
+          have decomposition : exponent = exponent / 2 + exponent / 2 := by omega
+          have power : base ^ exponent = base ^ (exponent / 2) * base ^ (exponent / 2) := by
+            calc
+              base ^ exponent = base ^ (exponent / 2 + exponent / 2) := congrArg (base ^ ·) decomposition
+              _ = base ^ (exponent / 2) * base ^ (exponent / 2) := Int.pow_add _ _ _
+          rw [power]
+          simp only [Int.mul_emod, Int.emod_emod]
+        · rw [if_neg even]
+          have decomposition : exponent = exponent / 2 + exponent / 2 + 1 := by omega
+          have power : base ^ exponent = base ^ (exponent / 2) * base ^ (exponent / 2) * base := by
+            calc
+              base ^ exponent = base ^ (exponent / 2 + exponent / 2 + 1) := congrArg (base ^ ·) decomposition
+              _ = base ^ (exponent / 2) * base ^ (exponent / 2) * base := by
+                rw [Int.pow_succ, Int.pow_add]
+          rw [power]
+          simp only [Int.mul_emod, Int.emod_emod]
+
+/-- The binary helper computes the exact remainder for every integer base and natural exponent/modulus. -/
+theorem powModBinary_correct (base : Int) (exponent modulus : Nat) :
+    powModBinary base exponent modulus = base ^ exponent % (modulus : Int) :=
+  powModBinaryAux_correct base modulus exponent exponent (Nat.le_refl exponent)
+
+private theorem powModNatLinear_nonnegative (base : Int) (exponent modulus : Nat) :
+    powModNatLinear base exponent modulus = base ^ exponent % (modulus : Int) := by
   induction exponent with
-  | zero => simp [powModNat, rawMod_nonnegative]
+  | zero => simp [powModNatLinear, rawMod_nonnegative]
   | succ exponent ih =>
-      rw [powModNat, rawMod_nonnegative, ih, Int.pow_succ']
+      rw [powModNatLinear, rawMod_nonnegative, ih, Int.pow_succ']
       rw [Int.mul_emod, Int.emod_emod, ← Int.mul_emod]
+
+private theorem powModNat_nonnegative (base : Int) (exponent modulus : Nat) :
+    powModNat base exponent modulus = base ^ exponent % (modulus : Int) := by
+  simpa only [powModNat, Int.natCast_nonneg, if_pos, Int.toNat_natCast]
+    using powModBinary_correct base exponent modulus
+
+/-- The optimized helper preserves the former recursion for every signed modulus. -/
+private theorem powModNat_eq_linear (base : Int) (exponent : Nat) (modulus : Int) :
+    powModNat base exponent modulus = powModNatLinear base exponent modulus := by
+  by_cases nonnegative : 0 ≤ modulus
+  · have cast : (modulus.toNat : Int) = modulus := Int.toNat_of_nonneg nonnegative
+    calc
+      powModNat base exponent modulus = base ^ exponent % modulus := by
+        simpa only [powModNat, if_pos nonnegative, cast]
+          using powModBinary_correct base exponent modulus.toNat
+      _ = powModNatLinear base exponent modulus := by
+        simpa only [cast] using (powModNatLinear_nonnegative base exponent modulus.toNat).symm
+  · simp only [powModNat, if_neg nonnegative]
 
 /-- On a positive modulus, nonnegative powers compute the usual exact integer remainder. -/
 theorem powMod_nonnegative (base : Int) (exponent modulus : Nat) (positive : 0<modulus) :
@@ -290,7 +373,10 @@ example : bitLength 255 = 8 := rfl
 example : bitCount 13 = 3 := rfl
 example : toBytes 1024 2 = .ok [4, 0] := rfl
 example : fromBytes [255] .big true = -1 := rfl
-example : powMod 3 (-1) 11 = .ok 4 := rfl
+example : powMod 3 (-1) 11 = .ok 4 := by
+  change (Except.ok (powModBinary 4 1 11) : Result IntValue) = .ok 4
+  rw [powModBinary_correct]
+  rfl
 example : powMod 2 (-1) 4 = .error (.valueError "base is not invertible for the given modulus") := rfl
 example : parse [45, 48, 120, 102, 102] 0 = .ok (-255) := rfl
 example : parse [49, 95, 48, 48, 48] = .ok 1000 := rfl

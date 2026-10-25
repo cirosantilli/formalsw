@@ -77,6 +77,22 @@ equations.extend([
     'example : HeapCalls.primitive (.builtin .pow) [.ref 0, .scalar (.int 2), .scalar (.int 3)] [.list []] = some (.error ⟨"TypeError", []⟩, [.list []]) := rfl',
 ])
 
+# Large exponents must remain practical in kernel-checked builtin calls.
+# Expected values come from Python pow, independently of the Lean implementation.
+for base, exponent, modulus in (
+    (2, 1000000007, 688590081),
+    (-1000003, 1000000007, 1000000007),
+    (1795265022, 172140960, 688590081),
+    (9780504, 1208925819614629174706177, 170141183460469231731687303715884105727),
+    (0, 340282366920938463463374607431768211456, 97),
+    (7, 0, 97),
+):
+    expected = constant(pow(base, exponent, modulus))
+    values = ', '.join(constant(value) for value in (base, exponent, modulus))
+    heap_values = ', '.join('.scalar ' + constant(value) for value in (base, exponent, modulus))
+    equations.append(f'set_option maxRecDepth 4096 in\nexample : Calls.Primitive.apply (.builtin .pow) [{values}] = some (Except.ok {expected}) := by decide')
+    equations.append(f'set_option maxRecDepth 4096 in\nexample : HeapCalls.primitive (.builtin .pow) [{heap_values}] [] = some (Except.ok (.scalar {expected}), []) := by decide')
+
 with project_temporary_directory(prefix='power-check-') as directory:
     directory = Path(directory)
     proof = directory / 'PrimitiveChecks.lean'
