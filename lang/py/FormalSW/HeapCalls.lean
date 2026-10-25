@@ -332,6 +332,8 @@ inductive Frame where
   | dictionaryKey (value : Expr) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | dictionaryValue (key : Constant) (rest : List (Expr × Expr)) (entries : List (Constant × Value)) (env : Env)
   | sumStart (loop : Stmt) (env : Env)
+  /-- Installed after the first iterable and ordinary consumer arguments finish. -/
+  | generatorEnd
   | initialized (address : Nat)
   | attribute (name : String)
   | methodReceiver (name : String) (arguments : List Expr) (env : Env)
@@ -385,6 +387,30 @@ structure State where
   work : Work
   stack : List Frame
   heap : Heap
+
+def Frame.inGenerator : Frame → Bool
+  | .generatorEnd => true
+  | _ => false
+
+/-- Preserve the heap and roots when a generator translates StopIteration. -/
+def protectGenerator (stack : List Frame) : Step State Completion → Step State Completion
+  | .done (.ok completion) => .done (.ok { completion with outcome := match completion.outcome with
+      | .error error => .error (Calls.generatorException (stack.any Frame.inGenerator) error)
+      | .ok value => .ok value })
+  | transition => transition
+
+@[simp] theorem protectGenerator_next (stack : List Frame) (state : State) :
+    protectGenerator stack (.next state) = .next state := rfl
+
+@[simp] theorem protectGenerator_unsupported (stack : List Frame) :
+    protectGenerator stack .unsupported = .unsupported := rfl
+
+@[simp] theorem protectGenerator_ne_unsupported (stack : List Frame) (transition : Step State Completion) :
+    protectGenerator stack transition ≠ .unsupported ↔ transition ≠ .unsupported := by
+  cases transition with
+  | next => simp
+  | unsupported => simp
+  | done result => cases result <;> simp [protectGenerator]
 
 def done (anchors : Nat) (heap : Heap) (outcome : Except ExceptionObject Value) (globals : Mutable.Globals := []) : Step State Completion :=
   .done (.ok ⟨outcome, globals, heap, anchors⟩)
@@ -906,6 +932,7 @@ def construct (module : Module) (anchors : Nat) (name : String) (values : List V
 
 def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Globals := []) : Step State Completion :=
   let ⟨work, stack, heap⟩ := state
+  protectGenerator stack <|
   match work with
   | .dictionary [] entries _ => result (globals := globals) anchors heap (Mutable.allocateDict entries) stack
   | .dictionary ((key, value) :: rest) entries env =>
@@ -1138,7 +1165,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
               | .ref _ => .unsupported
           | .dictionaryValue key rest entries env =>
               .next ⟨.dictionary rest (ScalarDict.insert entries key value) env, stack, heap⟩
-          | .sumStart loop env => sumEnter (globals := globals) anchors loop env value stack heap
+          | .sumStart loop env => sumEnter (globals := globals) anchors loop env value (.generatorEnd :: stack) heap
+          | .generatorEnd => .next ⟨.value value, stack, heap⟩
           | .initialized address => match value with
               | .scalar .none => .next ⟨.value (.ref address), stack, heap⟩
               | _ => done (globals := globals) anchors heap (.error { typeName := "TypeError", args := [] })
@@ -1329,7 +1357,7 @@ theorem ReturnsValue.with_defaults
   intro anchors stack
   cases h anchors stack with
   | next transition rest =>
-      simp only [step, found, complete, Step.next.injEq] at transition
+      simp only [step, found, complete, protectGenerator_next, Step.next.injEq] at transition
       subst transition
       exact .next (by simp [step, found, filled]) rest
 
@@ -1430,6 +1458,14 @@ private theorem run_extend (left right : Eval α)
     simp [run, missing] at supported
   simp only [run, same defined]
 
+private theorem protected_run_extend (left right : Eval α)
+    (same : left heap ≠ none → right heap = left heap)
+    (supported : protectGenerator frames (run (globals := globals) anchors heap left next) ≠ .unsupported) :
+    protectGenerator frames (run (globals := globals) anchors heap right next) =
+      protectGenerator frames (run (globals := globals) anchors heap left next) :=
+  congrArg (protectGenerator frames) (run_extend left right same
+    ((protectGenerator_ne_unsupported frames _).mp supported))
+
 /-- Imported helpers retain their checked bodies and share the caller's heap. -/
 theorem step_extend (extension : Extends target source) (state : State)
     (supported : step (globals := globals) source anchors state ≠ .unsupported) :
@@ -1464,11 +1500,11 @@ theorem step_extend (extension : Extends target source) (state : State)
       | cons frame stack =>
           cases frame with
           | «attribute» name =>
-              exact run_extend _ _ (attribute_extend extension) supported
+              exact protected_run_extend _ _ (attribute_extend extension) supported
           | methodReceiver name arguments env =>
-              exact run_extend _ _ (bindMethod_extend extension) supported
+              exact protected_run_extend _ _ (bindMethod_extend extension) supported
           | augmentAttribute name op right rest env =>
-              exact run_extend _ _ (attribute_extend extension) supported
+              exact protected_run_extend _ _ (attribute_extend extension) supported
           | addReceiver item env | appendReceiver item env =>
               cases value with
               | scalar _ => rfl
@@ -1480,7 +1516,7 @@ theorem step_extend (extension : Extends target source) (state : State)
                       | list items | tuple items | bytearray items | set items | dict items => simp [step, found]
                       | «instance» origin className fields | dataInstance origin className frozen declared fields =>
                           simp only [step, found] at supported ⊢
-                          exact run_extend _ _ (bindMethod_extend extension) supported
+                          exact protected_run_extend _ _ (bindMethod_extend extension) supported
           | _ => rfl
 
 theorem Reaches.extend (h : Reaches (globals := globals) source anchors initial final) (extension : Extends target source) :
@@ -1609,7 +1645,7 @@ theorem boolean_next (evaluated : Evaluates (globals := globals) module env firs
   apply (evaluated anchors _).trans
   cases rest anchors stack with
   | next transition following =>
-      simp only [step, Step.next.injEq] at transition
+      simp only [step, protectGenerator_next, Step.next.injEq] at transition
       subst transition
       exact .next (by simp [step, run, truth, continues]) following
 

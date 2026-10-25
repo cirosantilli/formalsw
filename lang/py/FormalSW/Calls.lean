@@ -151,6 +151,36 @@ structure State where
   work : Work
   stack : List Frame
 
+/-- Only a generator's filters and elements run inside its exception boundary. -/
+def Frame.inGenerator : Frame → Bool
+  | .sumFilter _ _ _ | .sumElement _ _ _ => true
+  | _ => false
+
+/-- Implicit exception messages are abstracted, as for the other runtime errors. -/
+def generatorException (active : Bool) (error : ExceptionObject) : ExceptionObject :=
+  if active && error.typeName == "StopIteration" then ⟨"RuntimeError", []⟩ else error
+
+/-- A callee's StopIteration cannot escape an active generator expression. -/
+def protectGenerator (stack : List Frame) : Step σ α → Step σ α
+  | .done (.error error) => .done (.error (generatorException (stack.any Frame.inGenerator) error))
+  | transition => transition
+
+@[simp] theorem protectGenerator_next (stack : List Frame) (state : σ) :
+    protectGenerator (α := α) stack (.next state) = .next state := rfl
+
+@[simp] theorem protectGenerator_done (stack : List Frame) (value : α) :
+    protectGenerator (σ := σ) stack (.done (.ok value)) = .done (.ok value) := rfl
+
+@[simp] theorem protectGenerator_unsupported (stack : List Frame) :
+    protectGenerator (σ := σ) (α := α) stack .unsupported = .unsupported := rfl
+
+@[simp] theorem protectGenerator_ne_unsupported (stack : List Frame) (transition : Step σ α) :
+    protectGenerator stack transition ≠ .unsupported ↔ transition ≠ .unsupported := by
+  cases transition with
+  | next => simp
+  | unsupported => simp
+  | done result => cases result <;> simp [protectGenerator]
+
 /-- Fill missing trailing arguments from definition-time scalar defaults. The
 source checker excludes effectful or mutable defaults and keyword arguments. -/
 def completeArguments : List Arg → List Constant → Option (List Constant)
@@ -261,6 +291,7 @@ def sumAdd (total : Int) : Constant → Except ExceptionObject Int
 
 def step (module : Module) (state : State) : Step State Constant :=
   let ⟨work, stack⟩ := state
+  protectGenerator stack <|
   match work with
   | .primitive operation values => outcome (operation.apply values) stack
   | .startRange name values body otherwise following env =>
@@ -572,7 +603,7 @@ theorem boolean_continue (h : Evaluates module env expression first)
   have remaining := rest stack
   cases remaining with
   | next stepEq remaining =>
-      simp only [step, Step.next.injEq] at stepEq
+      simp only [step, protectGenerator_next, Step.next.injEq] at stepEq
       subst stepEq
       exact .next rfl ((h _).trans (.next (by simp [step, proceed]) remaining))
 
@@ -637,7 +668,7 @@ private theorem primitive_result (arguments : Arguments module env expressions v
     (result : operation.apply values = some (.ok value)) (stack : List Frame) :
     Reaches module (primitiveState operation env [] expressions stack) ⟨.value value, stack⟩ :=
   (primitive_arguments_reach arguments [] stack).trans
-    (.next (by simpa [step, outcome] using congrArg (fun r => outcome r stack) result) .refl)
+    (.next (by simp [step, outcome, result]) .refl)
 
 theorem builtin (arguments : Arguments module env expressions values)
     (result : (Primitive.builtin operation).apply values = some (.ok value)) :

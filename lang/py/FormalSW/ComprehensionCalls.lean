@@ -133,7 +133,8 @@ theorem Evaluates.sum_generator_targets_range
       (comprehensionTargetsEnv env ((target, .call (.name "range") expressions, filters) :: generators)) :: stack,
     middle⟩) (by simp [step, sumGeneratorTargetsStart, bounds])
   apply (started anchors _).trans
-  exact .next (by simp [step, sumEnter, run, accepted]) (executed anchors stack)
+  exact .next (by simp [step, sumEnter, run, accepted])
+    ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))
 
 /-- The first iterator retains its identity while later generator work stays lazy. -/
 theorem Evaluates.sum_generator_targets_sequence
@@ -167,7 +168,8 @@ theorem Evaluates.sum_generator_targets_sequence
       (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)) :: stack, middle⟩)
   · cases iterable <;> simp_all [step, sumGeneratorTargetsStart, run]
   apply (started anchors _).trans
-  exact .next (by simp [step, sumEnter, run, accepted]) (executed anchors stack)
+  exact .next (by simp [step, sumEnter, run, accepted])
+    ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))
 
 
 /-- Enumerate acquires its first iterator before the generator sum's start is evaluated. -/
@@ -198,7 +200,8 @@ theorem Evaluates.sum_generator_targets_enumerate
         ((target, .call (.name "enumerate") [iterable, counterExpression], filters) :: generators)) :: stack,
     middle⟩) (by simp [step, sumGeneratorTargetsStart, pair, run, counter, sequence])
   apply (started anchors _).trans
-  exact .next (by simp [step, sumEnter, run, accepted]) (executed anchors stack)
+  exact .next (by simp [step, sumEnter, run, accepted])
+    ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))
 
 /-- Eager enumeration validates its iterable before allocating a comprehension result. -/
 theorem Evaluates.list_comp_targets_enumerate

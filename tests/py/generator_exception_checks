@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""
+Compare generator exception boundaries with Python in all call interpreters.
+"""
+import ast
+from functools import lru_cache
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def fail(n: int) -> int:
+    raise StopIteration(n)
+def ordinary_error(n: int) -> int:
+    raise RuntimeError(n)
+def recursive(n: int) -> int:
+    if n <= 0:
+        return fail(n)
+    return recursive(n - 1)
+def scalar_element(n: int) -> int:
+    return sum(fail(x) for x in range(n))
+def scalar_filter(n: int) -> int:
+    return sum(x for x in range(n) if fail(x))
+def scalar_first(n: int) -> int:
+    return sum(x for x in range(fail(n)))
+def scalar_recursive(n: int) -> int:
+    return sum(recursive(x) for x in range(n))
+def scalar_ordinary(n: int) -> int:
+    return sum(ordinary_error(x) for x in range(n))
+def scalar_nested(n: int) -> int:
+    return sum(sum(y for y in range(fail(x))) for x in range(n))
+def scalar_after(n: int) -> int:
+    sum(x for x in range(n))
+    return fail(n)
+def cached_fail(n: int) -> int:
+    raise StopIteration(n)
+def cached_outer(n: int) -> int:
+    return sum(cached_fail(x) for x in range(n))
+def memo_element(n: int) -> int:
+    return sum(cached_fail(x) for x in range(n))
+def memo_first(n: int) -> int:
+    return sum(x for x in range(cached_fail(n)))
+def memo_nested(n: int) -> int:
+    return cached_outer(n)
+def touch_fail(xs: list[int], n: int) -> int:
+    xs.append(n)
+    raise StopIteration(n)
+def fail_sequence(xs: list[int]) -> list[int]:
+    xs.append(9)
+    raise StopIteration(9)
+def heap_element(xs: list[int]) -> int:
+    return sum(fail(x) for x in xs)
+def heap_filter(xs: list[int]) -> int:
+    return sum(x for x in xs if touch_fail(xs, x))
+def heap_first(xs: list[int]) -> int:
+    return sum(x for x in fail_sequence(xs))
+def heap_start(xs: list[int]) -> int:
+    return sum((x for x in xs), touch_fail(xs, 4))
+def heap_nested(xs: list[int]) -> int:
+    return sum(y for x in xs for y in fail_sequence(xs))
+def heap_inner_first(xs: list[int]) -> int:
+    return sum(sum(y for y in fail_sequence(xs)) for x in xs)
+def heap_inner_start(xs: list[int]) -> int:
+    return sum(sum((y for y in xs), fail(x)) for x in xs)
+def heap_enumerate(xs: list[int]) -> int:
+    return sum(touch_fail(xs, i) for i, x in enumerate(xs))
+def heap_zip(xs: list[int]) -> int:
+    return sum(touch_fail(xs, a) for a, b in zip(xs, xs))
+def heap_ordinary(xs: list[int]) -> int:
+    return sum(ordinary_error(x) for x in xs)
+def heap_after(xs: list[int]) -> int:
+    sum(x for x in xs)
+    return touch_fail(xs, 7)
+def plain_comprehension(xs: list[int]) -> list[int]:
+    return [touch_fail(xs, x) for x in xs]
+def comprehension_first(xs: list[int]) -> int:
+    return sum(x for x in [fail(x) for x in xs])
+def comprehension_inside(xs: list[int]) -> int:
+    return sum(y for x in xs for y in [fail(x)])
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    issues = checker.check(function.name, heap_calls=function.name.startswith(('heap_', 'plain_', 'comprehension_')))
+    assert not issues, (function.name, issues)
+world = {}
+exec(source, world)
+for name in ('cached_fail', 'cached_outer'):
+    world[name] = lru_cache(None)(world[name])
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+
+
+def expected(name, arguments):
+    try:
+        return world[name](*arguments), None
+    except (StopIteration, RuntimeError) as error:
+        # Runtime-generated messages are abstracted by the language model;
+        # explicitly raised exception arguments must remain intact.
+        args = [] if isinstance(error.__cause__, StopIteration) else list(error.args)
+        return None, (type(error).__name__, args)
+
+
+def error_value(error):
+    name, args = error
+    return '⟨' + json.dumps(name) + ', [' + ', '.join(map(constant, args)) + ']⟩'
+
+
+for name in ('scalar_element', 'scalar_filter', 'scalar_first', 'scalar_recursive',
+             'scalar_ordinary', 'scalar_nested', 'scalar_after', 'memo_element', 'memo_first', 'memo_nested'):
+    for n in (-1, 0, 1, 3):
+        answer, error = expected(name, [n])
+        outcome = '.error (' + error_value(error) + ')' if error else '.ok (' + constant(answer) + ')'
+        scalar = f'Calls.function source "{name}" [.int ({n})]'
+        memo = f'MemoCalls.function source ["cached_fail", "cached_outer"] "{name}" [.int ({n})]'
+        for execution in (scalar, memo):
+            lines.append(f'example : ({execution}).observe 1000 = .done ({outcome}) := by native_decide')
+            count += 1
+
+for name in ('heap_element', 'heap_filter', 'heap_first', 'heap_start', 'heap_nested',
+             'heap_inner_first', 'heap_inner_start', 'heap_enumerate', 'heap_zip',
+             'heap_ordinary', 'heap_after', 'plain_comprehension', 'comprehension_first', 'comprehension_inside'):
+    for initial in ([], [2], [-2, 0, 3]):
+        value = initial.copy()
+        answer, error = expected(name, [value])
+        heap = '[.list [' + ', '.join('.scalar (' + constant(n) + ')' for n in initial) + ']]'
+        snapshot = data(snapshot_roots([value] + ([] if error else [answer])))
+        outcome = (f'match c.outcome with | .error e => decide (e = {error_value(error)}) | _ => false' if error else
+                   'match c.outcome with | .ok _ => true | _ => false')
+        lines.extend([
+            f'-- {name}, input {initial}',
+            f'example : (match (HeapCalls.call source "{name}" [.ref 0] {heap}).execution.observe 1000 with',
+            f'  | .done (.ok c) => ({outcome}) &&',
+            f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+            '  | _ => false) = true := by native_decide',
+        ])
+        count += 1
+
+with project_temporary_directory(prefix='generator-exceptions-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} generator exception comparisons passed across scalar, memoized, and heap execution')

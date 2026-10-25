@@ -45,7 +45,8 @@ theorem Evaluates.sum_generator_range
       (comprehensionEnv env ((name, .call (.name "range") expressions, filters) :: generators)) :: stack,
     middle⟩) (by simp [step, sumGeneratorStart, bounds])
   apply (started anchors _).trans
-  exact .next (by simp [step, sumEnter, run, accepted]) (executed anchors stack)
+  exact .next (by simp [step, sumEnter, run, accepted])
+    ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))
 
 /-- The first iterator retains its identity while later generator work stays lazy. -/
 theorem Evaluates.sum_generator_sequence
@@ -75,7 +76,8 @@ theorem Evaluates.sum_generator_sequence
       (comprehensionEnv env ((name, iterable, filters) :: generators)) :: stack, middle⟩)
   · cases iterable <;> simp_all [step, sumGeneratorStart, run]
   apply (started anchors _).trans
-  exact .next (by simp [step, sumEnter, run, accepted]) (executed anchors stack)
+  exact .next (by simp [step, sumEnter, run, accepted])
+    ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))
 
 /-- Preserve the legacy range-sum AST while using the heap interpreter's loop rules. -/
 theorem Evaluates.sum_range

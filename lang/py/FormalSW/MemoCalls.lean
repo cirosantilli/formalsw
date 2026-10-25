@@ -63,7 +63,24 @@ private def advance (state : State) : Step Calls.State Constant → Step State C
   | .done result => .done result
   | .unsupported => .unsupported
 
+/-- A memoized miss saves caller frames outside the current scalar stack. -/
+def protectGenerator (state : State) : Step State Constant → Step State Constant
+  | .done (.error error) => .done (.error (Calls.generatorException
+      (state.current.stack.any Calls.Frame.inGenerator ||
+        state.callers.any (fun caller => caller.stack.any Calls.Frame.inGenerator)) error))
+  | transition => transition
+
+@[simp] theorem protectGenerator_next (state next : State) :
+    protectGenerator state (.next next) = .next next := rfl
+
+@[simp] theorem protectGenerator_done (state : State) (value : Constant) :
+    protectGenerator state (.done (.ok value)) = .done (.ok value) := rfl
+
+@[simp] theorem protectGenerator_unsupported (state : State) :
+    protectGenerator state .unsupported = .unsupported := rfl
+
 def step (module : Module) (memoized : List String) (state : State) : Step State Constant :=
+  protectGenerator state <|
   match state.current with
   | ⟨.value value, []⟩ =>
       match state.callers with
@@ -120,12 +137,12 @@ theorem step_raw (plain : transparent memoized current)
     step module memoized ⟨current, callers, cache⟩ = .next ⟨following, callers, cache⟩ := by
   rcases current with ⟨work, stack⟩
   cases work
-  all_goals try { change advance _ (Calls.step module _) = _; rw [transition]; rfl }
+  all_goals try { change protectGenerator _ (advance _ (Calls.step module _)) = _; rw [transition]; rfl }
   case value value =>
     cases stack with
     | nil => exact False.elim plain
     | cons frame frames =>
-        change advance _ (Calls.step module _) = _
+        change protectGenerator _ (advance _ (Calls.step module _)) = _
         rw [transition]
         rfl
   case invoke name values =>
