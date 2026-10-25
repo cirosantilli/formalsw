@@ -165,7 +165,7 @@ with project_temporary_directory(prefix='sequence-') as temporary:
     document = directory / 'source.json'
     document.write_text(api['AstJsonEmitter'](program).emit())
     proof = directory / 'Checks.lean'
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
+    proof.write_text('import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
                      + 'open FormalSW.PyAst\nset_option maxRecDepth 8192\nset_option maxHeartbeats 1000000\n'
                      + '\n'.join(equations) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)

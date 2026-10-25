@@ -120,7 +120,7 @@ with project_temporary_directory(prefix='assertion-check-') as temporary:
     document = directory / 'source.json'
     document.write_text(api['AstJsonEmitter'](module).emit())
     proof = directory / 'Checks.lean'
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+    proof.write_text('import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
                      + 'open FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
     path = directory / 'container_message.py'

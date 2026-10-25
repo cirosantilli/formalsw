@@ -110,7 +110,7 @@ example : ¬ HeapCalls.Condition ProbeAst.module (fun _ => none) (.constant (.in
   rw [HeapCalls.Evaluates.condition_iff (value := .scalar (.int 1)) HeapCalls.Evaluates.constant]
   decide''')
     proof = directory / 'Checks.lean' 
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
+    proof.write_text('import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'ProbeAst', module, module.formalsw_conditions).emit()
                      + 'open FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
 

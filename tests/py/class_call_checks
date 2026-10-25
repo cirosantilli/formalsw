@@ -202,7 +202,7 @@ example : (HeapCalls.call Probe.module "{name}" [.ref 0, .scalar (.int 7)]
     document = directory / 'source.json'
     document.write_text(api['AstJsonEmitter'](module).emit())
     proof = directory / 'Checks.lean'
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+    proof.write_text('import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
                      + 'open FormalSW.PyAst\nset_option maxRecDepth 8192\n' + '\n'.join(checks))
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
 
@@ -231,7 +231,7 @@ def caller(n: int) -> int:
     document = directory / 'imported_data.json'
     document.write_text(api['AstJsonEmitter'](linked_data).emit())
     proof = directory / 'ImportedData.lean'
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'ImportedData', linked_data).emit() + f'''
+    proof.write_text('import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'ImportedData', linked_data).emit() + f'''
 open FormalSW.PyAst
 set_option maxRecDepth 8192
 example : ImportedData.module.classOrigins = [("ImportedDate", {json.dumps(str(data_helper.resolve()))})] := rfl
@@ -273,7 +273,7 @@ def caller(n: int) -> int:
     document = directory / 'imported.json'
     document.write_text(api['AstJsonEmitter'](linked).emit())
     proof = directory / 'Imported.lean'
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Imported', linked).emit() + f'''
+    proof.write_text('import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'Imported', linked).emit() + f'''
 open FormalSW.PyAst
 set_option maxRecDepth 8192
 example : Imported.module.classOrigins = [("ImportedBox", {json.dumps(str(helper.resolve()))})] := rfl

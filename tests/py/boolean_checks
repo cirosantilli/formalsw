@@ -75,7 +75,7 @@ with project_temporary_directory(prefix='booleans-') as temporary:
     document = directory / 'source.json'
     document.write_text(api['AstJsonEmitter'](module).emit())
     proof = directory / 'Checks.lean'
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+    proof.write_text('import lang.py.FormalSW.Calls\n' + api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
                      + 'open FormalSW.PyAst\nset_option maxRecDepth 4096\n' + '\n'.join(equations) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
     path = directory / 'contract.py'

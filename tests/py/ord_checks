@@ -83,7 +83,7 @@ with project_temporary_directory(prefix='ord-check-') as temporary:
     document = directory / 'source.json'
     document.write_text(api['AstJsonEmitter'](module).emit())
     proof = directory / 'Checks.lean'
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+    proof.write_text('import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
                      + 'open FormalSW.PyAst\nset_option maxRecDepth 8192\n' + '\n'.join(lines))
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
 

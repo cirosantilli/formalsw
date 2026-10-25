@@ -43,7 +43,7 @@ with project_temporary_directory(prefix='record-inputs-') as temporary:
     document.write_text(api['AstJsonEmitter'](module).emit())
     proof = directory / 'Inputs.lean'
     origin = json.dumps(str(path.resolve()))
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'RecordProbe', module).emit() + f'''
+    proof.write_text('import lang.py.FormalSW.HeapCalls\n' + api['AstLeanBridgeEmitter'](document, 'RecordProbe', module).emit() + f'''
 open FormalSW.PyAst
 set_option maxRecDepth 8192
 private def record (n : Int) : Mutable.Object :=

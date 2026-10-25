@@ -66,7 +66,7 @@ with project_temporary_directory(prefix='default-check-') as temporary:
     document = directory / 'defaults.json'
     document.write_text(api['AstJsonEmitter'](program).emit())
     proof = directory / 'Checks.lean'
-    proof.write_text(api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
+    proof.write_text('import lang.py.FormalSW.Calls\n' + api['AstLeanBridgeEmitter'](document, 'Probe', program).emit()
                      + 'open FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
 

@@ -105,7 +105,7 @@ with project_temporary_directory(prefix="nested-inputs-") as directory:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text(api["AstLeanBridgeEmitter"](document, "NestedProbe", module).emit()
+    proof.write_text('import lang.py.FormalSW.HeapCalls\n' + api["AstLeanBridgeEmitter"](document, "NestedProbe", module).emit()
                      + "open FormalSW.PyAst\n" + "\n".join(equations))
     subprocess.run(["lake", "env", "lean", "-DwarningAsError=true", str(proof)], cwd=ROOT, check=True)
 print("Nested inputs: shared rows, deep annotations, invalid domains, and Python behavior passed")

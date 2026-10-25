@@ -132,7 +132,11 @@ for builtin in ('list', 'reversed'):
     for suffix in (f'{builtin} = f\n', f'from other import {builtin}\n'):
         module = ast.parse(reverse_source + suffix)
         assert SupportChecker(module).check('f')
-        assert api['AstJsonEmitter'](module).expr(module.body[0].body[0].value)['type'] == 'Call'
+        expression = api['AstJsonEmitter'](module).expr(module.body[0].body[0].value)
+        if builtin == 'reversed':
+            assert expression['type'] == 'BuiltinCall' and expression['name'] == 'list'
+            expression = expression['args'][0]
+        assert expression['type'] == 'Call' and expression['func']['id'] == builtin
     assert SupportChecker(ast.parse(reverse_source.replace('n: int', f'n: int, {builtin}: int'))).check('f')
 maximum_source = 'def f(n: int) -> int: return max(n, 1)\n'
 assert not SupportChecker(ast.parse(maximum_source)).check('f')
