@@ -122,6 +122,22 @@ def sortBy (less : α → α → Bool) : List α → List α
   | [] => []
   | first :: rest => insertBy less first (sortBy less rest)
 
+/-- Mapping values commutes with insertion when comparisons use the mapped values. -/
+theorem insertBy_map (f : α → β) (less : β → β → Bool) (value : α) (items : List α) :
+    (insertBy (fun a b => less (f a) (f b)) value items).map f =
+      insertBy less (f value) (items.map f) := by
+  induction items with
+  | nil => rfl
+  | cons first rest ih =>
+      cases compared : less (f first) (f value) <;> simp [insertBy, compared, ih]
+
+/-- Sort references by their contents, then project the sorted contents. -/
+theorem sortBy_map (f : α → β) (less : β → β → Bool) (items : List α) :
+    (sortBy (fun a b => less (f a) (f b)) items).map f = sortBy less (items.map f) := by
+  induction items with
+  | nil => rfl
+  | cons first rest ih => simp [sortBy, insertBy_map, ih]
+
 theorem insertBy_perm (less : α → α → Bool) (value : α) (items : List α) :
     (insertBy less value items).Perm (value :: items) := by
   induction items with
