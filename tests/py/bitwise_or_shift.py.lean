@@ -75,4 +75,23 @@ theorem different.«Returns» (a b : Bool) : (function program "different" [.boo
 theorem different.«Supported» (a b : Bool) : (function program "different" [.bool a, .bool b]).Supported :=
   (different.«Returns» a b).supported
 
+theorem shift_right.result (a count : Int) (nonnegative : 0 ≤ count) :
+    ReturnsValue program "shift_right" [.int a, .int count] (.int (integerShiftRight a count.toNat)) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.binary (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+    (by simp [scalarBinary, scalarShiftRight, Int.not_lt.mpr nonnegative])
+
+theorem shift_right.«Returns» (a count : Int) (condition : Calls.Condition program
+    (fun name => if name = "count" then some (.int count) else none) BitwiseOrShiftAst.requires_shift_right_0) :
+    (function program "shift_right" [.int a, .int count]).Returns := by
+  have nonnegative : 0 ≤ count := by
+    simpa [evalCmpOp] using Evaluates.condition_int_compare condition rfl
+  exact (shift_right.result a count nonnegative).returns
+
+theorem shift_right.«Supported» (a count : Int) (condition : Calls.Condition program
+    (fun name => if name = "count" then some (.int count) else none) BitwiseOrShiftAst.requires_shift_right_0) :
+    (function program "shift_right" [.int a, .int count]).Supported :=
+  (shift_right.«Returns» a count condition).supported
+
 end tests.py.bitwise_or_shift

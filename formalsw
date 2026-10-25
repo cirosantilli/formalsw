@@ -1716,6 +1716,8 @@ class AstJsonEmitter:
                 return "BitXor"
             case ast.LShift():
                 return "LShift"
+            case ast.RShift():
+                return "RShift"
             case ast.Pow():
                 return "Pow"
             case ast.FloorDiv():

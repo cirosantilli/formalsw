@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compare OR, XOR, and left shifts with Python, including signs, types, and operand effects.
+Compare OR, XOR, and signed shifts with Python, including signs, types, and operand effects.
 """
 import ast
 from itertools import product
@@ -44,7 +44,8 @@ comparisons = 0
 for operator, operation, right_values in (
         ('bitOr', lambda a, b: a | b, values),
         ('bitXor', lambda a, b: a ^ b, values),
-        ('leftShift', lambda a, b: a << b, counts)):
+        ('leftShift', lambda a, b: a << b, counts),
+        ('rightShift', lambda a, b: a >> b, counts)):
     for a, b in product(values, right_values):
         expected = result(lambda: operation(a, b))
         lines.append(f'example : scalarBinary .{operator} {constant(a)} {constant(b)} = '
@@ -58,7 +59,7 @@ def record(items: list[int], n: int) -> int:
     items.append(n)
     return n
 '''
-for label, symbol in (('merge', '|'), ('exclusive', '^'), ('shift', '<<')):
+for label, symbol in (('merge', '|'), ('exclusive', '^'), ('shift', '<<'), ('shift_right', '>>')):
     source += f'''
 def {label}_effect(items: list[int], a: int, b: int) -> int:
     return record(items, a) {symbol} record(items, b)
@@ -76,7 +77,7 @@ program = ast.parse(source)
 world = {}
 exec(source, world)
 lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
-for label in ('merge', 'exclusive', 'shift'):
+for label in ('merge', 'exclusive', 'shift', 'shift_right'):
     for variant in ('effect', 'inplace', 'item', 'raises_left'):
         name = label + '_' + variant
         assert not SupportChecker(program).check(name), SupportChecker(program).check(name)
@@ -94,7 +95,8 @@ for label in ('merge', 'exclusive', 'shift'):
 # Collection union and custom reference operators must not silently become integer operations.
 for objects in ('[.set [], .set []]', '[.dict [], .dict []]'):
     lines.append(f'example : Mutable.binary .bitOr (.ref 0) (.ref 1) {objects} = none := by native_decide')
-lines.append('example : Mutable.binary .leftShift (.ref 0) (.scalar (.int 1)) [.list []] = none := by native_decide')
+for operator in ('leftShift', 'rightShift'):
+    lines.append(f'example : Mutable.binary .{operator} (.ref 0) (.scalar (.int 1)) [.list []] = none := by native_decide')
 
 with project_temporary_directory(prefix='bitwise-or-shift-') as temporary:
     directory = Path(temporary)
@@ -103,4 +105,4 @@ with project_temporary_directory(prefix='bitwise-or-shift-') as temporary:
     proof.write_text('\n'.join(lines) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
 subprocess.run([str(ROOT / 'formalsw'), 'tests/py/bitwise_or_shift.py'], cwd=ROOT, check=True)
-print(f'OR, XOR, and left shift: {comparisons} Python comparisons; arbitrary-input source proofs passed')
+print(f'OR, XOR, and signed shifts: {comparisons} Python comparisons; arbitrary-input source proofs passed')

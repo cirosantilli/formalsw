@@ -91,12 +91,21 @@ def scalarShiftLeft (left right : Constant) : Except ExceptionObject Constant :=
       else .ok (.int (integerShiftLeft a b.toNat))
   | _, _ => .error { typeName := "TypeError", args := [] }
 
+/-- Arithmetic right shifts have the same receiver and count rules as left shifts. -/
+def scalarShiftRight (left right : Constant) : Except ExceptionObject Constant :=
+  match scalarNumber left, scalarNumber right with
+  | some a, some b =>
+      if b < 0 then .error { typeName := "ValueError", args := [] }
+      else .ok (.int (integerShiftRight a b.toNat))
+  | _, _ => .error { typeName := "TypeError", args := [] }
+
 def scalarBinary (op : BinOp) (left right : Constant) : Option (Except ExceptionObject Constant) :=
   match op with
   | .bitAnd => some (scalarBitAnd left right)
   | .bitOr => some (scalarBitOr left right)
   | .bitXor => some (scalarBitXor left right)
   | .leftShift => some (scalarShiftLeft left right)
+  | .rightShift => some (scalarShiftRight left right)
   | _ =>
     match scalarNumber left, scalarNumber right with
     | some left, some right =>
@@ -104,7 +113,7 @@ def scalarBinary (op : BinOp) (left right : Constant) : Option (Except Exception
         | .add => some (.ok (.int (left + right)))
         | .sub => some (.ok (.int (left - right)))
         | .mult => some (.ok (.int (left * right)))
-        | .bitAnd | .bitOr | .bitXor | .leftShift => none -- Handled before numeric coercion.
+        | .bitAnd | .bitOr | .bitXor | .leftShift | .rightShift => none -- Handled before numeric coercion.
         | .pow =>
             if right < 0 then none
             else some (.ok (.int (left ^ right.toNat)))

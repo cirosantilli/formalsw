@@ -32,3 +32,11 @@ def different(a: bool, b: bool) -> bool:
     @formalsw: Returns
     """
     return a ^ b
+
+
+def shift_right(a: int, count: int) -> int:
+    """
+    @formalsw: Requires(count >= 0)
+    @formalsw: Returns
+    """
+    return a >> count

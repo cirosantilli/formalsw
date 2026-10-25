@@ -500,7 +500,7 @@ def uses_calls_model(module, function):
         or range_sum(node) is not None
         or general_division(node)
         or identity_comparison(node)
-        or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift))
+        or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
         or isinstance(node, ast.Call) and library_name(node.func) in names | {'int', 'str', 'bin', 'ord', 'abs', 'pow', 'max', 'min', 'len'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
@@ -797,7 +797,7 @@ def check_calls(module, function, reject, *, heap=False):
                 recurse(node.func.value)
                 recurse(node.args[0])
                 return
-            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift)):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift)):
                 recurse(node.left)
                 recurse(node.right)
             elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):

@@ -55,6 +55,8 @@ inductive BinOp where
   | bitXor
   /-- Python left shift; negative counts raise ValueError at runtime. -/
   | leftShift
+  /-- Python right shift; negative counts raise ValueError at runtime. -/
+  | rightShift
   /-- Python exponentiation. Float-producing cases require another value model. -/
   | pow
   /-- Python floor division `//`. -/
@@ -88,6 +90,12 @@ def integerBitXor : Int → Int → Int
 
 /-- A nonnegative left shift multiplies by an exact power of two, including for negative values. -/
 def integerShiftLeft (value : Int) (count : Nat) : Int := value * 2 ^ count
+
+/-- Arithmetic right shift is floor division by an exact positive power of two. -/
+def integerShiftRight (value : Int) (count : Nat) : Int := value / 2 ^ count
+
+@[simp] theorem integerShiftRight_nat (a count : Nat) :
+    integerShiftRight a count = ((a / 2 ^ count : Nat) : Int) := rfl
 
 @[simp] theorem integerBitOr_nat (a b : Nat) : integerBitOr a b = (a ||| b : Nat) := rfl
 
@@ -379,6 +387,7 @@ private def BinOp.fromJson? (json : Lean.Json) : Except String BinOp := do
   | "BitOr" => return .bitOr
   | "BitXor" => return .bitXor
   | "LShift" => return .leftShift
+  | "RShift" => return .rightShift
   | "Pow" => return .pow
   | "FloorDiv" => return .floorDiv
   | "Mod" => return .mod
@@ -1595,6 +1604,7 @@ def evalIntExpr (env : Env) : Expr -> Option Int
       | BinOp.bitOr => some (integerBitOr leftValue rightValue)
       | BinOp.bitXor => some (integerBitXor leftValue rightValue)
       | BinOp.leftShift => if rightValue < 0 then none else some (integerShiftLeft leftValue rightValue.toNat)
+      | BinOp.rightShift => if rightValue < 0 then none else some (integerShiftRight leftValue rightValue.toNat)
       | BinOp.pow => if rightValue < 0 then none else some (leftValue ^ rightValue.toNat)
       | BinOp.floorDiv => none
       | BinOp.mod => if rightValue = 0 then none else some (leftValue % rightValue)

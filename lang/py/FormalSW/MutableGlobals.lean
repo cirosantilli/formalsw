@@ -804,6 +804,12 @@ def binary (op : BinOp) (a b : Value) : Eval Value :=
           | .ok value => pure (.scalar value)
           | .error exception => throw exception
       | _, _ => unsupported
+  | .rightShift => match a, b with
+      | .scalar left, .scalar right =>
+          match scalarShiftRight left right with
+          | .ok value => pure (.scalar value)
+          | .error exception => throw exception
+      | _, _ => unsupported
   | _ => do
     let number : Value → Value
       | .scalar (.bool b) => .scalar (.int (if b then 1 else 0))
