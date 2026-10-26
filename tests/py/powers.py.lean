@@ -22,6 +22,24 @@ theorem power.«Supported» (base exponent : Int) (hp : Calls.Condition program
     (Calls.function program "power" [.int base, .int exponent]).Supported :=
   (power.«Returns» base exponent hp).supported
 
+theorem builtin_power.result (base exponent : Int) (nonnegative : 0 ≤ exponent) :
+    ReturnsValue program "builtin_power" [.int base, .int exponent] (.int (base ^ exponent.toNat)) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.builtin (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+    (by simp [Primitive.apply, scalarBinary, Int.not_lt.mpr nonnegative])
+
+theorem builtin_power.«Returns» (base exponent : Int) (hp : Calls.Condition program
+    (fun key => if key = "exponent" then some (.int exponent) else none) PowersAst.requires_builtin_power_0) :
+    (Calls.function program "builtin_power" [.int base, .int exponent]).Returns := by
+  have hn : 0 ≤ exponent := by simpa [evalCmpOp] using Evaluates.condition_int_compare hp rfl
+  exact (builtin_power.result base exponent hn).returns
+
+theorem builtin_power.«Supported» (base exponent : Int) (hp : Calls.Condition program
+    (fun key => if key = "exponent" then some (.int exponent) else none) PowersAst.requires_builtin_power_0) :
+    (Calls.function program "builtin_power" [.int base, .int exponent]).Supported :=
+  (builtin_power.«Returns» base exponent hp).supported
+
 theorem digit_lower.«Returns» (n : Int) (hp : Calls.Condition program
     (fun key => if key = "n" then some (.int n) else none) PowersAst.requires_digit_lower_0) :
     (Calls.function program "digit_lower" [.int n]).Returns := by

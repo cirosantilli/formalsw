@@ -783,6 +783,18 @@ def primitive : Operation → List Value → Eval Value
   | .append _, _ | .add _, _ => Mutable.error "TypeError"
   | .builtin .identity, [left, right] => identity left right
   | .builtin .len, [value] => Mutable.length value
+  | .builtin .pow, [.scalar base, .scalar exponent] => scalarResult (scalarBinary .pow base exponent)
+  | .builtin .pow, [base, exponent] => do
+      -- Unknown numeric protocols cannot be replaced with a builtin TypeError.
+      let heap ← get
+      if [base, exponent].any (fun value => match value with
+          | .scalar _ => false
+          | .ref address => match heap[address]? with
+              | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => true
+              | _ => false) then Mutable.unsupported
+      else Mutable.error "TypeError"
+  | .builtin .pow, [_, _, _] => Mutable.unsupported
+  | .builtin .pow, _ => Mutable.error "TypeError"
   | .builtin .abs, [.scalar value] => scalarResult (some (Calls.absoluteValue value))
   | .builtin .abs, _ => Mutable.error "TypeError"
   | .builtin .ord, [.scalar value] => scalarResult (some (Strings.ord value))
@@ -803,6 +815,8 @@ def primitive : Operation → List Value → Eval Value
       Mutable.allocate (← Mutable.sequence value)
   | .builtin .list, _ => Mutable.error "TypeError"
   | .builtin .set, [] => Mutable.allocateSet []
+  | .builtin .set, [source] => Mutable.setFrom source
+  | .builtin .set, _ => Mutable.error "TypeError"
   | .builtin .sorted, [value] => do
       let items ← match value with
         | .ref address => match (← get)[address]? with

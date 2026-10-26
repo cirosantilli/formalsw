@@ -12,6 +12,7 @@ from test_support import project_temporary_directory
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 api = runpy.run_path(str(REPO / 'formalsw'))
+from lang.py.support import SupportChecker
 
 
 def constant(value):
@@ -32,9 +33,17 @@ for base in (*range(-5, 6), True, False, None, 'bad'):
         except TypeError:
             expected = 'Except.error { typeName := "TypeError", args := [] }'
         equations.append(f'example : scalarBinary .pow {constant(base)} {constant(exponent)} = some ({expected}) := by decide')
+        equations.append(f'example : Calls.Primitive.apply (.builtin .pow) [{constant(base)}, {constant(exponent)}] = some ({expected}) := by decide')
 equations.extend([
     'example : scalarBinary .pow (.int 2) (.int (-1)) = none := rfl',
     'example : scalarBinary .pow (.int 0) (.int (-1)) = none := rfl',
+    'example : Calls.Primitive.apply (.builtin .pow) [.int 2, .int (-1)] = none := rfl',
+    'example : Calls.Primitive.apply (.builtin .pow) [.int 2, .int 3, .int 5] = none := rfl',
+    'example : HeapCalls.primitive (.builtin .pow) [.scalar (.int 2), .scalar (.int 3), .scalar (.int 5)] [] = none := rfl',
+    'example : HeapCalls.primitive (.builtin .pow) [.scalar (.int 0), .scalar (.int (-1))] [] = none := rfl',
+    'example : HeapCalls.primitive (.builtin .pow) [.ref 0, .scalar (.int 2)] [.instance "probe" "Custom" []] = none := rfl',
+    'example : HeapCalls.primitive (.builtin .pow) [.scalar (.int 2), .ref 99] [] = none := rfl',
+    'example : HeapCalls.primitive (.builtin .pow) [.ref 0, .scalar (.int 2)] [.list []] = some (.error ⟨"TypeError", []⟩, [.list []]) := rfl',
     'example : ¬ (Execution.unsupported : Execution Constant).Supported := by intro h; exact h 1 rfl',
     'private def spin : Execution Constant := ⟨Unit, (), fun state => .next state⟩',
     'example : spin.Supported := Execution.Diverges.supported ⟨fun _ => True, trivial, fun _ _ => ⟨(), rfl, trivial⟩⟩',
@@ -45,6 +54,58 @@ with project_temporary_directory(prefix='power-check-') as directory:
     proof = directory / 'PrimitiveChecks.lean'
     proof.write_text('import FormalSW\nopen FormalSW.PyAst\n' + '\n'.join(equations) + '\n')
     subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+    source = '''
+def touch(events: list[int], n: int) -> int:
+    events.append(n)
+    return n
+def fail(events: list[int]) -> int:
+    events.append(1)
+    return 1 // 0
+def ordered(events: list[int]) -> int:
+    return pow(touch(events, 2), touch(events, 3))
+def stopped(events: list[int]) -> int:
+    return pow(fail(events), touch(events, 3))
+def scalar(a: int, b: int) -> int:
+    return pow(a, b)
+'''
+    module = ast.parse(source)
+    for name in ('ordered', 'stopped', 'scalar'):
+        assert not SupportChecker(module).check(name)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    world = {}
+    exec(source, world)
+    lines = ['import FormalSW', 'open FormalSW.PyAst',
+             'def source : Module := pyast_from_json% (include_str "source.json")']
+    for name in ('ordered', 'stopped'):
+        events = []
+        try:
+            result = world[name](events)
+            outcome = f'.ok (.scalar {constant(result)})'
+        except ZeroDivisionError:
+            outcome = '.error ⟨"ZeroDivisionError", []⟩'
+        values = ', '.join(f'.scalar {constant(value)}' for value in events)
+        lines.append(f'example : (match (HeapCalls.call source "{name}" [.ref 0] [.list []]).execution.observe 500 with\n'
+                     f'  | .done (.ok c) => c.outcome == {outcome} && c.heap[0]? == some (.list [{values}])\n'
+                     '  | _ => false) = true := by native_decide')
+    lines.extend([
+        'example : (Calls.function source "scalar" [.int (-2), .int 3]).observe 100 = .done (.ok (.int (-8))) := by decide',
+        'example : (Calls.function source "scalar" [.int 2, .int (-1)]).observe 100 = .unsupported := by decide',
+    ])
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+    for expression in ('pow(n)', 'pow(n, 2, 3)', 'pow(base=n, exp=2)', 'pow(n, 2, mod=3)'):
+        assert SupportChecker(ast.parse(f'def f(n: int):\n    return {expression}\n')).check('f')
+    plain = 'def f(n: int):\n    return pow(n, 2)\n'
+    for suffix in ('pow = 3\n', 'from other import pow\n'):
+        module = ast.parse(plain + suffix)
+        assert SupportChecker(module).check('f')
+        assert api['AstJsonEmitter'](module).expr(module.body[0].body[0].value)['type'] == 'Call'
+    assert SupportChecker(ast.parse(plain.replace('f(n: int)', 'f(n: int, pow: int)'))).check('f')
+    for runtime in ('scalarFunction', 'scalarFunctionWithGlobals', 'Mutable.function'):
+        assert SupportChecker(ast.parse(plain)).requirement('f',
+            f'theorem wrong : Not ({runtime} Probe.module "f" [.int 2]).Returns'), runtime
 
     def requirements(name, text):
         source = directory / (name + '.py')
@@ -59,6 +120,9 @@ with project_temporary_directory(prefix='power-check-') as directory:
         assert len(coverage) == 1
         assert '.Supported' in coverage[0].property_type
         assert 'Not' not in coverage[0].property_type
+        builtin = requirements('builtin_' + str(len(list(directory.iterdir()))), text.replace('2 ** -1', 'pow(2, -1)'))
+        builtin_coverage = [r for r in builtin if r.marker == 'execution model coverage']
+        assert len(builtin_coverage) == 1 and '.Supported' in builtin_coverage[0].property_type
 
     # A partial predicate must not silently remove inputs from the domain.
     obligations = requirements('predicate', 'def f(n: int):\n    """\n'
@@ -98,4 +162,4 @@ with project_temporary_directory(prefix='power-check-') as directory:
     assert 'Unknown identifier' in rejected.stdout + rejected.stderr, rejected.stdout + rejected.stderr
 
 subprocess.run([sys.executable, str(REPO / 'tests/py/powers.py')], check=True)
-print(f'Integer powers: {len(equations) - 5} Python comparisons and coverage obligations passed')
+print('Integer operators and builtin pow: Python comparisons, argument effects, and coverage checks passed')

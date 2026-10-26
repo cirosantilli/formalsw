@@ -71,6 +71,9 @@ def Primitive.apply : Primitive → List Constant → Option (Except ExceptionOb
   | .builtin .len, [value] => some (length value)
   | .builtin .int, values => integerConversion values
   | .builtin .str, values => some (Strings.str values)
+  | .builtin .pow, [base, exponent] => scalarBinary .pow base exponent
+  | .builtin .pow, [_, _, _] => none
+  | .builtin .pow, _ => some (.error { typeName := "TypeError", args := [] })
   | .builtin .abs, [value] => some (absoluteValue value)
   | .builtin .abs, _ => some (.error { typeName := "TypeError", args := [] })
   | .builtin .ord, [value] => some (Strings.ord value)

@@ -51,6 +51,21 @@ def difference(items: set[int]) -> set[int]:
     return items - items
 """
 bodies = {
+    'constructor_list': 'return set([n, n, True, 1, False, 0, None, "λ", b"abc"])',
+    'constructor_tuple': 'return set((n, 1, n))',
+    'constructor_text': 'return set("aλ😀a")',
+    'constructor_bytes': 'return set(b"aab")',
+    'constructor_buffer': 'return set(bytearray(b"aab"))',
+    'constructor_copy': 'out = set(items)\nout.add(n)\nreturn [out, items]',
+    'constructor_dict': 'return set({n: events, 3: events})',
+    'constructor_order': 'return set([touch(alias, events, n), touch(alias, events, n + 1)])',
+    'constructor_failure': 'return set([fail(events, n), touch(alias, events, n + 1)])',
+    'constructor_list_key': 'return set([events])',
+    'constructor_set_key': 'return set([items])',
+    'constructor_dict_key': 'return set([{n: 0}])',
+    'constructor_buffer_key': 'return set([bytearray()])',
+    'constructor_integer': 'return set(n)',
+    'constructor_none': 'return set(None)',
     'add': 'items.add(n)\nreturn alias',
     'duplicate': 'items.add(n)\nitems.add(n)\nreturn len(items)',
     'contains': 'return n in items',
@@ -121,6 +136,14 @@ for name, initial, n, shared in itertools.product(bodies, ([], [1, -2]), (-2, 0,
 # Unmodeled set iteration and arithmetic must not manufacture Python outcomes.
 for name in ('iterate', 'difference'):
     lines.append(f'example : (HeapCalls.call source "{name}" [.ref 0] [.set [.int 1]]).execution.observe 100 = .unsupported := by decide')
+for source, heap in (
+    ('.ref 0', '[.list [.ref 1], .tuple [.scalar (.int 1)]]'),
+    ('.ref 0', '[.instance "probe" "Custom" []]'),
+    ('.ref 0', '[.list [.ref 1], .instance "probe" "Custom" []]'),
+    ('.ref 99', '[]'),
+):
+    lines.append(f'example : Mutable.setFrom ({source}) {heap} = none := by decide')
+
 lines.append('example : HeapCalls.membership (.ref 1) (.ref 0) false [.set [.int 1], .list []] = none := by decide')
 
 # Binding validation must not silently substitute the builtin for user code.
@@ -130,7 +153,7 @@ for suffix in ('set = 3\n', 'from other import set\n'):
     module = ast.parse(plain + suffix)
     assert SupportChecker(module).check('f')
     assert api['AstJsonEmitter'](module).expr(module.body[0].body[0].value)['type'] == 'Call'
-for constructor in ('set([n])', 'set(value=n)'):
+for constructor in ('set([n], [n])', 'set(value=n)'):
     assert SupportChecker(ast.parse(plain.replace('set()', constructor))).check('f')
 for runtime in ('Calls.function', 'scalarFunction', 'Mutable.function', 'HeapCalls.scalarFunction'):
     issues = SupportChecker(ast.parse(plain)).requirement('f',
@@ -145,6 +168,16 @@ with project_temporary_directory(prefix='set-checks-') as directory:
                         + marker + '\n    """\n    for item in items:\n        return item\n    return 0\n')
         module = api['source_module'](path)
         obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        coverage = [item for item in obligations if item.marker == 'execution model coverage']
+        assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
+        assert 'Not' not in coverage[0].property_type
+    for index, marker in enumerate(('Returns', 'Not Returns', 'Equiv(f)', 'Not Equiv(f)')):
+        path = directory / f'constructor_coverage{index}.py'
+        path.write_text('def f(n: int) -> int:\n    """\n    @formalsw: '
+                        + marker + '\n    """\n    return len(set([(n, n)]))\n')
+        module = api['source_module'](path)
+        obligations = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        assert not any(item.unsupported for item in obligations), obligations
         coverage = [item for item in obligations if item.marker == 'execution model coverage']
         assert len(coverage) == 1 and '.Supported' in coverage[0].property_type
         assert 'Not' not in coverage[0].property_type

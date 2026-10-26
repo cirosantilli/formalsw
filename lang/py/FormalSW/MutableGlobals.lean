@@ -746,6 +746,40 @@ def sequence : Value → Eval (List Value)
       | none => unsupported
   | _ => error "TypeError"
 
+/-- Set constructors keep the first scalar representative. Tuple and custom
+hashing require additional semantics; known mutable keys are unhashable. -/
+def setKey : Value → Eval Constant
+  | .scalar item => pure item
+  | .ref address => do
+      match (← get)[address]? with
+      | some (.tuple _) | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => unsupported
+      | some _ => error "TypeError"
+
+/-- Construct a fresh scalar set from builtin sequences, sets, or dictionary keys.
+Custom iteration stays unsupported, including on an otherwise empty object. -/
+def setFrom (source : Value) : Eval Value := do
+  let items ← match source with
+    | .ref address => match (← get)[address]? with
+        | some (.set items) => pure (items.map Value.scalar)
+        | some (.dict entries) => pure (entries.map fun entry => Value.scalar entry.1)
+        | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => unsupported
+        | _ => sequence source
+    | _ => sequence source
+  let keys ← items.mapM setKey
+  allocateSet (keys.foldl ScalarSet.insert [])
+
+/-- Scalar-list construction deduplicates without changing any input object. -/
+theorem setFrom_list (heap : Heap) (address : Nat) (items : List Constant)
+    (found : heap[address]? = some (.list (items.map Value.scalar))) :
+    setFrom (.ref address) heap = some (.ok (.ref heap.length),
+      heap ++ [.set (items.foldl ScalarSet.insert [])]) := by
+  have keys : (items.map Value.scalar).mapM setKey = (pure items : Eval (List Constant)) := by
+    clear found
+    induction items with
+    | nil => rfl
+    | cons item rest ih => simp only [List.map_cons, List.mapM_cons, setKey, ih]; rfl
+  simp [setFrom, sequence, found, keys, allocateSet, Except.map]
+
 /-- Reverse iteration handles builtin sequences; dictionaries and custom
 `__reversed__`/`__getitem__` protocols need separate execution semantics. -/
 def reversibleSequence (value : Value) : Eval (List Value) := do

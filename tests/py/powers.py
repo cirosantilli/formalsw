@@ -6,6 +6,14 @@ def power(base: int, exponent: int) -> int:
     return base ** exponent
 
 
+def builtin_power(base: int, exponent: int) -> int:
+    """
+    @formalsw: Requires(exponent >= 0)
+    @formalsw: Returns
+    """
+    return pow(base, exponent)
+
+
 def digit_lower(n: int) -> int:
     """
     @formalsw: Requires(n >= 0)
@@ -60,6 +68,7 @@ if __name__ == '__main__':
     for n in (-12, -1, 0, 1, 12):
         for exponent in range(8):
             assert power(n, exponent) == n ** exponent
+            assert builtin_power(n, exponent) == power(n, exponent)
         assert square(n) == n * n
         assert squared(n) == square_reference(n)
         assert boolean_exponents(n) == n + 1
