@@ -2505,6 +2505,33 @@ theorem continue_loop (target : Calls.loopTarget body = some (next, following))
   intro anchors stack
   exact .next (by simp [step, target]) (rest anchors stack)
 
+/-- An enumerate loop can return directly from its body, preserving receiver and start effects. -/
+theorem for_enumerate_start
+    (iterable : Evaluates (globals := globals) module env expression heap source afterSource)
+    (start : Evaluates (globals := globals) module env startExpression afterSource startValue middle)
+    (counter : enumerateStart startValue middle = some (.ok initial, middle))
+    (sequence : Mutable.sequence source middle = some (.ok items, middle))
+    (rest : BlockReturns (globals := globals) module env
+      (.enumerateStepLoop index name (sequenceSource source) 0 initial body otherwise :: following) middle answer finalHeap) :
+    BlockReturns (globals := globals) module env
+      (.forIn (.tuple [.name index, .name name]) (.call (.name "enumerate") [expression, startExpression]) body otherwise :: following)
+      heap answer finalHeap := by
+  intro anchors stack
+  exact .next rfl ((iterable anchors _).trans (.next rfl ((start anchors _).trans
+    (.next (by simp [step, run, counter, sequence]) (rest anchors stack)))))
+
+theorem for_enumerate
+    (iterable : Evaluates (globals := globals) module env expression heap source middle)
+    (sequence : Mutable.sequence source middle = some (.ok items, middle))
+    (rest : BlockReturns (globals := globals) module env
+      (.enumerateStepLoop index name (sequenceSource source) 0 0 body otherwise :: following) middle answer finalHeap) :
+    BlockReturns (globals := globals) module env
+      (.forIn (.tuple [.name index, .name name]) (.call (.name "enumerate") [expression]) body otherwise :: following)
+      heap answer finalHeap := by
+  intro anchors stack
+  exact .next rfl ((iterable anchors _).trans (.next rfl (.next rfl
+    (.next (by simp [step, run, enumerateStart, sequence]) (rest anchors stack)))))
+
 theorem function (found : findFunctionIn module.body name = some (args, body))
     (arguments : completeArguments args values = some completed)
     (evaluated : BlockReturns (globals := globals) module (functionEnv args body completed globals) (executableBody body) heap value finalHeap) :
