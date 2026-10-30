@@ -215,16 +215,6 @@ CASES = [
             """@formalsw: Halts"""
             raise ValueError()
     ''', 'only builtin exception constructors are supported'),
-    ('unsupported Throws signature', '''
-        def f(a: int, b: int):
-            """@formalsw: Not Throws"""
-            return a + b
-    ''', 'Throws has no function model for this argument signature'),
-    ('unsupported ReturnType signature', '''
-        def f(n: int) -> str:
-            """@formalsw: Not ReturnType"""
-            return "a"
-    ''', 'ReturnType currently requires matching supported argument and return annotations'),
     ('equivalence domains', '''
         def f(n: int):
             """@formalsw: Not Equiv(g)"""
@@ -284,8 +274,33 @@ with project_temporary_directory(prefix='support-check-') as directory:
         result = stub(path)
         assert result.returncode == 1, (name, result.stdout, result.stderr)
         assert reason in result.stderr, (name, result.stderr)
-        assert result.stderr.count('cannot check ') == 1, (name, result.stderr)
+        if name == 'equivalence domains':
+            assert result.stderr.startswith('error: '), (name, result.stderr)
+        else:
+            assert result.stderr.count('cannot check ') == 1, (name, result.stderr)
         assert 'sorry' not in result.stdout, (name, result.stdout)
+
+    # Typed scalar contracts now cover these signatures through scalarFunction.
+    for source, expected in (
+        ('''
+def f(a: int, b: int):
+    """
+    @formalsw: Not Throws
+    """
+    return a + b
+''', '(∃ («a» : Int) («b» : Int),'),
+        ('''
+def f(n: int) -> str:
+    """
+    @formalsw: Not ReturnType
+    """
+    return "a"
+''', '.ReturnType "str"'),
+    ):
+        path.write_text(source)
+        result = stub(path)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert expected in result.stdout and 'scalarFunction' in result.stdout, result.stdout
 
     # Change an actual comparison dependency while leaving the sorting AST intact.
     source = (REPO / 'tests/py/sort.py').read_text()
