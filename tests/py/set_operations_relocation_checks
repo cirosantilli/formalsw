@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+Prove allocating set algebra composes with aliased augmented updates in Python source.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def update(left, right):
+    copied = left | right
+    left -= right
+    return [left, right, copied, copied]
+
+def subtract(left, right):
+    left -= right
+    return left
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace SetOperationsRelocationExamples
+set_option Elab.async false
+
+def updated (heap : Mutable.Heap) (left : Nat) (xs ys : List Constant) : Mutable.Heap :=
+  (heap ++ [Mutable.Object.set (ScalarSet.union xs ys)]).set left (.set (ScalarSet.difference xs ys))
+
+def resultHeap (heap : Mutable.Heap) (left right : Nat) (xs ys : List Constant) : Mutable.Heap :=
+  updated heap left xs ys ++ [.list [.ref left, .ref right, .ref heap.length, .ref heap.length]]
+
+/-- The copy precedes mutation; the returned list retains the actual old and new identities. -/
+theorem source_updates (heap : Mutable.Heap) (left right : Nat) (xs ys : List Constant)
+    (leftFound : heap[left]? = some (.set xs)) (rightFound : heap[right]? = some (.set ys)) :
+    ReturnsValue Probe.module "update" [.ref left, .ref right] heap (.ref (heap.length + 1))
+      (resultHeap heap left right xs ys) := by
+  let middle := heap ++ [Mutable.Object.set (ScalarSet.union xs ys)]
+  have leftInside := (List.getElem?_eq_some_iff.mp leftFound).1
+  have rightInside := (List.getElem?_eq_some_iff.mp rightFound).1
+  have middleLeft : middle[left]? = some (.set xs) := by
+    simpa only [middle, List.getElem?_append_left leftInside] using leftFound
+  have middleRight : middle[right]? = some (.set ys) := by
+    simpa only [middle, List.getElem?_append_left rightInside] using rightFound
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.binary (middle := heap) (afterRight := heap)
+    (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+    (Mutable.binary_union_sets heap left right xs ys leftFound rightFound))
+  apply BlockReturns.augAssign rfl (Evaluates.lookup rfl)
+    (HeapCalls.inplace_difference_sets middle left right xs ys middleLeft middleRight)
+  apply BlockReturns.return_value
+  have size : (middle.set left (.set (ScalarSet.difference xs ys))).length = heap.length + 1 := by simp [middle]
+  rw [← size]
+  exact Evaluates.list (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))))
+
+/-- The operands may be the same set; private allocations and all caller aliases are retained. -/
+theorem paired_updates (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat) (xs ys : List Constant)
+    (leftFound : logical[left]? = some (.set xs)) (rightFound : logical[right]? = some (.set ys)) :
+    ∃ nextMap,
+      ReturnsValue Probe.module "update" [.ref left, .ref right] logical (.ref (logical.length + 1))
+        (resultHeap logical left right xs ys) ∧
+      ReturnsValue Probe.module "update" [.ref (rename left), .ref (rename right)] physical
+        (.ref (physical.length + 1)) (resultHeap physical (rename left) (rename right) xs ys) ∧
+      ExecutionLayout (resultHeap logical left right xs ys)
+        (resultHeap physical (rename left) (rename right) xs ys) nextMap ∧
+      nextMap (logical.length + 1) = physical.length + 1 ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  have leftInside := (List.getElem?_eq_some_iff.mp leftFound).1
+  have rightInside := (List.getElem?_eq_some_iff.mp rightFound).1
+  let middleMap := extendMap rename logical.length physical.length
+  have first := (layout.allocateSet (ScalarSet.union xs ys)).2.2
+  have middleLeft : (logical ++ [.set (ScalarSet.union xs ys)])[left]? = some (.set xs) := by
+    simpa only [List.getElem?_append_left leftInside] using leftFound
+  have second := first.set_nonempty left (.set xs) (.set (ScalarSet.difference xs ys)) middleLeft
+    (by simp) (by simp) (by simp [ObjectWithin, objectValues])
+  change ExecutionLayout (updated logical left xs ys)
+    (updated physical (middleMap left) xs ys) middleMap at second
+  have leftSame : middleMap left = rename left := extendMap_old _ _ _ _ leftInside
+  have rightSame : middleMap right = rename right := extendMap_old _ _ _ _ rightInside
+  rw [leftSame] at second
+  have inside : ∀ value ∈ [Mutable.Value.ref left, .ref right, .ref logical.length, .ref logical.length],
+      value.edge.Within (updated logical left xs ys).length := by
+    simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq,
+      Mutable.Value.edge, Graph.Edge.Within, updated, List.length_set, List.length_append, List.length_singleton]
+    omega
+  have retained := (second.allocate_list [.ref left, .ref right, .ref logical.length, .ref logical.length] inside).2.2
+  let nextMap := extendMap middleMap (logical.length + 1) (physical.length + 1)
+  refine ⟨nextMap, source_updates logical left right xs ys leftFound rightFound,
+    source_updates physical (rename left) (rename right) xs ys
+      (layout.runtime.lookup left _ leftFound) (layout.runtime.lookup right _ rightFound), ?_, ?_, ?_⟩
+  · simpa only [resultHeap, updated, List.length_set, List.length_append, List.length_singleton,
+      List.map_cons, List.map_nil, relocateValue, leftSame, rightSame, middleMap, extendMap_new] using retained
+  · exact extendMap_new _ _ _
+  · intro index bound
+    have later : index < logical.length + 1 := by omega
+    simp only [nextMap, extendMap_old _ _ _ _ later, middleMap, extendMap_old _ _ _ _ bound]
+
+theorem source_failed (heap after : Mutable.Heap) (left right : Nat) (xs : List Constant)
+    (leftFound : heap[left]? = some (.set xs)) (exception : ExceptionObject)
+    (failed : Mutable.setDifference left right true heap = some (.error exception, after)) :
+    (HeapCalls.call Probe.module "subtract" [.ref left, .ref right] heap).Finishes
+      ⟨.error exception, [], after, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.inplace, leftFound, Mutable.inplaceBinary, Mutable.eval_bind,
+    HeapCalls.result, HeapCalls.run, failed, HeapCalls.done, HeapCalls.protectGenerator,
+    Frame.inGenerator, Calls.generatorException])
+
+theorem paired_failures (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat) (xs : List Constant)
+    (leftFound : logical[left]? = some (.set xs)) (rightInside : right < logical.length)
+    (exception : ExceptionObject) (after : Mutable.Heap)
+    (failed : Mutable.setDifference left right true logical = some (.error exception, after)) :
+    ∃ other nextMap,
+      (HeapCalls.call Probe.module "subtract" [.ref left, .ref right] logical).Finishes
+        ⟨.error exception, [], after, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "subtract" [.ref (rename left), .ref (rename right)] physical).Finishes
+        ⟨.error exception, [], other, physical.length⟩ ∧ ExecutionLayout after other nextMap := by
+  obtain ⟨other, nextMap, otherFailed, retained, _, _, _⟩ := layout.setDifference left right true
+    (List.getElem?_eq_some_iff.mp leftFound).1 rightInside _ _ failed
+  exact ⟨other, nextMap, source_failed logical after left right xs leftFound exception failed,
+    source_failed physical other (rename left) (rename right) xs
+      (layout.runtime.lookup left _ leftFound) exception otherFailed, retained⟩
+
+#print axioms source_updates
+#print axioms paired_updates
+#print axioms source_failed
+#print axioms paired_failures
+#print axioms ExecutionLayout.storeSetResult
+#print axioms setUnion_result
+#print axioms setDifference_result
+#print axioms setOperand_relocates
+#print axioms setUnion_operands
+#print axioms setDifference_operands
+#print axioms setOperand_scalars
+#print axioms ExecutionLayout.setUnion
+#print axioms RuntimeLayout.setUnion_unsupported
+#print axioms ExecutionLayout.setDifference
+#print axioms RuntimeLayout.setDifference_unsupported
+end SetOperationsRelocationExamples
+'''
+
+with project_temporary_directory(prefix="set-operations-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for xs, ys in (([], []), ([True, 2, 3], [1, 3, 4]), ([None, "λ", b"x"], [None, b"y"]),
+                   ([2**140, -3], [2**140, 7])):
+        for shared in (False, True):
+            left = set(xs)
+            right = left if shared else set(ys)
+            expected_union = left | right
+            expected_difference = left - right
+            result = namespace["update"](left, right)
+            assert result[0] is left and result[1] is right
+            assert result[2] is result[3] and result[2] is not left and result[2] is not right
+            assert left == expected_difference and result[2] == expected_union
+            if shared:
+                assert not left and result[0] is result[1]
+            result[2].add("later")
+            assert "later" in result[3] and "later" not in left
+    left = {True, 2}
+    for right in ([], {}, (1,), bytearray(b"1")):
+        try:
+            namespace["subtract"](left, right)
+        except TypeError:
+            assert left == {True, 2} and next(value for value in left if value == 1) is True
+        else:
+            raise AssertionError(right)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.SetOperationsRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 15, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("set operations relocation: fresh copies, aliased updates, and failures; fifteen axiom audits passed")
