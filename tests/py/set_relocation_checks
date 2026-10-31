@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""
+Prove captured set insertion composes with argument-side mutation and membership.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def promote(items, key):
+    items.add(key)
+    return key
+
+def add_and_contains(items, key):
+    items.add(promote(items, key))
+    return key in items
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace SetRelocationExamples
+set_option Elab.async false
+
+theorem source_promote (heap after : Mutable.Heap) (address : Nat) (key : Mutable.Value)
+    (bound : Mutable.addReceiver (.ref address) heap = some (.ok address, heap))
+    (added : Mutable.addItem address key heap = some (.ok (.scalar .none), after)) :
+    ReturnsValue Probe.module "promote" [.ref address, key] heap key after := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.add_result (Evaluates.lookup rfl) bound
+    (Evaluates.lookup rfl) added)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+/-- The outer receiver is bound before the helper mutates that same object. -/
+theorem source_nested (heap middle after : Mutable.Heap) (address : Nat) (key answer : Mutable.Value)
+    (bound : Mutable.addReceiver (.ref address) heap = some (.ok address, heap))
+    (first : Mutable.addItem address key heap = some (.ok (.scalar .none), middle))
+    (second : Mutable.addItem address key middle = some (.ok (.scalar .none), after))
+    (tested : HeapCalls.membership key (.ref address) false after = some (.ok answer, after)) :
+    ReturnsValue Probe.module "add_and_contains" [.ref address, key] heap answer after := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.add_result (Evaluates.lookup rfl) bound
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (source_promote heap middle address key bound first)) second)
+  exact BlockReturns.return_value (Evaluates.membership
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) tested)
+
+/-- Arbitrary scalar tuples exercise promotion without a key-width or caller-heap bound. -/
+theorem paired_nested (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address keyAddress : Nat)
+    (items tupleItems : List Constant)
+    (found : logical[address]? = some (.set items))
+    (tupleFound : logical[keyAddress]? = some (.tuple (tupleItems.map Mutable.Value.scalar))) :
+    ∃ answer after other,
+      ReturnsValue Probe.module "add_and_contains" [.ref address, .ref keyAddress] logical answer after ∧
+      ReturnsValue Probe.module "add_and_contains" [.ref (rename address), .ref (rename keyAddress)]
+        physical (relocateValue rename answer) other ∧ ExecutionLayout after other rename := by
+  have addressInside := (List.getElem?_eq_some_iff.mp found).1
+  have keyInside := (List.getElem?_eq_some_iff.mp tupleFound).1
+  have different : keyAddress ≠ address := by
+    intro equal
+    subst keyAddress
+    rw [found] at tupleFound
+    cases tupleFound
+  let key := HashKey.tuple (tupleItems.map HashKey.scalar)
+  let promoted := items.map (fun item => (HashKey.scalar item, Mutable.Value.scalar item))
+  let entries := Mutable.insertKey promoted (key, .ref keyAddress)
+  let middle := logical.set address (.keySet entries)
+  have bound : Mutable.addReceiver (.ref address) logical = some (.ok address, logical) := by
+    simp [Mutable.addReceiver, found]
+  have hashed := Mutable.hashKey_tuple_scalars logical keyAddress tupleItems tupleFound
+  have first : Mutable.addItem address (.ref keyAddress) logical = some (.ok (.scalar .none), middle) := by
+    simp [Mutable.addItem, found, hashed, Mutable.eval_bind, Except.map, middle, entries, promoted, key]
+  obtain ⟨otherMiddle, otherFirst, middleLayout, sameLength, _⟩ :=
+    layout.addItem address (.ref keyAddress) addressInside keyInside _ _ first
+  have middleFound : middle[address]? = some (.keySet entries) := by simp [middle, addressInside]
+  have middleTuple : middle[keyAddress]? = some (.tuple (tupleItems.map Mutable.Value.scalar)) := by
+    simpa [middle, List.getElem?_set, different.symm] using tupleFound
+  let finalEntries := Mutable.insertKey entries (key, .ref keyAddress)
+  let after := middle.set address (.keySet finalEntries)
+  have middleHashed := Mutable.hashKey_tuple_scalars middle keyAddress tupleItems middleTuple
+  have second : Mutable.addItem address (.ref keyAddress) middle = some (.ok (.scalar .none), after) := by
+    simp [Mutable.addItem, middleFound, middleHashed, Mutable.eval_bind, Except.map, after, finalEntries, key]
+  obtain ⟨other, otherSecond, finalLayout, finalLength, _⟩ := middleLayout.addItem address (.ref keyAddress)
+    (by simpa [sameLength] using addressInside) (by simpa [sameLength] using keyInside) _ _ second
+  have finalFound : after[address]? = some (.keySet finalEntries) := by
+    simp [after, middle, addressInside]
+  have finalTuple : after[keyAddress]? = some (.tuple (tupleItems.map Mutable.Value.scalar)) := by
+    simpa [after, List.getElem?_set, different.symm] using middleTuple
+  have finalHashed := Mutable.hashKey_tuple_scalars after keyAddress tupleItems finalTuple
+  let answer := Mutable.Value.scalar (.bool (Mutable.keyContains finalEntries key))
+  have tested : HeapCalls.membership (.ref keyAddress) (.ref address) false after = some (.ok answer, after) := by
+    simp [HeapCalls.membership, finalFound, HeapCalls.membershipKey, finalTuple,
+      finalHashed, Mutable.eval_bind, Except.map, answer, key]
+  have otherBound := layout.runtime.addReceiver (.ref address) addressInside
+  simp only [bound, Option.map_some, Except.map, relocateValue] at otherBound
+  have otherTested := finalLayout.runtime.membership_keySet finalLayout.closed address finalEntries
+    (.ref keyAddress) false finalFound (by simpa [finalLength, sameLength] using keyInside)
+  simp only [tested, Option.map_some, Except.map, relocateValue] at otherTested
+  exact ⟨answer, after, other,
+    source_nested logical middle after address (.ref keyAddress) answer bound first second tested,
+    source_nested physical otherMiddle other (rename address) (.ref (rename keyAddress))
+      (relocateValue rename answer) otherBound otherFirst otherSecond otherTested, finalLayout⟩
+
+#print axioms source_promote
+#print axioms source_nested
+#print axioms paired_nested
+#print axioms Evaluates.add_result
+#print axioms insertKey_relocates
+#print axioms ObjectWithin.keySet_insert
+#print axioms RuntimeLayout.addReceiver
+#print axioms ExecutionLayout.addItem
+#print axioms RuntimeLayout.addItem_unsupported
+#print axioms RuntimeLayout.membershipKey
+#print axioms RuntimeLayout.membership_keySet
+#print axioms RuntimeLayout.membership_set
+#print axioms RuntimeLayout.membership_keyDict
+#print axioms RuntimeLayout.membership_dict
+end SetRelocationExamples
+'''
+
+with project_temporary_directory(prefix="set-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    add_and_contains = namespace["add_and_contains"]
+    items = {True}
+    key = (False, "x")
+    assert add_and_contains(items, key) is True
+    assert next(item for item in items if isinstance(item, tuple)) is key
+    equal_key = tuple(list(key))
+    assert equal_key is not key
+    assert add_and_contains(items, equal_key) is True
+    assert next(item for item in items if isinstance(item, tuple)) is key
+    assert add_and_contains(items, 1) is True
+    assert next(item for item in items if isinstance(item, bool)) is True
+    before = {id(item) for item in items}
+    for unhashable in ([], ([],), (1, [])):
+        try:
+            add_and_contains(items, unhashable)
+        except TypeError:
+            assert {id(item) for item in items} == before
+        else:
+            raise AssertionError(unhashable)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.SetRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 14, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("set relocation: argument-side promotion and membership; fourteen axiom audits passed")
