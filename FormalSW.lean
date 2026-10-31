@@ -4,6 +4,7 @@ import lang.py.FormalSW.ScalarDicts
 import lang.py.FormalSW.ScalarSort
 import lang.py.FormalSW.HeapSort
 import lang.py.FormalSW.Heapq
+import lang.py.FormalSW.DictionaryConstructor
 import lang.py.FormalSW.MutableGlobals
 import lang.py.FormalSW.ContainerTypes
 import lang.py.FormalSW.Permutations
@@ -19,6 +20,7 @@ import lang.py.FormalSW.SetCalls
 import lang.py.FormalSW.SetSumCalls
 import lang.py.FormalSW.SetDifferenceCalls
 import lang.py.FormalSW.DictionaryCalls
+import lang.py.FormalSW.DictionaryConstructorCalls
 import lang.py.FormalSW.DictionaryItemsCalls
 import lang.py.FormalSW.KeyDictionaryCalls
 import lang.py.FormalSW.SumCalls

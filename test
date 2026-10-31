@@ -468,6 +468,14 @@ def main() -> int:
     print(f"{'PASS' if heapq_checks_passed else 'FAIL'} heapq layouts and partial failures", flush=True)
     if not heapq_checks_passed:
         print(textwrap.indent((heapq_checks.stdout + heapq_checks.stderr).rstrip(), "  "))
+    dictionary_constructor_checks = subprocess.run(
+        [sys.executable, "tests/py/dictionary_constructor_checks"],
+        cwd=REPO, text=True, capture_output=True,
+    )
+    dictionary_constructor_checks_passed = dictionary_constructor_checks.returncode == 0
+    print(f"{'PASS' if dictionary_constructor_checks_passed else 'FAIL'} dictionary construction", flush=True)
+    if not dictionary_constructor_checks_passed:
+        print(textwrap.indent((dictionary_constructor_checks.stdout + dictionary_constructor_checks.stderr).rstrip(), "  "))
     join_checks = subprocess.run(
         [sys.executable, "tests/py/join_checks"],
         cwd=REPO, text=True, capture_output=True,
@@ -596,6 +604,7 @@ def main() -> int:
         and list_checks_passed
         and pop_checks_passed
         and heapq_checks_passed
+        and dictionary_constructor_checks_passed
         and join_checks_passed
         and generator_exception_checks_passed
         and consumed_generator_checks_passed

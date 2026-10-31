@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+Compare dictionary copies, pair construction, aliases and argument effects with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    assert type(value) is str
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+def hash_key(value):
+    if type(value) is tuple:
+        return '.tuple [' + ', '.join(map(hash_key, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+class Heap:
+    def __init__(self):
+        self.objects = []
+        self.addresses = {}
+
+    def value(self, value):
+        if type(value) not in (list, tuple, dict, bytearray):
+            return '.scalar (' + constant(value) + ')'
+        if id(value) not in self.addresses:
+            self.addresses[id(value)] = len(self.objects)
+            self.objects.append(value)
+            children = (part for pair in value.items() for part in pair) if type(value) is dict else value
+            for item in children:
+                self.value(item)
+        return f'.ref {self.addresses[id(value)]}'
+
+    def expression(self):
+        def object_expression(value):
+            if type(value) is bytearray:
+                return '.bytearray [' + ', '.join(map(str, value)) + ']'
+            if type(value) is dict:
+                if any(type(key) is tuple for key in value):
+                    entries = [f'(({hash_key(key)}), {self.value(key)}, {self.value(item)})'
+                               for key, item in value.items()]
+                    return '.keyDict [' + ', '.join(entries) + ']'
+                entries = [f'(({constant(key)}), {self.value(item)})' for key, item in value.items()]
+                return '.dict [' + ', '.join(entries) + ']'
+            return ('.list' if type(value) is list else '.tuple') + ' [' + ', '.join(map(self.value, value)) + ']'
+        return '[' + ', '.join(map(object_expression, self.objects)) + ']'
+
+
+source = '''
+def copy(table: dict[str, int]):
+    return dict(table)
+def pairs(rows: list[list[int]]):
+    return dict(rows)
+def fresh():
+    return dict()
+def outer_independent(table: dict[str, int]):
+    copied = dict(table)
+    copied["new"] = 99
+    return [table, copied]
+def shared_values(table: dict[str, int]):
+    copied = dict(table)
+    copied["shared"].append(7)
+    return [table, copied]
+def cyclic(n: int):
+    table = {}
+    table["self"] = table
+    return [table, dict(table)]
+def touch(table: dict[str, int]):
+    table["touched"] = 3
+    return table
+def argument_effect(table: dict[str, int]):
+    return dict(touch(table))
+def excess(table: dict[str, int]):
+    return dict(table, touch(table))
+def fail(table: dict[str, int]):
+    table["touched"] = 3
+    raise ValueError()
+def argument_error(table: dict[str, int]):
+    return dict(fail(table))
+def invalid_scalar(n: int):
+    return dict(n)
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    assert not checker.check(function.name), (function.name, checker.check(function.name))
+    assert uses_heap_calls(program, function)
+world = {}
+exec(source, world)
+checks = []
+
+
+def compare(name, arguments):
+    heap = Heap()
+    values = '[' + ', '.join(map(heap.value, arguments)) + ']'
+    before = heap.expression()
+    anchors = list(heap.objects)
+    try:
+        result = world[name](*arguments)
+        outcome = 'match c.outcome with | .ok _ => true | _ => false'
+        roots = anchors + [result]
+    except (TypeError, ValueError) as error:
+        outcome = ('match c.outcome with | .error e => decide '
+                   f'(e = ⟨"{type(error).__name__}", []⟩) | _ => false')
+        roots = anchors
+    expected = data(snapshot_roots(roots))
+    checks.append('\n'.join([
+        f'-- {name}, case {len(checks)}',
+        f'example : (match (HeapCalls.call source "{name}" {values} {before}).execution.observe 3000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ]))
+
+
+for values in itertools.product((-2, 0, 3), repeat=2):
+    compare('copy', [{"a": values[0], "b": values[1]}])
+    compare('outer_independent', [{"a": values[0], "b": values[1]}])
+for table in ({}, {True: 1, 2: 3, False: 4}, {"٢": 1, "²": None},
+              {(1, True): 3, (2,): 4}, {None: None, b'a': True}):
+    compare('copy', [table])
+    for name in ('argument_effect', 'excess', 'argument_error'):
+        compare(name, [table.copy()])
+shared = []
+compare('copy', [{"a": shared, "b": shared}])
+compare('shared_values', [{"shared": shared, "alias": shared}])
+self_reference = {}
+self_reference["self"] = self_reference
+compare('copy', [self_reference])
+for n in (-1, 0, 7):
+    compare('cyclic', [n])
+    compare('invalid_scalar', [n])
+compare('fresh', [])
+rows = [[], (), '', b'', 'ab', b'ab', None, True,
+        [[1, 2], [3, 4]], [(True, 2), (1, 3), (False, 4), (0, 5)],
+        ['ab', 'cd'], [b'ab', bytearray(b'cd')],
+        [{"a": 3, "b": 4}], [{(1,): 3, (2,): 4}],
+        [((1, True), []), ((1, 1), [8])],
+        [[], [1, 2]], [[1]], [[1, 2, 3]], [3],
+        [[1, 2], [3]], [[1, 2], [[], 4]], [[{}, 3]], [[bytearray(b'a'), 4]]]
+for row in rows:
+    compare('pairs', [row])
+    if type(row) is list:
+        compare('pairs', [tuple(row)])
+
+for text in (
+    'def f(n: int):\n    return dict(n=n)\n',
+    'def f(dict: int):\n    return dict()\n',
+    'def f(n: int):\n    return dict()\ndict = f\n',
+    'def f(n: int):\n    return dict()\ndel dict\n',
+):
+    assert SupportChecker(ast.parse(text)).check('f'), text
+
+shadowed_source = '''
+def dict(n: int) -> int:
+    return n + 1
+def f(n: int) -> int:
+    return dict(n)
+'''
+shadowed = ast.parse(shadowed_source)
+assert not SupportChecker(shadowed).check('f')
+shadowed_world = {}
+exec(shadowed_source, shadowed_world)
+shadowed_checks = []
+for n in (-7, 0, 3):
+    expected = constant(shadowed_world['f'](n))
+    shadowed_checks.append(
+        f'example : (HeapCalls.scalarFunction shadowed "f" [.int ({n})]).observe 100 = '
+        f'.done (.ok ({expected})) := by native_decide')
+
+prelude = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+           'def source : Module := pyast_from_json% (include_str "source.json")']
+with project_temporary_directory(prefix='dictionary-constructor-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    (directory / 'shadowed.json').write_text(api['AstJsonEmitter'](shadowed).emit())
+    proof = directory / 'Checks.lean'
+    for start in range(0, len(checks), 25):
+        proof.write_text('\n'.join(prelude + checks[start:start + 25]) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+    proof.write_text('''import FormalSW
+open FormalSW.PyAst
+def shadowed : Module := pyast_from_json% (include_str "shadowed.json")
+example : DictionaryConstructor.construct [.ref 0] [] = none := by decide
+example : DictionaryConstructor.construct [.ref 0] [.instance "source" "Custom" []] = none := by decide
+example : DictionaryConstructor.construct [.ref 0] [.set []] = none := by decide
+example : DictionaryConstructor.insertRows 0 [.ref 1, .ref 2]
+    [.dict [], .tuple [.scalar (.int 1), .scalar (.int 2)], .list []] =
+      some (.error ⟨"ValueError", []⟩,
+        [.dict [(.int 1, .scalar (.int 2))], .tuple [.scalar (.int 1), .scalar (.int 2)], .list []]) := by
+  native_decide
+''' + '\n'.join(shadowed_checks) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{len(checks) + len(shadowed_checks)} dictionary-constructor Python comparisons passed, including copies, aliases and failures')

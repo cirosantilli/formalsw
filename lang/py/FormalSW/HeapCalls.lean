@@ -3,6 +3,7 @@ import lang.py.FormalSW.Linking
 import lang.py.FormalSW.ScalarSort
 import lang.py.FormalSW.HeapSort
 import lang.py.FormalSW.Heapq
+import lang.py.FormalSW.DictionaryConstructor
 import lang.py.FormalSW.Permutations
 import lang.py.FormalSW.Combinations
 import lang.py.FormalSW.StringReplace
@@ -1390,6 +1391,7 @@ def primitive : Operation → List Value → Eval Value
   | .builtin .divmod, values => Mutable.divmod values
   | .builtin .bytearray, values => Mutable.bytearray values
   | .builtin .bytes, values => Mutable.bytes values
+  | .builtin .dict, values => DictionaryConstructor.construct values
   | .builtin .list, [] => Mutable.allocate []
   | .builtin .list, [value] => do
       -- Custom iteration protocols require their own execution model.
