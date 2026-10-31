@@ -2,6 +2,7 @@ import lang.py.FormalSW.IteratorExecutionIsolation
 import lang.py.FormalSW.DictionaryAllocation
 import lang.py.FormalSW.SequenceAllocation
 import lang.py.FormalSW.BufferAllocation
+import lang.py.FormalSW.SequenceArithmeticAllocation
 
 /-! Allocating operations retain their heap on success and on ordinary exceptions. -/
 namespace FormalSW.PyAst.IteratorCalls
@@ -122,5 +123,16 @@ theorem bufferAllocation_step (module : Module) (anchors used : Nat) (choices : 
   have ran := input.primitive
   cases input <;> apply core_next rfl <;>
     simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, result, run, ran]
+
+theorem sequenceArithmetic_step (module : Module) (anchors used : Nat) (choices : ChoiceSchedule)
+    (globals : Mutable.Globals) (heap after : Mutable.Heap) (op : BinOp) (left right : Mutable.Value)
+    (asTuple : Bool) (items : List Mutable.Value) (address : Nat) (stack : List Frame) (resumes : List Resume)
+    (input : SequenceArithmeticInput heap op left right asTuple items)
+    (allocated : allocateSequence asTuple items heap = some (.ok (.ref address), after)) :
+    step module anchors choices (.running ⟨⟨.value right, .binaryRight op left false :: stack, heap⟩, used⟩ resumes) globals =
+      .next (.running ⟨⟨.value (.ref address), stack, after⟩, used⟩ resumes) := by
+  have ran := input.binary.trans allocated
+  apply core_next rfl
+  simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, result, run, ran]
 
 end FormalSW.PyAst.IteratorCalls

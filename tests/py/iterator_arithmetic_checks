@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""
+Check iterator sequence arithmetic, signed repetition, tuple reuse and private consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Collector:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = self.data * self.count
+        return "123"
+
+
+def join(left, right):
+    return left + right
+
+
+def repeat(data, count):
+    return data * count
+
+
+def left_repeat(count, data):
+    return count * data
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace ArithmeticIteratorExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Collector").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def fieldExpr (name : String) : Expr := .attribute (.name "self") name
+def tail : List Stmt := [.return (.constant (.string "123"))]
+def body : List Stmt := .assign [fieldExpr "link"] (.binOp (fieldExpr "data") .mult (fieldExpr "count")) :: tail
+def env (address : Nat) := functionEnv args body [.ref address] []
+def methodHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :
+    Except ExceptionObject Mutable.Value → Mutable.Heap
+  | .ok result => heap.set address (.instance classInfo.1 "Collector" (Mutable.putField fields "link" result))
+  | .error _ => heap
+def text (s : String) : Mutable.Value := .scalar (.string s)
+def methodOutcome (outcome : Except ExceptionObject Mutable.Value) := outcome.map (fun _ => text "123")
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class : Probe.module.findClass "Collector" = some classInfo := rfl
+theorem source_next : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args body)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Collector"
+    "__next__" fields classInfo.2 found source_class
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem field_read (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (name : String) (ordinary : name ≠ "__class__" ∧ name ≠ "__dict__" ∧ name ≠ "__weakref__") (value : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (field : fields.lookup name = some value) :
+    Evaluates Probe.module (env address) (fieldExpr name) heap value heap := by
+  apply Evaluates.field (Evaluates.lookup rfl)
+  simp [getAttribute, Mutable.eval_bind, found, instanceClass, source_class, field, ordinary.1, ordinary.2.1, ordinary.2.2]
+
+theorem method_trace (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (data count : Mutable.Value)
+    (asTuple : Bool) (items : List Mutable.Value) (resultAddress : Nat)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some data) (getCount : fields.lookup "count" = some count)
+    (input : HeapCalls.Relocation.SequenceArithmeticInput heap .mult data count asTuple items)
+    (allocated : allocateSequence asTuple items heap = some (.ok (.ref resultAddress), after)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.method (.ref address) args body) [], [], heap⟩, used⟩ [])
+      (methodHeap after address fields (.ok (.ref resultAddress)))
+      (.completed (.ok ⟨methodOutcome (.ok (.ref resultAddress)), [], methodHeap after address fields (.ok (.ref resultAddress)), heap.length⟩) used []) := by
+  let frame := Frame.assignAttribute (.name "self") "link" tail (env address)
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.method (.ref address) args body) [], [], heap⟩
+      ⟨.value count, .binaryRight .mult data false :: [frame], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl
+      ((field_read heap address fields "data" (by decide) data found getData heap.length
+        [.binaryLeft .mult (fieldExpr "count") (env address) false, frame]).trans
+        (.next rfl (field_read heap address fields "count" (by decide) count found getCount heap.length
+          [.binaryRight .mult data false, frame])))))
+  have retained : after[address]? = some (.instance classInfo.1 "Collector" fields) := by
+    cases asTuple with
+    | false =>
+        exact Heapq.preserves_allocate (SavedCell address (.instance classInfo.1 "Collector" fields))
+          (SavedCell.allocates address _) items heap _ after found allocated
+    | true =>
+        exact Heapq.preserves_allocateTuple (SavedCell address (.instance classInfo.1 "Collector" fields))
+          (SavedCell.allocates address _) items heap _ after found allocated
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.value count, .binaryRight .mult data false :: [frame], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · have built := AllocatingTrace.sequenceArithmetic (module := Probe.module) (anchors := heap.length) (choices := choices) (globals := [])
+      heap after .mult data count asTuple items resultAddress [frame] used [] input allocated
+    let result : Mutable.Value := .ref resultAddress
+    have write := Mutable.writeField_result (name := "link") (value := result) retained (by simp)
+    have assigned : HeapCalls.Reaches Probe.module heap.length
+        ⟨.value result, [frame], after⟩
+        ⟨.block tail (env address), [], methodHeap after address fields (.ok result)⟩ := by
+      apply HeapCalls.Reaches.next rfl
+      apply (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) .nil)
+        (.setField "link" result) [] heap.length _).trans
+      exact .next (following := ⟨.value (.scalar .none), [.discard tail (env address)], methodHeap after address fields (.ok result)⟩)
+        (by simp [HeapCalls.step, primitive, HeapCalls.result, run, write, methodHeap]) (.next rfl .refl)
+    have returned : BlockReturns Probe.module (env address) tail (methodHeap after address fields (.ok result))
+        (text "123") (methodHeap after address fields (.ok result)) := BlockReturns.return_value Evaluates.constant
+    exact built.trans (.stable rfl rfl (by simp [methodHeap])
+      ((IteratorCalls.Reaches.of_heap (assigned.trans (returned heap.length [])) []).trans (.next (core_done rfl rfl) .refl)))
+
+theorem next_run (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (data count : Mutable.Value)
+    (asTuple : Bool) (items : List Mutable.Value) (resultAddress : Nat)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some data) (getCount : fields.lookup "count" = some count)
+    (input : HeapCalls.Relocation.SequenceArithmeticInput heap .mult data count asTuple items)
+    (allocated : allocateSequence asTuple items heap = some (.ok (.ref resultAddress), after)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (methodOutcome (.ok (.ref resultAddress)))
+      (methodHeap after address fields (.ok (.ref resultAddress))) used :=
+  ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], next_bound heap address fields found,
+    method_trace choices used heap after address fields data count asTuple items resultAddress found getData getCount input allocated⟩
+
+theorem list_repeat_next (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (address source : Nat) (fields : List (String × Mutable.Value)) (items : List Mutable.Value) (count : Int)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some (.ref source)) (getCount : fields.lookup "count" = some (.scalar (.int count)))
+    (sourceFound : heap[source]? = some (.list items)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (.ok (text "123"))
+      (methodHeap (heap ++ [.list (List.replicate count.toNat items).flatten]) address fields (.ok (.ref heap.length))) used :=
+  next_run choices used heap _ address fields (.ref source) (.scalar (.int count)) false _ heap.length
+    found getData getCount (.repeatList source items count sourceFound) rfl
+
+theorem prefixes (n : Nat) (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (address source : Nat) (fields : List (String × Mutable.Value)) (items : List Mutable.Value) (count : Int)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some (.ref source)) (getCount : fields.lookup "count" = some (.scalar (.int count)))
+    (sourceFound : heap[source]? = some (.list items)) :
+    ∃ after, AllocatingYieldPrefix Probe.module choices (.ref address) text heap used (List.replicate n "123") after used ∧
+      after.length = heap.length + n := by
+  induction n generalizing heap fields with
+  | zero => exact ⟨heap, .nil, by simp⟩
+  | succ n ih =>
+    let middle := heap ++ [Mutable.Object.list (List.replicate count.toNat items).flatten]
+    let nextFields := Mutable.putField fields "link" (.ref heap.length)
+    let nextHeap := methodHeap middle address fields (.ok (.ref heap.length))
+    have ran := list_repeat_next choices used heap address source fields items count found getData getCount sourceFound
+    have bounded := (List.getElem?_eq_some_iff.mp found).1
+    have sourceInside := (List.getElem?_eq_some_iff.mp sourceFound).1
+    have separate : address ≠ source := by
+      intro same
+      subst source
+      rw [found] at sourceFound
+      cases sourceFound
+    obtain ⟨after, later, size⟩ := ih nextHeap nextFields
+      (by simp [nextHeap, methodHeap, middle, nextFields, show address < heap.length + 1 by omega])
+      (by simpa [nextFields, Mutable.putField_lookup_other] using getData)
+      (by simpa [nextFields, Mutable.putField_lookup_other] using getCount)
+      (by simpa only [nextHeap, methodHeap, List.getElem?_set_ne separate, middle, List.getElem?_append_left sourceInside] using sourceFound)
+    refine ⟨after, .cons ran later, ?_⟩
+    simp only [nextHeap, methodHeap, middle, List.length_set, List.length_append, List.length_singleton] at size
+    omega
+
+theorem isolated_next (choices : ChoiceSchedule) (used anchors : Nat) (logical physical : Mutable.Heap)
+    (rename : Nat → Nat) (address source : Nat) (fields : List (String × Mutable.Value)) (items : List Mutable.Value) (count : Int)
+    (layout : ExecutionLayout logical physical rename)
+    (found : logical[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some (.ref source)) (getCount : fields.lookup "count" = some (.scalar (.int count)))
+    (sourceFound : logical[source]? = some (.list items)) :
+    ∃ other nextMap,
+      ExecutionLayout (methodHeap (logical ++ [.list (List.replicate count.toNat items).flatten]) address fields (.ok (.ref logical.length))) other nextMap ∧
+      (∀ privateAddress object, object ≠ .tuple [] → PrivateLayout logical physical rename privateAddress object →
+        PrivateLayout (methodHeap (logical ++ [.list (List.replicate count.toNat items).flatten]) address fields (.ok (.ref logical.length))) other nextMap privateAddress object) ∧
+      ∀ loop resumes, IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following) loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (loop.body ++ [Calls.loopContinuation loop.body (loopCode loop (.ref (rename address)))]
+          ++ loop.following) (setLocal loop.env loop.name (text "123")), loop.stack, other⟩, used⟩ resumes) := by
+  obtain ⟨other, nextMap, extended, kept, ran⟩ :=
+    (list_repeat_next choices used logical address source fields items count found getData getCount sourceFound).scalar_isolated
+      ArithmeticIteratorExamples.source physical rename layout anchors
+  exact ⟨other, nextMap, extended.layout, kept, ran⟩
+
+theorem join_entry (heap : Mutable.Heap) (left right : Mutable.Value) :
+    HeapCalls.Reaches Probe.module heap.length ⟨.operation (.call "join") [left, right], [], heap⟩
+      ⟨.value right, [.binaryRight .add left false], heap⟩ := by
+  repeat first | exact .refl | refine .next rfl ?_
+
+theorem repeat_entry (heap : Mutable.Heap) (left right : Mutable.Value) :
+    HeapCalls.Reaches Probe.module heap.length ⟨.operation (.call "repeat") [left, right], [], heap⟩
+      ⟨.value right, [.binaryRight .mult left false], heap⟩ := by
+  repeat first | exact .refl | refine .next rfl ?_
+
+theorem left_repeat_entry (heap : Mutable.Heap) (left right : Mutable.Value) :
+    HeapCalls.Reaches Probe.module heap.length ⟨.operation (.call "left_repeat") [left, right], [], heap⟩
+      ⟨.value right, [.binaryRight .mult left false], heap⟩ := by
+  repeat first | exact .refl | refine .next rfl ?_
+
+theorem arithmetic_call (name : String) (op : BinOp) (choices : ChoiceSchedule) (used : Nat)
+    (heap after : Mutable.Heap) (left right : Mutable.Value) (asTuple : Bool) (items : List Mutable.Value) (address : Nat)
+    (entered : HeapCalls.Reaches Probe.module heap.length ⟨.operation (.call name) [left, right], [], heap⟩
+      ⟨.value right, [.binaryRight op left false], heap⟩)
+    (input : HeapCalls.Relocation.SequenceArithmeticInput heap op left right asTuple items)
+    (allocated : allocateSequence asTuple items heap = some (.ok (.ref address), after)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call name) [left, right], [], heap⟩, used⟩ []) after
+      (.completed (.ok ⟨.ok (.ref address), [], after, heap.length⟩) used []) := by
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.value right, [.binaryRight op left false], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · exact (AllocatingTrace.sequenceArithmetic heap after op left right asTuple items address [] used [] input allocated).trans
+      (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+theorem join_lists (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (left right : Nat)
+    (xs ys : List Mutable.Value) (first : heap[left]? = some (.list xs)) (second : heap[right]? = some (.list ys)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "join") [.ref left, .ref right], [], heap⟩, used⟩ []) (heap ++ [.list (xs ++ ys)])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.list (xs ++ ys)], heap.length⟩) used []) :=
+  arithmetic_call "join" .add choices used heap _ _ _ false _ heap.length (join_entry heap _ _)
+    (.addLists left right xs ys first second) rfl
+
+theorem join_tuples (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (left right : Nat)
+    (xs ys : List Mutable.Value) (first : heap[left]? = some (.tuple xs)) (second : heap[right]? = some (.tuple ys))
+    (nonemptyLeft : xs.isEmpty = false) (nonemptyRight : ys.isEmpty = false) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "join") [.ref left, .ref right], [], heap⟩, used⟩ []) (heap ++ [.tuple (xs ++ ys)])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.tuple (xs ++ ys)], heap.length⟩) used []) := by
+  apply arithmetic_call "join" .add choices used heap _ _ _ true _ heap.length (join_entry heap _ _)
+    (.addTuples left right xs ys first second nonemptyLeft nonemptyRight)
+  have nonempty : xs ≠ [] := by simpa using nonemptyLeft
+  simp [allocateSequence, Mutable.allocateTuple, nonempty, Except.map]
+
+theorem repeat_list (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (source : Nat)
+    (items : List Mutable.Value) (count : Int) (found : heap[source]? = some (.list items)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "repeat") [.ref source, .scalar (.int count)], [], heap⟩, used⟩ [])
+      (heap ++ [.list (List.replicate count.toNat items).flatten])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.list (List.replicate count.toNat items).flatten], heap.length⟩) used []) :=
+  arithmetic_call "repeat" .mult choices used heap _ _ _ false _ heap.length (repeat_entry heap _ _)
+    (.repeatList source items count found) rfl
+
+theorem left_boolean (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (source : Nat)
+    (items : List Mutable.Value) (flag : Bool) (found : heap[source]? = some (.list items)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "left_repeat") [.scalar (.bool flag), .ref source], [], heap⟩, used⟩ [])
+      (heap ++ [.list (List.replicate (if flag then 1 else 0) items).flatten])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.list (List.replicate (if flag then 1 else 0) items).flatten], heap.length⟩) used []) := by
+  apply arithmetic_call "left_repeat" .mult choices used heap _ _ _ false _ heap.length (left_repeat_entry heap _ _)
+    (.countLeft source (.bool flag) false _ (.booleanRight source flag false _ (.repeatList source items _ found)))
+  cases flag <;> rfl
+
+theorem repeat_tuple (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap) (source result : Nat)
+    (items : List Mutable.Value) (count : Int) (found : heap[source]? = some (.tuple items))
+    (different : count ≠ 1) (nonempty : items.isEmpty = false)
+    (allocated : Mutable.allocateTuple (List.replicate count.toNat items).flatten heap = some (.ok (.ref result), after)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "repeat") [.ref source, .scalar (.int count)], [], heap⟩, used⟩ []) after
+      (.completed (.ok ⟨.ok (.ref result), [], after, heap.length⟩) used []) :=
+  arithmetic_call "repeat" .mult choices used heap after _ _ true _ result (repeat_entry heap _ _)
+    (.repeatTuple source items count found different nonempty) allocated
+
+theorem tuple_reuse (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (source : Nat)
+    (items : List Mutable.Value) (count : Int) (found : heap[source]? = some (.tuple items))
+    (reuse : count = 1 ∨ items.isEmpty = true) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "repeat") [.ref source, .scalar (.int count)], [], heap⟩, used⟩ []) heap
+      (.completed (.ok ⟨.ok (.ref source), [], heap, heap.length⟩) used []) := by
+  have ran : Mutable.binary .mult (.ref source) (.scalar (.int count)) heap = some (.ok (.ref source), heap) := by
+    rw [binary_mult_tuple_eval heap source items count found]
+    simp only [reuse, if_true]
+    rfl
+  refine .stable rfl rfl rfl ?_
+  apply (IteratorCalls.Reaches.of_heap (repeat_entry heap (.ref source) (.scalar (.int count))) []).trans
+  exact .next (following := .running ⟨⟨.value (.ref source), [], heap⟩, used⟩ [])
+    (core_next rfl (by simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, HeapCalls.result, run, ran]))
+    (.next (core_done rfl rfl) .refl)
+
+theorem empty_left_tuple (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (left right : Nat)
+    (items : List Mutable.Value) (first : heap[left]? = some (.tuple [])) (second : heap[right]? = some (.tuple items)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "join") [.ref left, .ref right], [], heap⟩, used⟩ []) heap
+      (.completed (.ok ⟨.ok (.ref right), [], heap, heap.length⟩) used []) := by
+  have ran : Mutable.binary .add (.ref left) (.ref right) heap = some (.ok (.ref right), heap) := by
+    rw [binary_add_tuples_eval heap left right [] items first second]
+    rfl
+  refine .stable rfl rfl rfl ?_
+  apply (IteratorCalls.Reaches.of_heap (join_entry heap (.ref left) (.ref right)) []).trans
+  exact .next (following := .running ⟨⟨.value (.ref right), [], heap⟩, used⟩ [])
+    (core_next rfl (by simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, HeapCalls.result, run, ran]))
+    (.next (core_done rfl rfl) .refl)
+
+end ArithmeticIteratorExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation.SequenceArithmeticInput." + name for name in (
+    "within", "relocates", "binary",
+)] + ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "sequenceArithmetic_step", "AllocatingTrace.reaches", "AllocatingTrace.isolated",
+)] + ["ArithmeticIteratorExamples." + name for name in (
+    "source", "source_class", "source_next", "next_bound", "field_read", "method_trace", "next_run",
+    "list_repeat_next", "prefixes", "isolated_next", "join_entry", "repeat_entry", "left_repeat_entry", "arithmetic_call",
+    "join_lists", "join_tuples", "repeat_list", "left_boolean", "repeat_tuple", "tuple_reuse", "empty_left_tuple",
+)]
+
+with project_temporary_directory(prefix="iterator-arithmetic-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    shared = []
+    shared.append(shared)
+    for data in ([], [shared, shared], (), tuple([shared, shared])):
+        for count in (-100, -1, 0, 1, 2, 10, False, True):
+            collector = namespace["Collector"]()
+            collector.data, collector.count = data, count
+            previous = []
+            for _ in range(4):
+                assert next(collector) == "123"
+                assert collector.link == data * count
+                if isinstance(data, tuple) and (count == 1 or not data):
+                    assert collector.link is data
+                elif isinstance(data, list):
+                    assert collector.link is not data and all(collector.link is not item for item in previous)
+                previous.append(collector.link)
+            if collector.link:
+                assert all(item is shared for item in collector.link)
+            assert namespace["repeat"](data, count) == data * count
+            assert namespace["left_repeat"](count, data) == count * data
+        joined = namespace["join"](data, data)
+        assert joined == data + data
+        if isinstance(data, list) or data:
+            assert joined is not data
+        assert all(item is shared for item in joined)
+    value = tuple([shared])
+    assert namespace["join"]((), value) is value
+    assert namespace["join"](value, ()) is value
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAllocatingAcquisition\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"arithmetic iterators: arbitrary signed counts, both operand orders, shallow aliases, tuple reuse and private consumers; {len(AUDITS)} axiom audits passed")
