@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""
+Check nonrecursive comparison invariants, chain evaluation, and shared mutations.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def store_compare(mapping, key, value):
+    mapping[key] = value
+    return mapping == mapping
+
+def store_true(mapping, key, value):
+    mapping[key] = value
+    return True
+
+def stopped_chain(items, left, right, value):
+    return left < right < items.append(value)
+
+def stopped_false(items, left, right, value):
+    return False
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineComparisonExamples
+set_option Elab.async false
+
+def stored (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (value : Mutable.Value) :=
+  heap.set address (.dict (ScalarDict.insert entries key value))
+
+theorem dictionary_self_equal (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (found : heap[address]? = some (.dict entries)) :
+    HeapCalls.compare .eq (.ref address) (.ref address) heap = some (.ok (.scalar (.bool true)), heap) := by
+  rw [compare_dicts_eq heap .eq address address entries entries found found]
+  simp [equalityAnswer, comparisonEval, Except.map]
+
+theorem compare_returns (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (value : Mutable.Value) (found : heap[address]? = some (.dict entries)) :
+    ReturnsValue Probe.module "store_compare" [.ref address, .scalar key, value] heap (.scalar (.bool true))
+      (stored heap address entries key value) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have write : Mutable.setItem (.ref address) (.scalar key) value heap =
+      some (.ok (.scalar .none), stored heap address entries key value) := by
+    simp [Mutable.setItem, found, stored, Except.map]
+  have after : (stored heap address entries key value)[address]? = some (.dict (ScalarDict.insert entries key value)) := by
+    simp [stored, valid]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.setItem (by intros; simp) (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) write
+  exact BlockReturns.return_value (Evaluates.compare (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+    (dictionary_self_equal _ address _ after))
+
+theorem direct_returns (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (value : Mutable.Value) (found : heap[address]? = some (.dict entries)) :
+    ReturnsValue Probe.module "store_true" [.ref address, .scalar key, value] heap (.scalar (.bool true))
+      (stored heap address entries key value) := by
+  have write : Mutable.setItem (.ref address) (.scalar key) value heap =
+      some (.ok (.scalar .none), stored heap address entries key value) := by
+    simp [Mutable.setItem, found, stored, Except.map]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.setItem (by intros; simp) (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) write
+  exact BlockReturns.return_value Evaluates.constant
+
+theorem store_compare_equiv (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (value : Mutable.Value) (found : heap[address]? = some (.dict entries)) :
+    (IteratorCalls.call Probe.module "store_compare" [.ref address, .scalar key, value] heap).Equiv
+      (IteratorCalls.call Probe.module "store_true" [.ref address, .scalar key, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, .scalar key, value] heap (.scalar (.bool true))
+        (stored heap address entries key value)) :
+      ((IteratorCalls.call Probe.module name [.ref address, .scalar key, value] heap).run choices).Finishes
+        ⟨.ok (.scalar (.bool true)), [], stored heap address entries key value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "store_compare" leftChoices (compare_returns heap address entries key value found))
+    (finishes "store_true" rightChoices (direct_returns heap address entries key value found)) (Or.inl rfl)
+
+/-- The comparison uses the mutation's actual output invariant under arbitrary saved consumers. -/
+theorem store_then_compare (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (value right : Mutable.Value) (op : CmpOp)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.dict entries)) (valueInside : value.edge.Within logical.length)
+    (rightInside : right.edge.Within logical.length)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (stored logical address entries key value) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.setItem value) [.ref address, .scalar key], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], stored logical address entries key value⟩) ∧
+      IteratorCalls.Relocation.Preserves (stored logical address entries key value) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.value right, [.compareRight op (.ref address)], stored logical address entries key value⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.value right, [.compareRight op (.ref address)], stored logical address entries key value⟩, used⟩ resumes))) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have inside : StateWithin ⟨.operation (.setItem value) [.ref address, .scalar key], [], logical⟩ := by
+    refine ⟨⟨valueInside, ?_⟩, by simp⟩
+    simp [Mutable.Value.edge, Graph.Edge.Within, bounded]
+  have preserved := step_setItem_preserves Probe.module logical physical rename logical.length physical.length
+    (.ref address) (.scalar key) value [] [] layout inside globalsInside
+  have actual : HeapCalls.step Probe.module logical.length
+      ⟨.operation (.setItem value) [.ref address, .scalar key], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], stored logical address entries key value⟩ := by
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, Mutable.setItem, found, stored, Except.map]
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, _, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have comparisonInside : StateWithin
+      ⟨.value right, [.compareRight op (.ref address)], stored logical address entries key value⟩ := by
+    refine ⟨?_, ?_⟩
+    · simpa [stored] using rightInside
+    · simp [FrameWithin, stored, Mutable.Value.edge, Graph.Edge.Within, bounded]
+  have nonrecursive : NonrecursiveComparison (stored logical address entries key value) op (.ref address) right := by
+    cases right with
+    | scalar scalar => trivial
+    | ref other => simp [NonrecursiveComparison, stored, bounded]
+  have raw := step_compare_nonrecursive_preserves Probe.module (stored logical address entries key value) other nextMap
+    logical.length physical.length op (.ref address) right [] [] retained comparisonInside nextGlobals nonrecursive
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.value right, [.compareRight op (.ref address)], stored logical address entries key value⟩, used⟩ other nextMap
+    logical.length physical.length [] retained comparisonInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨comparisonInside.1, comparisonInside.2, by simpa [stored] using saved⟩ rfl wrapped
+
+/-- Dataclass field lookup errors remain errors even when both operands are the same object. -/
+theorem missing_dataclass_field (heap : Mutable.Heap) (address : Nat) (origin name field : String)
+    (found : heap[address]? = some (.dataInstance origin name false [field] [])) :
+    HeapCalls.compare .eq (.ref address) (.ref address) heap = some (.error ⟨"AttributeError", []⟩, heap) := by
+  rw [compare_dataInstances_eq heap .eq address address _ _ _ _ _ _ _ _ _ _ found found]
+  simp [dataEqualityAnswer, declaredValues, comparisonEval, bind, Except.bind, Except.map]
+
+/-- Unequal stored reference identities stay unsupported rather than becoming a false result. -/
+theorem dictionary_unknown_values (heap : Mutable.Heap) (left right a b : Nat)
+    (different : left ≠ right) (valuesDifferent : a ≠ b)
+    (first : heap[left]? = some (.dict [(.int 0, .ref a)]))
+    (second : heap[right]? = some (.dict [(.int 0, .ref b)])) :
+    HeapCalls.compare .eq (.ref left) (.ref right) heap = none := by
+  rw [compare_dicts_eq heap .eq left right _ _ first second]
+  simp [different, equalityAnswer, comparisonEval, HeapCalls.equalDictionaries,
+    HeapCalls.equalEntries, HeapCalls.equalElements, ScalarDict.lookup, scalarCompare, evalCmpOp,
+    valuesDifferent, bind, Option.bind]
+
+/-- A false first comparison does not evaluate the mutating final operand. -/
+theorem stopped_chain_returns (heap : Mutable.Heap) (items value : Mutable.Value) (left right : Int)
+    (stopped : ¬ left < right) :
+    ReturnsValue Probe.module "stopped_chain" [items, .scalar (.int left), .scalar (.int right), value] heap
+      (.scalar (.bool false)) heap := by
+  have compared : HeapCalls.compare .lt (.scalar (.int left)) (.scalar (.int right)) heap =
+      some (.ok (.scalar (.bool false)), heap) := by
+    simp [HeapCalls.compare, HeapCalls.compareScalars, scalarCompare, evalCmpOp, stopped]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.chain (Evaluates.lookup rfl) (Evaluates.Compares.stop (Evaluates.lookup rfl) compared rfl)
+
+theorem stopped_false_returns (heap : Mutable.Heap) (items value : Mutable.Value) (left right : Int) :
+    ReturnsValue Probe.module "stopped_false" [items, .scalar (.int left), .scalar (.int right), value] heap
+      (.scalar (.bool false)) heap := by
+  apply BlockReturns.function rfl rfl
+  exact BlockReturns.return_value Evaluates.constant
+
+theorem stopped_chain_equiv (heap : Mutable.Heap) (items value : Mutable.Value) (left right : Int)
+    (stopped : ¬ left < right) :
+    (IteratorCalls.call Probe.module "stopped_chain" [items, .scalar (.int left), .scalar (.int right), value] heap).Equiv
+      (IteratorCalls.call Probe.module "stopped_false" [items, .scalar (.int left), .scalar (.int right), value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [items, .scalar (.int left), .scalar (.int right), value] heap
+        (.scalar (.bool false)) heap) :
+      ((IteratorCalls.call Probe.module name [items, .scalar (.int left), .scalar (.int right), value] heap).run choices).Finishes
+        ⟨.ok (.scalar (.bool false)), [], heap, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "stopped_chain" leftChoices (stopped_chain_returns heap items value left right stopped))
+    (finishes "stopped_false" rightChoices (stopped_false_returns heap items value left right)) (Or.inl rfl)
+
+/-- Equality fast paths retain arbitrary shared references, including cyclic prefixes. -/
+theorem shared_prefix_preserves (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right shared : Nat) (x y : Int) (negated : Bool)
+    (stack : List Frame) (globals : Mutable.Globals)
+    (first : logical[left]? = some (.list [.ref shared, .scalar (.int x)]))
+    (second : logical[right]? = some (.list [.ref shared, .scalar (.int y)]))
+    (inside : StateWithin ⟨.value (.ref right), .compareRight (if negated then .notEq else .eq) (.ref left) :: stack, logical⟩)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    Preserves logical physical rename physical.length
+      (HeapCalls.step Probe.module logical.length
+        ⟨.value (.ref right), .compareRight (if negated then .notEq else .eq) (.ref left) :: stack, logical⟩ globals)
+      (HeapCalls.step Probe.module physical.length
+        (relocateState rename physical
+          ⟨.value (.ref right), .compareRight (if negated then .notEq else .eq) (.ref left) :: stack, logical⟩)
+        (relocateGlobals rename globals)) := by
+  apply step_compare_nonrecursive_preserves Probe.module logical physical rename logical.length physical.length
+    _ _ _ stack globals layout inside globalsInside
+  cases negated <;>
+    simp [NonrecursiveComparison, first, second, HeapCalls.equalLists, HeapCalls.equalElements,
+      scalarCompare, evalCmpOp, bind, Option.bind]
+  all_goals (repeat' split) <;> simp_all
+
+end MachineComparisonExamples
+'''
+AUDITS = [
+    "MachineComparisonExamples.shared_prefix_preserves",
+    "RuntimeLayout.compare_shallow_sequences",
+    "RuntimeLayout.compare_sequences_nonrecursive",
+    "MachineComparisonExamples.stopped_chain_returns",
+    "MachineComparisonExamples.stopped_false_returns",
+    "MachineComparisonExamples.stopped_chain_equiv",
+    "MachineComparisonExamples.dictionary_unknown_values",
+    "RuntimeLayout.compare_nonrecursive",
+    "result_compare_nonrecursive_preserves",
+    "step_compare_nonrecursive_preserves",
+    "step_chainCompare_nonrecursive_preserves",
+    "step_compareLeft_preserves",
+    "step_chainLeft_preserves",
+    "step_compare_expression_preserves",
+    "MachineComparisonExamples.dictionary_self_equal",
+    "MachineComparisonExamples.compare_returns",
+    "MachineComparisonExamples.direct_returns",
+    "MachineComparisonExamples.store_compare_equiv",
+    "MachineComparisonExamples.store_then_compare",
+    "MachineComparisonExamples.missing_dataclass_field",
+]
+
+with project_temporary_directory(prefix="machine-comparison-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("store_compare", "store_true"):
+        for key in (True, 1, 0, -2, "key", b"key", None):
+            mapping = {True: object(), "cycle": None}
+            mapping["cycle"] = mapping
+            assert namespace[name](mapping, key, mapping) is True
+            assert mapping[key] is mapping and mapping["cycle"] is mapping
+            assert next(iter(mapping)) is True
+    for left, right in ((0, 0), (1, 0), (-1, -2), (10**100, -10**100)):
+        items = []
+        assert namespace["stopped_chain"](items, left, right, items) is False
+        assert not items
+        assert namespace["stopped_chain"](None, left, right, None) is False
+    items = []
+    try:
+        namespace["stopped_chain"](items, -1, 0, items)
+    except TypeError:
+        assert len(items) == 1 and items[0] is items
+    else:
+        raise AssertionError("true first comparison must evaluate the mutating last operand")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineComparisonInvariant\n"
+                     "import lang.py.FormalSW.MachineItemInvariant\nimport lang.py.FormalSW.IteratorRules\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine comparisons: nonrecursive dispatch, chains and mutation composition; {len(AUDITS)} axiom audits passed")
