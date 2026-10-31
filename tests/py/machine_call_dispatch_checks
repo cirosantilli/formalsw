@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""
+Check call dispatch and receiver effects before method argument effects.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Reader:
+    def read(self, ignored):
+        return self.link
+
+
+def select(reader, value):
+    reader.link = value
+    return reader
+
+
+def replace(reader, value):
+    reader.link = value
+    return value
+
+
+def invoke(reader, first, last):
+    return select(reader, first).read(replace(reader, last))
+
+
+def inline(reader, first, last):
+    reader.link = first
+    reader.link = last
+    return last
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineCallDispatchExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Reader").getD ("", [])
+def methodArgs : List Arg := [{name := "self", annotation := none}, {name := "ignored", annotation := none}]
+def methodBody : List Stmt := [.return (.attribute (.name "self") "link")]
+def stored (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (value : Mutable.Value) :=
+  heap.set address (.instance classInfo.1 "Reader" (Mutable.putField fields "link" value))
+def twice (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (first last : Mutable.Value) :=
+  stored (stored heap address fields first) address (Mutable.putField fields "link" first) last
+
+theorem source_class : Probe.module.findClass "Reader" = some classInfo := rfl
+theorem source_method : findFunctionIn classInfo.2 "read" = some (methodArgs, methodBody) := rfl
+
+theorem stored_found (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (value : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields)) :
+    (stored heap address fields value)[address]? = some (.instance classInfo.1 "Reader" (Mutable.putField fields "link" value)) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  simp [stored, inside]
+
+theorem select_returns (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (value : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields)) :
+    ReturnsValue Probe.module "select" [.ref address, value] heap (.ref address) (stored heap address fields value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockContinues.returns (body := [.assign [.attribute (.name "reader") "link"] (.name "value")])
+  · apply BlockContinues.setAttribute (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+    exact Mutable.writeField_result found (by simp)
+  · exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem replace_returns (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (value : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields)) :
+    ReturnsValue Probe.module "replace" [.ref address, value] heap value (stored heap address fields value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockContinues.returns (body := [.assign [.attribute (.name "reader") "link"] (.name "value")])
+  · apply BlockContinues.setAttribute (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+    exact Mutable.writeField_result found (by simp)
+  · exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem method_returns (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (ignored value : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (linked : fields.lookup "link" = some value) :
+    MethodReturns Probe.module (.ref address) methodArgs methodBody [ignored] heap value heap := by
+  apply MethodReturns.of_body rfl
+  apply BlockReturns.return_value
+  apply Evaluates.field (Evaluates.lookup rfl)
+  simp [getAttribute, found, instanceClass, source_class, linked]
+
+theorem invoke_returns (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (first last : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (absent : fields.lookup "read" = none) :
+    ReturnsValue Probe.module "invoke" [.ref address, first, last] heap last (twice heap address fields first last) := by
+  have selected := stored_found heap address fields first found
+  have replaced := stored_found _ address _ last selected
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.method_receiver (args := methodArgs) (body := methodBody)
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (select_returns heap address fields first found)) (by decide)
+  · simp [bindMethod, selected, instanceClass, source_class, source_method,
+      Mutable.putField_lookup_other fields "link" "read" first (by decide), absent]
+  · exact .cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (replace_returns _ address _ last selected)) .nil
+  · exact method_returns _ address _ last last replaced (Mutable.putField_lookup _ _ _)
+
+theorem inline_returns (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (first last : Mutable.Value) (found : heap[address]? = some (.instance classInfo.1 "Reader" fields)) :
+    ReturnsValue Probe.module "inline" [.ref address, first, last] heap last (twice heap address fields first last) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockContinues.returns (body := [.assign [.attribute (.name "reader") "link"] (.name "first")])
+    (middleHeap := stored heap address fields first)
+  · apply BlockContinues.setAttribute (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+    exact Mutable.writeField_result found (by simp)
+  · apply BlockContinues.returns (body := [.assign [.attribute (.name "reader") "link"] (.name "last")])
+    · apply BlockContinues.setAttribute (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+      exact Mutable.writeField_result (stored_found heap address fields first found) (by simp)
+    · exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem invoke_equiv (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (first last : Mutable.Value) (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (absent : fields.lookup "read" = none) :
+    (IteratorCalls.call Probe.module "invoke" [.ref address, first, last] heap).Equiv
+      (IteratorCalls.call Probe.module "inline" [.ref address, first, last] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, first, last] heap last (twice heap address fields first last)) :
+      ((IteratorCalls.call Probe.module name [.ref address, first, last] heap).run choices).Finishes
+        ⟨.ok last, [], twice heap address fields first last, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "invoke" leftChoices (invoke_returns heap address fields first last found absent))
+    (finishes "inline" rightChoices (inline_returns heap address fields first last found)) (Or.inl rfl)
+
+/-- Call dispatch consumes a field write's actual output invariant under saved iterator consumers. -/
+theorem write_then_dispatch (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (fields : List (String × Mutable.Value))
+    (replacement : Mutable.Value) (callee : Expr) (expressions : List Expr) (env : HeapCalls.Env) (used : Nat) (choices : ChoiceSchedule)
+    (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.instance classInfo.1 "Reader" fields))
+    (replacementInside : replacement.edge.Within logical.length)
+    (envInside : EnvWithin logical.length env)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (stored logical address fields replacement) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.setField "link" replacement) [.ref address], [], logical⟩) =
+        .next (relocateState nextMap other
+          ⟨.value (.scalar .none), [], stored logical address fields replacement⟩) ∧
+      IteratorCalls.Relocation.Preserves (stored logical address fields replacement) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.expr (.call callee expressions) env, [],
+            stored logical address fields replacement⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.expr (.call callee expressions) env, [],
+              stored logical address fields replacement⟩, used⟩ resumes))) := by
+  have addressInside := (List.getElem?_eq_some_iff.mp found).1
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have inside : StateWithin ⟨.operation (.setField "link" replacement) [.ref address], [], logical⟩ := by
+    refine ⟨⟨replacementInside, ?_⟩, by simp⟩
+    simpa only [List.mem_singleton, forall_eq, Mutable.Value.edge, Graph.Edge.Within] using addressInside
+  have written := Mutable.writeField_result (name := "link") (value := replacement) found (by simp)
+  have actual : HeapCalls.step Probe.module logical.length
+      ⟨.operation (.setField "link" replacement) [.ref address], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], stored logical address fields replacement⟩ := by
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, written, stored]
+  have preserved := step_setField_preserves Probe.module logical physical rename logical.length physical.length
+    (.ref address) replacement "link" [] [] layout inside globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have bindingInside : StateWithin ⟨.expr (.call callee expressions) env, [],
+      stored logical address fields replacement⟩ := by
+    exact ⟨envInside.mono larger, by simp⟩
+  have raw := step_call_expression_preserves Probe.module _ other nextMap logical.length physical.length
+    callee expressions env [] [] retained bindingInside
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.expr (.call callee expressions) env, [],
+      stored logical address fields replacement⟩, used⟩ other nextMap
+    logical.length physical.length [] retained bindingInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨bindingInside.1, bindingInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
+end MachineCallDispatchExamples
+'''
+AUDITS = [
+    "FormalSW.PyAst.HeapCalls.Relocation.step_attribute_call",
+    "FormalSW.PyAst.HeapCalls.Relocation.step_call_expression_preserves",
+    "FormalSW.PyAst.HeapCalls.Relocation.step_builtin_expression_preserves",
+    "FormalSW.PyAst.HeapCalls.Evaluates.name_isSome",
+    "FormalSW.PyAst.HeapCalls.Evaluates.method_receiver",
+    "MachineCallDispatchExamples.source_class", "MachineCallDispatchExamples.source_method",
+    "MachineCallDispatchExamples.stored_found", "MachineCallDispatchExamples.select_returns",
+    "MachineCallDispatchExamples.replace_returns", "MachineCallDispatchExamples.method_returns",
+    "MachineCallDispatchExamples.invoke_returns", "MachineCallDispatchExamples.inline_returns",
+    "MachineCallDispatchExamples.invoke_equiv", "MachineCallDispatchExamples.write_then_dispatch",
+]
+with project_temporary_directory(prefix="machine-call-dispatch-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("invoke", "inline"):
+        for shared in (False, True):
+            receiver = namespace["Reader"]()
+            first = [receiver]
+            last = first if shared else receiver
+            assert namespace[name](receiver, first, last) is last
+            assert receiver.link is last
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineCallDispatchInvariant\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"call dispatch: receiver effects, argument effects, shared results; {len(AUDITS)} axiom audits passed")
