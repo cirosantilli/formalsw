@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""
+Prove a mutating reverse traversal visits exactly its original sequence length.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def grow(items, extra):
+    count = 0
+    for entry in reversed(items):
+        items.append(extra)
+        count += 1
+    return count
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineReverseExamples
+set_option Elab.async false
+
+def args : List Arg := [{name := "items", annotation := none}, {name := "extra", annotation := none}]
+def loopBody : List Stmt := [.expr (.call (.attribute (.name "items") "append") [.name "extra"]),
+  .augAssign (.name "count") .add (.constant (.int 1))]
+def following : List Stmt := [.return (.name "count")]
+def body : List Stmt := [.assign [.name "count"] (.constant (.int 0)),
+  .forReversed "entry" (.name "items") loopBody []] ++ following
+def grown (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (number : Nat) (extra : Mutable.Value) :=
+  if number = 0 then heap else heap.set address (.list (items ++ List.replicate number extra))
+
+theorem source_function : findFunctionIn Probe.module.body "grow" = some (args, body) := rfl
+
+theorem grown_step (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (number : Nat) (extra : Mutable.Value) :
+    grown (heap.set address (.list (items ++ [extra]))) address (items ++ [extra]) number extra =
+      grown heap address items (number + 1) extra := by
+  cases number <;> simp [grown, List.set_set, List.append_assoc, List.replicate_succ]
+
+/-- The induction measure is the saved cursor, independent of the growing list length. -/
+theorem loop_returns (remaining : Nat) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (extra : Mutable.Value) (env : HeapCalls.Env) (count : Int)
+    (found : heap[address]? = some (.list items)) (bounded : remaining ≤ items.length)
+    (source : env "items" = some (.ref address)) (extraLookup : env "extra" = some extra)
+    (countLookup : env "count" = some (.scalar (.int count))) :
+    BlockReturns Probe.module env
+      (.reverseSequenceStepLoop "entry" (.ref address) ((remaining : Int) - 1) loopBody [] :: following)
+      heap (.scalar (.int (count + remaining))) (grown heap address items remaining extra) := by
+  induction remaining generalizing heap items env count with
+  | zero =>
+    simp only [Int.natCast_zero, Int.add_zero, grown]
+    apply BlockReturns.reverse_done (by omega)
+    exact BlockReturns.return_value (Evaluates.lookup countLookup)
+  | succ remaining ih =>
+    have addressBound := (List.getElem?_eq_some_iff.mp found).1
+    have itemBound : remaining < items.length := by omega
+    have position : ((remaining + 1 : Nat) : Int) - 1 = remaining := by omega
+    have read : Mutable.reversibleSequence (.ref address) heap = some (.ok items, heap) := by
+      simp [Mutable.reversibleSequence, Mutable.sequence, found]
+    have updatedFound : (heap.set address (.list (items ++ [extra])))[address]? = some (.list (items ++ [extra])) := by
+      simp [addressBound]
+    let nextEnv := setLocal (setLocal env "entry" items[remaining]) "count" (.scalar (.int (count + 1)))
+    have tail := ih (heap.set address (.list (items ++ [extra]))) (items ++ [extra]) nextEnv (count + 1)
+      updatedFound (by simp; omega) (by simp [nextEnv, setLocal, source])
+      (by simp [nextEnv, setLocal, extraLookup]) (by simp [nextEnv, setLocal])
+    have countSame : count + 1 + (remaining : Int) = count + ((remaining + 1 : Nat) : Int) := by omega
+    rw [countSame, grown_step] at tail
+    rw [position]
+    apply BlockReturns.reverse_step (source := .ref address) (position := (remaining : Int)) (by omega) read (List.getElem?_eq_getElem itemBound)
+    apply BlockReturns.discard (Evaluates.append (Evaluates.lookup (by simp [setLocal, source])) found
+      (Evaluates.lookup (value := extra) (by simp [setLocal, extraLookup])) found)
+    apply BlockReturns.augAssign (left := .scalar (.int count)) (value := .scalar (.int (count + 1)))
+      (by simp [setLocal, countLookup]) Evaluates.constant (by rfl)
+    simpa only [loopBody, List.cons_append, List.nil_append, Calls.loopContinuation,
+      Calls.loopControl, Calls.loopControlStmt, Bool.false_or, Bool.false_eq_true, if_false, nextEnv] using tail
+
+theorem source_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (extra : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "grow" [.ref address, extra] heap (.scalar (.int items.length))
+      (grown heap address items items.length extra) := by
+  apply BlockReturns.function source_function (completed := [.ref address, extra]) rfl
+  apply BlockReturns.assign Evaluates.constant
+  have read : Mutable.reversibleSequence (.ref address) heap = some (.ok items, heap) := by
+    simp [Mutable.reversibleSequence, Mutable.sequence, found]
+  apply BlockReturns.for_reversed (Evaluates.lookup (by simp [functionEnv, HeapCalls.argumentEnv, args, setLocal])) read
+  simpa only [Int.zero_add] using loop_returns items.length heap address items extra _ 0 found (by omega)
+    (by simp [functionEnv, HeapCalls.argumentEnv, args, setLocal])
+    (by simp [functionEnv, HeapCalls.argumentEnv, args, setLocal, List.lookup]) (by simp [setLocal])
+
+theorem paired_returns (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value) (extra : Mutable.Value)
+    (found : logical[address]? = some (.list items)) (extraInside : extra.edge.Within logical.length) :
+    ReturnsValue Probe.module "grow" [.ref address, extra] logical (.scalar (.int items.length))
+        (grown logical address items items.length extra) ∧
+    ReturnsValue Probe.module "grow" [.ref (rename address), relocateValue rename extra] physical (.scalar (.int items.length))
+        (grown physical (rename address) (items.map (relocateValue rename)) items.length (relocateValue rename extra)) ∧
+    ExecutionLayout (grown logical address items items.length extra)
+      (grown physical (rename address) (items.map (relocateValue rename)) items.length (relocateValue rename extra)) rename := by
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  refine ⟨source_returns logical address items extra found, ?_, ?_⟩
+  · simpa only [List.length_map] using source_returns physical (rename address) (items.map (relocateValue rename))
+      (relocateValue rename extra) moved
+  · by_cases empty : items.length = 0
+    · simpa [grown, empty] using layout
+    · have old := layout.closed (.list items) (List.mem_of_getElem? found)
+      have retained := layout.set_list address items (items ++ List.replicate items.length extra) found (by
+        intro value member
+        rcases List.mem_append.mp member with member | member
+        · exact old value member
+        · have same := (List.mem_replicate.mp member).2
+          subst value
+          exact extraInside)
+      simpa [grown, empty] using retained
+
+end MachineReverseExamples
+'''
+AUDITS = ["MachineReverseExamples." + name for name in (
+    "grown_step", "loop_returns", "source_returns", "paired_returns",
+)] + ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
+    "RuntimeLayout.reversibleSequence", "reversibleSequence_keeps_heap", "reversibleSequence_sequence",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "run_readonly_relocates", "run_readonly_within", "step_for_reversed_relocates",
+    "step_reverse_start_relocates", "step_reverse_loop_relocates", "StateWithin.for_reversed",
+    "StateWithin.reverse_start", "StateWithin.reverse_loop",
+)]
+
+with project_temporary_directory(prefix="machine-reverse-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for length in (0, 1, 2, 9, 100):
+        original = [object() for _ in range(length)]
+        items = original.copy()
+        extra = object()
+        assert namespace["grow"](items, extra) == length
+        assert len(items) == 2 * length
+        assert all(actual is expected for actual, expected in zip(items[:length], original))
+        assert all(item is extra for item in items[length:])
+    cycle = []
+    cycle.append(cycle)
+    assert namespace["grow"](cycle, cycle) == 1
+    assert len(cycle) == 2 and all(item is cycle for item in cycle)
+    shared = []
+    items = [shared, shared, shared]
+    assert namespace["grow"](items, shared) == 3 and all(item is shared for item in items)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineReverse\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"reverse iteration: full growing traversal and shared references; {len(AUDITS)} axiom audits passed")

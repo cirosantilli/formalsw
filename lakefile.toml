@@ -129,6 +129,7 @@ roots = [
   "lang.py.FormalSW.MachineLoopEntry",
   "lang.py.FormalSW.MachineUnpacking",
   "lang.py.FormalSW.MachineEnumerate",
+  "lang.py.FormalSW.MachineReverse",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",
