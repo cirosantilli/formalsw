@@ -126,6 +126,7 @@ roots = [
   "lang.py.FormalSW.BufferArithmeticRelocation",
   "lang.py.FormalSW.BinaryDispatchRelocation",
   "lang.py.FormalSW.MachineLoops",
+  "lang.py.FormalSW.MachineLoopEntry",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",

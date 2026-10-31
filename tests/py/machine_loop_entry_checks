@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""
+Prove range argument effects survive conversion errors and preserve shared values.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def record(items, value):
+    items.append(value)
+    return value
+
+def select(items, start, stop, stride):
+    for index in range(record(items, start), record(items, stop), record(items, stride)):
+        return index
+    else:
+        return items
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineLoopEntryExamples
+set_option Elab.async false
+
+def recordArgs : List Arg := [{name := "items", annotation := none}, {name := "value", annotation := none}]
+def recordBody : List Stmt := [.expr (.call (.attribute (.name "items") "append") [.name "value"]), .return (.name "value")]
+def args : List Arg := ["items", "start", "stop", "stride"].map fun name => {name := name, annotation := none}
+def expressions : List Expr := ["start", "stop", "stride"].map fun name =>
+  .call (.name "record") [.name "items", .name name]
+def loopBody : List Stmt := [.return (.name "index")]
+def otherwise : List Stmt := [.return (.name "items")]
+def body : List Stmt := [.forIn (.name "index") (.call (.name "range") expressions) loopBody otherwise]
+def env (address : Nat) (start stop stride : Mutable.Value) :=
+  functionEnv args body [.ref address, start, stop, stride] []
+def firstHeap (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (start : Mutable.Value) :=
+  heap.set address (.list (items ++ [start]))
+def secondHeap (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (start stop : Mutable.Value) :=
+  (firstHeap heap address items start).set address (.list (items ++ [start, stop]))
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (start stop stride : Mutable.Value) :=
+  (secondHeap heap address items start stop).set address (.list (items ++ [start, stop, stride]))
+def selection (address : Nat) (values : List Mutable.Value) : Except ExceptionObject Mutable.Value :=
+  match rangeBounds values with
+  | .error exception => .error exception
+  | .ok (start, stop, stride) =>
+      .ok (if Calls.rangeContinues start stop stride then .scalar (.int start) else .ref address)
+
+theorem source_record : findFunctionIn Probe.module.body "record" = some (recordArgs, recordBody) := rfl
+theorem source_select : findFunctionIn Probe.module.body "select" = some (args, body) := rfl
+
+theorem record_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "record" [.ref address, value] heap value (heap.set address (.list (items ++ [value]))) := by
+  apply BlockReturns.function source_record (completed := [.ref address, value]) rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem arguments_evaluate (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (start stop stride : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    Evaluates.Arguments Probe.module (env address start stop stride) expressions heap [start, stop, stride]
+      (after heap address items start stop stride) := by
+  have bound := (List.getElem?_eq_some_iff.mp found).1
+  have firstFound : (firstHeap heap address items start)[address]? = some (.list (items ++ [start])) := by
+    simp [firstHeap, bound]
+  have secondFound : (secondHeap heap address items start stop)[address]? = some (.list (items ++ [start, stop])) := by
+    simp [secondHeap, firstHeap, bound]
+  apply Evaluates.Arguments.cons
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) (record_returns heap address items start found))
+  apply Evaluates.Arguments.cons
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (record_returns (firstHeap heap address items start) address (items ++ [start]) stop firstFound))
+  simp only [List.append_assoc, List.cons_append, List.nil_append]
+  apply Evaluates.Arguments.cons
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (record_returns (secondHeap heap address items start stop) address (items ++ [start, stop]) stride secondFound))
+  simp only [after, List.append_assoc, List.cons_append, List.nil_append]
+  exact .nil
+
+/-- All three calls finish before range rejects any of the values or its stride. -/
+theorem source_finishes (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (start stop stride : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    (HeapCalls.call Probe.module "select" [.ref address, start, stop, stride] heap).Finishes
+      ⟨selection address [start, stop, stride], [], after heap address items start stop stride, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  apply Finishes.next (following := ⟨.block body (env address start stop stride), [], heap⟩)
+  · change HeapCalls.step Probe.module heap.length
+      ⟨.operation (.call "select") [.ref address, start, stop, stride], [], heap⟩ [] = _
+    simp [HeapCalls.step, source_select, show completeArguments args [.ref address, start, stop, stride] =
+      some [.ref address, start, stop, stride] from rfl, executableBody, body, env]
+  · apply (for_range_reach (arguments_evaluate heap address items start stop stride found)
+      "index" loopBody otherwise [] heap.length []).finishes
+    cases tested : rangeBounds [start, stop, stride] with
+    | error exception =>
+      exact .done (by simp [HeapCalls.step, tested, HeapCalls.done, selection, HeapCalls.protectGenerator, Calls.generatorException])
+    | ok triple =>
+      rcases triple with ⟨initial, limit, increment⟩
+      have returned : BlockReturns Probe.module (env address start stop stride)
+          [.rangeStepLoop "index" initial limit increment loopBody otherwise]
+          (after heap address items start stop stride)
+          (if Calls.rangeContinues initial limit increment then .scalar (.int initial) else .ref address)
+          (after heap address items start stop stride) := by
+        cases active : Calls.rangeContinues initial limit increment with
+        | false =>
+          apply BlockReturns.range_done active
+          exact BlockReturns.return_value (Evaluates.lookup rfl)
+        | true =>
+          apply BlockReturns.range_step active
+          exact BlockReturns.return_value (Evaluates.lookup (by simp [setLocal]))
+      simpa only [selection, tested] using
+        Finishes.next (by simp [HeapCalls.step, tested]) ((returned heap.length []).finishes (.done rfl))
+
+theorem selection_relocate (rename : Nat → Nat) (address : Nat) (values : List Mutable.Value) :
+    selection (rename address) (values.map (relocateValue rename)) =
+      (selection address values).map (relocateValue rename) := by
+  simp only [selection, rangeBounds_relocate]
+  cases rangeBounds values with
+  | error exception => rfl
+  | ok triple =>
+    rcases triple with ⟨start, stop, stride⟩
+    cases active : Calls.rangeContinues start stop stride <;> simp [active, Except.map, relocateValue]
+
+theorem after_layout (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (start stop stride : Mutable.Value) (found : logical[address]? = some (.list items))
+    (bounded : ∀ value ∈ [start, stop, stride], value.edge.Within logical.length) :
+    ExecutionLayout (after logical address items start stop stride)
+      (after physical (rename address) (items.map (relocateValue rename))
+        (relocateValue rename start) (relocateValue rename stop) (relocateValue rename stride)) rename := by
+  have bound := (List.getElem?_eq_some_iff.mp found).1
+  have old := layout.closed (.list items) (List.mem_of_getElem? found)
+  have allInside : ∀ value ∈ items ++ [start, stop, stride], value.edge.Within logical.length := by
+    intro value member
+    rcases List.mem_append.mp member with member | member
+    · exact old value member
+    · exact bounded value member
+  have first := layout.set_list address items (items ++ [start]) found (by
+    intro value member
+    rcases List.mem_append.mp member with member | member
+    · exact old value member
+    · have same : value = start := List.mem_singleton.mp member
+      subst value
+      exact bounded start (by simp))
+  have firstFound : (firstHeap logical address items start)[address]? = some (.list (items ++ [start])) := by
+    simp [firstHeap, bound]
+  have second := first.set_list address (items ++ [start]) (items ++ [start, stop]) firstFound (by
+    intro value member
+    simp only [List.length_set]
+    rcases List.mem_append.mp member with member | member
+    · exact old value member
+    · simp only [List.mem_cons, List.not_mem_nil, or_false] at member
+      rcases member with rfl | rfl
+      · exact bounded value (by simp)
+      · exact bounded value (by simp))
+  have secondFound : (secondHeap logical address items start stop)[address]? = some (.list (items ++ [start, stop])) := by
+    simp [secondHeap, firstHeap, bound]
+  have final := second.set_list address (items ++ [start, stop]) (items ++ [start, stop, stride]) secondFound (by
+    simpa using allInside)
+  simpa [after, secondHeap, firstHeap] using final
+
+theorem paired_finishes (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (start stop stride : Mutable.Value) (found : logical[address]? = some (.list items))
+    (bounded : ∀ value ∈ [start, stop, stride], value.edge.Within logical.length) :
+    (HeapCalls.call Probe.module "select" [.ref address, start, stop, stride] logical).Finishes
+        ⟨selection address [start, stop, stride], [], after logical address items start stop stride, logical.length⟩ ∧
+    (HeapCalls.call Probe.module "select" [.ref (rename address), relocateValue rename start,
+        relocateValue rename stop, relocateValue rename stride] physical).Finishes
+        ⟨(selection address [start, stop, stride]).map (relocateValue rename), [],
+          after physical (rename address) (items.map (relocateValue rename))
+            (relocateValue rename start) (relocateValue rename stop) (relocateValue rename stride), physical.length⟩ ∧
+    ExecutionLayout (after logical address items start stop stride)
+      (after physical (rename address) (items.map (relocateValue rename))
+        (relocateValue rename start) (relocateValue rename stop) (relocateValue rename stride)) rename := by
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  refine ⟨source_finishes logical address items start stop stride found, ?_,
+    after_layout logical physical rename layout address items start stop stride found bounded⟩
+  have paired := source_finishes physical (rename address) (items.map (relocateValue rename))
+    (relocateValue rename start) (relocateValue rename stop) (relocateValue rename stride) moved
+  have selected := selection_relocate rename address [start, stop, stride]
+  simp only [List.map_cons, List.map_nil] at selected
+  rw [selected] at paired
+  exact paired
+
+end MachineLoopEntryExamples
+'''
+AUDITS = ["MachineLoopEntryExamples." + name for name in (
+    "record_returns", "arguments_evaluate", "source_finishes", "selection_relocate", "after_layout", "paired_finishes",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "rangeBounds_relocate", "step_range_start_relocates", "step_range_arguments_relocates",
+    "step_for_range_relocates", "step_for_name_relocates", "step_sequence_start_relocates",
+    "StateWithin.range_start", "StateWithin.range_arguments", "StateWithin.for_range",
+    "StateWithin.for_name", "StateWithin.sequence_start", "range_arguments_reach", "for_range_reach",
+)]
+
+with project_temporary_directory(prefix="machine-loop-entry-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    select = namespace["select"]
+    for start, stop, stride in ((0, 8, 1), (8, -4, -2), (8, 0, 2), (0, 8, -2),
+                                (False, True, True), (10**100, 10**100 + 1, 1)):
+        items = [object()]
+        result = select(items, start, stop, stride)
+        assert items[1:] == [start, stop, stride]
+        candidates = range(start, stop, stride)
+        if candidates:
+            assert result == candidates[0]
+        else:
+            assert result is items
+    for start, stop, stride, exception in ((0, 10, 0, ValueError), (None, 10, 1, TypeError),
+                                           (0, "10", 1, TypeError), (0, 10, object(), TypeError)):
+        items = []
+        try:
+            select(items, start, stop, stride)
+        except exception:
+            pass
+        else:
+            raise AssertionError("range conversion error was lost")
+        assert len(items) == 3 and all(actual is expected for actual, expected in zip(items, (start, stop, stride)))
+    cycle = []
+    try:
+        select(cycle, cycle, 3, 1)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("list index accepted")
+    assert len(cycle) == 3 and cycle[0] is cycle and cycle[1:] == [3, 1]
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineLoopEntry\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"loop entry: argument effects, range errors, signed and Boolean bounds; {len(AUDITS)} axiom audits passed")
