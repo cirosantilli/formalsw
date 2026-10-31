@@ -85,6 +85,61 @@ def empty() -> str:
     else:
         text += "else"
     return text
+
+def range_rows(start: int, stop: int, step: int, count: int) -> str:
+    text = ""
+    for row in choose(range(start, stop, step), count):
+        for value in row:
+            text += str(value) + ","
+        text += ";"
+    return text
+
+
+def range_permutations(stop: int) -> str:
+    text = ""
+    for row in it.permutations(range(stop), r=2):
+        text += str(row[0]) + str(row[1]) + ";"
+    return text
+
+
+def touch(log: list[int], value: int) -> int:
+    log.append(value)
+    return value
+
+
+def range_order(step: int) -> str:
+    log = []
+    text = ""
+    for row in choose(range(touch(log, 1), touch(log, 4), touch(log, step)), touch(log, 2)):
+        text += str(row[0]) + str(row[1]) + ";"
+    for value in log:
+        text += str(value) + ","
+    return text
+
+
+def range_error_order(step: int) -> str:
+    for row in choose(range(0, 3, step), 1 // 0):
+        pass
+    return "unexpected"
+
+
+def range_comprehension(stop: int) -> str:
+    rows = [row[0] for row in it.permutations(range(stop), 1)]
+    return str(len(rows))
+
+
+def range_next(stop: int) -> str:
+    return str(next((row[0] + row[1] for row in choose(range(stop), 2)), 99))
+
+
+def range_default(stop: int) -> str:
+    text = ""
+    for row in it.permutations(range(stop)):
+        for value in row:
+            text += str(value)
+        text += ";"
+    return text
+
 '''
 
 
@@ -107,6 +162,14 @@ with project_temporary_directory(prefix='combinations-') as temporary:
     cases = [(name, [length]) for name in ('trace', 'keyword')
              for length in (-1, 0, 1, 2, 3, 4, None, True, '2')]
     cases += [(name, []) for name in ('mixed', 'snapshot', 'shared', 'control', 'empty')]
+    cases += [('range_rows', args) for args in
+              ([0, 4, 1, 2], [4, -1, -2, 2], [2, 2, 1, 0], [0, 3, 1, 4],
+               [0, 3, 1, -1], [0, 3, 0, 2], [0, 3, 1, '2'], [0, '3', 1, 2])]
+    cases += [('range_permutations', [stop]) for stop in (-1, 0, 3)]
+    cases += [('range_order', [step]) for step in (0, 1)]
+    cases += [('range_error_order', [step]) for step in (0, 1, 'bad')]
+    cases += [(name, [stop]) for name in ('range_comprehension', 'range_next', 'range_default')
+              for stop in (0, 3)]
     for name in scope:
         if name in {case[0] for case in cases}:
             issues = SupportChecker(program).check(name)
@@ -128,6 +191,31 @@ with project_temporary_directory(prefix='combinations-') as temporary:
   | .done (.ok (.string text)) => "ok:" ++ text
   | .done (.error error) => "error:" ++ error.typeName
   | _ => "unfinished or unexpected result")''')
+    # A module function named range remains an ordinary function call.
+    custom_source = directory / 'custom_range.py'
+    custom_source.write_text("""
+from itertools import combinations
+
+def range(n: int) -> list[int]:
+    return [n, n + 1]
+
+def custom() -> int:
+    total = 0
+    for row in combinations(range(3), 1):
+        total += row[0]
+    return total
+""")
+    custom_program = api['source_module'](custom_source)
+    assert not SupportChecker(custom_program).check('custom')
+    (directory / 'custom_range.json').write_text(api['AstJsonEmitter'](custom_program).emit())
+    index = len(expected)
+    expected.append(f'case{index}:ok:' + str(runpy.run_path(str(custom_source))['custom']()))
+    lines.append('def customRange : Module := pyast_from_json% (include_str "custom_range.json")')
+    lines.append(f'''
+#eval IO.println ("case{index}:" ++
+  match (HeapCalls.scalarFunction customRange "custom" []).observe 20000 with
+  | .done (.ok (.int value)) => "ok:" ++ toString value
+  | _ => "unexpected result")''')
     proof = directory / 'Checks.lean'
     proof.write_text('\n'.join(lines) + '\n')
     result = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)],
@@ -157,9 +245,16 @@ with project_temporary_directory(prefix='combinations-') as temporary:
         altered = ast.parse('from itertools import combinations as choose\ndef f():\n    ' + body + '\n')
         altered.formalsw_source = source
         assert SupportChecker(altered).check('f'), body
+    for body in (
+            'def f(range):\n    for row in choose(range(3), 2):\n        pass\n    return 0',
+            'range = lambda n: [n]\ndef f():\n    for row in choose(range(3), 2):\n        pass\n    return 0',
+            'def f():\n    for row in choose(range(stop=3), 2):\n        pass\n    return 0'):
+        altered = ast.parse('from itertools import combinations as choose\n' + body)
+        altered.formalsw_source = source
+        assert SupportChecker(altered).check('f'), body
     (directory / 'itertools.py').write_text('')
     altered = ast.parse(source_text)
     altered.formalsw_source = source
     assert SupportChecker(altered).check('trace'), 'shadowed itertools module accepted'
 
-print(f'Combination loops: {len(cases)} Python execution comparisons and binding/escape checks passed')
+print(f'Combination loops: {len(expected)} Python execution comparisons and binding/escape checks passed')

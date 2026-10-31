@@ -63,16 +63,34 @@ def combination_binding(node, module):
     return selection_binding(node, module, 'combinations')
 
 
+def selection_pool(node, module):
+    """
+    Snapshot a nonescaping range as a private comprehension of immutable integers.
+
+    Its bounds finish before the length argument. Since the range cannot be
+    mutated or observed elsewhere, materializing it early preserves the selected
+    rows and argument effects. Normal range checks still reject shadowing.
+    """
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'range' and not bindings(module, 'range')):
+        return node
+    name = '$formalsw.range.item'
+    return ast.copy_location(ast.ListComp(
+        elt=ast.Name(id=name, ctx=ast.Load()),
+        generators=[ast.comprehension(target=ast.Name(id=name, ctx=ast.Store()),
+                                      iter=node, ifs=[], is_async=0)]), node)
+
+
 def permutation_arguments(node, module):
     """One positional pool and an optional positional or keyword length."""
     if permutation_binding(node, module) is None:
         return None
     if len(node.args) == 1 and not node.keywords:
-        return [node.args[0], ast.Constant(value=None)]
+        return [selection_pool(node.args[0], module), ast.Constant(value=None)]
     if len(node.args) == 2 and not node.keywords:
-        return node.args
+        return [selection_pool(node.args[0], module), node.args[1]]
     if len(node.args) == 1 and len(node.keywords) == 1 and node.keywords[0].arg == 'r':
-        return [node.args[0], node.keywords[0].value]
+        return [selection_pool(node.args[0], module), node.keywords[0].value]
     return None
 
 
@@ -81,7 +99,7 @@ def combination_arguments(node, module):
     if combination_binding(node, module) is None:
         return None
     if len(node.args) == 2 and not node.keywords:
-        return node.args
+        return [selection_pool(node.args[0], module), node.args[1]]
     if len(node.args) == 1 and len(node.keywords) == 1 and node.keywords[0].arg == 'r':
-        return [node.args[0], node.keywords[0].value]
+        return [selection_pool(node.args[0], module), node.keywords[0].value]
     return None
