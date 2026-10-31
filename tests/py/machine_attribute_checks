@@ -24,6 +24,13 @@ def shadow(reader):
 
 def invoke(reader):
     return reader.read(shadow(reader))
+
+def inline(reader):
+    shadow(reader)
+    return reader.link
+
+def missing_method(reader):
+    return reader.absent(shadow(reader))
 '''
 PROOF = r'''
 open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
@@ -169,9 +176,139 @@ theorem reverse_binding (heap : Mutable.Heap) (address : Nat) (items : List Muta
     bindMethod Probe.module (.ref address) "$formalsw.sort.reverse" heap = some (.ok (.sortReverse address), heap) := by
   simp [bindMethod, found]
 
+theorem inline_returns (heap : Mutable.Heap) (address : Nat) (shared : Mutable.Value)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (linked : fields.lookup "link" = some shared) :
+    ReturnsValue Probe.module "inline" [.ref address] heap shared (afterShadow heap address fields) := by
+  have bound := (List.getElem?_eq_some_iff.mp found).1
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.call (.cons (Evaluates.lookup rfl) .nil) (shadow_returns heap address fields found))
+  apply BlockReturns.return_value
+  apply Evaluates.field (Evaluates.lookup rfl)
+  simp [getAttribute, afterShadow, bound, instanceClass, source_class,
+    Mutable.putField_lookup_other fields "read" "link" _ (by decide), linked]
+
+/-- Method lookup precedes the argument that shadows its name; the captured method still executes. -/
+theorem invoke_equiv (heap : Mutable.Heap) (address : Nat) (shared : Mutable.Value)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (absent : fields.lookup "read" = none) (linked : fields.lookup "link" = some shared) :
+    (IteratorCalls.call Probe.module "invoke" [.ref address] heap).Equiv
+      (IteratorCalls.call Probe.module "inline" [.ref address] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address] heap shared (afterShadow heap address fields)) :
+      ((IteratorCalls.call Probe.module name [.ref address] heap).run choices).Finishes
+        ⟨.ok shared, [], afterShadow heap address fields, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "invoke" leftChoices (invoke_returns heap address shared fields found absent linked))
+    (finishes "inline" rightChoices (inline_returns heap address shared fields found linked)) (Or.inl rfl)
+
+/-- A missing method fails during binding, before the argument can shadow read. -/
+theorem missing_method_finishes (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (absent : fields.lookup "absent" = none) :
+    (HeapCalls.call Probe.module "missing_method" [.ref address] heap).Finishes
+      ⟨.error ⟨"AttributeError", []⟩, [], heap, heap.length⟩ := by
+  have failed : bindMethod Probe.module (.ref address) "absent" heap =
+      some (.error ⟨"AttributeError", []⟩, heap) := by
+    have missing : findFunctionIn classInfo.2 "absent" = none := rfl
+    simp [bindMethod, found, instanceClass, source_class, absent, missing, Mutable.error]
+  change Finishes (step := HeapCalls.step Probe.module heap.length) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.run, failed, HeapCalls.done,
+    protectGenerator, Frame.inGenerator, Calls.generatorException])
+
+/-- A shadowing integer is rejected only after the argument has performed its field write. -/
+theorem shadowed_call_finishes (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (stored : Int) (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (shadowed : fields.lookup "read" = some (.scalar (.int stored))) :
+    (HeapCalls.call Probe.module "invoke" [.ref address] heap).Finishes
+      ⟨.error ⟨"TypeError", []⟩, [], afterShadow heap address fields, heap.length⟩ := by
+  let env := functionEnv shadowArgs invokeBody [.ref address] []
+  have reader : env "reader" = some (.ref address) := rfl
+  have bound := shadowed_binding heap address fields (.scalar (.int stored)) found shadowed
+  have argument : Evaluates Probe.module env (.call (.name "shadow") [.name "reader"])
+      heap (.scalar (.int 0)) (afterShadow heap address fields) :=
+    Evaluates.call (.cons (Evaluates.lookup reader) .nil) (shadow_returns heap address fields found)
+  change Finishes (step := HeapCalls.step Probe.module heap.length) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  apply Finishes.next (following := ⟨.expr (.call (.name "shadow") [.name "reader"]) env,
+    [.arguments .notCallable [] [] env], heap⟩)
+    (by simp [HeapCalls.step, HeapCalls.run, bound, argumentsState]; rfl)
+  exact (argument heap.length [.arguments .notCallable [] [] env]).finishes (.next rfl (.done rfl))
+
+def afterBindingWrite (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (value : Mutable.Value) := heap.set address (.instance classInfo.1 "Reader" (Mutable.putField fields "read" value))
+
+/-- Binding consumes the write's derived invariant, including saved consumers and cyclic field values. -/
+theorem write_then_bind (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (fields : List (String × Mutable.Value))
+    (replacement : Mutable.Value) (expressions : List Expr) (used : Nat) (choices : ChoiceSchedule)
+    (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.instance classInfo.1 "Reader" fields))
+    (replacementInside : replacement.edge.Within logical.length)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (afterBindingWrite logical address fields replacement) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.setField "read" replacement) [.ref address], [], logical⟩) =
+        .next (relocateState nextMap other
+          ⟨.value (.scalar .none), [], afterBindingWrite logical address fields replacement⟩) ∧
+      IteratorCalls.Relocation.Preserves (afterBindingWrite logical address fields replacement) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.value (.ref address), [.methodReceiver "read" expressions (fun _ => none)],
+            afterBindingWrite logical address fields replacement⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.value (.ref address), [.methodReceiver "read" expressions (fun _ => none)],
+              afterBindingWrite logical address fields replacement⟩, used⟩ resumes))) := by
+  have addressInside := (List.getElem?_eq_some_iff.mp found).1
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have inside : StateWithin ⟨.operation (.setField "read" replacement) [.ref address], [], logical⟩ := by
+    refine ⟨⟨replacementInside, ?_⟩, by simp⟩
+    simpa only [List.mem_singleton, forall_eq, Mutable.Value.edge, Graph.Edge.Within] using addressInside
+  have written := Mutable.writeField_result (name := "read") (value := replacement) found (by simp)
+  have actual : HeapCalls.step Probe.module logical.length
+      ⟨.operation (.setField "read" replacement) [.ref address], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], afterBindingWrite logical address fields replacement⟩ := by
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, written, afterBindingWrite]
+  have preserved := step_setField_preserves Probe.module logical physical rename logical.length physical.length
+    (.ref address) replacement "read" [] [] layout inside globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have bindingInside : StateWithin ⟨.value (.ref address), [.methodReceiver "read" expressions (fun _ => none)],
+      afterBindingWrite logical address fields replacement⟩ := by
+    refine ⟨Nat.lt_of_lt_of_le addressInside larger, ?_⟩
+    simp [FrameWithin, EnvWithin]
+  have raw := step_methodReceiver_preserves Probe.module _ other nextMap logical.length physical.length
+    (.ref address) "read" expressions (fun _ => none) [] [] retained
+    (by simp [Probe.module, StmtWithin]) bindingInside nextGlobals
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.value (.ref address), [.methodReceiver "read" expressions (fun _ => none)],
+      afterBindingWrite logical address fields replacement⟩, used⟩ other nextMap
+    logical.length physical.length [] retained bindingInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨bindingInside.1, bindingInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
 end MachineAttributeExamples
 '''
 AUDITS = [
+    "BoundMethodWithin.method", "bindMethod_scalar_within", "bindMethod_builtin_within", "bindMethod_ordinary_within",
+    "bindMethod_within", "step_methodReceiver_preserves", "step_attribute_expression_preserves", "step_augmentAttribute_preserves",
+    "step_appendReceiver_eq", "step_appendReceiver_preserves", "step_addReceiver_preserves", "step_notCallable_preserves",
+    "MachineAttributeExamples.inline_returns", "MachineAttributeExamples.invoke_equiv",
+    "MachineAttributeExamples.missing_method_finishes", "MachineAttributeExamples.shadowed_call_finishes",
+    "MachineAttributeExamples.write_then_bind",
     "MachineAttributeExamples.source_class", "MachineAttributeExamples.source_method",
     "MachineAttributeExamples.source_shadow", "MachineAttributeExamples.source_invoke", "MachineAttributeExamples.method_source",
     "MachineAttributeExamples.method_bound", "MachineAttributeExamples.method_returns",
@@ -193,6 +330,17 @@ with project_temporary_directory(prefix="machine-attribute-") as temporary:
     module = api["source_module"](path)
     namespace = {}
     exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("invoke", "inline"):
+        receiver = namespace["Reader"]()
+        receiver.link = receiver
+        assert namespace[name](receiver) is receiver and receiver.read == 0
+    receiver = namespace["Reader"]()
+    try:
+        namespace["missing_method"](receiver)
+    except AttributeError:
+        assert "read" not in receiver.__dict__
+    else:
+        raise AssertionError("a missing method must fail before argument evaluation")
     reader = namespace["Reader"]()
     reader.link = reader
     assert namespace["invoke"](reader) is reader
@@ -214,7 +362,7 @@ with project_temporary_directory(prefix="machine-attribute-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineAttributes\nimport lang.py.FormalSW.ClassCalls\n"
+    proof.write_text("import lang.py.FormalSW.MachineMethodInvariant\nimport lang.py.FormalSW.ClassCalls\nimport lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
