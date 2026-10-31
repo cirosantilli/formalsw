@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+Check zip traversal, fresh row tuples, and mutations through shared sources.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def drain(items):
+    last = None
+    for pair in zip(items, items):
+        items *= 0
+        last = pair
+    return last
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineZipExamples
+set_option Elab.async false
+
+def args : List Arg := [{name := "items", annotation := none}]
+def loopBody : List Stmt := [.augAssign (.name "items") .mult (.constant (.int 0)),
+  .assign [.name "last"] (.name "pair")]
+def following : List Stmt := [.return (.name "last")]
+def body : List Stmt := [.assign [.name "last"] (.constant .none),
+  .forZip (.name "pair") [.name "items", .name "items"] loopBody []] ++ following
+def answer (heap : Mutable.Heap) (items : List Mutable.Value) : Mutable.Value :=
+  if items.isEmpty then .scalar .none else .ref heap.length
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) : Mutable.Heap :=
+  match items with
+  | [] => heap
+  | first :: _ => (heap ++ [Mutable.Object.tuple [first, first]]).set address (.list [])
+
+theorem source_function : findFunctionIn Probe.module.body "drain" = some (args, body) := rfl
+
+theorem captured (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    zipSources [.ref address, .ref address] heap = some (.ok [.ref address, .ref address], heap) := by
+  simp [zipSources, Mutable.eval_bind, Mutable.sequence, found, sequenceSource, Except.map]
+
+theorem first_row (heap : Mutable.Heap) (address : Nat) (first : Mutable.Value) (rest : List Mutable.Value)
+    (found : heap[address]? = some (.list (first :: rest))) :
+    zipItem [.ref address, .ref address] 0 heap = some (.ok (some [first, first]), heap) := by
+  simp [zipItem, zipFields, sequenceValue, Mutable.eval_bind, Mutable.sequence, found, Except.map]
+
+theorem exhausted (heap : Mutable.Heap) (address position : Nat)
+    (found : heap[address]? = some (.list [])) :
+    zipItem [.ref address, .ref address] position heap = some (.ok none, heap) := by
+  simp [zipItem, zipFields, sequenceValue, Mutable.eval_bind, Mutable.sequence, found]
+
+theorem source_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "drain" [.ref address] heap (answer heap items) (after heap address items) := by
+  apply BlockReturns.function source_function (completed := [.ref address]) rfl
+  apply BlockReturns.assign Evaluates.constant
+  apply BlockReturns.for_zip (target := .name "pair")
+    (.cons (Evaluates.lookup (by simp [setLocal, functionEnv, HeapCalls.argumentEnv, args]))
+      (.cons (Evaluates.lookup (by simp [setLocal, functionEnv, HeapCalls.argumentEnv, args])) .nil))
+    (captured heap address items found)
+  cases items with
+  | nil =>
+    apply BlockReturns.zip_done (exhausted heap address 0 found)
+    exact BlockReturns.return_value (Evaluates.lookup (by simp [setLocal, answer]))
+  | cons first rest =>
+    have bound := (List.getElem?_eq_some_iff.mp found).1
+    have retained : (heap ++ [Mutable.Object.tuple [first, first]])[address]? = some (.list (first :: rest)) := by
+      rw [List.getElem?_append_left bound, found]
+    have clear := inplace_mult_list_eval (heap ++ [.tuple [first, first]]) address (first :: rest) 0 retained
+    have cleared : (after heap address (first :: rest))[address]? = some (.list []) := by
+      exact List.getElem?_set_self (by simp; omega)
+    apply BlockReturns.zip_step (first_row heap address first rest found) (by rfl)
+    apply BlockReturns.augAssign (left := .ref address)
+      (by simp [setLocal, functionEnv, HeapCalls.argumentEnv, args, comprehensionTargetName]) Evaluates.constant (by simpa using clear)
+    apply BlockReturns.assign (Evaluates.lookup (value := .ref heap.length) (by simp [setLocal, comprehensionTargetName]))
+    change BlockReturns Probe.module _
+      (.zipStepLoop "pair" [.ref address, .ref address] 1 loopBody [] :: following)
+      (after heap address (first :: rest)) (answer heap (first :: rest)) (after heap address (first :: rest))
+    apply BlockReturns.zip_done (exhausted _ address 1 cleared)
+    exact BlockReturns.return_value (Evaluates.lookup (by simp [setLocal, answer]))
+
+theorem paired_returns (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (found : logical[address]? = some (.list items)) :
+    ∃ nextMap,
+      ReturnsValue Probe.module "drain" [.ref address] logical (answer logical items) (after logical address items) ∧
+      ReturnsValue Probe.module "drain" [.ref (rename address)] physical
+        (relocateValue nextMap (answer logical items))
+        (after physical (rename address) (items.map (relocateValue rename))) ∧
+      ExecutionLayout (after logical address items)
+        (after physical (rename address) (items.map (relocateValue rename))) nextMap ∧
+      (∀ old < logical.length, nextMap old = rename old) := by
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  have source := source_returns logical address items found
+  have other := source_returns physical (rename address) (items.map (relocateValue rename)) moved
+  cases items with
+  | nil => exact ⟨rename, source, other, layout, fun _ _ => rfl⟩
+  | cons first rest =>
+    have bound := (List.getElem?_eq_some_iff.mp found).1
+    have firstInside := layout.closed (.list (first :: rest)) (List.mem_of_getElem? found) first (List.mem_cons_self ..)
+    obtain ⟨left, right, logicalAfter, physicalAfter, nextMap, allocated, allocatedOther, retained, _, same, agree⟩ :=
+      layout.allocateTuple [first, first] (by simpa using firstInside)
+    have leftEq : left = logical.length ∧ logicalAfter = logical ++ [.tuple [first, first]] := by
+      simpa [Mutable.allocateTuple, Except.map] using allocated.symm
+    have rightEq : right = physical.length ∧
+        physicalAfter = physical ++ [.tuple [relocateValue rename first, relocateValue rename first]] := by
+      simpa [Mutable.allocateTuple, Except.map] using allocatedOther.symm
+    obtain ⟨rfl, rfl⟩ := leftEq
+    obtain ⟨rfl, rfl⟩ := rightEq
+    refine ⟨nextMap, source, ?_, ?_, agree⟩
+    · simpa [answer, relocateValue, same] using other
+    · have written := retained.set_list address (first :: rest) [] (by rw [List.getElem?_append_left bound, found]) (by simp)
+      simpa [after, agree address bound] using written
+
+/-- Exhaustion prevents inspection of a later unsupported source. -/
+theorem short_circuit (heap : Mutable.Heap) (address : Nat) (later : SequenceSource) (position : Nat)
+    (empty : heap[address]? = some (.list [])) :
+    zipItem [.ref address, later] position heap = some (.ok none, heap) := by
+  simp [zipItem, zipFields, sequenceValue, Mutable.eval_bind, Mutable.sequence, empty]
+
+end MachineZipExamples
+'''
+AUDITS = ["MachineZipExamples." + name for name in (
+    "captured", "first_row", "exhausted", "source_returns", "paired_returns", "short_circuit",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "readonly_bind_relocates", "readonly_bind_keeps_heap", "readonly_bind_success",
+    "zipSources_keeps_heap", "zipFields_keeps_heap", "zipItem_keeps_heap",
+    "zipSources_relocates", "zipFields_relocates", "zipItem_relocates", "zipSources_captured",
+    "zipFields_values_within", "zipItem_values_within", "comprehensionTargetBody_relocates",
+    "comprehensionTargetBody_within", "step_for_zip_relocates", "step_zip_start_relocates",
+    "StateWithin.for_zip", "StateWithin.zip_start", "step_zip_loop_relocates",
+)]
+
+with project_temporary_directory(prefix="machine-zip-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    assert namespace["drain"]([]) is None
+    for length in (1, 2, 9, 100):
+        first = object()
+        items = [first] * length
+        result = namespace["drain"](items)
+        assert items == [] and len(result) == 2
+        assert result[0] is first and result[1] is first
+    cycle = []
+    cycle.append(cycle)
+    result = namespace["drain"](cycle)
+    assert cycle == [] and result[0] is cycle and result[1] is cycle
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineZip\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"zip traversal: shared mutations, fresh tuples, and exhaustion; {len(AUDITS)} axiom audits passed")
