@@ -249,6 +249,61 @@ theorem paired_all_scalars (logical physical : Mutable.Heap) (rename : Nat → N
   exact paired_all_success logical physical rename layout (.ref address) (.ref logical.length)
     (List.getElem?_eq_some_iff.mp found).1 _ (Mutable.setFrom_list logical address items found)
 
+
+/-- A fully executed failure retains both the partial set and private-address exclusion. -/
+theorem private_tuple_then_list (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (privateAddress tupleAddress listAddress : Nat) (object : Mutable.Object)
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (contents : List Constant) (items : List Mutable.Value)
+    (tupleFound : logical[tupleAddress]? = some (.tuple (contents.map Mutable.Value.scalar)))
+    (listFound : logical[listAddress]? = some (.list items)) :
+    let after := logical ++ [.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]]
+    ∃ other,
+      (HeapCalls.call Probe.module "build" [.ref tupleAddress, .ref listAddress] logical).Finishes
+        ⟨.error ⟨"TypeError", []⟩, [], after, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "build" [.ref (rename tupleAddress), .ref (rename listAddress)] physical).Finishes
+        ⟨.error ⟨"TypeError", []⟩, [], other, physical.length⟩ ∧
+      PrivateLayout after other (extendMap rename logical.length physical.length) privateAddress object := by
+  dsimp only
+  have tupleInside := (List.getElem?_eq_some_iff.mp tupleFound).1
+  have listInside := (List.getElem?_eq_some_iff.mp listFound).1
+  have failed := tuple_then_list logical tupleAddress listAddress contents items tupleFound listFound
+  obtain ⟨other, paired, retained, _, _⟩ := layout.allocateSetValues [.ref tupleAddress, .ref listAddress]
+    (by simpa using And.intro tupleInside listInside) _ _ failed
+  exact ⟨other, source_failed _ _ _ _ _ failed, source_failed _ _ _ _ _ paired, retained⟩
+
+/-- Scalar construction also permits protecting an empty tuple, because the set is fresh. -/
+theorem private_scalar_build (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (privateAddress : Nat) (object : Mutable.Object) (first second : Constant)
+    (layout : PrivateLayout logical physical rename privateAddress object) :
+    ∃ other nextMap,
+      ReturnsValue Probe.module "build" [.scalar first, .scalar second] physical (.ref other.length)
+        (other ++ [.list [.ref physical.length, .ref physical.length, .scalar first, .scalar second]]) ∧
+      PrivateLayout ((logical ++ [Mutable.Object.set ([first, second].foldl ScalarSet.insert [])]) ++
+        [.list [.ref logical.length, .ref logical.length, .scalar first, .scalar second]])
+        (other ++ [.list [.ref physical.length, .ref physical.length, .scalar first, .scalar second]])
+        nextMap privateAddress object := by
+  have allocated := Mutable.allocateSetValues_scalars logical [first, second]
+  obtain ⟨other, paired, retained, size, _⟩ := layout.allocateSetValues [.scalar first, .scalar second]
+    (by simp [Mutable.Value.edge, Graph.Edge.Within]) _ _ allocated
+  have stored : ∀ value ∈ [Mutable.Value.ref logical.length, .ref logical.length, .scalar first, .scalar second],
+      value.edge.Within (logical ++ [Mutable.Object.set ([first, second].foldl ScalarSet.insert [])]).length := by
+    simp [Mutable.Value.edge, Graph.Edge.Within]
+  have finalLayout := (retained.allocate_list _ stored).2.2
+  simp only [List.map_cons, List.map_nil, Except.map, relocateValue, extendMap_new] at paired finalLayout
+  exact ⟨other, _, source_success physical other (.scalar first) (.scalar second) (.ref physical.length) paired, finalLayout⟩
+
+#print axioms private_tuple_then_list
+#print axioms private_scalar_build
+#print axioms PrivateLayout.fresh_extension
+#print axioms PrivateLayout.set_nonempty
+#print axioms PrivateLayout.update_private
+#print axioms PrivateLayout.addItem
+#print axioms PrivateLayout.addItems
+#print axioms PrivateLayout.setFrom
+#print axioms PrivateLayout.allocateSetValues
+#print axioms PrivateLayout.dictionaryFromIterable
+
 #print axioms source_success
 #print axioms paired_success
 #print axioms source_failed
@@ -318,6 +373,7 @@ with project_temporary_directory(prefix="construction-relocation-") as temporary
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
     proof.write_text("import lang.py.FormalSW.SetFromRelocation\n"
+                     "import lang.py.FormalSW.ConstructionIsolation\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
     checked = subprocess.run(
         ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
@@ -327,9 +383,9 @@ with project_temporary_directory(prefix="construction-relocation-") as temporary
     assert checked.returncode == 0, checked.stdout + checked.stderr
     audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
     independent = checked.stdout.count("does not depend on any axioms")
-    assert len(audits) + independent == 27, checked.stdout
+    assert len(audits) + independent == 37, checked.stdout
     for audit in audits:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print("construction relocation: shared source results and partial failures; twenty-seven axiom audits passed")
+print("construction relocation: shared source results and partial failures; thirty-seven axiom audits passed")

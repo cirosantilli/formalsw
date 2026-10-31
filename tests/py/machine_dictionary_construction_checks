@@ -209,6 +209,26 @@ theorem partial_failure_private_cell (heap : Mutable.Heap) (source row privateAd
     heap _ _ saved (partial_insertion heap source row key value invalid found rowFound),
     partial_failure_source heap source row key value invalid found rowFound⟩
 
+
+/-- The second row raises after insertion; the returned map still excludes the private object. -/
+theorem partial_failure_private_layout (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (source row privateAddress : Nat) (key : Constant) (value : Mutable.Value) (invalid : Int)
+    (object : Mutable.Object) (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[source]? = some (.list [.ref row, .scalar (.int invalid)]))
+    (rowFound : logical[row]? = some (.tuple [.scalar key, value])) :
+    let after := (logical ++ [Mutable.Object.dict []]).set logical.length (.dict [(key, value)])
+    ∃ other, DictionaryConstructor.fromIterable (.ref (rename source)) physical =
+        some (.error ⟨"TypeError", []⟩, other) ∧
+      PrivateLayout after other (extendMap rename logical.length physical.length) privateAddress object ∧
+      Finishes (HeapCalls.step Probe.module logical.length)
+        ⟨.operation (.call "build") [.ref source], [], logical⟩
+        (.ok ⟨.error ⟨"TypeError", []⟩, [], after, logical.length⟩) := by
+  have failed := partial_insertion logical source row key value invalid found rowFound
+  rw [primitive_dict_constructor, dictionaryConstruct_ref logical source _ found] at failed
+  obtain ⟨other, paired, retained, _, _⟩ := layout.dictionaryFromIterable (.ref source)
+    (List.getElem?_eq_some_iff.mp found).1 _ _ failed
+  exact ⟨other, paired, retained, partial_failure_source logical source row key value invalid found rowFound⟩
+
 theorem mutation_failure_private_cell (heap : Mutable.Heap) (address privateAddress : Nat)
     (items : List Mutable.Value) (value : Mutable.Value) (privateObject : Mutable.Object)
     (found : heap[address]? = some (.list items)) (saved : SavedCell privateAddress privateObject heap)
@@ -292,7 +312,7 @@ AUDITS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
     "failure_retains_mutation_and_allocation",
     "partial_insertion",
     "partial_failure_source",
-    "partial_failure_private_cell",
+    "partial_failure_private_cell", "partial_failure_private_layout",
     "mutation_failure_private_cell",
     "append_then_dictionary",
 )]
@@ -331,6 +351,7 @@ with project_temporary_directory(prefix="machine-dictionary-construction-") as t
     checked_source.write_text(
         "import lang.py.FormalSW.MachineDictionaryConstruction\n"
         "import lang.py.FormalSW.ConstructionMachineFrame\n"
+        "import lang.py.FormalSW.ConstructionIsolation\n"
         "import lang.py.FormalSW.IteratorRules\n"
         "import lang.py.FormalSW.DictionaryConstructorCalls\n"
         + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
