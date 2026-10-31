@@ -120,9 +120,12 @@ theorem select_flag (heap : Mutable.Heap) (flagAddress anchors used : Nat) (loca
         [], heap⟩, used + 1⟩ := by
   apply SetCalls.Reaches.next (following := ⟨⟨.block (chooseBody ++ continuation flagAddress flag)
     (setLocal locals "flag" (.scalar (.bool flag))), [], heap⟩, used + 1⟩)
-  · cases flag <;> simp [SetCalls.step, HeapCalls.step, SetCalls.iteratorStep, stored,
-      flags, choices, remainder, continuation, chooseBody, yesBody, noBody,
-      Calls.loopContinuation, Calls.loopControl, Calls.loopControlStmt]
+  · have selected : flags[(if flag then 1 else 0)]? = some (.bool flag) := by cases flag <;> rfl
+    have transition := SetCalls.select_item Probe.module (choices flag) anchors used flagAddress
+      (if flag then 1 else 0) heap flags flags (.bool flag) locals "flag" chooseBody [] stopBody []
+      stored selected rfl
+    cases flag <;> simpa [flags, remainder, continuation, chooseBody, yesBody, noBody,
+      Calls.loopContinuation, Calls.loopControl, Calls.loopControlStmt] using transition
   · exact .refl
 
 theorem chosen_returns (heap : Mutable.Heap) (locals : HeapCalls.Env) (following : List Stmt) :
@@ -247,7 +250,8 @@ theorem counterexample :
 end IteratorChoiceExamples
 '''
 
-AUDITS = ["FormalSW.PyAst.Mutable.CallFamily.not_equiv_of_finishes"] + [f"IteratorChoiceExamples.{name}" for name in (
+AUDITS = ["FormalSW.PyAst.Mutable.CallFamily.not_equiv_of_finishes",
+          "FormalSW.PyAst.SetCalls.for_set_name", "FormalSW.PyAst.SetCalls.select_item"] + [f"IteratorChoiceExamples.{name}" for name in (
     "source_class", "source_iter", "source_next", "source_first", "iter_bound", "next_bound",
     "iter_returns", "flags_read", "method_cursor", "select_flag", "chosen_returns", "chosen_throws",
     "next_returns", "next_throws", "first_acquires", "first_returns", "first_throws",
@@ -280,6 +284,7 @@ with project_temporary_directory(prefix="iterator-choice-") as temporary:
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
     proof.write_text("import lang.py.FormalSW.IteratorRules\n"
+                     "import lang.py.FormalSW.SetChoiceCalls\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
