@@ -103,6 +103,11 @@ theorem bindMethod_builtin_within (module : Module) (heap after : Mutable.Heap)
     cases object <;> try contradiction
     all_goals simp [bindMethod, found, Mutable.error, Mutable.unsupported] at executed
     all_goals rcases executed with ⟨rfl, rfl⟩; exact ⟨inside, fun _ => rfl⟩
+  by_cases updateName : name = "update"
+  · subst name
+    cases object <;> try contradiction
+    all_goals simp [bindMethod, found, Mutable.error, Mutable.unsupported] at executed
+    all_goals rcases executed with ⟨rfl, rfl⟩; exact ⟨inside, fun _ => rfl⟩
   by_cases popName : name = "pop"
   · subst name
     cases object <;> try contradiction
@@ -164,7 +169,7 @@ theorem bindMethod_builtin_within (module : Module) (heap after : Mutable.Heap)
     all_goals simp [bindMethod, found, Mutable.error, Mutable.unsupported] at executed
     all_goals rcases executed with ⟨rfl, rfl⟩; exact ⟨inside, fun _ => rfl⟩
   cases object <;> try contradiction
-  all_goals simp [bindMethod, found, ordinary, sortName, appendName, extendName, popName, countName, addName, getName, setdefaultName, clearName, isdigitName, upperName, stripName, splitName, zfillName, replaceName, Mutable.unsupported] at executed
+  all_goals simp [bindMethod, found, ordinary, sortName, appendName, extendName, updateName, popName, countName, addName, getName, setdefaultName, clearName, isdigitName, upperName, stripName, splitName, zfillName, replaceName, Mutable.unsupported] at executed
 
 theorem bindMethod_ordinary_within (module : Module) (heap after : Mutable.Heap)
     (receiver : Value) (name : String) (operation : Operation)

@@ -18,7 +18,7 @@ def builtinTargets (builtin : Builtin) (values : List Value) : List Nat :=
 /-- An overapproximation includes the receiver even when argument validation prevents the write. -/
 def primitiveTargets (operation : Operation) (values : List Value) : List Nat :=
   match operation with
-  | .append address | .extendList address | .pop address | .sort address | .sortReverse address | .add address
+  | .append address | .extendList address | .updateSet address | .pop address | .sort address | .sortReverse address | .add address
     | .dictionarySetDefault address | .dictionaryClear address => [address]
   | .setField _ _ | .setItem _ | .setSlice _ => receiverTargets values
   | .builtin builtin => builtinTargets builtin values
@@ -192,6 +192,20 @@ theorem preserves_extendList (address : Nat) (invariant : Heap → Prop)
           all_goals rcases executed with ⟨rfl, rfl⟩; exact updates heap _ holds
     | _ => simp [HeapCalls.extendList, destination, Mutable.unsupported] at executed
 
+theorem preserves_updateSet (address : Nat) (invariant : Heap → Prop)
+    (updates : UpdateInvariant address invariant) (sources : List Value) :
+    Preserves invariant (Mutable.updateSet address sources) := by
+  induction sources with
+  | nil => exact Preserves.pure invariant _
+  | cons source rest ih =>
+    unfold Mutable.updateSet
+    apply Preserves.bind _ _ _ (preserves_setSourceItems invariant source)
+    intro items
+    apply Preserves.bind _ _ _ (Preserves.mapM invariant items (Mutable.addItem address)
+      (fun item _ => preserves_addItem address invariant updates item))
+    intro ignored
+    exact ih
+
 set_option maxHeartbeats 1200000 in
 /-- The actual primitive may allocate, read any object, and update only its listed receivers. -/
 theorem preserves_primitive (invariant : Heap → Prop) (stable : AppendInvariant invariant)
@@ -200,6 +214,7 @@ theorem preserves_primitive (invariant : Heap → Prop) (stable : AppendInvarian
     Preserves invariant (primitive operation values) := by
   cases operation
   all_goals first
+    | exact preserves_updateSet _ invariant (updates _ (by simp [primitiveTargets])) values
     | exact preserves_builtin invariant stable _ values updates
     | exact preserves_isDigit invariant _ values
     | exact preserves_replace invariant _ values

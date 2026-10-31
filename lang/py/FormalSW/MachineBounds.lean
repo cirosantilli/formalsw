@@ -122,7 +122,7 @@ def OperationWithin (limit : Nat) : Operation → Prop
       value.edge.Within limit
   | .append address =>
       address < limit
-  | .extendList address =>
+  | .extendList address | .updateSet address =>
       address < limit
   | .pop address =>
       address < limit

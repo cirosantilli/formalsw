@@ -53,7 +53,7 @@ inductive SetAllocationInput (heap : Mutable.Heap) : Builtin → List Mutable.Va
   | display (items : List Mutable.Value) : SetAllocationInput heap .setDisplay items items
   | empty : SetAllocationInput heap .set [] []
   | source (value : Mutable.Value) (items : List Mutable.Value)
-      (read : setSourceItems value heap = some (.ok items, heap)) : SetAllocationInput heap .set [value] items
+      (read : Mutable.setSourceItems value heap = some (.ok items, heap)) : SetAllocationInput heap .set [value] items
 
 theorem SetAllocationInput.within {heap : Mutable.Heap} {builtin : Builtin} {values items : List Mutable.Value}
     (input : SetAllocationInput heap builtin values items) (closed : Closed heap)

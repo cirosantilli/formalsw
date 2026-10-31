@@ -9,6 +9,7 @@ import lang.py.FormalSW.Permutations
 import lang.py.FormalSW.Combinations
 import lang.py.FormalSW.UnpackingTargets
 import lang.py.FormalSW.StringReplace
+import lang.py.FormalSW.SetUpdate
 
 /-! Function calls with shared lists. Locals and continuations carry references;
 all frames use one heap, including when a helper raises after mutating a list. -/
@@ -510,6 +511,7 @@ inductive Operation where
   | setSlice (replacement : Value)
   | append (address : Nat)
   | extendList (address : Nat)
+  | updateSet (address : Nat)
   | pop (address : Nat)
   | count (address : Nat)
   | sort (address : Nat)
@@ -1432,6 +1434,7 @@ private abbrev basePrimitive : Operation → List Value → Eval Value
   | .append address, [value] => Mutable.appendItem address value
   | .extendList address, [value] => extendList address value
   | .extendList _, _ => Mutable.error "TypeError"
+  | .updateSet address, values => Mutable.updateSet address values
   | .pop address, [] => Mutable.popItem address (.scalar (.int (-1)))
   | .pop address, [index] => Mutable.popItem address index
   | .pop _, _ => Mutable.error "TypeError"
@@ -1814,6 +1817,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
             else Mutable.unsupported
         | some (.set _) | some (.keySet _) =>
             if name = "add" then pure (.add address)
+            else if name = "update" then pure (.updateSet address)
             else if name = "count" ∨ name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" ∨ name = "isdigit" then Mutable.error "AttributeError" else Mutable.unsupported
         | some (.dict _) | some (.keyDict _) =>
             if name = "get" then pure (.dictionaryGet address)
@@ -2686,7 +2690,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | extendList _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionarySingleton | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | isDigit _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | extendList _ | updateSet _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionarySingleton | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | isDigit _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>

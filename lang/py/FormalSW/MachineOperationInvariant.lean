@@ -91,6 +91,9 @@ theorem step_operation_preserves (module : Module)
   | pop address =>
     exact step_sequenceMutation_preserves module logical physical rename logicalAnchors physicalAnchors
       _ values stack globals layout (.pop address) inside globalsInside
+  | updateSet address =>
+    exact step_setConstruction_preserves module logical physical rename logicalAnchors physicalAnchors
+      _ values stack globals layout (.update address) inside globalsInside
   | extendList address =>
     exact step_listMethod_preserves module logical physical rename logicalAnchors physicalAnchors
       _ values stack globals layout (.extendList address) inside globalsInside

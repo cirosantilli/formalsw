@@ -97,8 +97,8 @@ theorem preserves_allocateSetValues (invariant : Heap → Prop) (stable : Append
   Preserves.of_prefix invariant stable _ (allocateSetValues_prefix items)
 
 theorem preserves_setSourceItems (invariant : Heap → Prop) (source : Value) :
-    Preserves invariant (setSourceItems source) := by
-  unfold setSourceItems
+    Preserves invariant (Mutable.setSourceItems source) := by
+  unfold Mutable.setSourceItems
   with_reducible repeat' first
     | exact preserves_sequence invariant _
     | exact Preserves.pure invariant _

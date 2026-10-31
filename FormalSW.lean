@@ -12,6 +12,7 @@ import lang.py.FormalSW.Combinations
 import lang.py.FormalSW.Instances
 import lang.py.FormalSW.HeapCalls
 import lang.py.FormalSW.ListExtensionCalls
+import lang.py.FormalSW.SetUpdateCalls
 import lang.py.FormalSW.UnpackingCalls
 import lang.py.FormalSW.HeapqCalls
 import lang.py.FormalSW.HeapqContents

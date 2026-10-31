@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+Compare set updates with Python, including aliases, argument order, and partial errors.
+"""
+import argparse
+import ast
+import json
+from pathlib import Path
+import runpy
+import re
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--frontend-only', action='store_true')
+options = parser.parse_args()
+
+source = '''
+def plain(target: set[int], source: list[int], events: list[int]):
+    return target.update(source)
+def empty(target: set[int], source: list[int], events: list[int]):
+    return target.update()
+def self_update(target: set[int], source: list[int], events: list[int]):
+    return target.update(target)
+def multiple(target: set[int], source: list[int], events: list[int]):
+    return target.update(source, target, (len(source), len(source) + 1))
+def record(events, value):
+    events.append(value)
+    return [value]
+def effect(target: set[int], source: list[int], events: list[int]):
+    return target.update(record(events, 7), record(events, 8))
+def change_source(source, events):
+    source.append(99)
+    events.append(1)
+    return []
+def changed_source(target: set[int], source: list[int], events: list[int]):
+    return target.update(source, change_source(source, events))
+def fail(events):
+    events.append(1)
+    raise ValueError()
+def argument_failure(target: set[int], source: list[int], events: list[int]):
+    return target.update(source, fail(events))
+def partial(target: set[int], source: list[int], events: list[int]):
+    return target.update([len(source) + 10, []], record(events, 2))
+def later_failure(target: set[int], source: list[int], events: list[int]):
+    return target.update(source, [len(source) + 10, []], record(events, 2))
+def scalar_error(target: set[int], source: list[int], events: list[int]):
+    return target.update(source, 7)
+def tuple_keys(target: set[int], source: list[int], events: list[int]):
+    first = (len(source), 2)
+    second = (len(source), 2)
+    target.update([first, second])
+    return [first, second, target]
+def numeric_keys(target: set[int], source: list[int], events: list[int]):
+    first = (True, len(source))
+    second = (1, len(source))
+    target.update([first, second])
+    return [first, second, target]
+def nested_keys(target: set[int], source: list[int], events: list[int]):
+    inner = (len(source),)
+    key = (inner, inner)
+    target.update([key])
+    return [inner, key, target]
+def set_source(target: set[int], source: list[int], events: list[int]):
+    pair = (len(source), 2)
+    keys = {pair}
+    target.update(keys, target)
+    return [pair, keys, target]
+def dictionary(target: set[int], source: list[int], events: list[int]):
+    return target.update({len(source): [], len(source) + 1: source})
+def tuple_dictionary(target: set[int], source: list[int], events: list[int]):
+    pair = (len(source), 2)
+    keys = {pair: source}
+    target.update(keys)
+    return [pair, keys, target]
+def text(target: set[int], source: list[int], events: list[int]):
+    return target.update("aéa", b"ab", bytearray(b"bc"))
+def replace(holder, events):
+    holder[0] = set()
+    events.append(1)
+    return [3]
+def captured(target: set[int], source: list[int], events: list[int]):
+    holder = [target]
+    result = holder[0].update(replace(holder, events))
+    return [result, holder, target]
+class Custom:
+    def update(self, events):
+        events.append(9)
+        return 23
+def custom(target: set[int], source: list[int], events: list[int]):
+    return Custom().update(events)
+class Shadow:
+    def __init__(self):
+        self.update = 0
+def shadow(target: set[int], source: list[int], events: list[int]):
+    return Shadow().update(record(events, 5))
+class Missing:
+    pass
+def missing(target: set[int], source: list[int], events: list[int]):
+    return Missing().update(record(events, 5))
+'''
+program = ast.parse(source)
+for node in program.body:
+    if isinstance(node, ast.ClassDef):
+        node.formalsw_origin = str(Path(__file__).resolve())
+names = [node.name for node in program.body if isinstance(node, ast.FunctionDef)
+         and len(node.args.args) == 3]
+checker = SupportChecker(program)
+for name in names:
+    assert not checker.check(name, heap_calls=True), (name, checker.check(name, heap_calls=True))
+for call in ('target.update(source=source)', 'target.update(*source)', 'target.update(**source)'):
+    invalid = ast.parse(f'def probe(target, source):\n    return {call}\n')
+    assert SupportChecker(invalid).check('probe', heap_calls=True), call
+if options.frontend_only:
+    print(f'{len(names)} set-update source coverage checks passed')
+    raise SystemExit(0)
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if isinstance(value, list):
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'import lang.py.FormalSW.SetUpdateCalls',
+         'import lang.py.FormalSW.MachineSetUpdate', 'set_option maxRecDepth 8192', 'open FormalSW.PyAst',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name in names:
+    for initial, additional in (([], []), ([1], [1, 2, 3]), ([True], [1, False, 0, 2])):
+        target, items, events = set(initial), additional.copy(), []
+        try:
+            result = world[name](target, items, events)
+            error = None
+        except (TypeError, ValueError, AttributeError) as exc:
+            result, error = None, type(exc).__name__
+        roots = [target, items, events] + ([result] if error is None else [])
+        expected = data(snapshot_roots(roots))
+        heap = '[.set [' + ', '.join(map(constant, initial)) + '], .list [' + ', '.join(
+            '.scalar (' + constant(item) + ')' for item in additional) + '], .list []]'
+        call = f'HeapCalls.call source "{name}" [.ref 0, .ref 1, .ref 2] {heap}'
+        outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+                   f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+        lines.extend([f'-- {name}: {initial!r}, {additional!r}',
+                      f'example : (match ({call}).execution.observe 8000 with',
+                      f'  | .done (.ok c) => ({outcome}) &&',
+                      f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 12000) == some true)',
+                      '  | _ => false) = true := by native_decide'])
+        count += 1
+
+# Unknown protocols cannot be treated as noniterable builtin values.
+lines.append('example : HeapCalls.primitive (.updateSet 0) [.ref 1] '
+             '[.set [], .instance "origin" "Iterable" []] = none := by decide')
+audited = (
+    'Mutable.Relocation.ExecutionLayout.updateSet',
+    'Mutable.Relocation.ExecutionLayout.updateSet_unsupported',
+    'Mutable.Relocation.HeapGrows.setSourceItems',
+    'Mutable.Relocation.HeapGrows.updateSet',
+    'HeapCalls.Relocation.result_updateSet_preserves',
+    'HeapCalls.addItems_scalars',
+    'HeapCalls.updateSet_list_scalars',
+    'HeapCalls.Evaluates.updateSet',
+)
+lines.extend('#print axioms ' + name for name in audited)
+with project_temporary_directory(prefix='set-update-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    checked = subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)],
+                             cwd=ROOT, capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r'depends on axioms:\s*\[([^\]]*)\]', checked.stdout)
+    assert len(audits) + checked.stdout.count('does not depend on any axioms') == len(audited), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(',')} <= {
+            'propext', 'Classical.choice', 'Quot.sound'
+        }, checked.stdout
+print(f'{count} set-update Python comparisons passed, including aliases, argument effects and partial errors')
+print(f'{len(audited)} set-update axiom audits passed')

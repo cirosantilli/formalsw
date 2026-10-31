@@ -1,5 +1,5 @@
 import lang.py.FormalSW.SetConstructionEffects
-import lang.py.FormalSW.MachineDictionaryMethods
+import lang.py.FormalSW.MachineSetUpdate
 
 /-! Set construction and insertion retain representatives, partial allocations and caller aliases. -/
 namespace FormalSW.PyAst.HeapCalls.Relocation
@@ -66,6 +66,7 @@ theorem result_setFrom_preserves (logical physical : Mutable.Heap) (rename : Nat
 
 inductive SetConstructionOperation : Operation → Prop
   | add (address : Nat) : SetConstructionOperation (.add address)
+  | update (address : Nat) : SetConstructionOperation (.updateSet address)
   | display : SetConstructionOperation (.builtin .setDisplay)
   | constructor : SetConstructionOperation (.builtin .set)
 
@@ -87,6 +88,9 @@ theorem step_setConstruction_preserves (module : Module)
         layout inside.1.1 (inside.1.2 value (by simp)) inside.2 globalsInside).protectGenerator stack inside.2
     all_goals exact (result_scalar_preserves logical physical rename logicalAnchors physicalAnchors
       (some (.error ⟨"TypeError", []⟩)) stack globals layout inside.2 globalsInside).protectGenerator stack inside.2
+  | update address =>
+    exact (result_updateSet_preserves logical physical rename logicalAnchors physicalAnchors address values stack globals
+      layout inside.1.1 inside.1.2 inside.2 globalsInside).protectGenerator stack inside.2
   | display =>
     exact (result_allocateSetValues_preserves logical physical rename logicalAnchors physicalAnchors values stack globals
       layout inside.1.2 inside.2 globalsInside).protectGenerator stack inside.2

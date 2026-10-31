@@ -7,16 +7,7 @@ set_option Elab.async false
 variable {logical physical : Heap} {rename : Nat → Nat}
 
 /-- The collection phase of the actual builtin set constructor. -/
-def setSourceItems (source : Value) : Eval (List Value) := do
-  match source with
-  | .ref address => match (← get)[address]? with
-      | some (.set items) => pure (items.map Value.scalar)
-      | some (.keySet items) => pure (items.map Prod.snd)
-      | some (.dict entries) => pure (entries.map fun entry => Value.scalar entry.1)
-      | some (.keyDict entries) => pure (entries.map fun entry => entry.2.1)
-      | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => unsupported
-      | _ => Mutable.sequence source
-  | _ => Mutable.sequence source
+abbrev setSourceItems := Mutable.setSourceItems
 
 theorem setFrom_eq (source : Value) : Mutable.setFrom source = (do
     let items ← setSourceItems source
@@ -26,9 +17,9 @@ theorem setFrom_eq (source : Value) : Mutable.setFrom source = (do
   | scalar scalar => rfl
   | ref address =>
     cases found : heap[address]? with
-    | none => simp [Mutable.setFrom, Relocation.setSourceItems, found, eval_bind, unsupported]
+    | none => simp [Mutable.setFrom, Relocation.setSourceItems, Mutable.setSourceItems, found, eval_bind, unsupported]
     | some object =>
-      cases object <;> simp [Mutable.setFrom, Relocation.setSourceItems, found, eval_bind, unsupported]
+      cases object <;> simp [Mutable.setFrom, Relocation.setSourceItems, Mutable.setSourceItems, found, eval_bind, unsupported]
 
 theorem RuntimeLayout.setSourceItems (layout : RuntimeLayout logical physical rename)
     (source : Value) (inside : source.edge.Within logical.length) :
@@ -37,14 +28,14 @@ theorem RuntimeLayout.setSourceItems (layout : RuntimeLayout logical physical re
         (fun result => (result.1.map (List.map (relocateValue rename)), physical)) := by
   cases source with
   | scalar scalar =>
-    cases scalar <;> simp [Relocation.setSourceItems, Mutable.sequence, relocateValue, error, Except.map,
+    cases scalar <;> simp [Relocation.setSourceItems, Mutable.setSourceItems, Mutable.sequence, relocateValue, error, Except.map,
       List.map_map, Function.comp_def]
   | ref address =>
     have found : logical[address]? = some logical[address] := List.getElem?_eq_getElem inside
     have moved := layout.lookup address _ found
     cases object : logical[address] <;>
       simp only [object, relocateObject] at moved <;>
-      simp [Relocation.setSourceItems, Mutable.sequence, relocateValue, found, object, moved, unsupported,
+      simp [Relocation.setSourceItems, Mutable.setSourceItems, Mutable.sequence, relocateValue, found, object, moved, unsupported,
         Except.map, List.map_map, Function.comp_def]
 
 theorem setSourceItems_keeps_heap (heap after : Heap) (source : Value)
@@ -61,9 +52,9 @@ theorem setSourceItems_bounded (heap : Heap) (closed : Closed heap) (source : Va
   cases source with
   | scalar scalar =>
     cases scalar with
-    | int value | bool value | none => simp [Relocation.setSourceItems, Mutable.sequence, error] at executed
+    | int value | bool value | none => simp [Relocation.setSourceItems, Mutable.setSourceItems, Mutable.sequence, error] at executed
     | string text | bytes bytes =>
-      simp [Relocation.setSourceItems, Mutable.sequence] at executed
+      simp [Relocation.setSourceItems, Mutable.setSourceItems, Mutable.sequence] at executed
       subst items
       intro value member
       obtain ⟨_, _, rfl⟩ := List.mem_map.mp member
@@ -74,27 +65,27 @@ theorem setSourceItems_bounded (heap : Heap) (closed : Closed heap) (source : Va
     have old := closed object (List.mem_of_getElem? found)
     cases object with
     | list values | tuple values =>
-      simp [Relocation.setSourceItems, Mutable.sequence, found] at executed
+      simp [Relocation.setSourceItems, Mutable.setSourceItems, Mutable.sequence, found] at executed
       subst items
       exact old
     | bytearray bytes | set values | dict entries =>
-      simp [Relocation.setSourceItems, Mutable.sequence, found] at executed
+      simp [Relocation.setSourceItems, Mutable.setSourceItems, Mutable.sequence, found] at executed
       subst items
       intro value member
       obtain ⟨_, _, rfl⟩ := List.mem_map.mp member
       trivial
     | keySet entries =>
-      simp [Relocation.setSourceItems, found] at executed
+      simp [Relocation.setSourceItems, Mutable.setSourceItems, found] at executed
       subst items
       exact old
     | keyDict entries =>
-      simp [Relocation.setSourceItems, found] at executed
+      simp [Relocation.setSourceItems, Mutable.setSourceItems, found] at executed
       subst items
       intro value member
       obtain ⟨entry, present, rfl⟩ := List.mem_map.mp member
       exact old entry.2.1 (List.mem_flatMap.mpr ⟨entry, present, by simp⟩)
     | «instance» origin name fields | dataInstance origin name frozen declared fields =>
-      simp [Relocation.setSourceItems, found, unsupported] at executed
+      simp [Relocation.setSourceItems, Mutable.setSourceItems, found, unsupported] at executed
 
 /-- Both input rejection and construction errors retain corresponding heaps and outcomes. -/
 theorem ExecutionLayout.setFrom (layout : ExecutionLayout logical physical rename)
