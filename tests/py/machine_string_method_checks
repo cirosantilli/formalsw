@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""
+Check string argument effects, split allocation, validation and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(items, text):
+    items.append(text)
+    return items
+
+
+def join_nested(items, text, separator):
+    return separator.join(touch(items, text))
+
+
+def join_explicit(items, text, separator):
+    items.append(text)
+    return separator.join(items)
+
+
+def recorded(log, value, text):
+    log.append(value)
+    return text
+
+
+def split_nested(log, value, text):
+    return recorded(log, value, text).split()
+
+
+def split_explicit(log, value, text):
+    log.append(value)
+    return text.split()
+
+
+def strip_nested(log, value, text):
+    return recorded(log, value, text).strip()
+
+
+def strip_explicit(log, value, text):
+    log.append(value)
+    return text.strip()
+'''
+PROOF = r'''
+
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineStringExamples
+set_option Elab.async false
+
+def words (items : List String) : List Mutable.Value := items.map fun text => .scalar (.string text)
+
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [value]))
+
+def splitHeap (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) (text : String) : Mutable.Heap :=
+  inserted heap address items value ++ [.list (words (Strings.splitWhitespace text))]
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, .scalar (.string text)] heap (.ref address)
+      (inserted heap address items (.scalar (.string text))) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem join_nested_returns (heap : Mutable.Heap) (address : Nat) (items : List String) (text separator : String)
+    (found : heap[address]? = some (.list (words items))) :
+    ReturnsValue Probe.module "join_nested" [.ref address, .scalar (.string text), .scalar (.string separator)] heap
+      (.scalar (.string (String.intercalate separator (items ++ [text]))))
+      (inserted heap address (words items) (.scalar (.string text))) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address (words items) (.scalar (.string text)))[address]? = some (.list (words (items ++ [text]))) := by
+    simp [inserted, words, valid]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.join (Evaluates.lookup rfl)
+    (.cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (touch_returns heap address (words items) text found)) .nil)
+    (primitive_join_list _ address separator (items ++ [text]) retained)
+    (by intro name same; cases same; rfl)
+
+theorem join_explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List String) (text separator : String)
+    (found : heap[address]? = some (.list (words items))) :
+    ReturnsValue Probe.module "join_explicit" [.ref address, .scalar (.string text), .scalar (.string separator)] heap
+      (.scalar (.string (String.intercalate separator (items ++ [text]))))
+      (inserted heap address (words items) (.scalar (.string text))) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address (words items) (.scalar (.string text)))[address]? = some (.list (words (items ++ [text]))) := by
+    simp [inserted, words, valid]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  exact Evaluates.join (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)
+    (primitive_join_list _ address separator (items ++ [text]) retained) (by intro name same; cases same; rfl)
+
+theorem calls_equiv (left right : String) (arguments : List Mutable.Value) (heap after : Mutable.Heap) (answer : Mutable.Value)
+    (leftReturns : ReturnsValue Probe.module left arguments heap answer after)
+    (rightReturns : ReturnsValue Probe.module right arguments heap answer after) :
+    (IteratorCalls.call Probe.module left arguments heap).Equiv (IteratorCalls.call Probe.module right arguments heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule) (returned : ReturnsValue Probe.module name arguments heap answer after) :
+      ((IteratorCalls.call Probe.module name arguments heap).run choices).Finishes ⟨.ok answer, [], after, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (finishes left leftChoices leftReturns) (finishes right rightChoices rightReturns) (Or.inl rfl)
+
+theorem join_equiv (heap : Mutable.Heap) (address : Nat) (items : List String) (text separator : String)
+    (found : heap[address]? = some (.list (words items))) :
+    (IteratorCalls.call Probe.module "join_nested" [.ref address, .scalar (.string text), .scalar (.string separator)] heap).Equiv
+      (IteratorCalls.call Probe.module "join_explicit" [.ref address, .scalar (.string text), .scalar (.string separator)] heap) :=
+  calls_equiv _ _ _ _ _ _ (join_nested_returns heap address items text separator found) (join_explicit_returns heap address items text separator found)
+
+theorem recorded_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "recorded" [.ref address, value, .scalar (.string text)] heap (.scalar (.string text))
+      (inserted heap address items value) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem split_nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "split_nested" [.ref address, value, .scalar (.string text)] heap
+      (.ref (inserted heap address items value).length) (splitHeap heap address items value text) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.split_whitespace
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))
+      (recorded_returns heap address items value text found))
+    (by intro name impossible; cases impossible)
+
+theorem split_explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "split_explicit" [.ref address, value, .scalar (.string text)] heap
+      (.ref (inserted heap address items value).length) (splitHeap heap address items value text) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  exact Evaluates.split_whitespace (Evaluates.lookup rfl) (by intro name same; cases same; rfl)
+
+theorem split_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "split_nested" [.ref address, value, .scalar (.string text)] heap).Equiv
+      (IteratorCalls.call Probe.module "split_explicit" [.ref address, value, .scalar (.string text)] heap) :=
+  calls_equiv _ _ _ _ _ _ (split_nested_returns heap address items value text found) (split_explicit_returns heap address items value text found)
+
+theorem strip_nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "strip_nested" [.ref address, value, .scalar (.string text)] heap
+      (.scalar (.string (Strings.stripWhitespace text))) (inserted heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.strip
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))
+      (recorded_returns heap address items value text found))
+    (by intro name impossible; cases impossible)
+
+theorem strip_explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "strip_explicit" [.ref address, value, .scalar (.string text)] heap
+      (.scalar (.string (Strings.stripWhitespace text))) (inserted heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  exact Evaluates.strip (Evaluates.lookup rfl) (by intro name same; cases same; rfl)
+
+theorem strip_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "strip_nested" [.ref address, value, .scalar (.string text)] heap).Equiv
+      (IteratorCalls.call Probe.module "strip_explicit" [.ref address, value, .scalar (.string text)] heap) :=
+  calls_equiv _ _ _ _ _ _ (strip_nested_returns heap address items value text found) (strip_explicit_returns heap address items value text found)
+
+/-- String methods uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_stringMethod (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (operation : Operation) (covered : StringMethodOperation operation) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation operation values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_stringMethod_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used operation values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained covered
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineStringExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "joinPart_eval", "stringValues_eval", "stringValues_relocates", "joinValues_scalar", "primitive_join_pool",
+    "primitive_zfill_ref", "primitive_replace_ref", "result_join_preserves", "result_stringIndexFailure_preserves",
+    "result_replace_preserves", "result_zfill_preserves", "step_stringMethod_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_stringMethod_preserves"] + ["MachineStringExamples." + name for name in (
+    "touch_returns", "join_nested_returns", "join_explicit_returns", "calls_equiv", "join_equiv", "recorded_returns",
+    "split_nested_returns", "split_explicit_returns", "split_equiv", "strip_nested_returns", "strip_explicit_returns", "strip_equiv", "append_then_stringMethod",
+)]
+with project_temporary_directory(prefix="machine-string-method-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    texts = ("", " ", "a b", " λ\t😀 ", "\u00a0hello\u2003world\u3000", "e\u0301")
+    for name in ("join_nested", "join_explicit"):
+        for original in ([], [""], ["a", "λ", "😀"]):
+            for text in texts:
+                for separator in ("", ":", "\u2003"):
+                    items = original.copy()
+                    assert namespace[name](items, text, separator) == separator.join(original + [text])
+                    assert items == original + [text]
+        items = []
+        items.append(items)
+        try:
+            namespace[name](items, "tail", ":")
+        except TypeError:
+            assert len(items) == 2 and items[0] is items and items[1] == "tail"
+        else:
+            raise AssertionError("join must retain the append when an earlier element is invalid")
+    for name in ("split_nested", "split_explicit", "strip_nested", "strip_explicit"):
+        for text in texts:
+            log = []
+            log.append(log)
+            result = namespace[name](log, log, text)
+            assert len(log) == 2 and all(item is log for item in log)
+            if name.startswith("split"):
+                assert result == text.split() and result is not log
+            else:
+                assert result == text.strip()
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineStringMethods\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"string methods: live joining, split allocation, cyclic logs and suspended callers; {len(AUDITS)} axiom audits passed")
