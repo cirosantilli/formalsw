@@ -269,6 +269,15 @@ def reverse_keyword(node):
     return None
 
 
+def next_generator(node):
+    """A fresh generator and an optional eagerly evaluated positional fallback."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'next' and not node.keywords and len(node.args) in (1, 2)
+            and isinstance(node.args[0], ast.GeneratorExp)):
+        return node.args[0], node.args[1] if len(node.args) == 2 else None
+    return None
+
+
 def consumed_generator(node):
     """Recognize immediate consumers without materializing their lazy input."""
     if not (isinstance(node, ast.Call) and len(node.args) == 1):
@@ -542,6 +551,8 @@ def uses_heap_calls(module, function):
                            and len(node.targets[0].elts) == len(node.value.elts)
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
+            if next_generator(node) is not None:
+                return True
             if heapq_binding(node, module) is not None:
                 return True
             if (isinstance(node, ast.Call) and any(isinstance(argument, ast.Starred) for argument in node.args)
@@ -941,6 +952,17 @@ def check_calls(module, function, reject, *, heap=False):
                                 if isinstance(argument, ast.Tuple):
                                     hidden_tuples.add(argument)
                                 expr(argument, iterable_scope)
+                    elif (getattr(node, 'formalsw_next_context', False)
+                          and combination_binding(iterable, module) is not None):
+                        name = combination_binding(iterable, module)
+                        if name in iterable_scope:
+                            reject(iterable, 'combinations requires an unshadowed standard-library import')
+                        arguments = combination_arguments(iterable, module)
+                        if arguments is None:
+                            reject(iterable, 'combinations requires a positional iterable and length')
+                        else:
+                            for argument in arguments:
+                                expr(argument, iterable_scope)
                     elif zip_iterable(iterable, module):
                         if 'zip' in iterable_scope:
                             reject(iterable, 'zip iteration requires the unshadowed builtin zip')
@@ -960,6 +982,21 @@ def check_calls(module, function, reject, *, heap=False):
                     expr(node.value, inner_scope)
                 else:
                     expr(node.elt, inner_scope)
+                return
+            advanced = next_generator(node)
+            if advanced is not None:
+                if not heap:
+                    reject(node, 'next over a generator requires heap call execution')
+                    return
+                if 'next' in scope or bindings(module, 'next'):
+                    reject(node, 'generator advancement requires the unshadowed builtin next')
+                generator, fallback = advanced
+                collector = ast.copy_location(ast.ListComp(elt=generator.elt,
+                    generators=generator.generators), generator)
+                collector.formalsw_next_context = True
+                recurse(collector)
+                if fallback is not None:
+                    recurse(fallback)
                 return
             consumed = consumed_generator(node)
             if consumed is not None:

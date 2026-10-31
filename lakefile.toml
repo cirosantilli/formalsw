@@ -69,6 +69,7 @@ roots = [
   "lang.py.FormalSW.MembershipCalls",
   "lang.py.FormalSW.ComprehensionCalls",
   "lang.py.FormalSW.GeneratorCalls",
+  "lang.py.FormalSW.NextCalls",
   "lang.py.FormalSW.PermutationCalls",
   "lang.py.FormalSW.CombinationCalls",
   "lang.py.FormalSW.ZipCalls",

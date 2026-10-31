@@ -532,6 +532,8 @@ inductive Operation where
   | extremumGenerator (maximum : Bool) (fallback : Option Expr) (element : Expr)
       (generators : List (Expr × Expr × List Expr)) (env : Env)
   | generatorCollect (action : GeneratorAction) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
+  | nextGenerator (fallback : Option Expr) (element : Expr)
+      (generators : List (Expr × Expr × List Expr)) (env : Env)
 
 /-- The sequence reference and lexical key environment persist across key calls. -/
 structure SequenceExtremum where
@@ -607,6 +609,7 @@ inductive Frame where
   | assignSlice (base lower upper stride : Expr) (rest : List Stmt) (env : Env)
   | rangeArguments (name : String) (done : List Value) (rest : List Expr)
       (body otherwise following : List Stmt) (env : Env)
+  | nextStart (hasDefault : Bool) (loop : Stmt) (env : Env)
 
 inductive Work where
   | sortedLoop (cursor : SequenceSort) (remaining : List Value) (keys : List (Value × Value))
@@ -1235,6 +1238,79 @@ def extremumGeneratorStart (anchors : Nat) (maximum : Bool) (fallback : Option E
               enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
           | _ => .unsupported
 
+/-- This binding cannot collide with a Python source identifier. -/
+def nextDefault : String := "$formalsw.next.default"
+
+def nextConsumer (fallback : Option Expr) : Expr :=
+  .call (.name "$formalsw.next.generator") fallback.toList
+
+def nextExhausted : Expr :=
+  .consumeGenerator (.call (.name "$formalsw.next.exhausted") []) (.constant .none) []
+
+/-- Exhaustion exits this generator before raising the consumer's StopIteration. -/
+def nextFinish (hasDefault : Bool) : List Stmt :=
+  if hasDefault then [.return (.name nextDefault)] else [.expr nextExhausted]
+
+def nextEnv (env : Env) (fallback : Value) : Env := setLocal env nextDefault fallback
+
+/-- Unknown iteration protocols cannot be replaced with a builtin TypeError. -/
+def nextSequence (value : Value) : Eval (List Value) := do
+  if let .ref address := value then
+    match (← get)[address]? with
+    | some (.instance _ _ _) | some (.dataInstance _ _ _ _ _) | none => Mutable.unsupported
+    | _ => Mutable.sequence value
+  else
+    Mutable.sequence value
+
+def nextGeneratorArguments (fallback : Option Expr) (element : Expr)
+    (generators : List (Expr × Expr × List Expr)) (env : Env)
+    (stack : List Frame) (heap : Heap) : State :=
+  let expressions := match generators with
+    | (_, iterable, _) :: _ => match iterable with
+        | .call (.name "range") expressions | .call (.name "enumerate") expressions
+          | .zipIterable expressions | .permutationsIterable expressions
+          | .combinationsIterable expressions => expressions
+        | _ => [iterable]
+    | [] => []
+  argumentsState (.nextGenerator fallback element generators env) env [] expressions stack heap
+
+/-- Iterator acquisition precedes fallback evaluation. Each yielded element returns
+immediately; filters and inner iterables execute only as requested by the scan. -/
+def nextGeneratorStart (anchors : Nat) (fallback : Option Expr) (element : Expr)
+    (generators : List (Expr × Expr × List Expr)) (env : Env) (values : List Value)
+    (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  match generators with
+  | [] => .unsupported
+  | (target, iterable, filters) :: rest =>
+      let terminal := [.return element]
+      let body := comprehensionTargetBody target
+        (comprehensionFilters filters (comprehensionTargetsBody terminal rest))
+      let name := comprehensionTargetName target
+      let enter := fun loop heap => Step.next
+        ⟨.expr (fallback.getD (.constant .none)) env,
+          .nextStart fallback.isSome loop (comprehensionTargetsEnv env generators) :: stack, heap⟩
+      match iterable with
+      | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values)
+          fun rows heap => enter (.permutationStepLoop name rows body []) heap
+      | .combinationsIterable _ => run (globals := globals) anchors heap (combinationRows values)
+          fun rows heap => enter (.permutationStepLoop name rows body []) heap
+      | .zipIterable _ => run (globals := globals) anchors heap (zipSources values)
+          fun sources heap => enter (.zipStepLoop name sources 0 body []) heap
+      | .call (.name "enumerate") _ => match enumerateTarget target, values with
+          | some (index, name), [source, start] =>
+              run (globals := globals) anchors heap (enumerateStart start) fun counter heap =>
+                run (globals := globals) anchors heap (nextSequence source) fun _ heap =>
+                  enter (.enumerateStepLoop index name (sequenceSource source) 0 counter
+                    (comprehensionFilters filters (comprehensionTargetsBody terminal rest)) []) heap
+          | _, _ => .unsupported
+      | .call (.name "range") _ => match rangeBounds values with
+          | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
+          | .error error => done (globals := globals) anchors heap (.error error)
+      | _ => match values with
+          | [value] => run (globals := globals) anchors heap (nextSequence value) fun _ heap =>
+              enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
+          | _ => .unsupported
+
 /-- Clear the captured dictionary object in place, retaining all aliases and unrelated objects. -/
 def clearDictionary (address : Nat) : Eval Value := do
   match (← get)[address]? with
@@ -1797,6 +1873,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
   | .operation (.builtin .any) values => truthSequenceStart (globals := globals) anchors false values stack heap
   | .operation (.extremumGenerator maximum fallback element generators env) values =>
       extremumGeneratorStart (globals := globals) anchors maximum fallback element generators env values stack heap
+  | .operation (.nextGenerator fallback element generators env) values =>
+      nextGeneratorStart (globals := globals) anchors fallback element generators env values stack heap
   | .operation (.truthGenerator universal element generators env) values =>
       truthGeneratorStart (globals := globals) anchors universal element generators env values stack heap
   | .operation .sumSequence values => sumSequenceStart (globals := globals) anchors values stack heap
@@ -1900,6 +1978,12 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
       | .consumeGenerator (.call (.name "$formalsw.extremum.compare") []) expression [] =>
           .next ⟨.expr expression env, .extremumResume stack :: withoutGenerator stack, heap⟩
+      | .consumeGenerator (.call (.name "$formalsw.next.exhausted") []) (.constant .none) [] =>
+          .next ⟨.operation (.raiseException "StopIteration") [], withoutGenerator stack, heap⟩
+      | .consumeGenerator (.call (.name "$formalsw.next.generator") []) element generators =>
+          .next (nextGeneratorArguments none element generators env stack heap)
+      | .consumeGenerator (.call (.name "$formalsw.next.generator") [fallback]) element generators =>
+          .next (nextGeneratorArguments (some fallback) element generators env stack heap)
       | .consumeGenerator (.call (.name "$formalsw.max.generator") []) element generators =>
           .next (extremumGeneratorArguments true none element generators env stack heap)
       | .consumeGenerator (.call (.name "$formalsw.min.generator") []) element generators =>
@@ -2103,6 +2187,9 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           | .extremumResume original => .next ⟨.value value, original, heap⟩
           | .extremumStart hasDefault loop env =>
               .next ⟨.block ([loop] ++ extremumFinish hasDefault) (extremumEnv env value), .generatorEnd :: stack, heap⟩
+          | .nextStart hasDefault loop env =>
+              .next ⟨.block ([loop] ++ nextFinish hasDefault) (nextEnv env value),
+                .generatorEnd :: stack, heap⟩
           | .sumStart loop env => sumEnter (globals := globals) anchors loop env value (.generatorEnd :: stack) heap
           | .generatorEnd => .next ⟨.value value, stack, heap⟩
           | .generatorConsumer .list => .next ⟨.value value, stack, heap⟩
@@ -2488,7 +2575,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>

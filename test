@@ -476,6 +476,14 @@ def main() -> int:
     print(f"{'PASS' if dictionary_constructor_checks_passed else 'FAIL'} dictionary construction", flush=True)
     if not dictionary_constructor_checks_passed:
         print(textwrap.indent((dictionary_constructor_checks.stdout + dictionary_constructor_checks.stderr).rstrip(), "  "))
+    next_generator_checks = subprocess.run(
+        [sys.executable, "tests/py/next_generator_checks"],
+        cwd=REPO, text=True, capture_output=True,
+    )
+    next_generator_checks_passed = next_generator_checks.returncode == 0
+    print(f"{'PASS' if next_generator_checks_passed else 'FAIL'} lazy next generator consumption", flush=True)
+    if not next_generator_checks_passed:
+        print(textwrap.indent((next_generator_checks.stdout + next_generator_checks.stderr).rstrip(), "  "))
     join_checks = subprocess.run(
         [sys.executable, "tests/py/join_checks"],
         cwd=REPO, text=True, capture_output=True,
@@ -605,6 +613,7 @@ def main() -> int:
         and pop_checks_passed
         and heapq_checks_passed
         and dictionary_constructor_checks_passed
+        and next_generator_checks_passed
         and join_checks_passed
         and generator_exception_checks_passed
         and consumed_generator_checks_passed

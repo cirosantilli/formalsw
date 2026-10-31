@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+Compare lazy first yields, eager defaults, live iterators and exception boundaries.
+"""
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+class Heap:
+    def __init__(self):
+        self.objects = []
+        self.addresses = {}
+
+    def value(self, value):
+        if type(value) not in (list, tuple, bytearray):
+            return '.scalar (' + constant(value) + ')'
+        if id(value) not in self.addresses:
+            self.addresses[id(value)] = len(self.objects)
+            self.objects.append(value)
+            for item in value:
+                self.value(item)
+        return f'.ref {self.addresses[id(value)]}'
+
+    def expression(self):
+        return '[' + ', '.join(
+            '.bytearray [' + ', '.join(map(str, value)) + ']' if type(value) is bytearray else
+            ('.list' if type(value) is list else '.tuple') + ' [' + ', '.join(map(self.value, value)) + ']'
+            for value in self.objects) + ']'
+
+
+source = '''
+from itertools import permutations, combinations
+
+def touch(xs: list[int], n: int):
+    xs.append(n)
+    return n
+def fallback(xs: list[int]):
+    xs.append(9)
+    return 99
+def source_effect(xs: list[int]):
+    xs.append(1)
+    return xs
+def bad_source(xs: list[int]):
+    xs.append(1)
+    return 3
+def stop(xs: list[int], n: int):
+    xs.append(7)
+    raise StopIteration(n)
+def stop_source(xs: list[int]):
+    xs.append(1)
+    raise StopIteration("source")
+def shrinking(xs: list[int]):
+    if xs:
+        xs.pop()
+    return 99
+def replace(holder: list[list[int]]):
+    holder[0] = [88]
+    return 99
+
+def first(xs: list[int]):
+    return next((x for x in xs), 99)
+def required(xs: list[int]):
+    return next(x for x in xs)
+def filtered(xs: list[int]):
+    return next((x for x in xs if x > 1), 99)
+def ranged(xs: list[int]):
+    return next((x for x in range(len(xs) - 2, -3, -1)), fallback(xs))
+def empty_range(xs: list[int]):
+    return next((x for x in range(-5)), fallback(xs))
+def required_range(xs: list[int]):
+    return next(x for x in range(len(xs) - 1))
+def default_eager(xs: list[int]):
+    return next((touch(xs, x) for x in range(2)), fallback(xs))
+def acquire_first(xs: list[int]):
+    return next((x for x in source_effect(xs)), fallback(xs))
+def invalid_first(xs: list[int]):
+    return next((x for x in bad_source(xs)), fallback(xs))
+def source_stops(xs: list[int]):
+    return next((x for x in stop_source(xs)), fallback(xs))
+def default_stops(xs: list[int]):
+    return next((x for x in xs), stop(xs, 11))
+def element_stops(xs: list[int]):
+    return next((stop(xs, x) for x in xs), 99)
+def filter_stops(xs: list[int]):
+    return next((x for x in xs if stop(xs, x)), 99)
+def inner_stops(xs: list[int]):
+    return next((y for x in xs for y in stop_source(xs)), 99)
+def after(xs: list[int]):
+    result = next((x for x in xs), 99)
+    return stop(xs, result)
+def outer_boundary(xs: list[int]):
+    return list(next(y for y in []) for x in xs)
+def nested_default(xs: list[int]):
+    return next((next((y for y in []), x) for x in xs), 99)
+def nested_default_stops(xs: list[int]):
+    return next((next((y for y in []), stop(xs, 5)) for x in xs), 99)
+def shadow(xs: list[int]):
+    x = 123
+    result = next((x for x in xs), x)
+    return [result, x]
+def shrinking_default(xs: list[int]):
+    return next((x for x in xs), shrinking(xs))
+def captured_source(xs: list[int]):
+    holder = [xs]
+    result = next((x for x in holder[0]), replace(holder))
+    return [result, holder]
+def nested(xs: list[int]):
+    return next((x + y for x in xs for y in [2, 3] if y > 2), 99)
+def skip_later(xs: list[int]):
+    return next((touch(xs, x) if x == 0 else stop(xs, x) for x in range(2)), 99)
+def filters(xs: list[int]):
+    return next((x for x in xs if x < 0 if stop(xs, x)), 99)
+def invalid_range(xs: list[int]):
+    return next((x for x in range(0, 2, 0)), fallback(xs))
+def zipped(xs: list[int]):
+    return next((x + y for x, y in zip(xs, xs)), fallback(xs))
+def enumerated(xs: list[int]):
+    return next((i + x for i, x in enumerate(xs, start=2)), fallback(xs))
+def permuted(xs: list[int]):
+    return next((row for row in permutations(xs, 1)), fallback(xs))
+def combined(xs: list[int]):
+    return next((row for row in combinations(xs, 1)), fallback(xs))
+def empty_tuple(xs: list[int]):
+    return next((row for row in combinations(xs, 0)), fallback(xs))
+def bad_combination(xs: list[int]):
+    return next((row for row in combinations(xs, -1)), fallback(xs))
+def textual(xs: list[int]):
+    return next((x for x in "٢²a" if x != "a"), fallback(xs))
+def mapped_none(xs: list[int]):
+    return next((None for x in xs), 99)
+def default_identity(xs: list[int]):
+    result = next((x for x in xs), xs)
+    return result is xs
+def shared(xs: list[int]):
+    result = next((x for x in xs), xs)
+    result.append(7)
+    return result
+def defaults_scope(xs: list[int]):
+    x = 123
+    return next((y for x in xs for y in [x]), x)
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+names = [function.name for function in program.body if isinstance(function, ast.FunctionDef)]
+for name in names:
+    issues = checker.check(name, heap_calls=True)
+    assert not issues, (name, issues)
+world = {}
+exec(source, world)
+checks = []
+
+
+def compare(name, value):
+    heap = Heap()
+    argument = heap.value(value)
+    before = heap.expression()
+    anchors = list(heap.objects)
+    try:
+        result = world[name](value)
+        roots = anchors + [result]
+        outcome = 'match c.outcome with | .ok _ => true | _ => false'
+    except (StopIteration, RuntimeError, ValueError, TypeError) as error:
+        args = error.args if type(error) is StopIteration else ()
+        exception = f'⟨"{type(error).__name__}", [' + ', '.join(map(constant, args)) + ']⟩'
+        roots = anchors
+        outcome = f'match c.outcome with | .error e => decide (e = {exception}) | _ => false'
+    expected = data(snapshot_roots(roots))
+    checks.append('\n'.join([
+        f'-- {name}, case {len(checks)}',
+        f'example : (match (HeapCalls.call source "{name}" [{argument}] {before}).execution.observe 5000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ]))
+
+
+variants = names[names.index('first'):names.index('shared')]
+for name in variants + ['defaults_scope']:
+    for initial in ([], [0], [2, -1, 0], [True, False, 1, 0]):
+        compare(name, initial.copy())
+for initial in ([None], [False], [''], [b''], [[1], [2]]):
+    for name in ('first', 'required', 'default_identity'):
+        compare(name, initial.copy())
+for initial in ([], [[1], [2]]):
+    compare('shared', initial)
+cyclic = []
+cyclic.append(cyclic)
+compare('first', cyclic)
+compare('default_identity', cyclic)
+
+for text in (
+    'def f(xs: list[int]): return next((x for x in xs), default=0)',
+    'def f(xs: list[int]): return next((x for x in xs), 0, 1)',
+    'def f(xs: list[int], next: int): return next(x for x in xs)',
+    'next = 1\ndef f(xs: list[int]): return next(x for x in xs)',
+    'def f(xs: list[int]):\n    g = (x for x in xs)\n    return next(g)',
+):
+    assert SupportChecker(ast.parse(text)).check('f'), text
+probe = ast.parse('def f(n: int): return next((x for x in range(n)), 0)')
+assert uses_heap_calls(probe, probe.body[0])
+assert not SupportChecker(probe).check('f')
+
+prelude = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+           'def source : Module := pyast_from_json% (include_str "source.json")']
+with project_temporary_directory(prefix='next-generator-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    for start in range(0, len(checks), 25):
+        proof.write_text('\n'.join(prelude + checks[start:start + 25]) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+        print(f'Checked next generator cases {start + 1}..{min(start + 25, len(checks))}', flush=True)
+
+print(f'{len(checks)} next-generator Python comparisons passed, including defaults, aliases and exceptions')
