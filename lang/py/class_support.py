@@ -57,9 +57,10 @@ def dataclass_fields(module, cls, reject):
                 return fail('dataclass fields require unique ordinary names', node)
             if name in ('bit_length', 'bit_count'):
                 return fail(f'{name} is currently reserved for the modeled integer method', node)
-            if annotation_kind(node.annotation) is None or any(
+            universal = isinstance(node.annotation, ast.Name) and node.annotation.id == 'object'
+            if (annotation_kind(node.annotation) is None and not universal) or any(
                     bindings(module, part.id) for part in ast.walk(node.annotation) if isinstance(part, ast.Name)):
-                return fail('dataclass fields need unshadowed supported scalar or container annotations', node)
+                return fail('dataclass fields need unshadowed object, scalar or container annotations', node)
             names.add(name)
             fields.append(node)
         elif isinstance(node, ast.FunctionDef):
@@ -139,8 +140,11 @@ def resolve_record_inputs(module):
         if issues or data is None:
             continue
         frozen, fields = data
-        records[cls.name] = RecordInput(origin, cls.name, frozen,
-            tuple((field.target.id, annotation_kind(field.annotation)) for field in fields))
+        domains = tuple((field.target.id, annotation_kind(field.annotation)) for field in fields)
+        # Constructor fields can hold arbitrary objects; quantified inputs need an expressible domain.
+        if any(kind is None for _, kind in domains):
+            continue
+        records[cls.name] = RecordInput(origin, cls.name, frozen, domains)
     for argument in arguments:
         if isinstance(argument.annotation, ast.Name) and argument.annotation.id in records:
             argument.annotation.formalsw_record_input = records[argument.annotation.id]

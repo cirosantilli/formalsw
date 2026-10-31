@@ -215,6 +215,8 @@ roots = [
   "lang.py.FormalSW.CompositeMachineFrame",
   "lang.py.FormalSW.ConstructionFrame",
   "lang.py.FormalSW.ConstructionMachineFrame",
+  "lang.py.FormalSW.AllocationFrame",
+  "lang.py.FormalSW.AllocationMachineFrame",
   "lang.py.FormalSW.MachineExtremumSelection",
   "lang.py.FormalSW.MachineValueResults",
   "lang.py.FormalSW.MachineValueContinuation",

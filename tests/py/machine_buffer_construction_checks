@@ -183,6 +183,34 @@ theorem bytearray_failure_retains_mutation (heap : Mutable.Heap) (address : Nat)
     | exact .done rfl
     | refine .next rfl ?_
 
+theorem buffer_copy_private_cell (choices : ChoiceSchedule) (heap : Mutable.Heap) (address privateAddress : Nat)
+    (data : List UInt8) (privateObject : Mutable.Object) (found : heap[address]? = some (.bytearray data))
+    (saved : SavedCell privateAddress privateObject heap) :
+    SavedCell privateAddress privateObject (heap ++ [.bytearray data]) ∧
+    ((IteratorCalls.call Probe.module "bytearray_copy" [.ref address] heap).run choices).Finishes
+      ⟨.ok (.ref heap.length), [], heap ++ [.bytearray data], heap.length⟩ := by
+  have kept := Heapq.preserves_bytearray _ (SavedCell.allocates privateAddress privateObject) [.ref address]
+    heap (.ok (.ref heap.length)) (heap ++ [.bytearray data]) saved
+    (by simp [Mutable.bytearray, Mutable.byteValues, found, Mutable.allocateBuffer, Except.map])
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0)
+    (bytearray_copy_returns heap address data found heap.length []) []
+  exact ⟨kept, reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))⟩
+
+theorem buffer_failure_private_cell (heap : Mutable.Heap) (address privateAddress : Nat)
+    (items : List Mutable.Value) (value : Mutable.Value) (text : String) (privateObject : Mutable.Object)
+    (found : heap[address]? = some (.list items)) (saved : SavedCell privateAddress privateObject heap)
+    (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (inserted heap address items value) ∧
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "bytearray_nested") [.ref address, value, .scalar (.string text)], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], inserted heap address items value, heap.length⟩) := by
+  have kept := appendItem_preserves_cell privateAddress address privateObject value separate
+    heap (.ok (.scalar .none)) (inserted heap address items value) saved
+    (by simp [Mutable.appendItem, found, inserted, Except.map])
+  exact ⟨Heapq.preserves_bytearray _ (SavedCell.allocates privateAddress privateObject) [.scalar (.string text)]
+    (inserted heap address items value) (.error ⟨"TypeError", []⟩) _ kept (by rfl),
+    bytearray_failure_retains_mutation heap address items value text found⟩
+
 /-- Buffer construction uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
 theorem append_then_buffer (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
@@ -256,6 +284,7 @@ AUDITS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
     "bytearray_copy_returns",
     "bytearray_failed_conversion",
     "append_then_buffer",
+    "buffer_copy_private_cell", "buffer_failure_private_cell",
 )]
 with project_temporary_directory(prefix="machine-buffer-construction-") as temporary:
     directory = Path(temporary)
@@ -294,6 +323,7 @@ with project_temporary_directory(prefix="machine-buffer-construction-") as tempo
     checked_source = directory / "Checks.lean"
     checked_source.write_text(
         "import lang.py.FormalSW.MachineBufferConstruction\n"
+        "import lang.py.FormalSW.AllocationMachineFrame\n"
         "import lang.py.FormalSW.IteratorRules\n"
         + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
         + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"

@@ -3,6 +3,7 @@
 Check constructor allocation, initializer effects, defaults and named-call composition.
 """
 from pathlib import Path
+import ast
 import re
 import runpy
 import subprocess
@@ -13,6 +14,8 @@ from test_support import project_temporary_directory
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 api = runpy.run_path(str(ROOT / "formalsw"))
+from lang.py.class_support import dataclass_fields
+from lang.py.global_inputs import annotation_record
 SOURCE = '''
 from dataclasses import dataclass
 from math import factorial
@@ -92,6 +95,49 @@ theorem checked_finishes (heap : Mutable.Heap) (address : Nat) (items : List Mut
   all_goals first
     | exact .done rfl
     | exact .next rfl (.done rfl)
+
+/-- The initializer can expose its instance and fail without changing a separate caller object. -/
+theorem checked_private_cell (heap : Mutable.Heap) (address privateAddress : Nat) (items : List Mutable.Value)
+    (returned : Mutable.Value) (privateObject : Mutable.Object) (found : heap[address]? = some (.list items))
+    (saved : SavedCell privateAddress privateObject heap) (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (after heap address items) ∧
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "Checked") [.ref address, returned], [], heap⟩
+      (.ok ⟨outcome heap.length returned, [], after heap address items, heap.length⟩) := by
+  have kept := Heapq.preserves_allocateInstance _ (SavedCell.allocates privateAddress privateObject) classInfo.1 "Checked"
+    heap (.ok (.ref heap.length)) (allocated heap) saved (by rfl)
+  have extended : (allocated heap)[address]? = some (.list items) := by
+    rw [allocated, List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+    exact found
+  exact ⟨appendItem_preserves_cell privateAddress address privateObject (.ref heap.length) separate
+    (allocated heap) (.ok (.scalar .none)) (after heap address items) kept
+    (by simp [Mutable.appendItem, extended, after, Except.map]),
+    checked_finishes heap address items returned found⟩
+
+def pairObject (first second : Mutable.Value) : Mutable.Object :=
+  .dataInstance ((Probe.module.findClass "Pair").getD ("", [])).1 "Pair" true
+    ["first", "second"] [("first", first), ("second", second)]
+
+theorem pair_private_cell (heap : Mutable.Heap) (privateAddress : Nat) (privateObject : Mutable.Object)
+    (first second : Mutable.Value) (saved : SavedCell privateAddress privateObject heap) :
+    SavedCell privateAddress privateObject (heap ++ [pairObject first second]) ∧
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "Pair") [first, second], [], heap⟩
+      (.ok ⟨.ok (.ref heap.length), [], heap ++ [pairObject first second], heap.length⟩) := by
+  refine ⟨Heapq.preserves_allocateDataclass _ (SavedCell.allocates privateAddress privateObject)
+    _ "Pair" true ["first", "second"] [first, second] heap (.ok (.ref heap.length)) _ saved (by rfl), ?_⟩
+  refine Finishes.next (following := ⟨.value (.ref heap.length), [], heap ++ [pairObject first second]⟩) ?_ (.done rfl)
+  rfl
+
+theorem initializer_arity_private_cell (heap : Mutable.Heap) (privateAddress : Nat) (privateObject : Mutable.Object)
+    (saved : SavedCell privateAddress privateObject heap) :
+    SavedCell privateAddress privateObject (allocated heap) ∧
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "Checked") [], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], allocated heap, heap.length⟩) := by
+  have kept := HeapCalls.Framing.step_namedCall_cell Probe.module privateAddress heap.length privateObject heap
+    "Checked" [] [] [] saved
+  exact ⟨kept, .done rfl⟩
 
 theorem checked_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
     (values : List Mutable.Value)
@@ -183,14 +229,59 @@ AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
 )] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_named_call_preserves"] + ["MachineNamedCallExamples." + name for name in (
     "initializer_returns", "checked_finishes", "checked_returns", "implicit_returns", "explicit_returns",
     "returns_finishes", "default_equiv", "append_then_call",
+    "checked_private_cell", "pair_private_cell", "initializer_arity_private_cell",
+)] + ["FormalSW.PyAst.HeapCalls.Framing." + name for name in (
+    "step_allocationBuiltin_cell", "step_reversedList_cell", "invokeMethod_retains_cell",
+    "construct_retains_cell", "step_namedCall_cell", "step_method_cell",
+)] + ["FormalSW.PyAst.Heapq." + name for name in (
+    "preserves_allocateInstance", "preserves_allocateDataclass", "preserves_bytesElement",
+    "preserves_bytes", "preserves_bytearray", "preserves_listConstruct", "preserves_tupleConstruct",
+    "preserves_reversedList", "preserves_sorted", "preserves_sortedReverse",
+    "preserves_scalarResult", "preserves_library",
 )]
 with project_temporary_directory(prefix="machine-named-call-") as temporary:
     directory = Path(temporary)
     path = directory / "source.py"
     path.write_text(SOURCE)
     module = api["source_module"](path)
+    record_input = directory / "record_input.py"
+    record_input.write_text(SOURCE + '''
+def consume(pair: Pair) -> int:
+    """
+    @formalsw: Returns
+    """
+    return 0
+''')
+    record_module = api["source_module"](record_input)
+    consume = next(node for node in record_module.body if isinstance(node, ast.FunctionDef) and node.name == "consume")
+    assert annotation_record(consume.args.args[0].annotation) is None
+    requirements = api["collect_requirements"](record_input, record_module, "Probe", "RecordProbe")
+    assert requirements and any(item.unsupported for item in requirements)
+    for prefix, body in (
+        ("object = int\n", "    value: object\n"),
+        ("from typing import ClassVar as object\n", "    value: object\n"),
+        ("", "    value: object\n    def object(self): return 0\n"),
+    ):
+        program = ast.parse("from dataclasses import dataclass\n" + prefix + "@dataclass\nclass Box:\n" + body)
+        cls = next(node for node in program.body if isinstance(node, ast.ClassDef))
+        issues = []
+        assert dataclass_fields(program, cls, lambda node, message: issues.append(message)) is None
+        assert issues
     namespace = {}
     exec(compile(SOURCE, str(path), "exec"), namespace)
+    private = []
+    private.append(private)
+    items = [private]
+    try:
+        namespace["Checked"](items, private)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("initializer accepted a non-None return")
+    pair = namespace["Pair"](private, private)
+    assert pair.first is pair.second is private
+    assert len(private) == 1 and private[0] is private
+    assert items[0] is private and isinstance(items[1], namespace["Checked"])
     for size in (0, 1, 17):
         for returned in (None, False, 0, 10**100, "", b"", []):
             items = [object() for _ in range(size)]
@@ -229,6 +320,7 @@ with project_temporary_directory(prefix="machine-named-call-") as temporary:
     checked_source = directory / "Checks.lean"
     checked_source.write_text(
         "import lang.py.FormalSW.MachineNamedCallInvariant\n"
+        "import lang.py.FormalSW.AllocationMachineFrame\n"
         "import lang.py.FormalSW.IteratorRules\n"
         + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
         + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"

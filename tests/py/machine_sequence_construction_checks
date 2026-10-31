@@ -83,6 +83,26 @@ theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mut
   apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
   simpa [copied, inserted] using primitive_list_list (inserted heap address items item) address (items ++ [item]) retained
 
+theorem source_private_copy (choices : ChoiceSchedule) (heap : Mutable.Heap) (address privateAddress : Nat)
+    (items : List Mutable.Value) (item : Mutable.Value) (privateObject : Mutable.Object)
+    (found : heap[address]? = some (.list items)) (saved : SavedCell privateAddress privateObject heap)
+    (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (copied heap address items item) ∧
+    ((IteratorCalls.call Probe.module "explicit" [.ref address, item] heap).run choices).Finishes
+      ⟨.ok (.ref heap.length), [], copied heap address items item, heap.length⟩ := by
+  have kept := appendItem_preserves_cell privateAddress address privateObject item separate
+    heap (.ok (.scalar .none)) (inserted heap address items item) saved
+    (by simp [Mutable.appendItem, found, inserted, Except.map])
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address items item)[address]? = some (.list (items ++ [item])) := by
+    simp [inserted, inside]
+  have built := Heapq.preserves_listConstruct _ (SavedCell.allocates privateAddress privateObject) [.ref address]
+    (inserted heap address items item) (.ok (.ref (inserted heap address items item).length))
+    (copied heap address items item) kept (primitive_list_list _ address _ retained)
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0)
+    (explicit_returns heap address items item found heap.length []) []
+  exact ⟨built, reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))⟩
+
 theorem inline_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
     (found : heap[address]? = some (.list items)) :
     (IteratorCalls.call Probe.module "nested" [.ref address, item] heap).Equiv
@@ -180,6 +200,7 @@ AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
     "result_reversedList_preserves", "step_sequenceConstruction_preserves",
 )] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_sequenceConstruction_preserves"] + ["MachineSequenceConstructionExamples." + name for name in (
     "touch_returns", "nested_returns", "explicit_returns", "inline_equiv",
+    "source_private_copy",
     "tuple_copy_returns", "identity_returns", "tuple_identity_equiv", "reverse_copy_returns", "append_then_sequence",
 )]
 with project_temporary_directory(prefix="machine-sequence-construction-") as temporary:
@@ -218,6 +239,7 @@ with project_temporary_directory(prefix="machine-sequence-construction-") as tem
     checked_source = directory / "Checks.lean"
     checked_source.write_text(
         "import lang.py.FormalSW.MachineSequenceConstruction\n"
+        "import lang.py.FormalSW.AllocationMachineFrame\n"
         "import lang.py.FormalSW.IteratorRules\n"
         + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
         + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
