@@ -102,6 +102,7 @@ roots = [
   "lang.py.FormalSW.KeyRelocation",
   "lang.py.FormalSW.DictionaryRelocation",
   "lang.py.FormalSW.ItemRelocation",
+  "lang.py.FormalSW.ItemWriteRelocation",
   "lang.py.FormalSW.SetRelocation",
   "lang.py.FormalSW.ConstructionRelocation",
   "lang.py.FormalSW.SetFromRelocation",

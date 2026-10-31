@@ -21,6 +21,14 @@ def append_read(items, value):
 def append_return(items, value):
     items.append(value)
     return value
+
+def store_read(mapping, key, value):
+    mapping[key] = value
+    return mapping[key]
+
+def store_return(mapping, key, value):
+    mapping[key] = value
+    return value
 '''
 PROOF = r'''
 open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
@@ -118,6 +126,123 @@ theorem append_then_read (logical physical : Mutable.Heap) (rename : Nat → Nat
     (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
     ⟨inside.1, inside.2, by simpa [appended] using saved⟩ rfl wrapped
 
+
+def stored (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (value : Mutable.Value) :=
+  heap.set address (.dict (ScalarDict.insert entries key value))
+def storeName (readback : Bool) := if readback then "store_read" else "store_return"
+def storeArgs : List Arg := [{name := "mapping", annotation := none}, {name := "key", annotation := none},
+  {name := "value", annotation := none}]
+def storeBody (readback : Bool) : List Stmt :=
+  [.assign [.subscript (.name "mapping") (.name "key")] (.name "value"),
+    .return (if readback then .subscript (.name "mapping") (.name "key") else .name "value")]
+
+theorem store_source (readback : Bool) :
+    findFunctionIn Probe.module.body (storeName readback) = some (storeArgs, storeBody readback) := by
+  cases readback <;> rfl
+
+theorem store_returns (readback : Bool) (heap : Mutable.Heap) (address : Nat)
+    (entries : List (Constant × Mutable.Value)) (key : Constant) (value : Mutable.Value)
+    (found : heap[address]? = some (.dict entries)) :
+    ReturnsValue Probe.module (storeName readback) [.ref address, .scalar key, value] heap value
+      (stored heap address entries key value) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have write : Mutable.setItem (.ref address) (.scalar key) value heap =
+      some (.ok (.scalar .none), stored heap address entries key value) := by
+    simp [Mutable.setItem, found, stored, Except.map]
+  have read : Mutable.getItem (.ref address) (.scalar key) (stored heap address entries key value) =
+      some (.ok value, stored heap address entries key value) := by
+    simp [Mutable.getItem, stored, bounded, ScalarDict.lookup_insert_self]
+  apply BlockReturns.function (store_source readback) rfl
+  apply BlockReturns.setItem (by intros; simp) (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) write
+  cases readback with
+  | false => exact BlockReturns.return_value (Evaluates.lookup rfl)
+  | true =>
+    exact BlockReturns.return_value
+      (Evaluates.subscript (by intros; simp) (Evaluates.lookup rfl) (Evaluates.lookup rfl) read)
+
+theorem store_equiv (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (value : Mutable.Value) (found : heap[address]? = some (.dict entries)) :
+    (IteratorCalls.call Probe.module "store_read" [.ref address, .scalar key, value] heap).Equiv
+      (IteratorCalls.call Probe.module "store_return" [.ref address, .scalar key, value] heap) := by
+  have finishes (readback : Bool) (choices : ChoiceSchedule) :
+      ((IteratorCalls.call Probe.module (storeName readback) [.ref address, .scalar key, value] heap).run choices).Finishes
+        ⟨.ok value, [], stored heap address entries key value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0)
+      (store_returns readback heap address entries key value found heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (finishes true leftChoices) (finishes false rightChoices) (Or.inl rfl)
+
+/-- The dictionary write supplies the layout for a read under arbitrary saved iterator consumers. -/
+theorem store_then_read (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (value : Mutable.Value) (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.dict entries)) (valueInside : value.edge.Within logical.length)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (stored logical address entries key value) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.setItem value) [.ref address, .scalar key], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], stored logical address entries key value⟩) ∧
+      IteratorCalls.Relocation.Preserves (stored logical address entries key value) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.operation .subscript [.ref address, .scalar key], [], stored logical address entries key value⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.operation .subscript [.ref address, .scalar key], [], stored logical address entries key value⟩, used⟩ resumes))) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have inside : StateWithin ⟨.operation (.setItem value) [.ref address, .scalar key], [], logical⟩ := by
+    refine ⟨⟨valueInside, ?_⟩, by simp⟩
+    simp [Mutable.Value.edge, Graph.Edge.Within, bounded]
+  have preserved := step_setItem_preserves Probe.module logical physical rename logical.length physical.length
+    (.ref address) (.scalar key) value [] [] layout inside globalsInside
+  have actual : HeapCalls.step Probe.module logical.length
+      ⟨.operation (.setItem value) [.ref address, .scalar key], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], stored logical address entries key value⟩ := by
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, Mutable.setItem, found, stored, Except.map]
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, _, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have readInside : StateWithin ⟨.operation .subscript [.ref address, .scalar key], [], stored logical address entries key value⟩ := by
+    refine ⟨⟨by simp [OperationWithin], ?_⟩, by simp⟩
+    simp [stored, Mutable.Value.edge, Graph.Edge.Within, bounded]
+  have raw := step_subscript_preserves Probe.module (stored logical address entries key value) other nextMap
+    logical.length physical.length (.ref address) (.scalar key) [] [] retained readInside nextGlobals
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.operation .subscript [.ref address, .scalar key], [], stored logical address entries key value⟩, used⟩ other nextMap
+    logical.length physical.length [] retained readInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨readInside.1, readInside.2, by simpa [stored] using saved⟩ rfl wrapped
+
+/- The interpreter uses unbounded indices; host-size conversion overflow is outside these rules. -/
+theorem buffer_index_type_first (heap : Mutable.Heap) (address keyAddress : Nat) (bytes : List UInt8) (value : Mutable.Value)
+    (found : heap[address]? = some (.bytearray bytes)) :
+    Mutable.setItem (.ref address) (.ref keyAddress) value heap = some (.error ⟨"TypeError", []⟩, heap) := by
+  simp [Mutable.setItem, found, Mutable.integer, Mutable.error, Mutable.eval_bind]
+
+theorem buffer_byte_range_before_index (heap : Mutable.Heap) (address : Nat) (bytes : List UInt8) (index value : Int)
+    (found : heap[address]? = some (.bytearray bytes)) (invalid : ¬ (0 ≤ value ∧ value < 256)) :
+    Mutable.setItem (.ref address) (.scalar (.int index)) (.scalar (.int value)) heap =
+      some (.error ⟨"ValueError", []⟩, heap) := by
+  simp [Mutable.setItem, found, Mutable.integer, Mutable.byte, invalid, Mutable.error, Mutable.eval_bind]
+
+theorem buffer_index_range_last (heap : Mutable.Heap) (address : Nat) (bytes : List UInt8) (value : UInt8)
+    (found : heap[address]? = some (.bytearray bytes)) :
+    Mutable.setItem (.ref address) (.scalar (.int bytes.length)) (.scalar (.int value.toNat)) heap =
+      some (.error ⟨"IndexError", []⟩, heap) := by
+  have valid : 0 ≤ (value.toNat : Int) ∧ (value.toNat : Int) < 256 := by
+    have bound := value.toNat_lt
+    omega
+  have nonnegative : ¬ (bytes.length : Int) < 0 := by omega
+  simp [Mutable.setItem, found, Mutable.integer, Mutable.byte, valid, Mutable.index, nonnegative,
+    Mutable.error, Mutable.eval_bind]
+
 end MachineItemExamples
 '''
 AUDITS = [
@@ -126,6 +251,15 @@ AUDITS = [
     "step_augmentItemReceiver_preserves", "step_assignItem_preserves",
     "MachineItemExamples.last_item", "MachineItemExamples.read_returns", "MachineItemExamples.direct_returns",
     "MachineItemExamples.append_equiv", "MachineItemExamples.append_then_read",
+]
+
+AUDITS += [
+    "integer_total", "byte_total", "byte_relocates", "setItem_effect", "setItem_buffer_total",
+    "ExecutionLayout.setItem_buffer", "ExecutionLayout.setItem", "RuntimeLayout.setItem_unsupported",
+    "result_setItem_preserves", "step_setItem_preserves", "step_writeItem_preserves",
+    "MachineItemExamples.store_source", "MachineItemExamples.store_returns", "MachineItemExamples.store_equiv",
+    "MachineItemExamples.store_then_read", "MachineItemExamples.buffer_index_type_first",
+    "MachineItemExamples.buffer_byte_range_before_index", "MachineItemExamples.buffer_index_range_last",
 ]
 
 with project_temporary_directory(prefix="machine-item-") as temporary:
@@ -145,6 +279,23 @@ with project_temporary_directory(prefix="machine-item-") as temporary:
         items = []
         assert namespace[name](items, items) is items
         assert items[0] is items
+    for name in ("store_read", "store_return"):
+        for key in (True, 1, 0, -2, "key", b"key", None):
+            mapping = {True: object(), "cycle": None}
+            mapping["cycle"] = mapping
+            assert namespace[name](mapping, key, mapping) is mapping
+            assert mapping[key] is mapping and mapping["cycle"] is mapping
+            assert next(iter(mapping)) is True
+    for initial in (b"", b"\x00\xff"):
+        for index, value, error_type in (("bad", 256, TypeError), (len(initial), 256, ValueError),
+                                         (len(initial), 0, IndexError), (0, -1, ValueError)):
+            buffer = bytearray(initial)
+            try:
+                buffer[index] = value
+            except error_type:
+                assert bytes(buffer) == initial
+            else:
+                raise AssertionError("bytearray write did not raise the expected error")
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
@@ -164,4 +315,4 @@ with project_temporary_directory(prefix="machine-item-") as temporary:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print(f"machine items: indexed reads, mutation composition, and source equivalence; {len(AUDITS)} axiom audits passed")
+print(f"machine items: indexed reads and writes, error ordering, and source equivalence; {len(AUDITS)} axiom audits passed")

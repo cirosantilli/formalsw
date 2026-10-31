@@ -1,4 +1,4 @@
-import lang.py.FormalSW.ItemRelocation
+import lang.py.FormalSW.ItemWriteRelocation
 import lang.py.FormalSW.MachineExpressionInvariant
 
 /-! Indexed access preserves shared objects, saved operands, and iterator consumers. -/
@@ -132,5 +132,67 @@ theorem step_assignItem_preserves (module : Module) (logical physical : Mutable.
       inside.1 saved.1 (by simp) remainder
   · simp [step, argumentsState, relocateState, relocateWork, relocateFrame, relocateStep,
       relocateOperation, relocateRuntimeOperation]
+
+theorem result_setItem_preserves (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (logicalAnchors physicalAnchors : Nat) (receiver index value : Value) (stack : List Frame)
+    (globals : Mutable.Globals) (layout : ExecutionLayout logical physical rename)
+    (receiverInside : receiver.edge.Within logical.length) (indexInside : index.edge.Within logical.length)
+    (valueInside : value.edge.Within logical.length) (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    Preserves logical physical rename physicalAnchors
+      (result logicalAnchors logical (Mutable.setItem receiver index value) stack globals)
+      (result physicalAnchors physical
+        (Mutable.setItem (relocateValue rename receiver) (relocateValue rename index) (relocateValue rename value))
+        (stack.map (relocateFrame rename)) (relocateGlobals rename globals)) := by
+  cases executed : Mutable.setItem receiver index value logical with
+  | none =>
+    have other := (layout.runtime.setItem_unsupported layout.closed receiver index value receiverInside indexInside).mpr executed
+    apply Preserves.unchanged layout <;> simp [result, run, executed, other, StepHeap, StepWithin, relocateStep]
+  | some pair =>
+    rcases pair with ⟨outcome, after⟩
+    obtain ⟨other, paired, retained⟩ := layout.setItem receiver index value receiverInside indexInside valueInside outcome after executed
+    have effect := setItem_effect logical after receiver index value outcome executed
+    have physicalEffect := setItem_effect physical other (relocateValue rename receiver) (relocateValue rename index)
+      (relocateValue rename value) _ paired
+    apply result_preserves logical physical after other rename rename logicalAnchors physicalAnchors _ _ stack globals outcome
+      (fun _ _ => rfl) (Nat.le_of_eq effect.1.symm) (Nat.le_of_eq physicalEffect.1.symm)
+      retained stackInside globalsInside ?_ executed paired
+    intro returned success
+    rw [effect.2 returned success]
+    trivial
+
+theorem step_setItem_preserves (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (logicalAnchors physicalAnchors : Nat) (receiver index value : Value) (stack : List Frame)
+    (globals : Mutable.Globals) (layout : ExecutionLayout logical physical rename)
+    (inside : StateWithin ⟨.operation (.setItem value) [receiver, index], stack, logical⟩)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    Preserves logical physical rename physicalAnchors
+      (step module logicalAnchors ⟨.operation (.setItem value) [receiver, index], stack, logical⟩ globals)
+      (step module physicalAnchors
+        (relocateState rename physical ⟨.operation (.setItem value) [receiver, index], stack, logical⟩)
+        (relocateGlobals rename globals)) := by
+  exact (result_setItem_preserves logical physical rename logicalAnchors physicalAnchors receiver index value stack globals layout
+    (inside.1.2 receiver (by simp)) (inside.1.2 index (by simp)) inside.1.1 inside.2 globalsInside).protectGenerator stack inside.2
+
+theorem step_writeItem_preserves (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (logicalAnchors physicalAnchors : Nat) (receiver index value : Value) (rest : List Stmt) (env : Env)
+    (stack : List Frame) (globals : Mutable.Globals) (layout : ExecutionLayout logical physical rename)
+    (inside : StateWithin ⟨.value value, .writeItem receiver index rest env :: stack, logical⟩)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    Preserves logical physical rename physicalAnchors
+      (step module logicalAnchors ⟨.value value, .writeItem receiver index rest env :: stack, logical⟩ globals)
+      (step module physicalAnchors
+        (relocateState rename physical ⟨.value value, .writeItem receiver index rest env :: stack, logical⟩)
+        (relocateGlobals rename globals)) := by
+  have saved := inside.2 _ (List.mem_cons_self ..)
+  simp only [FrameWithin] at saved
+  have remainder : ∀ frame ∈ .discard rest env :: stack, FrameWithin logical.length frame := by
+    intro frame member
+    rcases List.mem_cons.mp member with rfl | member
+    · simpa only [FrameWithin] using saved.2.2
+    · exact inside.2 frame (List.mem_cons_of_mem _ member)
+  simpa only [step, relocateState, relocateWork, List.map_cons, relocateFrame] using
+    (result_setItem_preserves logical physical rename logicalAnchors physicalAnchors receiver index value
+      (.discard rest env :: stack) globals layout saved.1 saved.2.1 inside.1 remainder globalsInside).protectGenerator _ inside.2
 
 end FormalSW.PyAst.HeapCalls.Relocation
