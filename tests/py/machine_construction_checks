@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""
+Check container construction, duplicate-key effects, and saved iterator consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def tuple_read(value):
+    return (value,)[0]
+
+def direct(value):
+    return value
+
+def discard_empty(value):
+    ignored = ()
+    return value
+
+def display(first, second):
+    return {True: first, 1: second}
+
+def update(first, second):
+    result = {True: first}
+    result[1] = second
+    return result
+
+def display_effects(log, first, second):
+    return {True: log.append(first), 1: log.append(second)}
+
+def ordered_effects(log, first, second):
+    log.append(first)
+    log.append(second)
+    return {True: None}
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineConstructionExamples
+set_option Elab.async false
+
+theorem returns_finishes (name : String) (args : List Mutable.Value) (heap after : Mutable.Heap)
+    (value : Mutable.Value) (choices : ChoiceSchedule)
+    (returned : ReturnsValue Probe.module name args heap value after) :
+    ((IteratorCalls.call Probe.module name args heap).run choices).Finishes
+      ⟨.ok value, [], after, heap.length⟩ := by
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+  exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+
+theorem tuple_read_returns (heap : Mutable.Heap) (value : Mutable.Value) :
+    ReturnsValue Probe.module "tuple_read" [value] heap value (heap ++ [.tuple [value]]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.subscript (by intros; simp)
+    (Evaluates.tuple (.cons (Evaluates.lookup rfl) .nil) (by simp)) Evaluates.constant
+  simp [Mutable.getItem, Mutable.index, Mutable.eval_bind, Except.map]
+
+theorem direct_returns (heap : Mutable.Heap) (value : Mutable.Value) :
+    ReturnsValue Probe.module "direct" [value] heap value heap := by
+  apply BlockReturns.function rfl rfl
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem tuple_read_equiv (heap : Mutable.Heap) (value : Mutable.Value)
+    (valid : heap.Valid) (inside : value.edge.Within heap.length) :
+    (IteratorCalls.call Probe.module "tuple_read" [value] heap).Equiv
+      (IteratorCalls.call Probe.module "direct" [value] heap) := by
+  intro leftChoices rightChoices
+  apply Mutable.Call.equiv_of_finishes
+    (returns_finishes _ _ _ _ _ leftChoices (tuple_read_returns heap value))
+    (returns_finishes _ _ _ _ _ rightChoices (direct_returns heap value))
+  simpa only [List.append_nil] using Mutable.Completion.equivalent_allocations
+    heap [.tuple [value]] [] value [] valid inside (by simp)
+
+theorem discard_empty_returns (heap after : Mutable.Heap) (value : Mutable.Value) (address : Nat)
+    (allocated : Mutable.allocateTuple [] heap = some (.ok (.ref address), after)) :
+    ReturnsValue Probe.module "discard_empty" [value] heap value after := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.tuple_result .nil allocated)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+/-- Dropping an empty tuple is valid whether the allocator reuses an existing tuple or creates one. -/
+theorem discard_empty_equiv (heap : Mutable.Heap) (value : Mutable.Value)
+    (valid : heap.Valid) (inside : value.edge.Within heap.length) :
+    (IteratorCalls.call Probe.module "discard_empty" [value] heap).Equiv
+      (IteratorCalls.call Probe.module "direct" [value] heap) := by
+  intro leftChoices rightChoices
+  cases found : heap.findIdx? (fun object => decide (object = .tuple [])) with
+  | none =>
+    have allocated : Mutable.allocateTuple [] heap = some (.ok (.ref heap.length), heap ++ [.tuple []]) := by
+      simp [Mutable.allocateTuple, found, Except.map]
+    apply Mutable.Call.equiv_of_finishes
+      (returns_finishes _ _ _ _ _ leftChoices (discard_empty_returns heap _ value heap.length allocated))
+      (returns_finishes _ _ _ _ _ rightChoices (direct_returns heap value))
+    simpa only [List.append_nil] using Mutable.Completion.equivalent_allocations
+      heap [.tuple []] [] value [] valid inside (by simp)
+  | some address =>
+    have allocated : Mutable.allocateTuple [] heap = some (.ok (.ref address), heap) := by
+      simp [Mutable.allocateTuple, found]
+    exact Mutable.Call.equiv_of_finishes
+      (returns_finishes _ _ _ _ _ leftChoices (discard_empty_returns heap heap value address allocated))
+      (returns_finishes _ _ _ _ _ rightChoices (direct_returns heap value)) (Or.inl rfl)
+
+def dictionaryHeap (heap : Mutable.Heap) (value : Mutable.Value) := heap ++ [.dict [(.bool true, value)]]
+
+theorem display_returns (heap : Mutable.Heap) (first second : Mutable.Value) :
+    ReturnsValue Probe.module "display" [first, second] heap (.ref heap.length) (dictionaryHeap heap second) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.dictionary (.cons Evaluates.constant (Evaluates.lookup rfl)
+    (.cons Evaluates.constant (Evaluates.lookup rfl) .nil))
+
+theorem update_returns (heap : Mutable.Heap) (first second : Mutable.Value) :
+    ReturnsValue Probe.module "update" [first, second] heap (.ref heap.length) (dictionaryHeap heap second) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.dictionary (.cons Evaluates.constant (Evaluates.lookup rfl) .nil))
+  apply BlockReturns.setItem (afterWrite := dictionaryHeap heap second) (by intros; simp) (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons Evaluates.constant .nil))
+  · simp [Mutable.setItem, dictionaryHeap, ScalarDict.insert, scalarCompare, evalCmpOp, Except.map]
+  · exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem duplicate_equiv (heap : Mutable.Heap) (first second : Mutable.Value) :
+    (IteratorCalls.call Probe.module "display" [first, second] heap).Equiv
+      (IteratorCalls.call Probe.module "update" [first, second] heap) := by
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (returns_finishes _ _ _ _ _ leftChoices (display_returns heap first second))
+    (returns_finishes _ _ _ _ _ rightChoices (update_returns heap first second)) (Or.inl rfl)
+
+def afterFirst (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (first : Mutable.Value) :=
+  heap.set address (.list (items ++ [first]))
+
+def afterBoth (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (first second : Mutable.Value) :=
+  (afterFirst heap address items first).set address (.list ((items ++ [first]) ++ [second]))
+
+theorem display_effects_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (first second : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "display_effects" [.ref address, first, second] heap
+      (.ref (afterBoth heap address items first second).length)
+      (dictionaryHeap (afterBoth heap address items first second) (.scalar .none)) := by
+  have bound := (List.getElem?_eq_some_iff.mp found).1
+  have next : (afterFirst heap address items first)[address]? = some (.list (items ++ [first])) := by
+    simp [afterFirst, bound]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.dictionary (.cons Evaluates.constant
+    (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+    (.cons Evaluates.constant
+      (Evaluates.append (Evaluates.lookup rfl) next (Evaluates.lookup rfl) next) .nil))
+
+theorem ordered_effects_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (first second : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "ordered_effects" [.ref address, first, second] heap
+      (.ref (afterBoth heap address items first second).length)
+      (dictionaryHeap (afterBoth heap address items first second) (.scalar .none)) := by
+  have bound := (List.getElem?_eq_some_iff.mp found).1
+  have next : (afterFirst heap address items first)[address]? = some (.list (items ++ [first])) := by
+    simp [afterFirst, bound]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) next (Evaluates.lookup rfl) next)
+  exact BlockReturns.return_value (Evaluates.dictionary (.cons Evaluates.constant Evaluates.constant .nil))
+
+/-- Replacing the first value does not discard its effects or reorder the two evaluations. -/
+theorem effects_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (first second : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "display_effects" [.ref address, first, second] heap).Equiv
+      (IteratorCalls.call Probe.module "ordered_effects" [.ref address, first, second] heap) := by
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (returns_finishes _ _ _ _ _ leftChoices (display_effects_returns heap address items first second found))
+    (returns_finishes _ _ _ _ _ rightChoices (ordered_effects_returns heap address items first second found)) (Or.inl rfl)
+
+/-- Empty-tuple reuse and fresh allocation both supply the invariant for the pending dictionary value. -/
+theorem tuple_then_dictionary (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (items : List Mutable.Value) (key : Constant)
+    (entries : List (Constant × Mutable.Value)) (env : HeapCalls.Env) (used : Nat) (choices : ChoiceSchedule)
+    (resumes : List IteratorCalls.Resume)
+    (itemsInside : ∀ value ∈ items, value.edge.Within logical.length)
+    (entriesInside : ∀ entry ∈ entries, entry.2.edge.Within logical.length)
+    (envInside : EnvWithin logical.length env)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ address after other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧ ExecutionLayout after other nextMap ∧
+      HeapCalls.step Probe.module logical.length
+        ⟨.operation .tuple items, [.dictionaryValue key [] entries env], logical⟩ =
+        .next ⟨.value (.ref address), [.dictionaryValue key [] entries env], after⟩ ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation .tuple items, [.dictionaryValue key [] entries env], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.ref address), [.dictionaryValue key [] entries env], after⟩) ∧
+      IteratorCalls.Relocation.Preserves after other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.value (.ref address), [.dictionaryValue key [] entries env], after⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.value (.ref address), [.dictionaryValue key [] entries env], after⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have inside : StateWithin ⟨.operation .tuple items, [.dictionaryValue key [] entries env], logical⟩ := by
+    refine ⟨⟨by trivial, itemsInside⟩, ?_⟩
+    simpa only [List.mem_singleton, forall_eq, FrameWithin] using And.intro envInside entriesInside
+  obtain ⟨address, _, after, _, _, first, _, _, _, _, _⟩ := layout.allocateTuple items itemsInside
+  have actual : HeapCalls.step Probe.module logical.length
+      ⟨.operation .tuple items, [.dictionaryValue key [] entries env], logical⟩ =
+      .next ⟨.value (.ref address), [.dictionaryValue key [] entries env], after⟩ := by
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, first]
+  have preserved := step_tuple_preserves Probe.module logical physical rename logical.length physical.length
+    items [.dictionaryValue key [] entries env] [] layout inside globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, nextInside, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have raw := step_dictionaryValue_preserves Probe.module after other nextMap logical.length physical.length
+    (.ref address) key [] entries env [] [] retained nextInside
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.value (.ref address), [.dictionaryValue key [] entries env], after⟩, used⟩ other nextMap
+    logical.length physical.length [] retained nextInside nextGlobals raw
+  refine ⟨address, after, other, nextMap, agree, retained, actual, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨nextInside.1, nextInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
+end MachineConstructionExamples
+'''
+AUDITS = [
+    "step_tuple_preserves",
+    "step_tuple_expression_preserves",
+    "step_dictionary_expression_preserves",
+    "step_dictionary_entry_preserves",
+    "step_dictionaryKey_preserves",
+    "step_dictionaryValue_preserves",
+    "step_dictionary_finish_preserves",
+    "step_dictionary_preserves",
+    *["MachineConstructionExamples." + name for name in (
+        "returns_finishes", "tuple_read_returns", "direct_returns", "tuple_read_equiv",
+        "discard_empty_returns", "discard_empty_equiv",
+        "display_returns", "update_returns", "duplicate_equiv", "display_effects_returns",
+        "ordered_effects_returns", "effects_equiv", "tuple_then_dictionary",
+    )],
+]
+
+with project_temporary_directory(prefix="machine-construction-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    cycle = []
+    cycle.append(cycle)
+    for value in (None, True, 10**100, "value", (), cycle, object()):
+        assert namespace["tuple_read"](value) is value
+        assert namespace["direct"](value) is value
+        assert namespace["discard_empty"](value) is value
+        for name in ("display", "update"):
+            result = namespace[name](object(), value)
+            assert list(result) == [True] and next(iter(result)) is True
+            assert result[1] is value
+    for name in ("display_effects", "ordered_effects"):
+        log = []
+        result = namespace[name](log, log, cycle)
+        assert len(log) == 2 and log[0] is log and log[1] is cycle
+        assert next(iter(result)) is True and result[1] is None
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineConstructionInvariant\n"
+                     "import lang.py.FormalSW.MachineExpressionInvariant\n"
+                     "import lang.py.FormalSW.IteratorRules\nimport lang.py.FormalSW.DictionaryCalls\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine construction: tuples, duplicate keys, evaluation effects and saved consumers; {len(AUDITS)} axiom audits passed")
