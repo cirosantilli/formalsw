@@ -63,6 +63,30 @@ theorem graphNodes_closed {heap : Heap} (valid : heap.Valid) :
       | scalar _ => trivial
       | ref _ => simpa only [value] using within
 
+/-- Unreachable allocations preserve results when every observed reference stays in the entry heap. -/
+theorem equivalent_allocations_of_closed (heap leftExtra rightExtra : Heap)
+    (result : Value) (globals : Globals)
+    (closed : ∀ node ∈ heap.map graphNode, ∀ edge ∈ node.edges, edge.Within heap.length)
+    (resultWithin : result.edge.Within heap.length)
+    (globalsWithin : ∀ entry ∈ globals, entry.2.edge.Within heap.length) :
+    Completion.Equivalent ⟨.ok result, globals, heap ++ leftExtra, heap.length⟩
+      ⟨.ok result, globals, heap ++ rightExtra, heap.length⟩ := by
+  refine Or.inr ⟨rfl, rfl, trivial, ?_⟩
+  have rootsClosed : ∀ edge ∈ globals.map (fun entry => entry.2.edge) ++ [result.edge],
+      edge.Within heap.length := by
+    intro edge member
+    rcases List.mem_append.mp member with global | returned
+    · obtain ⟨entry, entryMember, rfl⟩ := List.mem_map.mp global
+      exact globalsWithin entry entryMember
+    · simpa only [List.mem_singleton.mp returned] using resultWithin
+  have equivalent := Graph.equivalent_allocations (heap.map graphNode)
+    (leftExtra.map graphNode) (rightExtra.map graphNode)
+    (globals.map (fun entry => entry.2.edge) ++ [result.edge])
+    (by simpa only [List.length_map] using closed)
+    (by simpa only [List.length_map] using rootsClosed)
+  simpa only [Completion.snapshot, List.map_append, List.length_map, List.append_assoc,
+    graphNode] using equivalent
+
 /-- Fix caller objects, then relocate the result tuple and its selected list. -/
 def resultMap (anchors tuple selected index : Nat) : Nat :=
   if index < anchors then index else if index = anchors then tuple else selected
