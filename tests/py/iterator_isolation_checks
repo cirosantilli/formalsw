@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""
+Transport complete mutating iterator methods while preserving private consumer objects.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Repoint:
+    def __next__(self):
+        self.link = self
+        return "123"
+
+class Stopped:
+    def __next__(self):
+        self.link = self
+        raise StopIteration()
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+open IteratorCalls IteratorCalls.Relocation
+namespace IteratorIsolationExamples
+set_option Elab.async false
+
+def className (stopped : Bool) := if stopped then "Stopped" else "Repoint"
+def classInfo (stopped : Bool) := (Probe.module.findClass (className stopped)).getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def writeSelf : List Stmt := [.assign [.attribute (.name "self") "link"] (.name "self")]
+def tail (stopped : Bool) : List Stmt :=
+  if stopped then [.raise (some (.call (.name "StopIteration") []))]
+  else [.return (.constant (.string "123"))]
+def body (stopped : Bool) : List Stmt := writeSelf ++ tail stopped
+def outcome (stopped : Bool) : Except ExceptionObject Mutable.Value :=
+  if stopped then .error ⟨"StopIteration", []⟩ else .ok (.scalar (.string "123"))
+def after (stopped : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value)) : Mutable.Heap :=
+  heap.set address (.instance (classInfo stopped).1 (className stopped)
+    (Mutable.putField fields "link" (.ref address)))
+
+theorem source : ModuleSource Probe.module := by simp [ModuleSource, Probe.module, StmtWithin]
+theorem source_class (stopped : Bool) : Probe.module.findClass (className stopped) = some (classInfo stopped) := by
+  cases stopped <;> rfl
+theorem source_next (stopped : Bool) : findFunctionIn (classInfo stopped).2 "__next__" = some (args, body stopped) := by
+  cases stopped <;> rfl
+
+theorem next_bound (stopped : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo stopped).1 (className stopped) fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args (body stopped))), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address (classInfo stopped).1
+    (className stopped) "__next__" fields (classInfo stopped).2 found (source_class stopped)
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+/-- The parsed method creates a cycle in an existing caller object before returning or exhausting. -/
+theorem method_completes (stopped : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo stopped).1 (className stopped) fields)) :
+    OperationCompletes Probe.module choices used (.method (.ref address) args (body stopped))
+      heap (outcome stopped) (after stopped heap address fields) := by
+  let env := functionEnv args (body stopped) [.ref address] []
+  have self : env "self" = some (.ref address) := rfl
+  have written : BlockContinues Probe.module env writeSelf heap env (after stopped heap address fields) :=
+    BlockContinues.setAttribute (Evaluates.lookup self) (Evaluates.lookup self)
+      (Mutable.writeField_result found (by simp))
+  cases stopped with
+  | false =>
+      apply OperationCompletes.of_method
+      apply MethodReturns.of_body (completed := [.ref address]) rfl
+      exact written.returns (BlockReturns.return_value Evaluates.constant)
+  | true =>
+      apply OperationCompletes.of_heap (safe := by simp [outcome])
+      intro anchors
+      apply Finishes.next (step := HeapCalls.step Probe.module anchors)
+        (following := ⟨.block (body true) env, [], heap⟩) rfl
+      apply (written (tail true) anchors []).finishes
+      exact .next rfl (.done rfl)
+
+/-- Neither the physical method run nor its private-cell frame is a premise. -/
+theorem whole_advance_isolated (stopped : Bool) (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address : Nat)
+    (fields : List (String × Mutable.Value)) (privateAddress : Nat) (object : Mutable.Object)
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance (classInfo stopped).1 (className stopped) fields)) :
+    ∃ other nextMap finalUsed,
+      ExtendedLayout logical.length physical.length rename (after stopped logical address fields) other nextMap ∧
+      PrivateLayout (after stopped logical address fields) other nextMap privateAddress object ∧
+      ∀ loop resumes, IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following) loop.env,
+          loop.stack, physical⟩, used⟩ resumes)
+        (.completed (.ok ⟨outcome stopped, [], other, anchors⟩) finalUsed
+          (.advance loop (.ref (rename address)) :: resumes)) := by
+  obtain ⟨finalUsed, executed⟩ := (method_completes stopped choices used logical address fields found) logical.length []
+  obtain ⟨other, nextMap, extended, kept, called⟩ := advance_completion_isolated Probe.module choices
+    logical physical rename logical.length anchors used finalUsed (.ref address) (.method (.ref address) args (body stopped))
+    (outcome stopped) (after stopped logical address fields) [] source layout.layout
+    (List.getElem?_eq_some_iff.mp found).1 (by simp [GlobalsWithin]) (by simp [isInstance, found])
+    (next_bound stopped logical address fields found) executed (by simp [after])
+  refine ⟨other, nextMap, finalUsed, extended, kept privateAddress object layout, ?_⟩
+  intro loop resumes
+  cases stopped <;> simpa only [outcome, Bool.false_eq_true, ↓reduceIte, Except.map,
+    HeapCalls.Relocation.relocateGlobals, List.map_nil, relocateValue] using called loop resumes
+
+/-- An exhausted method resumes the consumer with its mutations and private objects intact. -/
+theorem exhaustion_resumes (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address : Nat)
+    (fields : List (String × Mutable.Value)) (privateAddress : Nat) (object : Mutable.Object)
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance (classInfo true).1 (className true) fields))
+    (loop : Loop) (resumes : List Resume) :
+    ∃ other nextMap finalUsed,
+      PrivateLayout (after true logical address fields) other nextMap privateAddress object ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following) loop.env,
+          loop.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (loop.otherwise ++ loop.following) loop.env,
+          loop.stack, other⟩, finalUsed⟩ resumes) := by
+  obtain ⟨other, nextMap, finalUsed, _, kept, called⟩ :=
+    whole_advance_isolated true choices used anchors logical physical rename address fields privateAddress object layout found
+  exact ⟨other, nextMap, finalUsed, kept, exhausted (called loop resumes)⟩
+
+theorem protected_receiver_impossible (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (address : Nat) (object : Mutable.Object) (inside : address < logical.length) :
+    ¬ PrivateLayout logical physical rename (rename address) object := by
+  intro layout
+  exact layout.excludes address inside rfl
+
+end IteratorIsolationExamples
+'''
+AUDITS = ["FormalSW.PyAst.IteratorCalls.Relocation." + name for name in (
+    "reaches_isolated", "operation_completion_isolated", "advance_completion_isolated",
+)] + ["IteratorIsolationExamples." + name for name in (
+    "source", "source_class", "source_next", "next_bound", "method_completes", "whole_advance_isolated",
+    "exhaustion_resumes", "protected_receiver_impossible",
+)]
+with project_temporary_directory(prefix="iterator-isolation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    returning = namespace["Repoint"]()
+    assert next(returning) == "123" and returning.link is returning
+    stopped = namespace["Stopped"]()
+    try:
+        next(stopped)
+    except StopIteration as error:
+        assert error.args == () and stopped.link is stopped
+    else:
+        raise AssertionError("expected exhaustion after the field update")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorExecutionIsolation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"iterator isolation: complete mutating methods and exhaustion preserve private cells; {len(AUDITS)} axiom audits passed")
