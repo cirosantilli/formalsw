@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+Check source iterator method entry, slot lookup, and saved-reference bounds.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Plain:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self
+
+class Legacy:
+    def __getitem__(self, index):
+        return index
+
+class Missing:
+    pass
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+open IteratorCalls IteratorCalls.Relocation
+namespace IteratorEntryExamples
+set_option Elab.async false
+
+def classInfo (name : String) := (Probe.module.findClass name).getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def body : List Stmt := [.return (.name "self")]
+def bound (address : Nat) := Operation.method (.ref address) args body
+
+theorem source_module : ModuleSource Probe.module := by
+  simp [ModuleSource, Probe.module, StmtWithin]
+
+theorem source_class : Probe.module.findClass "Plain" = some (classInfo "Plain") := rfl
+
+theorem source_method (advance : Bool) :
+    findFunctionIn (classInfo "Plain").2 (if advance then "__next__" else "__iter__") = some (args, body) := by
+  cases advance <;> rfl
+
+theorem lookup_bound (advance : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo "Plain").1 "Plain" fields)) :
+    ProtocolCalls.lookup Probe.module (.ref address) (if advance then "__next__" else "__iter__") heap =
+      some (.ok (some (bound address)), heap) := by
+  simpa only [source_method, Option.map_some, bound] using
+    ProtocolCalls.lookup_instance Probe.module heap address (classInfo "Plain").1 "Plain"
+      (if advance then "__next__" else "__iter__") fields (classInfo "Plain").2 found source_class
+
+theorem acquisition_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo "Plain").1 "Plain" fields)) :
+    ProtocolCalls.iterMethod Probe.module (.ref address) heap = some (.ok (bound address), heap) := by
+  have looked := lookup_bound false heap address fields found
+  change ProtocolCalls.lookup Probe.module (.ref address) "__iter__" heap = some (.ok (some (bound address)), heap) at looked
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, looked]
+
+theorem advancement_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo "Plain").1 "Plain" fields)) :
+    advanceMethod Probe.module (.ref address) heap = some (.ok (bound address), heap) := by
+  have looked := lookup_bound true heap address fields found
+  change ProtocolCalls.lookup Probe.module (.ref address) "__next__" heap = some (.ok (some (bound address)), heap) at looked
+  simp [advanceMethod, ProtocolCalls.nextMethod, Mutable.eval_bind, found, looked]
+
+theorem acquisition_entry (heap : Mutable.Heap) (address anchors used : Nat)
+    (fields : List (String × Mutable.Value)) (loop : Loop) (resumes : List Resume) (globals : Mutable.Globals)
+    (found : heap[address]? = some (.instance (classInfo "Plain").1 "Plain" fields)) :
+    intercept Probe.module anchors ⟨⟨.value (.ref address),
+      .sequence loop.name loop.body loop.otherwise loop.following loop.env :: loop.stack, heap⟩, used⟩ resumes globals =
+      some (.next (.running ⟨⟨.operation (bound address) [], [], heap⟩, used⟩ (.acquire loop :: resumes))) := by
+  simp [intercept, isInstance, found, enter, acquisition_bound heap address fields found]
+
+theorem advancement_entry (heap : Mutable.Heap) (address index anchors used : Nat)
+    (fields : List (String × Mutable.Value)) (loop : Loop) (resumes : List Resume) (globals : Mutable.Globals)
+    (found : heap[address]? = some (.instance (classInfo "Plain").1 "Plain" fields)) :
+    intercept Probe.module anchors ⟨⟨.block
+      (.sequenceStepLoop loop.name (.ref address) index loop.body loop.otherwise :: loop.following) loop.env,
+      loop.stack, heap⟩, used⟩ resumes globals =
+      some (.next (.running ⟨⟨.operation (bound address) [], [], heap⟩, used⟩ (.advance loop (.ref address) :: resumes))) := by
+  have executed := advancement_bound heap address fields found
+  simpa [intercept, isInstance, found, enter, advanceMethod, sequenceValue] using congrArg
+    (fun result => some (enter anchors heap used resumes (.advance loop (.ref address))
+      (fun _ => result) globals)) executed
+
+theorem acquisition_layout (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (address logicalAnchors physicalAnchors used : Nat) (choices : ChoiceSchedule)
+    (fields : List (String × Mutable.Value)) (loop : Loop) (resumes : List Resume) (globals : Mutable.Globals)
+    (found : logical[address]? = some (.instance (classInfo "Plain").1 "Plain" fields))
+    (layout : RuntimeLayout logical physical rename) :
+    IteratorCalls.step Probe.module physicalAnchors choices
+      (IteratorCalls.Relocation.relocateState rename physical physicalAnchors (.running
+        ⟨⟨.value (.ref address), .sequence loop.name loop.body loop.otherwise loop.following loop.env :: loop.stack,
+          logical⟩, used⟩ resumes)) (relocateGlobals rename globals) =
+      relocateStep rename physical physicalAnchors
+        (.next (.running ⟨⟨.operation (bound address) [], [], logical⟩, used⟩ (.acquire loop :: resumes))) := by
+  have intercepted := acquisition_entry logical address logicalAnchors used fields loop resumes globals found
+  let core : SetCalls.State := ⟨⟨.value (.ref address),
+    .sequence loop.name loop.body loop.otherwise loop.following loop.env :: loop.stack, logical⟩, used⟩
+  have paired := step_intercepted_relocates Probe.module core physical rename logicalAnchors physicalAnchors choices
+    resumes globals _ source_module layout (List.getElem?_eq_some_iff.mp found).1 intercepted
+  simpa only [core, IteratorCalls.step, intercepted] using paired
+
+theorem entry_bounds (core : SetCalls.State) (anchors : Nat) (resumes : List Resume)
+    (globals : Mutable.Globals) (transition : Step IteratorCalls.State Mutable.Completion)
+    (inside : IteratorCalls.Relocation.StateWithin core.core.heap.length (.running core resumes))
+    (globalsInside : GlobalsWithin core.core.heap.length globals)
+    (intercepted : intercept Probe.module anchors core resumes globals = some transition) :
+    StepWithin core.core.heap.length transition :=
+  intercept_within Probe.module core anchors resumes globals transition source_module inside globalsInside intercepted
+
+theorem legacy_unsupported (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo "Legacy").1 "Legacy" fields)) :
+    ProtocolCalls.iterMethod Probe.module (.ref address) heap = none := by
+  have defined : Probe.module.findClass "Legacy" = some (classInfo "Legacy") := rfl
+  have missing := ProtocolCalls.lookup_instance Probe.module heap address (classInfo "Legacy").1 "Legacy"
+    "__iter__" fields (classInfo "Legacy").2 found defined
+  have fallback := ProtocolCalls.lookup_instance Probe.module heap address (classInfo "Legacy").1 "Legacy"
+    "__getitem__" fields (classInfo "Legacy").2 found defined
+  have noIter : findFunctionIn (classInfo "Legacy").2 "__iter__" = none := rfl
+  have getItem : findFunctionIn (classInfo "Legacy").2 "__getitem__" =
+    some ([{name := "self", annotation := none}, {name := "index", annotation := none}], [.return (.name "index")]) := rfl
+  simp only [noIter, Option.map_none] at missing
+  simp only [getItem, Option.map_some] at fallback
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, missing, fallback, Mutable.unsupported]
+
+theorem missing_rejected (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo "Missing").1 "Missing" fields)) :
+    ProtocolCalls.iterMethod Probe.module (.ref address) heap =
+      some (.error ⟨"TypeError", []⟩, heap) := by
+  have defined : Probe.module.findClass "Missing" = some (classInfo "Missing") := rfl
+  have noMethod (name : String) : findFunctionIn (classInfo "Missing").2 name = none := rfl
+  have lookup (name : String) : ProtocolCalls.lookup Probe.module (.ref address) name heap = some (.ok none, heap) := by
+    simpa only [noMethod, Option.map_none] using ProtocolCalls.lookup_instance Probe.module heap address
+      (classInfo "Missing").1 "Missing" name fields (classInfo "Missing").2 found defined
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup, Mutable.error]
+
+end IteratorEntryExamples
+'''
+AUDITS = ["IteratorEntryExamples." + name for name in (
+    "source_module", "source_class", "source_method", "lookup_bound", "acquisition_bound", "advancement_bound",
+    "acquisition_entry", "advancement_entry", "acquisition_layout", "entry_bounds", "legacy_unsupported", "missing_rejected",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation." + name for name in (
+    "findFunctionIn_within", "findClassBodyIn_within", "findClass_within", "lookup_source", "SourceMethod.relocate",
+    "nextMethod_source", "iterMethod_source", "nextMethod_runtime_relocates", "iterMethod_runtime_relocates",
+    "enter_relocates", "advanceMethod_relocates", "intercept_acquire_relocates", "intercept_advance_relocates",
+    "intercept_relocates", "lift_relocates", "SourceMethod.within", "advanceMethod_source", "enter_within",
+    "intercept_within", "step_intercepted_relocates",
+)]
+
+with project_temporary_directory(prefix="iterator-entry-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    plain = namespace["Plain"]()
+    plain.__iter__ = None
+    plain.__next__ = None
+    assert iter(plain) is plain
+    assert next(plain) is plain
+    assert next(iter(namespace["Legacy"]())) == 0
+    try:
+        iter(namespace["Missing"]())
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("missing iterator slots accepted")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorEntry\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"iterator entry: source-bound methods, lookup priority and saved-reference bounds; {len(AUDITS)} axiom audits passed")
