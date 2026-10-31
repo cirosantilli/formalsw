@@ -140,6 +140,123 @@ def range_default(stop: int) -> str:
         text += ";"
     return text
 
+
+def copied_rows(count: int) -> str:
+    rows = [list(row) for row in choose([3, 1, 3], count)]
+    text = ""
+    for row in rows:
+        for value in row:
+            text += str(value)
+        text += ";"
+    return text
+
+
+def mutate_pool(pool: list[int], row: tuple[int, ...]) -> bool:
+    pool[1] = 9
+    pool.append(4)
+    return row[0] != 2
+
+
+def comprehension_snapshot() -> str:
+    pool = [1, 2, 3]
+    rows = [list(row) for row in choose(pool, 2) if mutate_pool(pool, row)]
+    return str(rows[0][0]) + str(rows[0][1]) + str(rows[1][0]) + str(rows[1][1]) + str(len(pool))
+
+
+def comprehension_shared() -> str:
+    pool = [[1], [2], [3]]
+    rows = [list(row) for row in choose(pool, 2)]
+    rows[0][0][0] += 10
+    return str(rows[1][0][0]) + str(pool[0][0]) + str(int(rows[0] is rows[1]))
+
+
+def comprehension_identity() -> str:
+    rows = [row for row in choose([1, 1], 1)]
+    first = [row for row in choose([], 0)]
+    second = [row for row in choose([], 0)]
+    return str(int(rows[0] is rows[1])) + str(int(first[0] is second[0]))
+
+
+def comprehension_nested() -> str:
+    x = 7
+    rows = [x + y for x in [1, 2] for y, in choose([x, x + 1], 1) if y > x]
+    return str(rows[0]) + str(rows[1]) + str(x)
+
+
+def comprehension_sets_dicts() -> str:
+    values = {x + y for x, y in choose([1, 2, 2], r=2)}
+    table = {x: y for x, y in choose([1, 2, 2], 2)}
+    return str(len(values)) + str(table[1]) + str(table[2])
+
+
+def grow(pool: list[int]) -> int:
+    pool.append(4)
+    return 2
+
+
+def comprehension_arguments() -> str:
+    pool = [1, 2]
+    rows = [list(row) for row in choose(pool, grow(pool))]
+    return str(len(rows)) + str(rows[2][1])
+
+
+def consumed(count: int) -> str:
+    total = sum(row[0] for row in choose([1, 2, 3], count))
+    largest = max((row[0] for row in choose([1, 2, 3], count)), default=99)
+    smallest = min((row[0] for row in choose([1, 2, 3], count)), default=99)
+    values = list(row[0] for row in choose([1, 2, 3], count))
+    packed = tuple(row[0] for row in choose([1, 2, 3], count))
+    return str(total) + str(largest) + str(smallest) + str(len(values)) + str(len(packed))
+
+
+def logged(log: list[int], row: tuple[int, ...]) -> bool:
+    log.append(row[0])
+    return row[0] != 0
+
+
+def lazy_truth() -> str:
+    log = []
+    every = all(logged(log, row) for row in choose([1, 0, 2], 1))
+    some = any(logged(log, row) for row in choose([0, 1, 2], 1))
+    return str(int(every)) + str(int(some)) + str(len(log))
+
+
+def sum_error_order(count: int) -> str:
+    return str(sum((row[0] for row in choose([1, 2], count)), 1 // 0))
+
+
+def combination_range_comp(stop: int) -> str:
+    rows = [list(row) for row in choose(range(stop), 2)]
+    return str(len(rows))
+
+
+def stop() -> int:
+    raise StopIteration
+
+
+def stopped_pool() -> list[int]:
+    raise StopIteration
+
+
+def comprehension_error() -> str:
+    rows = [stop() for row in choose([1], 1)]
+    return str(len(rows))
+
+
+def generator_error() -> str:
+    rows = list(stop() for row in choose([1], 1))
+    return str(len(rows))
+
+
+def generator_creation_error() -> str:
+    rows = list(row for row in choose(stopped_pool(), 1))
+    return str(len(rows))
+
+
+def generator_inner_error() -> str:
+    rows = list(row for n in [1] for row in choose(stopped_pool(), n))
+    return str(len(rows))
+
 '''
 
 
@@ -170,12 +287,20 @@ with project_temporary_directory(prefix='combinations-') as temporary:
     cases += [('range_error_order', [step]) for step in (0, 1, 'bad')]
     cases += [(name, [stop]) for name in ('range_comprehension', 'range_next', 'range_default')
               for stop in (0, 3)]
+    cases += [('copied_rows', [count]) for count in (-1, 0, 1, 2, 3, 4, None, True, '2')]
+    cases += [(name, []) for name in ('comprehension_snapshot', 'comprehension_shared',
+              'comprehension_identity', 'comprehension_nested', 'comprehension_sets_dicts',
+              'comprehension_arguments', 'lazy_truth', 'comprehension_error', 'generator_error',
+              'generator_creation_error', 'generator_inner_error')]
+    cases += [('consumed', [count]) for count in (-1, 0, 1, 2, 4)]
+    cases += [('sum_error_order', [count]) for count in (-1, 1, 'bad')]
+    cases += [('combination_range_comp', [stop]) for stop in (-1, 0, 4)]
     for name in scope:
         if name in {case[0] for case in cases}:
             issues = SupportChecker(program).check(name)
             assert not issues, issues
     (directory / 'program.json').write_text(api['AstJsonEmitter'](program).emit())
-    lines = ['import FormalSW', 'open FormalSW.PyAst',
+    lines = ['import lang.py.FormalSW.CombinationCalls', 'open FormalSW.PyAst',
              'def program : Module := pyast_from_json% (include_str "program.json")']
     expected = []
     for index, (name, arguments) in enumerate(cases):
@@ -240,7 +365,6 @@ def custom() -> int:
     altered.formalsw_source = source
     assert not SupportChecker(altered).check('trace'), 'unrelated constructor alias blocked combinations'
     for body in ('rows = choose([1, 2], 1)\n    return 0',
-                 'return [row for row in choose([1, 2], 1)]',
                  'for row in choose([1, 2]):\n        pass\n    return 0'):
         altered = ast.parse('from itertools import combinations as choose\ndef f():\n    ' + body + '\n')
         altered.formalsw_source = source
@@ -257,4 +381,4 @@ def custom() -> int:
     altered.formalsw_source = source
     assert SupportChecker(altered).check('trace'), 'shadowed itertools module accepted'
 
-print(f'Combination loops: {len(expected)} Python execution comparisons and binding/escape checks passed')
+print(f'Combination loops and consumers: {len(expected)} Python execution comparisons and binding/escape checks passed')

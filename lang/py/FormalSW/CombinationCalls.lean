@@ -34,4 +34,23 @@ theorem BlockContinues.for_combinations
   exact .next rfl ((Evaluates.arguments_reach arguments _ [] anchors stack).trans
     (.next (by simp [step, run, captured]) (executed following anchors stack)))
 
+theorem Evaluates.list_comp_targets_combinations
+    (arguments : Arguments (globals := globals) module env expressions heap values middle)
+    (captured : combinationRows values middle = some (.ok rows, middle))
+    (executed : BlockContinues (globals := globals) module
+      (comprehensionTargetsEnv env ((target, .combinationsIterable expressions, filters) :: generators))
+      [.permutationStepLoop (comprehensionTargetName target) rows
+        (comprehensionTargetBody target (comprehensionFilters filters
+          (comprehensionTargetsBody [.comprehensionAppend middle.length element] generators))) []]
+      (middle ++ [.list []]) finalEnv finalHeap) :
+    Evaluates (globals := globals) module env
+      (.listCompTargets element ((target, .combinationsIterable expressions, filters) :: generators))
+      heap (.ref middle.length) finalHeap := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply (arguments_reach arguments _ [] anchors stack).trans
+  exact .next (by simp [step, comprehensionTargetsStart, run, captured])
+    ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
+      (.next rfl (.next rfl .refl)))
+
 end FormalSW.PyAst.HeapCalls

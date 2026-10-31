@@ -65,6 +65,7 @@ theorem Evaluates.truth_generator_sequence
         ((target, iterable, filters) :: generators)) heap answer finalHeap := by
   intro anchors stack
   have notPermutations := evaluated.not_permutations
+  have notCombinations := evaluated.not_combinations
   have notDictionaryValues := evaluated.not_dictionary_values
   have arguments : truthGeneratorArguments universal element ((target, iterable, filters) :: generators)
       env stack heap =

@@ -1675,8 +1675,7 @@ class AstJsonEmitter:
                        or (not getattr(expr, 'formalsw_generator_context', False)
                            and dictionary_values_receiver(generator.iter) is not None)
                        or permutation_arguments(generator.iter, self.bindings_module) is not None
-                       or (getattr(expr, 'formalsw_next_context', False)
-                           and combination_arguments(generator.iter, self.bindings_module) is not None)
+                       or combination_arguments(generator.iter, self.bindings_module) is not None
                        for generator in generators):
                     return {"type": "SetComp" if isinstance(expr, ast.SetComp) else "ListCompTargets", "elt": self.expr(elt), "generators": [
                         {"target": self.expr(generator.target), "iter": self.iterator_expr(generator.iter,

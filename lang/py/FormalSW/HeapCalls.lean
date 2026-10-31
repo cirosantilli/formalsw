@@ -991,6 +991,8 @@ def comprehensionTargetsStart (anchors : Nat) (element : Expr)
           | _ => .unsupported
       | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
           enter (.permutationStepLoop name rows body []) heap
+      | .combinationsIterable _ => run (globals := globals) anchors heap (combinationRows values) fun rows heap =>
+          enter (.permutationStepLoop name rows body []) heap
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
           enter (.zipStepLoop name sources 0 body []) heap
       | .call (.name "enumerate") _ => match enumerateTarget target, values with
@@ -1013,7 +1015,7 @@ def generatorArguments (action : GeneratorAction) (element : Expr)
     (generators : List (Expr × Expr × List Expr)) (env : Env) (stack : List Frame) (heap : Heap) : State :=
   let expressions := match generators with
     | (_, iterable, _) :: _ => match iterable with
-        | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+        | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions | .combinationsIterable expressions => expressions
         | _ => [iterable]
     | [] => []
   argumentsState (.generatorCollect action element generators (comprehensionTargetsEnv env generators))
@@ -1088,6 +1090,8 @@ def sumGeneratorTargetsStart (anchors : Nat) (element : Expr)
       match iterable with
       | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
           enter (.permutationStepLoop name rows body []) heap
+      | .combinationsIterable _ => run (globals := globals) anchors heap (combinationRows values) fun rows heap =>
+          enter (.permutationStepLoop name rows body []) heap
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
           enter (.zipStepLoop name sources 0 body []) heap
       | .call (.name "enumerate") _ => match enumerateTarget target, values with
@@ -1125,7 +1129,7 @@ def truthGeneratorArguments (universal : Bool) (element : Expr)
     (generators : List (Expr × Expr × List Expr)) (env : Env) (stack : List Frame) (heap : Heap) : State :=
   let expressions := match generators with
     | (_, iterable, _) :: _ => match iterable with
-        | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+        | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions | .combinationsIterable expressions => expressions
         | _ => [iterable]
     | [] => []
   argumentsState (.truthGenerator universal element generators (comprehensionTargetsEnv env generators))
@@ -1147,6 +1151,8 @@ def truthGeneratorStart (anchors : Nat) (universal : Bool) (element : Expr)
         ⟨.block [loop, .return (.constant (.bool universal))] env, .generatorEnd :: stack, heap⟩
       match iterable with
       | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
+          enter (.permutationStepLoop name rows body []) heap
+      | .combinationsIterable _ => run (globals := globals) anchors heap (combinationRows values) fun rows heap =>
           enter (.permutationStepLoop name rows body []) heap
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
           enter (.zipStepLoop name sources 0 body []) heap
@@ -1207,7 +1213,7 @@ def extremumGeneratorArguments (maximum : Bool) (fallback : Option Expr) (elemen
   let expressions := match generators with
     | (_, iterable, _) :: _ => match iterable with
         | .call (.name "range") expressions | .call (.name "enumerate") expressions
-          | .zipIterable expressions | .permutationsIterable expressions => expressions
+          | .zipIterable expressions | .permutationsIterable expressions | .combinationsIterable expressions => expressions
         | _ => [iterable]
     | [] => []
   argumentsState (.extremumGenerator maximum fallback element generators env) env [] expressions stack heap
@@ -1228,6 +1234,8 @@ def extremumGeneratorStart (anchors : Nat) (maximum : Bool) (fallback : Option E
           .extremumStart fallback.isSome loop (comprehensionTargetsEnv env generators) :: stack, heap⟩
       match iterable with
       | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
+          enter (.permutationStepLoop name rows body []) heap
+      | .combinationsIterable _ => run (globals := globals) anchors heap (combinationRows values) fun rows heap =>
           enter (.permutationStepLoop name rows body []) heap
       | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
           enter (.zipStepLoop name sources 0 body []) heap
@@ -1986,28 +1994,28 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
             env [] expressions stack heap)
       | .listCompTargets element (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
-            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions | .combinationsIterable expressions => expressions
             | .dictionaryValuesIterable receiver => [receiver]
             | _ => [iterable]
           .next (argumentsState (.comprehensionTargets element generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .setComp element (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
-            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions | .combinationsIterable expressions => expressions
             | .dictionaryValuesIterable receiver => [receiver]
             | _ => [iterable]
           .next (argumentsState (.setComprehension element generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .dictComp key value (generators@((_, iterable, _) :: _)) =>
           let expressions := match iterable with
-            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions | .combinationsIterable expressions => expressions
             | .dictionaryValuesIterable receiver => [receiver]
             | _ => [iterable]
           .next (argumentsState (.dictionaryComprehension key value generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .sumGeneratorTargets element (generators@((_, iterable, _) :: _)) start =>
           let expressions := match iterable with
-            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions => expressions
+            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions | .combinationsIterable expressions => expressions
             | _ => [iterable]
           .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
       | .consumeGenerator (.call (.name "$formalsw.extremum.compare") []) expression [] =>

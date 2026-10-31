@@ -60,6 +60,7 @@ theorem Evaluates.dict_comp_sequence
           (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)))
         env [] [iterable] stack heap) := by
     have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   apply Reaches.next first
@@ -68,6 +69,7 @@ theorem Evaluates.dict_comp_sequence
     ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
       (.next rfl (.next rfl .refl)))
   have notPermutations := evaluated.not_permutations
+  have notCombinations := evaluated.not_combinations
   have notDictionaryValues := evaluated.not_dictionary_values
   cases iterable <;> simp_all [step, comprehensionTargetsStart, run]
 
@@ -116,6 +118,7 @@ theorem Evaluates.list_comp_targets_sequence
           (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)))
         env [] [iterable] stack heap) := by
     have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   apply Reaches.next first
@@ -124,6 +127,7 @@ theorem Evaluates.list_comp_targets_sequence
     ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
       (.next rfl (.next rfl .refl)))
   have notPermutations := evaluated.not_permutations
+  have notCombinations := evaluated.not_combinations
   have notDictionaryValues := evaluated.not_dictionary_values
   cases iterable <;> simp_all [step, comprehensionTargetsStart, run]
 
@@ -172,6 +176,7 @@ theorem Evaluates.set_comp_sequence
           (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)))
         env [] [iterable] stack heap) := by
     have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   apply Reaches.next first
@@ -180,6 +185,7 @@ theorem Evaluates.set_comp_sequence
     ((executed [] anchors (.comprehensionResult middle.length :: stack)).trans
       (.next rfl (.next rfl .refl)))
   have notPermutations := evaluated.not_permutations
+  have notCombinations := evaluated.not_combinations
   have notDictionaryValues := evaluated.not_dictionary_values
   cases iterable <;> simp_all [step, comprehensionTargetsStart, run]
 
@@ -234,6 +240,7 @@ theorem Evaluates.sum_generator_targets_sequence
       .next (argumentsState (.sumGeneratorTargets element ((target, iterable, filters) :: generators) env start)
         env [] [iterable] stack heap) := by
     have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step]
   apply Reaches.next first
@@ -244,6 +251,7 @@ theorem Evaluates.sum_generator_targets_sequence
           (comprehensionTargetsBody (sumBody element []) generators))) [])
       (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)) :: stack, middle⟩)
   · have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [step, sumGeneratorTargetsStart, run]
   apply (started anchors _).trans

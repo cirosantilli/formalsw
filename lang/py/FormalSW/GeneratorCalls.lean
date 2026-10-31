@@ -77,6 +77,7 @@ theorem GeneratorCollects.sequence
       argumentsState (.generatorCollect action element ((target, iterable, filters) :: generators)
         (comprehensionTargetsEnv env ((target, iterable, filters) :: generators))) env [] [iterable] stack heap := by
     have notPermutations := evaluated.not_permutations
+    have notCombinations := evaluated.not_combinations
     have notDictionaryValues := evaluated.not_dictionary_values
     cases iterable <;> simp_all [generatorArguments]
   rw [initial]
@@ -85,6 +86,7 @@ theorem GeneratorCollects.sequence
     ((executed [] anchors (.comprehensionResult middle.length :: .generatorEnd :: .generatorConsumer action :: stack)).trans
       (.next rfl (.next rfl (.next rfl (finished.reaches anchors stack)))))
   have notPermutations := evaluated.not_permutations
+  have notCombinations := evaluated.not_combinations
   have notDictionaryValues := evaluated.not_dictionary_values
   cases iterable <;> simp_all [step, comprehensionTargetsStart, run]
 

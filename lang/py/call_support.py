@@ -964,8 +964,7 @@ def check_calls(module, function, reject, *, heap=False):
                                 if isinstance(argument, ast.Tuple):
                                     hidden_tuples.add(argument)
                                 expr(argument, iterable_scope)
-                    elif (getattr(node, 'formalsw_next_context', False)
-                          and combination_binding(iterable, module) is not None):
+                    elif combination_binding(iterable, module) is not None:
                         name = combination_binding(iterable, module)
                         if name in iterable_scope:
                             reject(iterable, 'combinations requires an unshadowed standard-library import')

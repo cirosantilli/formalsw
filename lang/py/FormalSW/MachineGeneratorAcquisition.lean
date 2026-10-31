@@ -8,10 +8,10 @@ set_option Elab.async false
 inductive GeneratorSource where
   | sequence | range | enumerate | zip | permutations | combinations
 
-/-- Only next's acquisition recognizes combinations and excludes unknown sequence protocols. -/
-def generatorSource (nextOnly : Bool) : Expr → GeneratorSource
+/-- Selection constructors acquire positional snapshots for every generator consumer. -/
+def generatorSource (_nextOnly : Bool) : Expr → GeneratorSource
   | .permutationsIterable _ => .permutations
-  | .combinationsIterable _ => if nextOnly then .combinations else .sequence
+  | .combinationsIterable _ => .combinations
   | .zipIterable _ => .zip
   | .call (.name "enumerate") _ => .enumerate
   | .call (.name "range") _ => .range
