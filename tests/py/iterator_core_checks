@@ -310,6 +310,74 @@ theorem relocated_next (logical physical : Mutable.Heap) (rename : Nat → Nat)
     simpa only [relocateGlobals, List.map_nil, Except.map, relocateValue] using called loop resumes
   exact advanced completed
 
+/-- Finish an allocating method and resume its caller without restricting later caller writes. -/
+theorem allocation_prefix_private (heap : Mutable.Heap) (receiver privateAddress anchors used : Nat)
+    (privateObject : Mutable.Object) (choices : ChoiceSchedule) (loop : Loop) (resumes : List Resume)
+    (saved : SavedCell privateAddress privateObject heap) :
+    ∃ final, IteratorCalls.Reaches Probe.module anchors choices []
+      (.running ⟨⟨.operation .list [.ref receiver], [], heap⟩, used⟩ (.advance loop (.ref receiver) :: resumes)) final ∧
+      IteratorCalls.Framing.StateCell privateAddress privateObject final := by
+  let returned : IteratorCalls.State := .running
+    ⟨⟨.value (.ref heap.length), [], after heap receiver⟩, used⟩ [.advance loop (.ref receiver)]
+  let completed : IteratorCalls.State := .completed
+    (.ok ⟨.ok (.ref heap.length), [], after heap receiver, anchors⟩) used [.advance loop (.ref receiver)]
+  let final : IteratorCalls.State := .running ⟨⟨.block
+    (loop.body ++ [Calls.loopContinuation loop.body (loopCode loop (.ref receiver))] ++ loop.following)
+    (setLocal loop.env loop.name (.ref heap.length)), loop.stack, after heap receiver⟩, used⟩ []
+  have allocated : IteratorCalls.step Probe.module anchors choices
+      (.running ⟨⟨.operation .list [.ref receiver], [], heap⟩, used⟩ [.advance loop (.ref receiver)]) = .next returned := by
+    simp [IteratorCalls.step, intercept, SetCalls.step, HeapCalls.step, primitive, result,
+      HeapCalls.run, Mutable.allocate, Except.map, SetCalls.liftStep, lift, returned, after]
+  have path : IteratorCalls.Framing.SeparatedReaches Probe.module anchors privateAddress choices []
+      (.running ⟨⟨.operation .list [.ref receiver], [], heap⟩, used⟩ [.advance loop (.ref receiver)]) final :=
+    .next (by simp [IteratorCalls.Framing.StateSeparate, HeapCalls.Framing.StateSeparate,
+      HeapCalls.Framing.operationTargets, Heapq.primitiveTargets]) allocated
+      (.next (by simp [returned, IteratorCalls.Framing.StateSeparate, HeapCalls.Framing.StateSeparate])
+        (show IteratorCalls.step Probe.module anchors choices returned = .next completed from rfl)
+        (.next (by trivial) (show IteratorCalls.step Probe.module anchors choices completed = .next final from rfl) .refl))
+  have withCaller := path.append_resumes resumes
+  refine ⟨appendResumes resumes final, ?_, withCaller.retains_cell privateObject saved⟩
+  simpa only [appendResumes, List.cons_append, List.nil_append] using withCaller.reaches
+
+/-- Acquisition rejects a scalar iterator result while retaining the method's final heap. -/
+theorem rejected_acquisition_private (heap : Mutable.Heap) (privateAddress anchors used : Nat)
+    (privateObject : Mutable.Object) (value : Constant) (choices : ChoiceSchedule)
+    (loop : Loop) (resumes : List Resume) (saved : SavedCell privateAddress privateObject heap) :
+    IteratorCalls.step Probe.module anchors choices
+      (.completed (.ok ⟨.ok (.scalar value), [], heap, anchors⟩) used (.acquire loop :: resumes)) =
+      .next (.completed (.ok ⟨.error ⟨"TypeError", []⟩, [], heap, anchors⟩) used resumes) ∧
+    IteratorCalls.Framing.RetainsCell privateAddress privateObject (IteratorCalls.step Probe.module anchors choices
+      (.completed (.ok ⟨.ok (.scalar value), [], heap, anchors⟩) used (.acquire loop :: resumes))) := by
+  constructor
+  · simp [IteratorCalls.step, resume, ProtocolCalls.iterFinish, ProtocolCalls.nextMethod,
+      propagate, Calls.generatorException]
+  · exact IteratorCalls.Framing.step_cell Probe.module privateAddress anchors privateObject _ choices [] (by trivial) saved
+
+/-- Exhaustion and other errors preserve the same cell while selecting different continuation paths. -/
+theorem error_resume_private (heap : Mutable.Heap) (privateAddress anchors used : Nat)
+    (privateObject : Mutable.Object) (error : ExceptionObject) (iterator : Mutable.Value)
+    (choices : ChoiceSchedule) (loop : Loop) (resumes : List Resume)
+    (saved : SavedCell privateAddress privateObject heap) :
+    IteratorCalls.Framing.RetainsCell privateAddress privateObject (IteratorCalls.step Probe.module anchors choices
+      (.completed (.ok ⟨.error error, [], heap, anchors⟩) used (.advance loop iterator :: resumes))) :=
+  IteratorCalls.Framing.step_cell Probe.module privateAddress anchors privateObject _ choices [] (by trivial) saved
+
+/-- A later caller write can change the protected object; prefix preservation does not forbid it. -/
+theorem later_append_changes_private (heap : Mutable.Heap) (privateAddress anchors used : Nat)
+    (items : List Mutable.Value) (value : Mutable.Value) (choices : ChoiceSchedule) (resumes : List Resume)
+    (found : heap[privateAddress]? = some (.list items)) :
+    ¬ IteratorCalls.Framing.RetainsCell privateAddress (.list items) (IteratorCalls.step Probe.module anchors choices
+      (.running ⟨⟨.operation (.append privateAddress) [value], [], heap⟩, used⟩ resumes)) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have transition : IteratorCalls.step Probe.module anchors choices
+      (.running ⟨⟨.operation (.append privateAddress) [value], [], heap⟩, used⟩ resumes) =
+      .next (.running ⟨⟨.value (.scalar .none), [], heap.set privateAddress (.list (items ++ [value]))⟩, used⟩ resumes) := by
+    simp [IteratorCalls.step, intercept, SetCalls.step, HeapCalls.step, primitive, result,
+      HeapCalls.run, Mutable.appendItem, found, Except.map, SetCalls.liftStep, lift]
+  intro retained
+  rw [transition] at retained
+  simp [IteratorCalls.Framing.RetainsCell, IteratorCalls.Framing.StateCell, SavedCell, valid] at retained
+
 end IteratorCoreExamples
 '''
 AUDITS = ["IteratorCoreExamples." + name for name in (
@@ -325,6 +393,42 @@ AUDITS = ["IteratorCoreExamples." + name for name in (
     "enter_append", "intercept_append", "lift_append", "resume_append", "step_next_append", "Reaches.append_resumes",
     "enter_not_done", "intercept_not_done", "step_done_boundary", "completion_of_iterator", "OperationCompletes.of_iterator",
 )]
+
+AUDITS += [
+    'FormalSW.PyAst.Heapq.preserves_protocolLookup',
+    'FormalSW.PyAst.Heapq.preserves_nextMethod',
+    'FormalSW.PyAst.Heapq.preserves_iterMethod',
+    'FormalSW.PyAst.Heapq.iterFinish_preserves',
+    'FormalSW.PyAst.IteratorCalls.Framing.lift_retains_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.propagate_retains_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.resume_retains_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.enter_retains_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.intercept_retains_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.step_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.SeparatedReaches.reaches',
+    'FormalSW.PyAst.IteratorCalls.Framing.SeparatedReaches.retains_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.reaches_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.finishes_retains_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.finishes_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.receiverTargets_relocates',
+    'FormalSW.PyAst.HeapCalls.Framing.receiverTargets_within',
+    'FormalSW.PyAst.HeapCalls.Framing.operationTargets_relocates',
+    'FormalSW.PyAst.HeapCalls.Framing.operationTargets_within',
+    'FormalSW.PyAst.HeapCalls.Framing.relocateValue_separate',
+    'FormalSW.PyAst.HeapCalls.Framing.relocateFrame_separate',
+    'FormalSW.PyAst.HeapCalls.Framing.relocateState_separate',
+    'FormalSW.PyAst.HeapCalls.Framing.relocated_step_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.appendResumes_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.appendResumes_separate',
+    'FormalSW.PyAst.IteratorCalls.Framing.SeparatedReaches.append_resumes',
+    'FormalSW.PyAst.IteratorCalls.Framing.relocateState_separate',
+    'FormalSW.PyAst.IteratorCalls.Framing.relocateState_cell',
+    'FormalSW.PyAst.IteratorCalls.Framing.relocated_step_cell',
+    'IteratorCoreExamples.allocation_prefix_private',
+    'IteratorCoreExamples.rejected_acquisition_private',
+    'IteratorCoreExamples.error_resume_private',
+    'IteratorCoreExamples.later_append_changes_private',
+]
 
 with project_temporary_directory(prefix="iterator-core-") as temporary:
     directory = Path(temporary)
@@ -345,7 +449,7 @@ with project_temporary_directory(prefix="iterator-core-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineInvariant\nimport lang.py.FormalSW.IteratorOperationRelocation\n"
+    proof.write_text("import lang.py.FormalSW.IteratorFrameComposition\nimport lang.py.FormalSW.MachineInvariant\nimport lang.py.FormalSW.IteratorOperationRelocation\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
