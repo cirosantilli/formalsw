@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+Check unpacking order and enumerate start effects against parsed Python calls.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def prepare(items, start):
+    items.append(start)
+    return start
+
+def indexed(items, start):
+    for index, value in enumerate(items, prepare(items, start)):
+        return index
+    return items
+
+def repeated(items, start):
+    for value, value in enumerate(items, prepare(items, start)):
+        return value
+    return items
+
+def unpack(items, start):
+    prepare(items, start)
+    value, value = items
+    return value
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineBindingExamples
+set_option Elab.async false
+
+def args : List Arg := [{name := "items", annotation := none}, {name := "start", annotation := none}]
+def prepareBody : List Stmt := [.expr (.call (.attribute (.name "items") "append") [.name "start"]), .return (.name "start")]
+def prepareCall : Expr := .call (.name "prepare") [.name "items", .name "start"]
+def functionName (repeated : Bool) := if repeated then "repeated" else "indexed"
+def indexName (repeated : Bool) := if repeated then "value" else "index"
+def loopBody (repeated : Bool) : List Stmt := [.return (.name (indexName repeated))]
+def following : List Stmt := [.return (.name "items")]
+def body (repeated : Bool) : List Stmt :=
+  [.forIn (.tuple [.name (indexName repeated), .name "value"])
+    (.call (.name "enumerate") [.name "items", prepareCall]) (loopBody repeated) []] ++ following
+def unpackBody : List Stmt := [.expr prepareCall,
+  .assign [.tuple [.name "value", .name "value"]] (.name "items"), .return (.name "value")]
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (start : Mutable.Value) :=
+  heap.set address (.list (items ++ [start]))
+def indexOutcome : Mutable.Value → Except ExceptionObject Int
+  | .scalar (.int number) => .ok number
+  | .scalar (.bool flag) => .ok (if flag then 1 else 0)
+  | _ => .error {typeName := "TypeError", args := []}
+def answer (repeated : Bool) (items : List Mutable.Value) (start : Mutable.Value) : Except ExceptionObject Mutable.Value :=
+  (indexOutcome start).map fun counter => if repeated then items.headD start else .scalar (.int counter)
+def unpackAnswer (items : List Mutable.Value) (start : Mutable.Value) : Except ExceptionObject Mutable.Value :=
+  match items with
+  | [_] => .ok start
+  | _ => .error {typeName := "ValueError", args := []}
+
+theorem source_prepare : findFunctionIn Probe.module.body "prepare" = some (args, prepareBody) := rfl
+theorem source_function (repeated : Bool) :
+    findFunctionIn Probe.module.body (functionName repeated) = some (args, body repeated) := by
+  cases repeated <;> rfl
+theorem source_unpack : findFunctionIn Probe.module.body "unpack" = some (args, unpackBody) := rfl
+
+theorem prepare_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (start : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "prepare" [.ref address, start] heap start (after heap address items start) := by
+  apply BlockReturns.function source_prepare (completed := [.ref address, start]) rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem index_evaluates (heap : Mutable.Heap) (start : Mutable.Value) :
+    enumerateStart start heap = some (indexOutcome start, heap) := by
+  cases start with
+  | scalar scalar => cases scalar <;> rfl
+  | ref address => rfl
+
+theorem source_finishes (repeated : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (start : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    (HeapCalls.call Probe.module (functionName repeated) [.ref address, start] heap).Finishes
+      ⟨answer repeated items start, [], after heap address items start, heap.length⟩ := by
+  let env := functionEnv args (body repeated) [.ref address, start] []
+  have bound := (List.getElem?_eq_some_iff.mp found).1
+  have read : Mutable.sequence (.ref address) (after heap address items start) =
+      some (.ok (items ++ [start]), after heap address items start) := by
+    simp [Mutable.sequence, after, bound]
+  have first : (items ++ [start])[0]? = some (items.headD start) := by cases items <;> rfl
+  have prepared : Evaluates Probe.module env prepareCall heap start (after heap address items start) :=
+    Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (prepare_returns heap address items start found)
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.block (body repeated) env, [], heap⟩)
+  · change HeapCalls.step Probe.module heap.length
+      ⟨.operation (.call (functionName repeated)) [.ref address, start], [], heap⟩ [] = _
+    simp [HeapCalls.step, source_function, show completeArguments args [.ref address, start] = some [.ref address, start] from rfl,
+      executableBody, body, env]
+  · apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (step_for_enumerate Probe.module heap heap.length false (indexName repeated) "value"
+      (.name "items") (some prepareCall) (loopBody repeated) [] following env [] [])
+    apply (Evaluates.lookup (module := Probe.module) (heap := heap) (env := env) (value := .ref address) rfl
+      heap.length _).finishes
+    apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+    apply (prepared heap.length _).finishes
+    cases tested : indexOutcome start with
+    | error exception =>
+      exact .done (by simp [HeapCalls.step, HeapCalls.run, index_evaluates, tested, HeapCalls.done,
+        answer, Except.map, HeapCalls.protectGenerator, Frame.inGenerator, Calls.generatorException])
+    | ok counter =>
+      apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.block
+        (.enumerateStepLoop (indexName repeated) "value" (.ref address) 0 counter (loopBody repeated) [] :: following) env,
+        [], after heap address items start⟩)
+      · simp [HeapCalls.step, HeapCalls.run, index_evaluates, tested, read, sequenceSource]
+      · apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.block
+          (loopBody repeated ++ [Calls.loopContinuation (loopBody repeated)
+            (.enumerateStepLoop (indexName repeated) "value" (.ref address) 1 (counter + 1) (loopBody repeated) [])] ++ following)
+          (setLocal (setLocal env (indexName repeated) (.scalar (.int counter))) "value" (items.headD start)),
+          [], after heap address items start⟩)
+        · simp only [HeapCalls.step, HeapCalls.run, sequenceValue, read, first, HeapCalls.protectGenerator_next]
+        · cases repeated <;> apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+          all_goals apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (by simp [HeapCalls.step, setLocal, indexName] <;> rfl)
+          all_goals exact .done (by simp [HeapCalls.step, HeapCalls.done, answer, tested, Except.map,
+            HeapCalls.protectGenerator])
+
+theorem unpack_finishes (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (start : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (HeapCalls.call Probe.module "unpack" [.ref address, start] heap).Finishes
+      ⟨unpackAnswer items start, [], after heap address items start, heap.length⟩ := by
+  let env := functionEnv args unpackBody [.ref address, start] []
+  have bound := (List.getElem?_eq_some_iff.mp found).1
+  have read : Mutable.sequence (.ref address) (after heap address items start) =
+      some (.ok (items ++ [start]), after heap address items start) := by
+    simp [Mutable.sequence, after, bound]
+  have prepared : Evaluates Probe.module env prepareCall heap start (after heap address items start) :=
+    Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (prepare_returns heap address items start found)
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.block unpackBody env, [], heap⟩)
+  · change HeapCalls.step Probe.module heap.length ⟨.operation (.call "unpack") [.ref address, start], [], heap⟩ [] = _
+    simp [HeapCalls.step, source_unpack, show completeArguments args [.ref address, start] = some [.ref address, start] from rfl,
+      executableBody, unpackBody, prepareCall, env]
+  · apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+    apply (prepared heap.length _).finishes
+    apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+    apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+    apply (Evaluates.lookup (module := Probe.module) (heap := after heap address items start)
+      (env := env) (value := .ref address) rfl heap.length _).finishes
+    cases items with
+    | nil =>
+      exact .done (by simp [HeapCalls.step, HeapCalls.run, read, HeapCalls.done, unpackAnswer,
+        HeapCalls.protectGenerator, Frame.inGenerator, Calls.generatorException])
+    | cons first rest =>
+      cases rest with
+      | nil =>
+        apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (by simp [HeapCalls.step, HeapCalls.run, read] <;> rfl)
+        apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+        apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (by simp [HeapCalls.step, assignNames, setLocal] <;> rfl)
+        exact .done rfl
+      | cons second rest =>
+        exact .done (by simp [HeapCalls.step, HeapCalls.run, read, HeapCalls.done, unpackAnswer,
+          HeapCalls.protectGenerator, Frame.inGenerator, Calls.generatorException])
+
+theorem answers_relocate (rename : Nat → Nat) (repeated : Bool) (items : List Mutable.Value) (start : Mutable.Value) :
+    answer repeated (items.map (relocateValue rename)) (relocateValue rename start) =
+      (answer repeated items start).map (relocateValue rename) ∧
+    unpackAnswer (items.map (relocateValue rename)) (relocateValue rename start) =
+      (unpackAnswer items start).map (relocateValue rename) := by
+  constructor
+  · cases start with
+    | scalar scalar => cases scalar <;> cases repeated <;> cases items <;> rfl
+    | ref address => rfl
+  · cases items with
+    | nil => rfl
+    | cons first rest => cases rest <;> rfl
+
+theorem paired_finishes (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (repeated : Bool) (address : Nat) (items : List Mutable.Value)
+    (start : Mutable.Value) (found : logical[address]? = some (.list items)) (bounded : start.edge.Within logical.length) :
+    (HeapCalls.call Probe.module (functionName repeated) [.ref address, start] logical).Finishes
+        ⟨answer repeated items start, [], after logical address items start, logical.length⟩ ∧
+    (HeapCalls.call Probe.module (functionName repeated) [.ref (rename address), relocateValue rename start] physical).Finishes
+        ⟨(answer repeated items start).map (relocateValue rename), [],
+          after physical (rename address) (items.map (relocateValue rename)) (relocateValue rename start), physical.length⟩ ∧
+    (HeapCalls.call Probe.module "unpack" [.ref address, start] logical).Finishes
+        ⟨unpackAnswer items start, [], after logical address items start, logical.length⟩ ∧
+    (HeapCalls.call Probe.module "unpack" [.ref (rename address), relocateValue rename start] physical).Finishes
+        ⟨(unpackAnswer items start).map (relocateValue rename), [],
+          after physical (rename address) (items.map (relocateValue rename)) (relocateValue rename start), physical.length⟩ ∧
+    ExecutionLayout (after logical address items start)
+      (after physical (rename address) (items.map (relocateValue rename)) (relocateValue rename start)) rename := by
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  have enumerated := source_finishes repeated physical (rename address) (items.map (relocateValue rename))
+    (relocateValue rename start) moved
+  have unpacked := unpack_finishes physical (rename address) (items.map (relocateValue rename)) (relocateValue rename start) moved
+  rw [(answers_relocate rename repeated items start).1] at enumerated
+  rw [(answers_relocate rename repeated items start).2] at unpacked
+  refine ⟨source_finishes repeated logical address items start found, enumerated,
+    unpack_finishes logical address items start found, unpacked, ?_⟩
+  have old := layout.closed (.list items) (List.mem_of_getElem? found)
+  have retained := layout.set_list address items (items ++ [start]) found (by
+    intro value member
+    rcases List.mem_append.mp member with member | member
+    · exact old value member
+    · have same := List.mem_singleton.mp member
+      subst value
+      exact bounded)
+  simpa [after] using retained
+
+end MachineBindingExamples
+'''
+AUDITS = ["MachineBindingExamples." + name for name in (
+    "prepare_returns", "source_finishes", "unpack_finishes", "answers_relocate", "paired_finishes",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "assignNames_relocate", "EnvWithin.assignNames", "run_sequence_relocates", "run_sequence_within",
+    "step_unpack_relocates", "step_unpack_start_relocates", "step_unpack_loop_relocates",
+    "StateWithin.unpack", "StateWithin.unpack_start", "StateWithin.unpack_loop",
+    "enumerateStart_relocate", "step_for_enumerate_relocates", "step_enumerate_source_relocates",
+    "step_enumerate_start_relocates", "step_enumerate_loop_relocates", "StateWithin.for_enumerate",
+    "StateWithin.enumerate_source", "StateWithin.enumerate_start", "StateWithin.enumerate_loop",
+)]
+
+with project_temporary_directory(prefix="machine-binding-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("indexed", "repeated"):
+        for count in (0, 1, 7):
+            for start in (-10**100, 0, 10**100, False, True):
+                old = [object() for _ in range(count)]
+                items = old.copy()
+                result = namespace[name](items, start)
+                if name == "indexed":
+                    assert type(result) is int and result == int(start)
+                else:
+                    assert result is (old[0] if old else start)
+                assert len(items) == count + 1 and items[-1] is start
+        for start in (None, "2", object()):
+            items = []
+            try:
+                namespace[name](items, start)
+            except TypeError:
+                pass
+            else:
+                raise AssertionError("invalid enumerate start accepted")
+            assert len(items) == 1 and items[0] is start
+        cycle = []
+        cycle.append(cycle)
+        result = namespace[name](cycle, 4)
+        assert cycle[0] is cycle and cycle[1:] == [4]
+        assert result is cycle if name == "repeated" else result == 4
+    for count in (0, 1, 2, 9):
+        items = [object() for _ in range(count)]
+        value = object()
+        try:
+            result = namespace["unpack"](items, value)
+        except ValueError:
+            assert count != 1
+        else:
+            assert count == 1 and result is value
+        assert len(items) == count + 1 and items[-1] is value
+    cycle = [object()]
+    assert namespace["unpack"](cycle, cycle) is cycle and cycle[-1] is cycle
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineEnumerate\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"sequence binding: shared mutation, repeated targets, unpacking and enumerate errors; {len(AUDITS)} axiom audits passed")
