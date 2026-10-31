@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+Check local annotation erasure while retaining effectful receivers and shared mutations.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(items, value):
+    items.append(value)
+    return items
+
+
+def annotated(items, value):
+    unused: missing_annotation
+    touch(items, value).missing: missing_annotation
+    selected: missing_annotation = items
+    return selected
+
+
+def explicit(items, value):
+    touch(items, value)
+    selected = items
+    return selected
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineStatementExamples
+set_option Elab.async false
+
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) :=
+  heap.set address (.list (items ++ [value]))
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, value] heap (.ref address) (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem annotated_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "annotated" [.ref address, value] heap (.ref address) (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockContinues.returns (body := [.annAssign (.name "unused") (.name "missing_annotation") none])
+    (BlockContinues.annotation _)
+  apply BlockContinues.returns (body := [.annAssign
+    (.attribute (.call (.name "touch") [.name "items", .name "value"]) "missing") (.name "missing_annotation") none])
+    (BlockContinues.annotationAttribute
+      (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+        (touch_returns heap address items value found)))
+  apply BlockContinues.returns (body := [.annAssign (.name "selected") (.name "missing_annotation") (some (.name "items"))])
+    (BlockContinues.annAssign (Evaluates.lookup rfl))
+  exact BlockReturns.return_value (Evaluates.lookup (by simp [setLocal]))
+
+theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "explicit" [.ref address, value] heap (.ref address) (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+    (touch_returns heap address items value found))
+  apply BlockContinues.returns (body := [.assign [.name "selected"] (.name "items")])
+    (BlockContinues.assign (Evaluates.lookup rfl))
+  exact BlockReturns.return_value (Evaluates.lookup (by simp [setLocal]))
+
+/-- Annotation erasure retains receiver effects and the original shared return value. -/
+theorem annotation_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "annotated" [.ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, value] heap (.ref address) (after heap address items value)) :
+      ((IteratorCalls.call Probe.module name [.ref address, value] heap).run choices).Finishes
+        ⟨.ok (.ref address), [], after heap address items value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "annotated" leftChoices (annotated_returns heap address items value found))
+    (finishes "explicit" rightChoices (explicit_returns heap address items value found)) (Or.inl rfl)
+
+/-- Annotation entry retains the append's actual output invariant under saved iterator consumers. -/
+theorem append_then_annotation (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (target annotation : Expr) (value : Option Expr) (following : List Stmt) (env : HeapCalls.Env)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (envInside : EnvWithin logical.length env)
+    (bodyInside : ∀ statement ∈ following, StmtWithin logical.length statement)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (after logical address items item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.block (.annAssign target annotation value :: following) env, [], after logical address items item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.block (.annAssign target annotation value :: following) env, [], after logical address items item⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have annotationInside : StateWithin ⟨.block (.annAssign target annotation value :: following) env, [], after logical address items item⟩ := by
+    refine ⟨⟨envInside.mono larger, ?_⟩, by simp⟩
+    intro statement member
+    rcases List.mem_cons.mp member with rfl | member
+    · simp [StmtWithin]
+    · exact (bodyInside statement member).mono larger
+  have raw := step_annotation_preserves Probe.module _ other nextMap logical.length physical.length
+    target annotation value following env [] [] retained annotationInside
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.block (.annAssign target annotation value :: following) env, [], after logical address items item⟩, used⟩ other nextMap
+    logical.length physical.length [] retained annotationInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨annotationInside.1, annotationInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
+end MachineStatementExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "step_annotation", "step_annotation_preserves", "step_augmented_assignment", "step_augmented_assignment_preserves",
+    "step_empty_block_preserves", "step_return_statement_preserves", "step_expression_statement_preserves", "step_if_statement_preserves",
+)] + ["FormalSW.PyAst.HeapCalls.BlockContinues.annotationAttribute"] + ["MachineStatementExamples." + name for name in (
+    "touch_returns", "annotated_returns", "explicit_returns", "annotation_equiv", "append_then_annotation",
+)]
+with project_temporary_directory(prefix="machine-statement-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("annotated", "explicit"):
+        for count in (0, 1, 4):
+            items = [object() for _ in range(count)]
+            old = items.copy()
+            assert namespace[name](items, items) is items
+            assert len(items) == count + 1 and items[-1] is items
+            assert all(left is right for left, right in zip(items[:-1], old))
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineStatementInvariant\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"statement entry: unevaluated annotations, receiver effects, shared results; {len(AUDITS)} axiom audits passed")
