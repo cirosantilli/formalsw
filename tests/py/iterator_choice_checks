@@ -248,10 +248,23 @@ theorem counterexample :
   not_self_equiv exampleHeap 0 1 [("flags", .ref 1)] rfl rfl rfl
 
 end IteratorChoiceExamples
+
+namespace SetOrderExamples
+open FormalSW.PyAst
+
+/-- The cursor uses a modulus at every position, including the last singleton. -/
+theorem second_first (first second : Constant) (choices : ChoiceSchedule) (used : Nat)
+    (selectSecond : choices used % 2 = 1) :
+    SetCalls.selectionOrder choices used [first, second] = [second, first] := by
+  simp [SetCalls.selectionOrder, selectSecond, Nat.mod_one]
+
+end SetOrderExamples
 '''
 
 AUDITS = ["FormalSW.PyAst.Mutable.CallFamily.not_equiv_of_finishes",
-          "FormalSW.PyAst.SetCalls.for_set_name", "FormalSW.PyAst.SetCalls.select_item"] + [f"IteratorChoiceExamples.{name}" for name in (
+          "FormalSW.PyAst.SetCalls.for_set_name", "FormalSW.PyAst.SetCalls.select_item",
+          "FormalSW.PyAst.SetCalls.select_item_mod", "FormalSW.PyAst.SetCalls.selectionOrder_length",
+          "FormalSW.PyAst.SetCalls.selectionOrder_perm", "SetOrderExamples.second_first"] + [f"IteratorChoiceExamples.{name}" for name in (
     "source_class", "source_iter", "source_next", "source_first", "iter_bound", "next_bound",
     "iter_returns", "flags_read", "method_cursor", "select_flag", "chosen_returns", "chosen_throws",
     "next_returns", "next_throws", "first_acquires", "first_returns", "first_throws",

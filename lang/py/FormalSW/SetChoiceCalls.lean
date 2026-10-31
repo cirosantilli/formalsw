@@ -5,6 +5,57 @@ namespace FormalSW.PyAst.SetCalls
 open HeapCalls
 set_option Elab.async false
 
+/-- The finite order selected by a schedule, consuming one choice per representative. -/
+def selectionOrder {α : Type} (choices : ChoiceSchedule) (used : Nat) (items : List α) : List α :=
+  match items with
+  | [] => []
+  | head :: tail =>
+      let index := choices used % (head :: tail).length
+      have bound : index < (head :: tail).length := Nat.mod_lt _ (by simp)
+      (head :: tail)[index] :: selectionOrder choices (used + 1) ((head :: tail).eraseIdx index)
+termination_by items.length
+decreasing_by
+  rw [List.length_eraseIdx_of_lt bound]
+  simp
+
+theorem selectionOrder_length {α : Type} (choices : ChoiceSchedule) (used : Nat) (items : List α) :
+    (selectionOrder choices used items).length = items.length := by
+  cases items with
+  | nil => simp [selectionOrder]
+  | cons head tail =>
+      rw [selectionOrder, List.length_cons, selectionOrder_length]
+      rw [List.length_eraseIdx_of_lt (Nat.mod_lt _ (by simp))]
+      simp
+termination_by items.length
+decreasing_by
+  rw [List.length_eraseIdx_of_lt (Nat.mod_lt _ (by simp))]
+  simp
+
+private theorem selected_erase_perm {α : Type} (items : List α) (index : Nat)
+    (bound : index < items.length) : (items[index] :: items.eraseIdx index).Perm items := by
+  induction items generalizing index with
+  | nil => simp at bound
+  | cons head tail ih =>
+      cases index with
+      | zero => exact .refl _
+      | succ index =>
+          have bounded : index < tail.length := Nat.lt_of_succ_lt_succ bound
+          exact (List.Perm.swap head tail[index] _).trans ((ih index bounded).cons head)
+
+/-- Traversal visits every representative exactly once, without assuming a particular order. -/
+theorem selectionOrder_perm {α : Type} (choices : ChoiceSchedule) (used : Nat) (items : List α) :
+    (selectionOrder choices used items).Perm items := by
+  cases items with
+  | nil => rw [selectionOrder]
+  | cons head tail =>
+      rw [selectionOrder]
+      exact ((selectionOrder_perm choices (used + 1) _).cons _).trans
+        (selected_erase_perm _ _ (Nat.mod_lt _ (by simp)))
+termination_by items.length
+decreasing_by
+  rw [List.length_eraseIdx_of_lt (Nat.mod_lt _ (by simp))]
+  simp
+
 theorem for_set_name (module : Module) (choices : ChoiceSchedule) (anchors used address : Nat)
     (heap : Mutable.Heap) (items : List Constant) (env : HeapCalls.Env) (target source : String)
     (body otherwise following : List Stmt) (stack : List HeapCalls.Frame)
