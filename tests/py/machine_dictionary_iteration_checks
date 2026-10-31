@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""
+Prove dictionary clearing is retained when live iteration raises a size error.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def drain(table):
+    for pair in table.items():
+        table.clear()
+    return table
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineDictionaryExamples
+set_option Elab.async false
+
+abbrev Table := Sum (List (Constant × Mutable.Value)) (List (HashDict.Entry Mutable.Value))
+def tableObject : Table → Mutable.Object
+  | .inl entries => .dict entries
+  | .inr entries => .keyDict entries
+def fields : Table → List (Mutable.Value × Mutable.Value)
+  | .inl entries => entries.map fun entry => (.scalar entry.1, entry.2)
+  | .inr entries => entries.map Prod.snd
+def clearedObject : Table → Mutable.Object
+  | .inl _ => .dict []
+  | .inr _ => .keyDict []
+def movedTable (rename : Nat → Nat) : Table → Table
+  | .inl entries => .inl (entries.map fun entry => (entry.1, relocateValue rename entry.2))
+  | .inr entries => .inr (relocateHashEntries rename entries)
+def args : List Arg := [{name := "table", annotation := none}]
+def loopBody : List Stmt := [.expr (.call (.attribute (.name "table") "clear") [])]
+def following : List Stmt := [.return (.name "table")]
+def body : List Stmt := [.forDictionaryItems (.name "pair") (.name "table") loopBody []] ++ following
+def env (address : Nat) : HeapCalls.Env := functionEnv args body [.ref address] []
+def result (address : Nat) (table : Table) : Except ExceptionObject Mutable.Value :=
+  if (fields table).isEmpty then .ok (.ref address) else .error {typeName := "RuntimeError", args := []}
+def after (heap : Mutable.Heap) (address : Nat) (table : Table) : Mutable.Heap :=
+  match fields table with
+  | [] => heap
+  | pair :: _ => (heap ++ [Mutable.Object.tuple [pair.1, pair.2]]).set address (clearedObject table)
+
+theorem source_function : findFunctionIn Probe.module.body "drain" = some (args, body) := rfl
+theorem table_fields (table : Table) : dictionaryItemFields (tableObject table) = some (fields table) := by
+  cases table <;> rfl
+theorem cleared_fields (table : Table) : dictionaryItemFields (clearedObject table) = some [] := by
+  cases table <;> rfl
+theorem table_relocates (rename : Nat → Nat) (table : Table) :
+    tableObject (movedTable rename table) = relocateObject rename (tableObject table) ∧
+    fields (movedTable rename table) = (fields table).map (relocatePair rename) ∧
+    clearedObject (movedTable rename table) = relocateObject rename (clearedObject table) := by
+  cases table <;> simp [tableObject, movedTable, fields, clearedObject, relocateHashEntries,
+    relocateObject, relocatePair, relocateValue, List.map_map, Function.comp_def]
+
+theorem clear_evaluates (heap : Mutable.Heap) (address : Nat) (table : Table) (locals : HeapCalls.Env)
+    (found : heap[address]? = some (tableObject table)) (lookup : locals "table" = some (.ref address)) :
+    Evaluates Probe.module locals (.call (.attribute (.name "table") "clear") []) heap
+      (.scalar .none) (heap.set address (clearedObject table)) := by
+  apply Evaluates.dictionary_clear (by intro name equal; cases equal; simp [lookup]) (Evaluates.lookup lookup)
+  · cases table <;> simp [bindMethod, tableObject, found]
+  · cases table <;> simp [clearDictionary, tableObject, clearedObject, found, Except.map]
+
+theorem source_finishes (heap : Mutable.Heap) (address : Nat) (table : Table)
+    (found : heap[address]? = some (tableObject table)) :
+    (HeapCalls.call Probe.module "drain" [.ref address] heap).Finishes
+      ⟨result address table, [], after heap address table, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.block body (env address), [], heap⟩)
+  · change HeapCalls.step Probe.module heap.length
+      ⟨.operation (.call "drain") [.ref address], [], heap⟩ [] = _
+    simp [HeapCalls.step, source_function, show completeArguments args [.ref address] = some [.ref address] from rfl,
+      executableBody, body, env]
+  · apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.expr (.name "table") (env address),
+      [.dictionaryItemsReceiver (.name "pair") loopBody [] following (env address)], heap⟩) rfl
+    have lookup : env address "table" = some (.ref address) := by simp [env, functionEnv, HeapCalls.argumentEnv, args]
+    apply ((Evaluates.lookup (module := Probe.module) lookup) heap.length _).finishes
+    apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.block (.dictionaryItemsStepLoop "pair" address
+      ((fields table).map fun entry => sequenceSource entry.1) 0 loopBody [] :: following) (env address), [], heap⟩)
+    · simp [HeapCalls.step, dictionaryItemsStart, found, table_fields, comprehensionTargetName, comprehensionTargetBody]
+    · have fetched := dictionaryItemsNext_fields (position := 0) found (table_fields table)
+      cases entries : fields table with
+      | nil =>
+        have returned : BlockReturns Probe.module (env address)
+            (.dictionaryItemsStepLoop "pair" address [] 0 loopBody [] :: following) heap (.ref address) heap := by
+          apply BlockReturns.dictionary_items_done (by simpa [entries] using fetched)
+          exact BlockReturns.return_value (Evaluates.lookup lookup)
+        simpa [entries, result, after] using (returned heap.length []).finishes (.done rfl)
+      | cons pair rest =>
+        simp only [entries, List.map_cons, List.getElem?_cons_zero] at fetched
+        have bound := (List.getElem?_eq_some_iff.mp found).1
+        let allocated := heap ++ [Mutable.Object.tuple [pair.1, pair.2]]
+        have retained : allocated[address]? = some (tableObject table) := by
+          rw [List.getElem?_append_left bound, found]
+        have cleared : (after heap address table)[address]? = some (clearedObject table) := by
+          simp only [after, entries]
+          exact List.getElem?_set_self (by simp; omega)
+        apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.block (loopBody ++ [Calls.loopContinuation loopBody
+          (.dictionaryItemsStepLoop "pair" address ((fields table).map fun entry => sequenceSource entry.1) 1 loopBody [])] ++ following)
+          (setLocal (env address) "pair" (.ref heap.length)), [], allocated⟩)
+        · simp [HeapCalls.step, run, entries, fetched, Mutable.allocateTuple, Except.map, allocated]
+        · apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.expr (.call (.attribute (.name "table") "clear") [])
+            (setLocal (env address) "pair" (.ref heap.length)),
+            [.discard ([Calls.loopContinuation loopBody
+              (.dictionaryItemsStepLoop "pair" address ((fields table).map fun entry => sequenceSource entry.1) 1 loopBody [])] ++ following)
+              (setLocal (env address) "pair" (.ref heap.length))], allocated⟩) rfl
+          apply ((clear_evaluates allocated address table _ retained (by simp [setLocal, lookup])) heap.length _).finishes
+          apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+          exact .done (by simp [HeapCalls.step, loopBody, Calls.loopContinuation, Calls.loopControl, Calls.loopControlStmt,
+            run, dictionaryItemsNext, show allocated.set address (clearedObject table) = after heap address table by
+              simp [allocated, after, entries], cleared, cleared_fields, entries, Mutable.error,
+            HeapCalls.done, result, protectGenerator, Calls.generatorException])
+
+theorem paired_finishes (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (table : Table)
+    (found : logical[address]? = some (tableObject table)) :
+    ∃ nextMap,
+      (HeapCalls.call Probe.module "drain" [.ref address] logical).Finishes
+        ⟨result address table, [], after logical address table, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "drain" [.ref (rename address)] physical).Finishes
+        ⟨(result address table).map (relocateValue nextMap), [],
+          after physical (rename address) (movedTable rename table), physical.length⟩ ∧
+      ExecutionLayout (after logical address table) (after physical (rename address) (movedTable rename table)) nextMap ∧
+      (∀ old < logical.length, nextMap old = rename old) := by
+  have bound := (List.getElem?_eq_some_iff.mp found).1
+  have moved : physical[rename address]? = some (tableObject (movedTable rename table)) := by
+    rw [(table_relocates rename table).1]
+    exact layout.runtime.lookup address _ found
+  have source := source_finishes logical address table found
+  have other := source_finishes physical (rename address) (movedTable rename table) moved
+  cases entries : fields table with
+  | nil =>
+    refine ⟨rename, source, ?_, ?_, fun _ _ => rfl⟩
+    · simpa [result, (table_relocates rename table).2.1, entries, Except.map, relocateValue] using other
+    · simpa [after, (table_relocates rename table).2.1, entries] using layout
+  | cons pair rest =>
+    have pairInside := dictionaryItemFields_within logical.length (tableObject table) (fields table)
+      (layout.closed _ (List.mem_of_getElem? found)) (table_fields table) pair (by simp [entries])
+    obtain ⟨left, right, logicalAfter, physicalAfter, nextMap, first, second, retained, _, _, agree⟩ :=
+      layout.allocateTuple [pair.1, pair.2] (by simpa using pairInside)
+    have leftHeap : logicalAfter = logical ++ [.tuple [pair.1, pair.2]] := by
+      simpa [Mutable.allocateTuple] using (congrArg (Option.map Prod.snd) first).symm
+    have rightHeap : physicalAfter = physical ++ [.tuple [relocateValue rename pair.1, relocateValue rename pair.2]] := by
+      simpa [Mutable.allocateTuple] using (congrArg (Option.map Prod.snd) second).symm
+    subst logicalAfter physicalAfter
+    refine ⟨nextMap, source, ?_, ?_, agree⟩
+    · simpa [result, (table_relocates rename table).2.1, entries, Except.map] using other
+    · have updated := retained.set_nonempty address (tableObject table) (clearedObject table)
+        (by rw [List.getElem?_append_left bound, found])
+        (by cases table <;> simp [tableObject]) (by cases table <;> simp [clearedObject])
+        (by cases table <;> simp [clearedObject, ObjectWithin, objectValues])
+      have emptySame : relocateObject nextMap (clearedObject table) = relocateObject rename (clearedObject table) := by
+        cases table <;> rfl
+      rw [emptySame] at updated
+      simpa [after, (table_relocates rename table).2.1, (table_relocates rename table).2.2,
+        entries, relocatePair, agree address bound] using updated
+
+/-- The value read on a later step is the current binding, not a snapshot. -/
+theorem current_values (heap : Mutable.Heap) (address : Nat) (old current : Table) (position : Nat)
+    (found : heap[address]? = some (tableObject current))
+    (sameKeys : (fields current).map (fun entry => sequenceSource entry.1) =
+      (fields old).map (fun entry => sequenceSource entry.1)) :
+    dictionaryItemsNext address ((fields old).map fun entry => sequenceSource entry.1) position heap =
+      some (.ok (fields current)[position]?, heap) := by
+  rw [← sameKeys]
+  exact dictionaryItemsNext_fields found (table_fields current)
+
+end MachineDictionaryExamples
+'''
+AUDITS = ["MachineDictionaryExamples." + name for name in (
+    "table_relocates", "clear_evaluates", "source_finishes", "paired_finishes", "current_values",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "dictionaryItemFields_relocates", "dictionaryItemFields_within", "relocateSource_eq_iff",
+    "relocateSources_eq_iff", "dictionaryKeys_relocate", "dictionaryItemsNext_keeps_heap",
+    "dictionaryItemsNext_relocates", "dictionaryItemsNext_values_within",
+    "dictionaryItemsStart_relocates", "dictionaryValuesStart_relocates",
+    "step_dictionary_items_start_relocates", "step_dictionary_values_start_relocates",
+    "step_dictionary_items_loop_relocates", "step_for_dictionary_items_relocates", "step_for_dictionary_values_relocates",
+    "StateWithin.for_dictionary_items", "StateWithin.for_dictionary_values", "dictionary_start_within",
+    "StateWithin.dictionary_items_start", "StateWithin.dictionary_values_start",
+)]
+
+with project_temporary_directory(prefix="machine-dictionary-iteration-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    empty = {}
+    assert namespace["drain"](empty) is empty
+    for length in (1, 2, 9, 100):
+        for tuple_keys in (False, True):
+            shared = []
+            table = {(i, i + 1) if tuple_keys else i: shared for i in range(length)}
+            alias = table
+            try:
+                namespace["drain"](table)
+            except RuntimeError:
+                assert alias is table and table == {} and shared == []
+            else:
+                raise AssertionError("dictionary size change did not raise")
+    cycle = {}
+    cycle[0] = cycle
+    try:
+        namespace["drain"](cycle)
+    except RuntimeError:
+        assert cycle == {}
+    else:
+        raise AssertionError("cyclic dictionary size change did not raise")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineDictionaryIteration\n"
+                     "import lang.py.FormalSW.KeyDictionaryCalls\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"dictionary iteration: live values, aliases, and size errors; {len(AUDITS)} axiom audits passed")

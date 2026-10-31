@@ -131,6 +131,7 @@ roots = [
   "lang.py.FormalSW.MachineEnumerate",
   "lang.py.FormalSW.MachineReverse",
   "lang.py.FormalSW.MachineZip",
+  "lang.py.FormalSW.MachineDictionaryIteration",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",
