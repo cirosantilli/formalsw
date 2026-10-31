@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+Check live list counting, stable sorting, argument effects and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def mark(items, value):
+    items.append(value)
+    return value
+
+
+def counted(items, value):
+    return items.count(mark(items, value))
+
+
+def counted_explicit(items, value):
+    items.append(value)
+    return items.count(value)
+
+
+def self_count(items):
+    return items.count(items)
+
+
+def direction(items, value, reverse):
+    items.append(value)
+    return reverse
+
+
+def sort_nested(items, value, reverse):
+    items.sort(reverse=direction(items, value, reverse))
+    return items
+
+
+def sort_explicit(items, value, reverse):
+    items.append(value)
+    items.sort(reverse=reverse)
+    return items
+
+
+def sort_plain(items):
+    items.sort()
+    return items
+'''
+PROOF = r'''
+
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineListMethodExamples
+set_option Elab.async false
+
+def numbers (items : List Int) : List Mutable.Value := (items.map Constant.int).map Mutable.Value.scalar
+
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int) : Mutable.Heap :=
+  heap.set address (.list (numbers items ++ [.scalar (.int value)]))
+
+def reordered (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int) (reverse : Bool) : Mutable.Heap :=
+  (inserted heap address items value).set address (.list (numbers (sortedInts reverse (items ++ [value]))))
+
+theorem after_append (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (numbers items))) :
+    (inserted heap address items value)[address]? = some (.list (numbers (items ++ [value]))) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  simp [inserted, numbers, valid]
+
+theorem mark_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (numbers items))) :
+    ReturnsValue Probe.module "mark" [.ref address, .scalar (.int value)] heap (.scalar (.int value)) (inserted heap address items value) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem counted_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (numbers items))) :
+    ReturnsValue Probe.module "counted" [.ref address, .scalar (.int value)] heap
+      (.scalar (.int ((items ++ [value]).count value))) (inserted heap address items value) := by
+  have retained := after_append heap address items value found
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.count (Evaluates.lookup rfl) found
+    (.cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) (mark_returns heap address items value found)) .nil)
+    _ (by intro name same; cases same; rfl)
+  simp only [numbers, List.map_map] at retained
+  exact primitive_count_list _ address (items ++ [value]) value retained
+
+theorem counted_explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (numbers items))) :
+    ReturnsValue Probe.module "counted_explicit" [.ref address, .scalar (.int value)] heap
+      (.scalar (.int ((items ++ [value]).count value))) (inserted heap address items value) := by
+  have retained := after_append heap address items value found
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.count (Evaluates.lookup rfl) retained (.cons (Evaluates.lookup rfl) .nil)
+    _ (by intro name same; cases same; rfl)
+  simp only [numbers, List.map_map] at retained
+  exact primitive_count_list _ address (items ++ [value]) value retained
+
+theorem calls_equiv (left right : String) (arguments : List Mutable.Value) (heap after : Mutable.Heap) (answer : Mutable.Value)
+    (leftReturns : ReturnsValue Probe.module left arguments heap answer after)
+    (rightReturns : ReturnsValue Probe.module right arguments heap answer after) :
+    (IteratorCalls.call Probe.module left arguments heap).Equiv (IteratorCalls.call Probe.module right arguments heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule) (returned : ReturnsValue Probe.module name arguments heap answer after) :
+      ((IteratorCalls.call Probe.module name arguments heap).run choices).Finishes ⟨.ok answer, [], after, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (finishes left leftChoices leftReturns) (finishes right rightChoices rightReturns) (Or.inl rfl)
+
+theorem count_equiv (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (numbers items))) :
+    (IteratorCalls.call Probe.module "counted" [.ref address, .scalar (.int value)] heap).Equiv
+      (IteratorCalls.call Probe.module "counted_explicit" [.ref address, .scalar (.int value)] heap) :=
+  calls_equiv _ _ _ _ _ _ (counted_returns heap address items value found) (counted_explicit_returns heap address items value found)
+
+theorem count_repeated_identity (value : Mutable.Value) (count : Nat) :
+    countElements value (List.replicate count value) = some count := by
+  induction count with
+  | zero => rfl
+  | succ count ih => simp [List.replicate_succ, countElements, ih]
+
+theorem self_count_returns (heap : Mutable.Heap) (address count : Nat)
+    (found : heap[address]? = some (.list (List.replicate count (.ref address)))) :
+    ReturnsValue Probe.module "self_count" [.ref address] heap (.scalar (.int count)) heap := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.count (Evaluates.lookup rfl) found (.cons (Evaluates.lookup rfl) .nil)
+    _ (by intro name same; cases same; rfl)
+  simp [primitive, found, count_repeated_identity]
+
+theorem direction_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int) (reverse : Bool)
+    (found : heap[address]? = some (.list (numbers items))) :
+    ReturnsValue Probe.module "direction" [.ref address, .scalar (.int value), .scalar (.bool reverse)] heap
+      (.scalar (.bool reverse)) (inserted heap address items value) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem sort_nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int) (reverse : Bool)
+    (found : heap[address]? = some (.list (numbers items))) :
+    ReturnsValue Probe.module "sort_nested" [.ref address, .scalar (.int value), .scalar (.bool reverse)] heap
+      (.ref address) (reordered heap address items value reverse) := by
+  have retained := after_append heap address items value found
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.sort_reverse (Evaluates.lookup rfl) found
+      (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))
+        (direction_returns heap address items value reverse found))
+      (primitive_sort_reverse_ints _ address (items ++ [value]) reverse retained)
+      (by intro name same; cases same; rfl))
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem sort_explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int) (reverse : Bool)
+    (found : heap[address]? = some (.list (numbers items))) :
+    ReturnsValue Probe.module "sort_explicit" [.ref address, .scalar (.int value), .scalar (.bool reverse)] heap
+      (.ref address) (reordered heap address items value reverse) := by
+  have retained := after_append heap address items value found
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.discard
+    (Evaluates.sort_reverse (Evaluates.lookup rfl) retained (Evaluates.lookup rfl)
+      (primitive_sort_reverse_ints _ address (items ++ [value]) reverse retained)
+      (by intro name same; cases same; rfl))
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem sort_equiv (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int) (reverse : Bool)
+    (found : heap[address]? = some (.list (numbers items))) :
+    (IteratorCalls.call Probe.module "sort_nested" [.ref address, .scalar (.int value), .scalar (.bool reverse)] heap).Equiv
+      (IteratorCalls.call Probe.module "sort_explicit" [.ref address, .scalar (.int value), .scalar (.bool reverse)] heap) :=
+  calls_equiv _ _ _ _ _ _ (sort_nested_returns heap address items value reverse found) (sort_explicit_returns heap address items value reverse found)
+
+theorem plain_returns (heap : Mutable.Heap) (address : Nat) (items : List Int)
+    (found : heap[address]? = some (.list (numbers items))) :
+    ReturnsValue Probe.module "sort_plain" [.ref address] heap (.ref address)
+      (heap.set address (.list (numbers (ScalarSort.ints items)))) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.sort (Evaluates.lookup rfl) found
+      (primitive_sort_list heap address (items.map Constant.int) ((ScalarSort.ints items).map Constant.int) found (ScalarSort.sort_ints items))
+      (by intro name same; cases same; rfl))
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+/-- List methods uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_listMethod (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (operation : Operation) (covered : ListMethodOperation operation) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation operation values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_listMethod_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used operation values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained covered
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineListMethodExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "countElements_relocates", "scalarValues_all", "sortWithReverse_scalars", "sortDirection_relocates", "sortDirection_heap",
+    "primitive_sort_core", "primitive_sortReverse_core", "sortListCore_scalars", "result_count_preserves",
+    "result_sortListCore_preserves", "result_sort_preserves", "result_sortReverse_preserves", "step_listMethod_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_listMethod_preserves"] + ["MachineListMethodExamples." + name for name in (
+    "after_append", "mark_returns", "counted_returns", "counted_explicit_returns", "calls_equiv", "count_equiv",
+    "count_repeated_identity", "self_count_returns", "direction_returns", "sort_nested_returns", "sort_explicit_returns", "sort_equiv", "plain_returns", "append_then_listMethod",
+)]
+with project_temporary_directory(prefix="machine-list-method-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for original in ([], [0], [3, -1, 3, 0], [True, 1, False, 0, 1]):
+        for value in (0, 1, True, -10**100, 10**100):
+            for name in ("counted", "counted_explicit"):
+                items = original.copy()
+                expected = original + [value]
+                assert namespace[name](items, value) == expected.count(value)
+                assert items == expected
+            for reverse in (False, True):
+                expected = sorted(original + [value], reverse=reverse)
+                for name in ("sort_nested", "sort_explicit"):
+                    items = original.copy()
+                    result = namespace[name](items, value, reverse)
+                    assert result is items
+                    assert [(type(item), item) for item in items] == [(type(item), item) for item in expected]
+        items = original.copy()
+        assert namespace["sort_plain"](items) is items and items == sorted(original)
+    for count in (0, 1, 17):
+        items = []
+        items.extend([items] * count)
+        assert namespace["self_count"](items) == count
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineListMethods\nimport lang.py.FormalSW.ReverseSortingCalls\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"list methods: live counts, cyclic identity, stable sorting and suspended callers; {len(AUDITS)} axiom audits passed")

@@ -171,6 +171,8 @@ roots = [
   "lang.py.FormalSW.SliceRelocation",
   "lang.py.FormalSW.ByteValuesRelocation",
   "lang.py.FormalSW.MachineSliceInvariant",
+  "lang.py.FormalSW.ListMethodRelocation",
+  "lang.py.FormalSW.MachineListMethods",
   "lang.py.FormalSW.MachineLoopInvariant",
   "lang.py.FormalSW.MachineLoopAcquisition",
   "lang.py.FormalSW.MachineExpressionInvariant",
