@@ -1324,7 +1324,13 @@ def clearDictionary (address : Nat) : Eval Value := do
   | some _ => Mutable.error "TypeError"
   | none => Mutable.unsupported
 
-def primitive : Operation → List Value → Eval Value
+/-- Arity is checked before inspecting a representation argument's protocol. -/
+def scalarRepresentation : List Value → Eval Value
+  | [.scalar value] => pure (.scalar (.string (Strings.reprValue value)))
+  | [_] => Mutable.unsupported
+  | _ => Mutable.error "TypeError"
+
+private abbrev basePrimitive : Operation → List Value → Eval Value
   | .builtin .heapqHeapify, values => Heapq.heapify values
   | .builtin .heapqPush, values => Heapq.heappush values
   | .builtin .heapqPop, values => Heapq.heappop values
@@ -1584,6 +1590,12 @@ def primitive : Operation → List Value → Eval Value
         | .ref _ => Mutable.unsupported
       scalarResult (Calls.positionalMinimum values)
   | _, _ => Mutable.unsupported
+
+/-- Keep Unicode representation outside the shared primitive pattern match. -/
+def primitive (operation : Operation) (values : List Value) : Eval Value :=
+  match operation with
+  | .builtin .repr => scalarRepresentation values
+  | _ => basePrimitive operation values
 
 /-- Counting reads the current integer contents without allocating or changing any object. -/
 theorem primitive_count_list (heap : Heap) (address : Nat) (items : List Int) (needle : Int)

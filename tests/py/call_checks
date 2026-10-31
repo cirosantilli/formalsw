@@ -103,6 +103,7 @@ subprocess.run([sys.executable, str(Path(__file__).with_name('boolean_checks'))]
 subprocess.run([sys.executable, str(Path(__file__).with_name('string_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('string_upper_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('string_digit_checks'))], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name('repr_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('bytes_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('bytes_membership_checks'))], check=True)
 subprocess.run([sys.executable, str(Path(__file__).with_name('bytearray_checks'))], check=True)

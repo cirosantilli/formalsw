@@ -112,7 +112,7 @@ for name in ('nested', 'nested_field'):
 
 for body in ('raise OSError(2, "missing")', 'raise ValueError from None', 'raise',
              'raise ValueError(message="x")', 'ValueError = 4\nraise ValueError',
-             'return f"{n:03d}"', 'return f"{n!r}"', 'return f"{n!a}"',
+             'return f"{n:03d}"', 'return f"{n!a}"',
              'return f"{n:{n}}"'):
     module = ast.parse('def f(n: int):\n    xs = []\n' + ''.join('    ' + line + '\n' for line in body.splitlines()))
     assert SupportChecker(module).check('f'), body

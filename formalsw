@@ -1623,14 +1623,15 @@ class AstJsonEmitter:
         match expr:
             case ast.JoinedStr(values=values):
                 if not plain_fstring(expr):
-                    raise UnsupportedSyntax('f-strings require empty format specifications and optional !s')
+                    raise UnsupportedSyntax('f-strings require empty format specifications and optional !s or !r')
                 # Formatting supported scalars with an empty specification is
-                # intrinsic str conversion, even if Python's str name is rebound.
+                # intrinsic conversion, even if str or repr names are rebound.
                 # Convert each field before evaluating the next one.
                 result = self.constant('')
                 for part in values:
                     value = (self.expr(part) if isinstance(part, ast.Constant) else
-                             {"type": "BuiltinCall", "name": "str", "args": [self.expr(part.value)]})
+                             {"type": "BuiltinCall", "name": "repr" if part.conversion == ord('r') else "str",
+                              "args": [self.expr(part.value)]})
                     result = {"type": "BinOp", "left": result, "op": "Add", "right": value}
                 return result
             case ast.Constant(value=value) if value is Ellipsis:
@@ -1750,7 +1751,7 @@ class AstJsonEmitter:
                 if (reversed_value is not None
                         and not any(bindings(self.bindings_module, name) for name in ('list', 'reversed'))):
                     return {"type": "ReversedList", "value": self.expr(reversed_value)}
-                if isinstance(func, ast.Name) and func.id in ('int', 'str', 'bin', 'ord', 'abs', 'pow', 'all', 'any', 'max', 'min', 'divmod', 'bytearray', 'bytes', 'len', 'list', 'tuple', 'set', 'dict', 'sorted') and not bindings(self.bindings_module, func.id):
+                if isinstance(func, ast.Name) and func.id in ('int', 'str', 'repr', 'bin', 'ord', 'abs', 'pow', 'all', 'any', 'max', 'min', 'divmod', 'bytearray', 'bytes', 'len', 'list', 'tuple', 'set', 'dict', 'sorted') and not bindings(self.bindings_module, func.id):
                     return {"type": "BuiltinCall", "name": func.id,
                             "args": [self.expr(arg) for arg in args]}
                 return {

@@ -159,6 +159,7 @@ inductive Builtin where
   | heapqPush
   | heapqPop
   | dict
+  | repr
 deriving Repr, BEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
@@ -555,6 +556,7 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "$formalsw.isinstance.int" => pure Builtin.isinstanceInt
         | "len" => pure Builtin.len
         | "str" => pure Builtin.str
+        | "repr" => pure Builtin.repr
         | "all" => pure Builtin.all
         | "any" => pure Builtin.any
         | "pow" => pure Builtin.pow

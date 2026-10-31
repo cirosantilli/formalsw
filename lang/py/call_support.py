@@ -27,10 +27,10 @@ PLAIN_EXCEPTIONS = frozenset({
 
 
 def plain_fstring(node):
-    """Check formatting options whose scalar semantics are exactly str(value)."""
+    """Check intrinsic scalar conversions with empty format specifications."""
     return isinstance(node, ast.JoinedStr) and all(
         isinstance(part, ast.Constant) and type(part.value) is str
-        or isinstance(part, ast.FormattedValue) and part.conversion in (-1, ord('s'))
+        or isinstance(part, ast.FormattedValue) and part.conversion in (-1, ord('s'), ord('r'))
         and (part.format_spec is None
              or isinstance(part.format_spec, ast.JoinedStr) and not part.format_spec.values)
         for part in node.values)
@@ -687,7 +687,7 @@ def uses_calls_model(module, function):
         or identity_comparison(node)
         or isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, (ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift))
         or isinstance(node, ast.Assign) and any(isinstance(target, ast.Tuple) for target in node.targets)
-        or isinstance(node, ast.Call) and library_name(node.func) in names | {'bool', 'int', 'str', 'bin', 'ord', 'abs', 'pow', 'max', 'min', 'len', 'isinstance'}
+        or isinstance(node, ast.Call) and library_name(node.func) in names | {'bool', 'int', 'str', 'repr', 'bin', 'ord', 'abs', 'pow', 'max', 'min', 'len', 'isinstance'}
         or isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
         and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range' and len(node.iter.args) != 1
         for node in ast.walk(function)
@@ -1055,7 +1055,7 @@ def check_calls(module, function, reject, *, heap=False):
                 return
             if isinstance(node, ast.JoinedStr):
                 if not plain_fstring(node):
-                    reject(node, 'f-strings support scalar fields with empty format specifications and optional !s')
+                    reject(node, 'f-strings support scalar fields with empty format specifications and optional !s or !r')
                 for part in node.values:
                     if isinstance(part, ast.FormattedValue):
                         recurse(part.value)
@@ -1289,6 +1289,13 @@ def check_calls(module, function, reject, *, heap=False):
                     reject(node, 'Boolean conversion requires the unshadowed builtin bool')
                 if node.keywords or len(node.args) > 1:
                     reject(node, 'bool supports zero or one positional argument')
+                for item in node.args:
+                    recurse(item)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'repr':
+                if node.func.id in scope or bindings(module, node.func.id):
+                    reject(node, 'representation requires the unshadowed builtin repr')
+                if node.keywords:
+                    reject(node, 'repr supports only positional arguments')
                 for item in node.args:
                     recurse(item)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'str':

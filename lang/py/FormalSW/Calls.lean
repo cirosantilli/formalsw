@@ -1,5 +1,6 @@
 import lang.py.FormalSW.Math
 import lang.py.FormalSW.Strings
+import lang.py.FormalSW.StringRepr
 
 /-! Scalar Python execution with an explicit expression and function call stack.
 Recursive calls consume transitions, not Lean recursion fuel. Unsupported syntax
@@ -90,6 +91,7 @@ def Primitive.apply : Primitive → List Constant → Option (Except ExceptionOb
   | .builtin .isinstanceInt, [value] => some (.ok (.bool (isInteger value)))
   | .builtin .isinstanceInt, _ => some (.error { typeName := "TypeError", args := [] })
   | .builtin .str, values => some (Strings.str values)
+  | .builtin .repr, values => some (Strings.repr values)
   | .builtin .bin, values => some (Strings.bin values)
   | .builtin .pow, [base, exponent] => scalarBinary .pow base exponent
   | .builtin .pow, [base, exponent, modulus] => modularPower base exponent modulus
