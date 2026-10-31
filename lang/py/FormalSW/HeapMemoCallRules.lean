@@ -371,6 +371,23 @@ end EvaluatesRel
 
 namespace BlockReturnsRel
 
+/-- Unpack a cache-dependent result after evaluating the entire right-hand side. -/
+theorem unpack_rel (targets : Calls.targetNames expressions = some names)
+    (evaluated : EvaluatesRel (globals := globals) module spec env expression heap expressionPost)
+    (rest : ∀ value middle, expressionPost value middle → ∃ items afterUnpack,
+      Mutable.sequence value middle = some (.ok items, afterUnpack) ∧
+      names.length = items.length ∧ Cache.Preserves spec middle afterUnpack ∧
+      BlockReturnsRel (globals := globals) module spec (HeapCalls.assignNames env names items) body afterUnpack post) :
+    BlockReturnsRel (globals := globals) module spec env (.assign [.tuple expressions] expression :: body) heap post := by
+  intro anchors stack
+  apply RunsRel.next (following := ⟨.expr expression env, .unpack names body env :: stack, heap⟩)
+    (by trivial) (by simp [HeapCalls.step, targets])
+  apply (evaluated anchors _).bind
+  rintro final ⟨value, middle, rfl, holds⟩
+  obtain ⟨items, afterUnpack, sequence, arity, preserved, continued⟩ := rest value middle holds
+  exact RunsRel.next (by trivial) (by simp [HeapCalls.step, HeapCalls.run, sequence, arity])
+    (continued anchors stack) preserved
+
 theorem unpack (targets : Calls.targetNames expressions = some names)
     (evaluated : Evaluates (globals := globals) module spec env expression heap value middle)
     (sequence : Mutable.sequence value middle = some (.ok items, afterUnpack))
