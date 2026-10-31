@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""
+Check complete core frames, collector rejection and tuple reuse.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def singleton(value):
+    return [value]
+
+
+def collect(source):
+    return [item for item in source]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Framing
+namespace CoreFrameExamples
+set_option Elab.async false
+
+theorem separated_done (module : Module) (anchors address : Nat) (state : HeapCalls.State)
+    (outcome : Except ExceptionObject Mutable.Completion)
+    (transition : HeapCalls.step module anchors state = .done outcome) (separate : StateSeparate address state) :
+    ∀ final, HeapCalls.Reaches module anchors state final → StateSeparate address final := by
+  intro final reached
+  cases reached with
+  | refl => exact separate
+  | next other rest => simp only [transition] at other; cases other
+
+theorem separated_next (module : Module) (anchors address : Nat) (state following : HeapCalls.State)
+    (transition : HeapCalls.step module anchors state = .next following) (separate : StateSeparate address state)
+    (later : ∀ final, HeapCalls.Reaches module anchors following final → StateSeparate address final) :
+    ∀ final, HeapCalls.Reaches module anchors state final → StateSeparate address final := by
+  intro final reached
+  cases reached with
+  | refl => exact separate
+  | next other rest =>
+    simp only [transition, Step.next.injEq] at other
+    subst other
+    exact later _ rest
+
+def singletonArgs : List Arg := [{ name := "value", annotation := none }]
+def singletonBody : List Stmt := [.return (.list [.name "value"])]
+def singletonEnv (value : Mutable.Value) := functionEnv singletonArgs singletonBody [value] []
+def singletonStart (heap : Mutable.Heap) (value : Mutable.Value) : HeapCalls.State :=
+  ⟨.operation (.call "singleton") [value], [], heap⟩
+
+theorem singleton_returns (heap : Mutable.Heap) (value : Mutable.Value) :
+    ReturnsValue Probe.module "singleton" [value] heap (.ref heap.length) (heap ++ [.list [value]]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.list (.cons (Evaluates.lookup rfl) .nil)
+
+theorem singleton_separate (heap : Mutable.Heap) (value : Mutable.Value) (address : Nat) :
+    ∀ state, HeapCalls.Reaches Probe.module heap.length (singletonStart heap value) state → StateSeparate address state := by
+  apply separated_next (following := ⟨.block singletonBody (singletonEnv value), [], heap⟩)
+    _ _ _ _ rfl (by simp [StateSeparate, singletonStart, operationTargets, Heapq.primitiveTargets])
+  apply separated_next (following := ⟨.expr (.list [.name "value"]) (singletonEnv value), [], heap⟩)
+    _ _ _ _ rfl (by trivial)
+  apply separated_next (following := ⟨.expr (.name "value") (singletonEnv value),
+    [.arguments .list [] [] (singletonEnv value)], heap⟩) _ _ _ _ rfl (by trivial)
+  apply separated_next (following := ⟨.value value, [.arguments .list [] [] (singletonEnv value)], heap⟩)
+    _ _ _ _ rfl (by trivial)
+  apply separated_next (following := ⟨.operation .list [value], [], heap⟩)
+    _ _ _ _ rfl (by simp [StateSeparate, FrameSeparate])
+  apply separated_next (following := ⟨.value (.ref heap.length), [], heap ++ [.list [value]]⟩)
+    _ _ _ _ (by simp [HeapCalls.step, result, HeapCalls.run, primitive, Mutable.allocate, Except.map])
+    (by simp [StateSeparate, operationTargets, Heapq.primitiveTargets])
+  exact separated_done _ _ _ _ _ rfl (by simp [StateSeparate])
+
+/-- A complete parsed call retains every existing cell, including the returned element's own object. -/
+theorem singleton_private (heap : Mutable.Heap) (value : Mutable.Value) (address : Nat)
+    (object : Mutable.Object) (saved : SavedCell address object heap) :
+    SavedCell address object (heap ++ [.list [value]]) :=
+  finishes_cell Probe.module address heap.length object (singletonStart heap value) []
+    ⟨.ok (.ref heap.length), [], heap ++ [.list [value]], heap.length⟩
+    ((singleton_returns heap value heap.length []).finishes (.done rfl)) (singleton_separate heap value address) saved
+
+/-- Failed sequence acquisition raises before creating a collector. -/
+theorem rejected_collector (heap : Mutable.Heap) (number : Int) (address anchors : Nat)
+    (object : Mutable.Object) (env : HeapCalls.Env) (saved : SavedCell address object heap) :
+    HeapCalls.step Probe.module anchors
+      ⟨.operation (.comprehension (.name "item") [("item", .name "source", [])] env)
+        [.scalar (.int number)], [], heap⟩ =
+      .done (.ok ⟨.error ⟨"TypeError", []⟩, [], heap, anchors⟩) ∧
+    SavedCell address object heap := by
+  have retained := step_cell Probe.module address anchors object
+    ⟨.operation (.comprehension (.name "item") [("item", .name "source", [])] env)
+      [.scalar (.int number)], [], heap⟩ [] (by simp [StateSeparate, operationTargets, Heapq.primitiveTargets]) saved
+  have failed : HeapCalls.step Probe.module anchors
+      ⟨.operation (.comprehension (.name "item") [("item", .name "source", [])] env)
+        [.scalar (.int number)], [], heap⟩ =
+      .done (.ok ⟨.error ⟨"TypeError", []⟩, [], heap, anchors⟩) := by
+    simp [HeapCalls.step, comprehensionStart, HeapCalls.run, Mutable.sequence, Mutable.error, done, protectGenerator, Calls.generatorException]
+  exact ⟨failed, by simpa only [failed, HeapCalls.Framing.RetainsCell] using retained⟩
+
+/-- The empty row may reuse a protected tuple instead of extending the heap. -/
+theorem interned_row (heap : Mutable.Heap) (interned anchors : Nat) (env : HeapCalls.Env)
+    (found : heap.findIdx? (fun object => decide (object = .tuple [])) = some interned)
+    (saved : SavedCell interned (.tuple []) heap) :
+    ∃ following, HeapCalls.step Probe.module anchors
+      ⟨.block [.permutationStepLoop "row" [[]] [] []] env, [], heap⟩ = .next following ∧
+      following.heap = heap ∧ SavedCell interned (.tuple []) following.heap := by
+  have retained := step_cell Probe.module interned anchors (.tuple [])
+    ⟨.block [.permutationStepLoop "row" [[]] [] []] env, [], heap⟩ [] (by trivial) saved
+  have transition : HeapCalls.step Probe.module anchors
+      ⟨.block [.permutationStepLoop "row" [[]] [] []] env, [], heap⟩ =
+      .next ⟨.block [Calls.loopContinuation [] (.permutationStepLoop "row" [] [] [])]
+        (setLocal env "row" (.ref interned)), [], heap⟩ := by
+    simp [HeapCalls.step, HeapCalls.run, Mutable.allocateTuple, found]
+  exact ⟨_, transition, rfl, by simpa only [transition, HeapCalls.Framing.RetainsCell] using retained⟩
+
+/-- Set fallback may allocate a collector but cannot change the captured set. -/
+theorem set_collector_private (heap : Mutable.Heap) (receiver privateAddress anchors used : Nat)
+    (object : Mutable.Object) (choices : ChoiceSchedule) (env : HeapCalls.Env)
+    (saved : SavedCell privateAddress object heap) :
+    SetCalls.Framing.RetainsCell privateAddress object (SetCalls.step Probe.module anchors choices
+      ⟨⟨.operation (.setComprehension (.name "item") [(.name "item", .name "source", [])] env)
+        [.ref receiver], [], heap⟩, used⟩) :=
+  SetCalls.Framing.step_cell Probe.module privateAddress anchors object _ choices []
+    (by simp [StateSeparate, operationTargets, Heapq.primitiveTargets]) saved
+
+end CoreFrameExamples
+'''
+AUDITS = [
+    'FormalSW.PyAst.Heapq.preserves_permutationRows',
+    'FormalSW.PyAst.Heapq.preserves_combinationRows',
+    'FormalSW.PyAst.Heapq.preserves_zipSources',
+    'FormalSW.PyAst.Heapq.preserves_zipItem',
+    'FormalSW.PyAst.Heapq.preserves_dictionaryItemsNext',
+    'FormalSW.PyAst.Heapq.preserves_nextSequence',
+    'FormalSW.PyAst.Heapq.preserves_sortedFinish',
+    'FormalSW.PyAst.HeapCalls.Framing.step_expression_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_block_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_sortedLoop_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_extremumLoop_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_dictionary_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_startRange_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_operation_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.reaches_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.finishes_retains_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.finishes_cell',
+    'FormalSW.PyAst.SetCalls.Framing.liftStep_retains_cell',
+    'FormalSW.PyAst.SetCalls.Framing.iteratorStep_cell',
+    'FormalSW.PyAst.SetCalls.Framing.step_cell',
+    'CoreFrameExamples.separated_done',
+    'CoreFrameExamples.separated_next',
+    'CoreFrameExamples.singleton_returns',
+    'CoreFrameExamples.singleton_separate',
+    'CoreFrameExamples.singleton_private',
+    'CoreFrameExamples.rejected_collector',
+    'CoreFrameExamples.interned_row',
+    'CoreFrameExamples.set_collector_private',
+]
+
+with project_temporary_directory(prefix="core-frame-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    shared = []
+    shared.append(shared)
+    result = namespace["singleton"](shared)
+    assert result == [shared] and result is not shared and result[0] is shared
+    for number in (0, -10**100, 10**100):
+        try:
+            namespace["collect"](number)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("integer iteration should fail")
+    assert shared[0] is shared and len(shared) == 1
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.SetFrame\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"core frames: complete calls, acquisition errors, tuple reuse and set fallback; {len(AUDITS)} axiom audits passed")
