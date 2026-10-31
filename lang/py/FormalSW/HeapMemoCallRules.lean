@@ -83,6 +83,14 @@ theorem binary (left : Evaluates (globals := globals) module spec env a heap av 
   exact Runs.next (by first | exact True.intro | exact rfl) rfl ((left _ _).trans (Runs.next (by first | exact True.intro | exact rfl) rfl ((right _ _).trans
     (Runs.next (by first | exact True.intro | exact rfl) (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, operation]) .refl preserved))))
 
+theorem unary (evaluated : Evaluates (globals := globals) module spec env expression heap value middle)
+    (operation : HeapCalls.unary op value middle = some (.ok answer, finalHeap))
+    (preserved : Cache.Preserves spec middle finalHeap := by intro cache valid; exact valid) :
+    Evaluates (globals := globals) module spec env (.unaryOp op expression) heap answer finalHeap := by
+  intro anchors stack
+  exact Runs.next (by trivial) rfl ((evaluated anchors _).trans
+    (Runs.next (by trivial) (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, operation]) .refl preserved))
+
 theorem compare (left : Evaluates (globals := globals) module spec env a heap av middle)
     (right : Evaluates (globals := globals) module spec env b middle bv afterRight)
     (operation : HeapCalls.compare op av bv afterRight = some (.ok value, finalHeap))
@@ -157,6 +165,17 @@ theorem subscript (base : Evaluates (globals := globals) module spec env a heap 
   exact Runs.next (by first | exact True.intro | exact rfl) (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run,
     HeapCalls.primitive, operation]) .refl preserved
 
+theorem slice (arguments : Arguments (globals := globals) module spec env
+    [base, lower.getD (.constant .none), upper.getD (.constant .none), stride.getD (.constant .none)]
+    heap [receiver, first, last, stepValue] middle)
+    (operation : Mutable.getSlice receiver first last stepValue middle = some (.ok value, finalHeap))
+    (preserved : Cache.Preserves spec middle finalHeap := by intro cache valid; exact valid) :
+    Evaluates (globals := globals) module spec env (.subscript base (.slice lower upper stride)) heap value finalHeap := by
+  intro anchors stack
+  exact Runs.next (by trivial) rfl ((arguments_reach arguments .slice [] anchors stack).trans
+    (Runs.next (by trivial) (by simp [HeapCalls.step, HeapCalls.primitive, HeapCalls.result,
+      HeapCalls.run, operation]) .refl preserved))
+
 end Evaluates
 
 namespace BlockReturns
@@ -226,6 +245,18 @@ theorem fixed (arguments : Evaluates.Arguments (globals := globals) module spec 
 end ArgumentsRel
 
 namespace EvaluatesRel
+
+theorem conditional (condition : EvaluatesRel (globals := globals) module spec env test heap testPost)
+    (selected : ∀ value middle, testPost value middle → ∃ flag,
+      Mutable.truth value middle = some (.ok flag, middle) ∧
+      EvaluatesRel (globals := globals) module spec env (if flag then yes else no) middle post) :
+    EvaluatesRel (globals := globals) module spec env (.ifExp test yes no) heap post := by
+  intro anchors stack
+  apply RunsRel.next (by trivial) rfl
+  apply (condition anchors (.conditional yes no env :: stack)).bind
+  rintro final ⟨value, middle, rfl, holds⟩
+  obtain ⟨flag, truth, branch⟩ := selected value middle holds
+  exact RunsRel.next (by trivial) (by simp [HeapCalls.step, HeapCalls.run, truth]) (branch anchors stack)
 
 theorem constant (holds : post (.scalar value) heap) :
     EvaluatesRel (globals := globals) module spec env (.constant value) heap post :=
@@ -339,6 +370,21 @@ theorem subscript {indexPost : Value → Heap → Value → Heap → Prop}
 end EvaluatesRel
 
 namespace BlockReturnsRel
+
+theorem unpack (targets : Calls.targetNames expressions = some names)
+    (evaluated : Evaluates (globals := globals) module spec env expression heap value middle)
+    (sequence : Mutable.sequence value middle = some (.ok items, afterUnpack))
+    (arity : names.length = items.length)
+    (rest : BlockReturnsRel (globals := globals) module spec (HeapCalls.assignNames env names items) body afterUnpack post)
+    (preserved : Cache.Preserves spec middle afterUnpack := by intro cache valid; exact valid) :
+    BlockReturnsRel (globals := globals) module spec env (.assign [.tuple expressions] expression :: body) heap post := by
+  intro anchors stack
+  apply RunsRel.next (following := ⟨.expr expression env, .unpack names body env :: stack, heap⟩)
+    (by trivial) (by simp [HeapCalls.step, targets])
+  apply (evaluated anchors _).bind
+  rintro final rfl
+  exact RunsRel.next (by trivial) (by simp [HeapCalls.step, HeapCalls.run, sequence, arity])
+    (rest anchors stack) preserved
 
 theorem return_value (evaluated : EvaluatesRel (globals := globals) module spec env expression heap post) :
     BlockReturnsRel (globals := globals) module spec env (.return expression :: rest) heap post :=
