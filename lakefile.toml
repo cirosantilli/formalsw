@@ -98,6 +98,7 @@ roots = [
   "lang.py.FormalSW.RuntimeEffects",
   "lang.py.FormalSW.SequenceRelocation",
   "lang.py.FormalSW.KeyRelocation",
+  "lang.py.FormalSW.DictionaryRelocation",
   "lang.py.FormalSW.HeapRelocation",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",

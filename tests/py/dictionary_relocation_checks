@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""
+Prove dictionary promotion and later cyclic writes compose in parsed Python.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def update(mapping, key, value):
+    mapping[key] = value
+    mapping["self"] = mapping
+    return mapping
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace DictionaryRelocationExamples
+set_option Elab.async false
+
+def selfKey : Mutable.Value := .scalar (.string "self")
+
+/-- The actual source performs both writes before returning the original shared dictionary. -/
+theorem source_updates (heap middle after : Mutable.Heap) (address : Nat) (key value : Mutable.Value)
+    (first : Mutable.setItem (.ref address) key value heap = some (.ok (.scalar .none), middle))
+    (second : Mutable.setItem (.ref address) selfKey (.ref address) middle = some (.ok (.scalar .none), after)) :
+    ReturnsValue Probe.module "update" [.ref address, key, value] heap (.ref address) after := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.setItem (by intros; simp) (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) first
+  apply BlockReturns.setItem (by intros; simp) (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons Evaluates.constant .nil)) second
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+/-- Source promotion feeds the resulting dictionary invariant into a later self-referential update. -/
+theorem paired_updates (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address keyAddress : Nat)
+    (entries : List (Constant × Mutable.Value)) (value : Mutable.Value) (key : HashKey)
+    (found : logical[address]? = some (.dict entries))
+    (keyInside : keyAddress < logical.length) (valueInside : value.edge.Within logical.length)
+    (hashed : Mutable.keyOf logical (.ref keyAddress) = some (.ok key)) :
+    ∃ after other,
+      ReturnsValue Probe.module "update" [.ref address, .ref keyAddress, value] logical (.ref address) after ∧
+      ReturnsValue Probe.module "update" [.ref (rename address), .ref (rename keyAddress), relocateValue rename value]
+        physical (.ref (rename address)) other ∧ ExecutionLayout after other rename := by
+  let promoted := HashDict.insert (Mutable.promoteDictionary entries) key (.ref keyAddress) value
+  let middle := logical.set address (.keyDict promoted)
+  have first : Mutable.setItem (.ref address) (.ref keyAddress) value logical =
+      some (.ok (.scalar .none), middle) := by
+    simp [Mutable.setItem, found, Mutable.hashKey, hashed, Mutable.eval_bind, Except.map, middle, promoted]
+  obtain ⟨otherMiddle, otherFirst, middleLayout, sameLength, _⟩ :=
+    layout.setItem_dict address entries (.ref keyAddress) value found keyInside valueInside _ _ first
+  have addressBound := (List.getElem?_eq_some_iff.mp found).1
+  have middleFound : middle[address]? = some (.keyDict promoted) := by simp [middle, addressBound]
+  let after := middle.set address (.keyDict (HashDict.insert promoted (.scalar (.string "self"))
+    selfKey (.ref address)))
+  have second : Mutable.setItem (.ref address) selfKey (.ref address) middle =
+      some (.ok (.scalar .none), after) := by
+    simp [Mutable.setItem, middleFound, Mutable.hashKey, Mutable.keyOf, Mutable.keyOfFuel,
+      selfKey, Mutable.eval_bind, Except.map, after]
+  obtain ⟨other, otherSecond, finalLayout, _, _⟩ := middleLayout.setItem_keyDict address promoted
+    selfKey (.ref address) middleFound (by simp [selfKey, Mutable.Value.edge, Graph.Edge.Within])
+    (by simpa [middle] using addressBound) _ _ second
+  refine ⟨after, other, source_updates logical middle after address (.ref keyAddress) value first second,
+    ?_, finalLayout⟩
+  apply source_updates physical otherMiddle other (rename address) (.ref (rename keyAddress))
+    (relocateValue rename value)
+  · exact otherFirst
+  · exact otherSecond
+
+/-- A failed first write exits before the self-reference assignment. -/
+theorem source_failed (heap after : Mutable.Heap) (address : Nat) (key value : Mutable.Value)
+    (exception : ExceptionObject)
+    (failed : Mutable.setItem (.ref address) key value heap = some (.error exception, after)) :
+    (HeapCalls.call Probe.module "update" [.ref address, key, value] heap).Finishes
+      ⟨.error exception, [], after, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.argumentsState, HeapCalls.primitive,
+    HeapCalls.result, HeapCalls.run, failed, HeapCalls.done, HeapCalls.protectGenerator,
+    Frame.inGenerator, Calls.generatorException])
+
+theorem paired_failures (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat)
+    (entries : List (Constant × Mutable.Value)) (key value : Mutable.Value)
+    (found : logical[address]? = some (.dict entries))
+    (keyInside : key.edge.Within logical.length) (valueInside : value.edge.Within logical.length)
+    (exception : ExceptionObject) (after : Mutable.Heap)
+    (failed : Mutable.setItem (.ref address) key value logical = some (.error exception, after)) :
+    ∃ other,
+      (HeapCalls.call Probe.module "update" [.ref address, key, value] logical).Finishes
+        ⟨.error exception, [], after, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "update" [.ref (rename address), relocateValue rename key,
+        relocateValue rename value] physical).Finishes ⟨.error exception, [], other, physical.length⟩ ∧
+      ExecutionLayout after other rename := by
+  obtain ⟨other, otherFailed, retained, _, _⟩ :=
+    layout.setItem_dict address entries key value found keyInside valueInside _ _ failed
+  exact ⟨other, source_failed logical after address key value exception failed,
+    source_failed physical other (rename address) (relocateValue rename key) (relocateValue rename value)
+      exception otherFailed, retained⟩
+
+/-- A relocated scalar-key dictionary read keeps every shared returned reference. -/
+theorem paired_scalar_reads (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat)
+    (entries : List (Constant × Mutable.Value)) (key : Constant)
+    (found : logical[address]? = some (.dict entries)) (value : Mutable.Value)
+    (read : Mutable.getItem (.ref address) (.scalar key) logical = some (.ok value, logical)) :
+    Mutable.getItem (.ref (rename address)) (.scalar key) physical =
+      some (.ok (relocateValue rename value), physical) := by
+  exact (layout.getItem_dict address entries (.scalar key) found
+    (by simp [Mutable.Value.edge, Graph.Edge.Within]) _ _ read).1
+
+#print axioms source_updates
+#print axioms paired_updates
+#print axioms source_failed
+#print axioms paired_failures
+#print axioms paired_scalar_reads
+#print axioms ExecutionLayout.set_nonempty
+#print axioms hashDict_insert_relocates
+#print axioms ObjectWithin.keyDict_insert
+#print axioms scalarDict_insert_relocates
+#print axioms ObjectWithin.dict_insert
+#print axioms promoteDictionary_relocates
+#print axioms ObjectWithin.promoteDictionary
+#print axioms ExecutionLayout.setItem_keyDict
+#print axioms ExecutionLayout.setItem_dict
+#print axioms RuntimeLayout.setItem_keyDict_unsupported
+#print axioms RuntimeLayout.setItem_dict_unsupported
+#print axioms RuntimeLayout.getItem_dict
+#print axioms ExecutionLayout.getItem_dict
+end DictionaryRelocationExamples
+'''
+
+with project_temporary_directory(prefix="dictionary-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    update = namespace["update"]
+    original = []
+    keep = []
+    mapping = {True: original, "keep": keep}
+    value = []
+    key = ((1,), 2)
+    assert update(mapping, key, value) is mapping
+    assert list(mapping) == [True, "keep", key, "self"]
+    assert mapping[key] is value and mapping["self"] is mapping
+    assert mapping["keep"] is keep
+    replacement = []
+    assert update(mapping, 1, replacement) is mapping
+    assert next(iter(mapping)) is True and mapping[True] is replacement
+    assert list(mapping) == [True, "keep", key, "self"]
+    before_keys = list(mapping)
+    before_values = [id(item) for item in mapping.values()]
+    for unhashable in ([], ([],), (1, [])):
+        try:
+            update(mapping, unhashable, original)
+        except TypeError:
+            assert list(mapping) == before_keys
+            assert [id(item) for item in mapping.values()] == before_values
+        else:
+            raise AssertionError(unhashable)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.DictionaryRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 18, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("dictionary relocation: source promotion and cyclic updates; eighteen axiom audits passed")
