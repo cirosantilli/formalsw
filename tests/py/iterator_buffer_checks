@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""
+Check iterator bytearray construction, slicing, fresh copies and private consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Collector:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = self.data[:]
+        return "123"
+
+
+def cut(items, lower, upper, stride):
+    return items[lower:upper:stride]
+
+
+def build(data):
+    return bytearray(data)
+
+
+def empty():
+    return bytearray()
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace BufferIteratorExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Collector").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def fieldExpr (name : String) : Expr := .attribute (.name "self") name
+def tail : List Stmt := [.return (.constant (.string "123"))]
+def body : List Stmt := .assign [fieldExpr "link"] (.subscript (fieldExpr "data") (.slice none none none)) :: tail
+def env (address : Nat) := functionEnv args body [.ref address] []
+def methodHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :
+    Except ExceptionObject Mutable.Value → Mutable.Heap
+  | .ok result => heap.set address (.instance classInfo.1 "Collector" (Mutable.putField fields "link" result))
+  | .error _ => heap
+def text (s : String) : Mutable.Value := .scalar (.string s)
+def methodOutcome (outcome : Except ExceptionObject Mutable.Value) := outcome.map (fun _ => text "123")
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class : Probe.module.findClass "Collector" = some classInfo := rfl
+theorem source_next : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args body)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Collector"
+    "__next__" fields classInfo.2 found source_class
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem field_read (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (name : String) (ordinary : name ≠ "__class__" ∧ name ≠ "__dict__" ∧ name ≠ "__weakref__") (value : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (field : fields.lookup name = some value) :
+    Evaluates Probe.module (env address) (fieldExpr name) heap value heap := by
+  apply Evaluates.field (Evaluates.lookup rfl)
+  simp [getAttribute, Mutable.eval_bind, found, instanceClass, source_class, field, ordinary.1, ordinary.2.1, ordinary.2.2]
+
+theorem method_trace (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (data : Mutable.Value)
+    (items : List UInt8) (resultAddress : Nat)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some data)
+    (input : HeapCalls.Relocation.BufferAllocationInput heap .slice [data, .scalar .none, .scalar .none, .scalar .none] items)
+    (allocated : Mutable.allocateBuffer items heap = some (.ok (.ref resultAddress), after)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.method (.ref address) args body) [], [], heap⟩, used⟩ [])
+      (methodHeap after address fields (.ok (.ref resultAddress)))
+      (.completed (.ok ⟨methodOutcome (.ok (.ref resultAddress)), [], methodHeap after address fields (.ok (.ref resultAddress)), heap.length⟩) used []) := by
+  let frame := Frame.assignAttribute (.name "self") "link" tail (env address)
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.method (.ref address) args body) [], [], heap⟩
+      ⟨.operation .slice [data, .scalar .none, .scalar .none, .scalar .none], [frame], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl
+      (Evaluates.arguments_reach (.cons (field_read heap address fields "data" (by decide) data found getData) (.cons Evaluates.constant (.cons Evaluates.constant (.cons Evaluates.constant .nil))))
+        .slice [] heap.length [frame])))
+  have retained : after[address]? = some (.instance classInfo.1 "Collector" fields) := by
+    exact Heapq.preserves_allocateBuffer (SavedCell address (.instance classInfo.1 "Collector" fields))
+      (SavedCell.allocates address _) items heap _ after found allocated
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation .slice [data, .scalar .none, .scalar .none, .scalar .none], [frame], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · have equal : heap.length = resultAddress ∧ heap ++ [.bytearray items] = after := by
+      simpa [Mutable.allocateBuffer, Except.map] using allocated
+    have built : AllocatingTrace Probe.module heap.length choices [] heap
+        (.running ⟨⟨.operation .slice [data, .scalar .none, .scalar .none, .scalar .none], [frame], heap⟩, used⟩ []) after
+        (.running ⟨⟨.value (.ref resultAddress), [frame], after⟩, used⟩ []) := by
+      simpa only [← equal.1, ← equal.2] using
+        (AllocatingTrace.bufferConstruction (module := Probe.module) (anchors := heap.length) (choices := choices) (globals := [])
+          heap .slice [data, .scalar .none, .scalar .none, .scalar .none] items [frame] used [] input)
+    let result : Mutable.Value := .ref resultAddress
+    have write := Mutable.writeField_result (name := "link") (value := result) retained (by simp)
+    have assigned : HeapCalls.Reaches Probe.module heap.length
+        ⟨.value result, [frame], after⟩
+        ⟨.block tail (env address), [], methodHeap after address fields (.ok result)⟩ := by
+      apply HeapCalls.Reaches.next rfl
+      apply (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) .nil)
+        (.setField "link" result) [] heap.length _).trans
+      exact .next (following := ⟨.value (.scalar .none), [.discard tail (env address)], methodHeap after address fields (.ok result)⟩)
+        (by simp [HeapCalls.step, primitive, HeapCalls.result, run, write, methodHeap]) (.next rfl .refl)
+    have returned : BlockReturns Probe.module (env address) tail (methodHeap after address fields (.ok result))
+        (text "123") (methodHeap after address fields (.ok result)) := BlockReturns.return_value Evaluates.constant
+    exact built.trans (.stable rfl rfl (by simp [methodHeap])
+      ((IteratorCalls.Reaches.of_heap (assigned.trans (returned heap.length [])) []).trans (.next (core_done rfl rfl) .refl)))
+
+theorem next_run (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (data : Mutable.Value)
+    (items : List UInt8) (resultAddress : Nat)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some data)
+    (input : HeapCalls.Relocation.BufferAllocationInput heap .slice [data, .scalar .none, .scalar .none, .scalar .none] items)
+    (allocated : Mutable.allocateBuffer items heap = some (.ok (.ref resultAddress), after)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (methodOutcome (.ok (.ref resultAddress)))
+      (methodHeap after address fields (.ok (.ref resultAddress))) used :=
+  ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], next_bound heap address fields found,
+    method_trace choices used heap after address fields data items resultAddress found getData input allocated⟩
+
+theorem buffer_slice_input (heap : Mutable.Heap) (source : Nat) (items : List UInt8)
+    (found : heap[source]? = some (.bytearray items)) :
+    HeapCalls.Relocation.BufferAllocationInput heap .slice
+      [.ref source, .scalar .none, .scalar .none, .scalar .none] items := by
+  apply HeapCalls.Relocation.BufferAllocationInput.slice source items items _ _ _ {} found
+  · rfl
+  · exact FormalSW.Py.Builtin.Sequence.slice_full items
+
+theorem buffer_slice_next (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (address source : Nat) (fields : List (String × Mutable.Value)) (items : List UInt8)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some (.ref source))
+    (sourceFound : heap[source]? = some (.bytearray items)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (.ok (text "123"))
+      (methodHeap (heap ++ [.bytearray items]) address fields (.ok (.ref heap.length))) used :=
+  next_run choices used heap _ address fields (.ref source) items heap.length found getData
+    (buffer_slice_input heap source items sourceFound) rfl
+
+theorem slice_prefix (n : Nat) (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (address source : Nat) (fields : List (String × Mutable.Value)) (items : List UInt8)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some (.ref source))
+    (sourceFound : heap[source]? = some (.bytearray items)) :
+    ∃ after, AllocatingYieldPrefix Probe.module choices (.ref address) text heap used (List.replicate n "123") after used ∧
+      after.length = heap.length + n := by
+  induction n generalizing heap fields with
+  | zero => exact ⟨heap, .nil, by simp⟩
+  | succ n ih =>
+    let middle := heap ++ [Mutable.Object.bytearray items]
+    let nextFields := Mutable.putField fields "link" (.ref heap.length)
+    let nextHeap := methodHeap middle address fields (.ok (.ref heap.length))
+    have ran := buffer_slice_next choices used heap address source fields items found getData sourceFound
+    have bounded := (List.getElem?_eq_some_iff.mp found).1
+    have sourceInside := (List.getElem?_eq_some_iff.mp sourceFound).1
+    have separate : address ≠ source := by
+      intro same
+      subst source
+      rw [found] at sourceFound
+      cases sourceFound
+    obtain ⟨after, later, size⟩ := ih nextHeap nextFields
+      (by simp [nextHeap, methodHeap, middle, nextFields, show address < heap.length + 1 by omega])
+      (by simpa [nextFields, Mutable.putField_lookup_other] using getData)
+      (by simpa only [nextHeap, methodHeap, List.getElem?_set_ne separate, middle, List.getElem?_append_left sourceInside] using sourceFound)
+    refine ⟨after, .cons ran later, ?_⟩
+    simp only [nextHeap, methodHeap, middle, List.length_set, List.length_append, List.length_singleton] at size
+    omega
+
+theorem isolated_next (choices : ChoiceSchedule) (used anchors : Nat) (logical physical : Mutable.Heap)
+    (rename : Nat → Nat) (address source : Nat) (fields : List (String × Mutable.Value)) (items : List UInt8)
+    (layout : ExecutionLayout logical physical rename)
+    (found : logical[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some (.ref source))
+    (sourceFound : logical[source]? = some (.bytearray items)) :
+    ∃ other nextMap,
+      ExecutionLayout (methodHeap (logical ++ [.bytearray items]) address fields (.ok (.ref logical.length))) other nextMap ∧
+      (∀ privateAddress object, object ≠ .tuple [] → PrivateLayout logical physical rename privateAddress object →
+        PrivateLayout (methodHeap (logical ++ [.bytearray items]) address fields (.ok (.ref logical.length))) other nextMap privateAddress object) ∧
+      ∀ loop resumes, IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following) loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (loop.body ++ [Calls.loopContinuation loop.body (loopCode loop (.ref (rename address)))]
+          ++ loop.following) (setLocal loop.env loop.name (text "123")), loop.stack, other⟩, used⟩ resumes) := by
+  obtain ⟨other, nextMap, extended, kept, ran⟩ :=
+    (buffer_slice_next choices used logical address source fields items found getData sourceFound).scalar_isolated
+      BufferIteratorExamples.source physical rename layout anchors
+  exact ⟨other, nextMap, extended.layout, kept, ran⟩
+
+theorem cut_entry (heap : Mutable.Heap) (value lower upper stride : Mutable.Value) :
+    HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.call "cut") [value, lower, upper, stride], [], heap⟩
+      ⟨.operation .slice [value, lower, upper, stride], [], heap⟩ := by
+  exact .next rfl (.next rfl (.next rfl
+    (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl)
+      (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))) .slice [] heap.length [])))
+
+theorem cut_trace (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (source : Nat) (original selected : List UInt8) (lower upper stride : Mutable.Value)
+    (bounds : FormalSW.Py.Builtin.Slice.Slice) (found : heap[source]? = some (.bytearray original))
+    (coordinates : sliceCoordinates lower upper stride = .ok bounds)
+    (sliced : FormalSW.Py.Builtin.Sequence.slice original bounds = .ok selected) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "cut") [.ref source, lower, upper, stride], [], heap⟩, used⟩ []) (heap ++ [.bytearray selected])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.bytearray selected], heap.length⟩) used []) := by
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation .slice [.ref source, lower, upper, stride], [], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap (cut_entry heap (.ref source) lower upper stride) [])
+  · exact (AllocatingTrace.bufferConstruction heap .slice [.ref source, lower, upper, stride] selected [] used []
+      (.slice source original selected lower upper stride bounds found coordinates sliced)).trans
+      (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+theorem build_entry (heap : Mutable.Heap) (data : Mutable.Value) :
+    HeapCalls.Reaches Probe.module heap.length ⟨.operation (.call "build") [data], [], heap⟩
+      ⟨.operation (.builtin .bytearray) [data], [], heap⟩ := by
+  exact .next rfl (.next rfl (.next rfl
+    (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) .nil) (.builtin .bytearray) [] heap.length [])))
+
+theorem build_trace (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (data : Mutable.Value) (bytes : List UInt8)
+    (input : HeapCalls.Relocation.BufferAllocationInput heap (.builtin .bytearray) [data] bytes) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "build") [data], [], heap⟩, used⟩ []) (heap ++ [.bytearray bytes])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.bytearray bytes], heap.length⟩) used []) := by
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.builtin .bytearray) [data], [], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap (build_entry heap data) [])
+  · exact (AllocatingTrace.bufferConstruction heap (.builtin .bytearray) [data] bytes [] used [] input).trans
+      (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+theorem nonnegative_size (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (size : Int) (nonnegative : 0 ≤ size) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "build") [.scalar (.int size)], [], heap⟩, used⟩ [])
+      (heap ++ [.bytearray (List.replicate size.toNat 0)])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.bytearray (List.replicate size.toNat 0)], heap.length⟩) used []) :=
+  build_trace choices used heap _ _ (.count size nonnegative)
+
+theorem flag_size (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (flag : Bool) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "build") [.scalar (.bool flag)], [], heap⟩, used⟩ [])
+      (heap ++ [.bytearray (if flag then [0] else [])])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.bytearray (if flag then [0] else [])], heap.length⟩) used []) :=
+  build_trace choices used heap _ _ (.flag flag)
+
+theorem buffer_copy (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (source : Nat) (bytes : List UInt8)
+    (found : heap[source]? = some (.bytearray bytes)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "build") [.ref source], [], heap⟩, used⟩ []) (heap ++ [.bytearray bytes])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.bytearray bytes], heap.length⟩) used []) := by
+  apply build_trace
+  apply HeapCalls.Relocation.BufferAllocationInput.source
+  simp [Mutable.byteValues, found]
+
+theorem empty_trace (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "empty") [], [], heap⟩, used⟩ []) (heap ++ [.bytearray []])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.bytearray []], heap.length⟩) used []) := by
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.builtin .bytearray) [], [], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (.next (core_next rfl rfl) (.next (core_next rfl rfl) (.next (core_next rfl rfl) .refl)))
+  · exact (AllocatingTrace.bufferConstruction heap (.builtin .bytearray) [] [] [] used [] .empty).trans
+      (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+theorem build_failure (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (data : Mutable.Value)
+    (error : ExceptionObject) (failed : Mutable.bytearray [data] heap = some (.error error, heap)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "build") [data], [], heap⟩, used⟩ []) heap
+      (.completed (.ok ⟨.error error, [], heap, heap.length⟩) used []) := by
+  refine .stable rfl rfl rfl ?_
+  apply (IteratorCalls.Reaches.of_heap (build_entry heap data) []).trans
+  exact .next (core_done rfl (by simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, primitive,
+    HeapCalls.result, run, failed, protectGenerator, done, Calls.generatorException])) .refl
+
+theorem negative_size (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (size : Int) (negative : size < 0) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "build") [.scalar (.int size)], [], heap⟩, used⟩ []) heap
+      (.completed (.ok ⟨.error ⟨"ValueError", []⟩, [], heap, heap.length⟩) used []) := by
+  apply build_failure
+  simp [Mutable.bytearray, negative, Mutable.error]
+
+theorem invalid_element (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (source : Nat)
+    (invalid : Int) (outside : invalid < 0 ∨ 256 ≤ invalid)
+    (found : heap[source]? = some (.list [.scalar (.int 1), .scalar (.int invalid)])) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "build") [.ref source], [], heap⟩, used⟩ []) heap
+      (.completed (.ok ⟨.error ⟨"ValueError", []⟩, [], heap, heap.length⟩) used []) := by
+  apply build_failure
+  simp [Mutable.bytearray, Mutable.byteValues, found, List.mapM_cons, Mutable.byte, Mutable.integer,
+    Mutable.eval_bind, show ¬ (0 ≤ invalid ∧ invalid < 256) by omega, Mutable.error]
+
+theorem zero_step (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (source : Nat)
+    (items : List UInt8) (lower upper : Mutable.Value) (found : heap[source]? = some (.bytearray items)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "cut") [.ref source, lower, upper, .scalar (.int 0)], [], heap⟩, used⟩ []) heap
+      (.completed (.ok ⟨.error ⟨"ValueError", []⟩, [], heap, heap.length⟩) used []) := by
+  have ran : primitive .slice [.ref source, lower, upper, .scalar (.int 0)] heap = some (.error ⟨"ValueError", []⟩, heap) := by
+    change Mutable.getSlice (.ref source) lower upper (.scalar (.int 0)) heap = _
+    rw [HeapCalls.Relocation.getSlice_ref heap source _ lower upper (.scalar (.int 0)) found]
+    simp [sliceBounds_result, sliceCoordinates, sliceCoordinate, Mutable.eval_bind]
+  refine .stable rfl rfl rfl ?_
+  apply (IteratorCalls.Reaches.of_heap (cut_entry heap (.ref source) lower upper (.scalar (.int 0))) []).trans
+  exact .next (core_done rfl (by simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, HeapCalls.result, run, ran, protectGenerator, done, Calls.generatorException])) .refl
+
+end BufferIteratorExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation.BufferAllocationInput." + name for name in (
+    "relocates", "operation_relocates", "primitive",
+)] + ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "bufferAllocation_step", "AllocatingTrace.reaches", "AllocatingTrace.isolated",
+)] + ["BufferIteratorExamples." + name for name in (
+    "source", "source_class", "source_next", "next_bound", "field_read", "method_trace", "next_run",
+    "buffer_slice_input", "buffer_slice_next", "slice_prefix", "isolated_next", "cut_entry", "cut_trace",
+    "build_entry", "build_trace", "nonnegative_size", "flag_size", "buffer_copy", "empty_trace",
+    "build_failure", "negative_size", "invalid_element", "zero_step",
+)]
+
+with project_temporary_directory(prefix="iterator-buffer-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for data in (bytearray(), bytearray(range(256))):
+        collector = namespace["Collector"]()
+        collector.data = data
+        previous = []
+        for _ in range(4):
+            assert next(collector) == "123"
+            assert collector.link == data and collector.link is not data
+            assert all(collector.link is not item for item in previous)
+            previous.append(collector.link)
+        for lower in (None, -1000, -1, 0, True, 1000):
+            for upper in (None, -1000, -1, 0, False, 1000):
+                for stride in (None, -3, -1, 1, 2, True):
+                    result = namespace["cut"](data, lower, upper, stride)
+                    assert result == data[lower:upper:stride] and result is not data
+                    assert type(result) is bytearray
+        for lower, upper in ((None, None), (object(), object())):
+            try:
+                namespace["cut"](data, lower, upper, 0)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("expected zero step to fail before checking bounds")
+    for data in (0, 1, 257, True, False, b"abc", bytearray(b"abc"), [0, True, 255], (1, 2)):
+        result = namespace["build"](data)
+        assert result == bytearray(data) and result is not data
+    for data, error in ((-1, ValueError), ([1, -1], ValueError), ([1, 256], ValueError), ([1, None], TypeError), (None, TypeError)):
+        try:
+            namespace["build"](data)
+        except error:
+            pass
+        else:
+            raise AssertionError("expected invalid bytearray input to fail")
+    data = bytearray(b"abc")
+    copied = namespace["build"](data)
+    copied[0] = 255
+    assert data == b"abc"
+    assert namespace["empty"]() == bytearray()
+    assert namespace["empty"]() is not namespace["empty"]()
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAllocatingAcquisition\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"buffer iterators: generalized construction, slices, repeated fresh copies, conversion failures and private consumers; {len(AUDITS)} axiom audits passed")

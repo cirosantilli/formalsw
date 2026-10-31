@@ -85,6 +85,25 @@ theorem AllocatingTrace.isolated {module : Module} {logicalAnchors : Nat} {choic
         physical other builtin (values.map (relocateValue rename)) (items.map (relocateValue rename)) (stack.map (relocateFrame rename))
         (resumes.map (Relocation.relocateResume rename)) (outcome.map (relocateValue nextMap))
         (input.relocates layout inside.1.2) paired
+  | bufferConstruction heap operation values bytes stack used resumes input =>
+    let nextMap := extendMap rename heap.length physical.length
+    let other := physical ++ [Mutable.Object.bytearray bytes]
+    have agree : ∀ index < heap.length, nextMap index = rename index := extendMap_old _ _ _
+    have retained := (layout.allocateBuffer bytes).2.2
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree inside.2.1
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    refine ⟨other, nextMap, ⟨retained, by simp, by simp [other], agree⟩, ?_, ?_, ?_⟩
+    · exact ⟨by simp [WorkWithin, Mutable.Value.edge, Graph.Edge.Within],
+        fun frame member => (inside.2.1 frame member).mono (by simp),
+        fun pending member => (inside.2.2 pending member).mono (by simp)⟩
+    · intro address object _ saved
+      exact (saved.allocateBuffer bytes).2.2
+    · apply Reaches.next ?_ .refl
+      simp only [Relocation.relocateState, Relocation.relocateCore, HeapCalls.Relocation.relocateState,
+        relocateWork, input.operation_relocates rename, relocateValue, nextMap, extendMap_new, stackSame, resumesSame]
+      exact bufferAllocation_step module physicalAnchors used choices (relocateGlobals rename globals)
+        physical operation (values.map (relocateValue rename)) bytes (stack.map (relocateFrame rename))
+        (resumes.map (Relocation.relocateResume rename)) (input.relocates layout inside.1.2)
   | sequenceConstruction heap after operation values items asTuple address stack used resumes input allocated =>
     obtain ⟨other, nextMap, paired, retained, agree, grows, physicalGrows, bounded, kept⟩ :=
       layout.allocateSequence asTuple items (input.within layout.closed inside.1.2) address after allocated

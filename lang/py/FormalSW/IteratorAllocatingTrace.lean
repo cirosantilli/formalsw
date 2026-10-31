@@ -48,6 +48,13 @@ inductive AllocatingTrace (module : Module) (anchors : Nat) (choices : ChoiceSch
       AllocatingTrace module anchors choices globals heap
         (.running ⟨⟨.operation (.builtin builtin) values, stack, heap⟩, used⟩ resumes)
         after (allocationResult anchors used globals after stack resumes outcome)
+  | bufferConstruction (heap : Mutable.Heap) (operation : Operation) (values : List Mutable.Value)
+      (bytes : List UInt8) (stack : List Frame) (used : Nat) (resumes : List Resume)
+      (input : BufferAllocationInput heap operation values bytes) :
+      AllocatingTrace module anchors choices globals heap
+        (.running ⟨⟨.operation operation values, stack, heap⟩, used⟩ resumes)
+        (heap ++ [.bytearray bytes])
+        (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [.bytearray bytes]⟩, used⟩ resumes)
   | sequenceConstruction (heap after : Mutable.Heap) (operation : Operation) (values items : List Mutable.Value)
       (asTuple : Bool) (address : Nat) (stack : List Frame) (used : Nat) (resumes : List Resume)
       (input : SequenceAllocationInput heap operation values asTuple items)
@@ -123,7 +130,7 @@ theorem AllocatingTrace.heaps {module : Module} {anchors : Nat} {choices : Choic
     HeapAt before first ∧ HeapAt after final := by
   induction trace with
   | stable firstHeap finalHeap => exact ⟨firstHeap, finalHeap⟩
-  | list | dictionary | tuple | sequenceConstruction | newInstance | initializedInstance | dataInstance => exact ⟨rfl, rfl⟩
+  | list | dictionary | tuple | sequenceConstruction | bufferConstruction | newInstance | initializedInstance | dataInstance => exact ⟨rfl, rfl⟩
   | setAllocation _ _ _ _ _ _ _ _ outcome _ _ => cases outcome <;> exact ⟨rfl, rfl⟩
   | dictionaryConstruct _ _ _ _ _ _ outcome _ _ => cases outcome <;> exact ⟨rfl, rfl⟩
   | trans _ _ left right => exact ⟨left.1, right.2⟩
@@ -137,6 +144,8 @@ theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : Cho
   | list | dictionary => exact .next (core_next rfl rfl) .refl
   | setAllocation heap after builtin values items stack used resumes outcome input allocated =>
     exact .next (setAllocation_step module anchors used choices globals heap after builtin values items stack resumes outcome input allocated) .refl
+  | bufferConstruction heap operation values bytes stack used resumes input =>
+    exact .next (bufferAllocation_step module anchors used choices globals heap operation values bytes stack resumes input) .refl
   | sequenceConstruction heap after operation values items asTuple address stack used resumes input allocated =>
     exact .next (sequenceAllocation_step module anchors used choices globals heap after operation values items asTuple address stack resumes input allocated) .refl
   | dictionaryConstruct heap after values stack used resumes outcome _ allocated =>
