@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""
+Prove positional traversal retains its snapshot after the source list is cleared.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+import itertools
+
+def count_permutations(items, length):
+    count = 0
+    for row in itertools.permutations(items, length):
+        items *= 0
+        count += 1
+    return count
+
+def count_combinations(items, length):
+    count = 0
+    for row in itertools.combinations(items, length):
+        items *= 0
+        count += 1
+    return count
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachinePositionalExamples
+set_option Elab.async false
+
+def functionName (combination : Bool) := if combination then "count_combinations" else "count_permutations"
+def args : List Arg := [{name := "items", annotation := none}, {name := "length", annotation := none}]
+def loopBody : List Stmt := [.augAssign (.name "items") .mult (.constant (.int 0)),
+  .augAssign (.name "count") .add (.constant (.int 1))]
+def following : List Stmt := [.return (.name "count")]
+def iterable (combination : Bool) : Expr :=
+  if combination then .combinationsIterable [.name "items", .name "length"] else .permutationsIterable [.name "items", .name "length"]
+def body (combination : Bool) : List Stmt := [.assign [.name "count"] (.constant (.int 0)),
+  .forIn (.name "row") (iterable combination) loopBody []] ++ following
+def rows (combination : Bool) (length : Nat) (items : List Mutable.Value) :=
+  if combination then Combinations.rows length items else Permutations.rows length items
+
+/-- Each constructor records an actual tuple allocation followed by the list write. -/
+inductive Drain (address : Nat) : List (List Mutable.Value) → Mutable.Heap → Mutable.Heap → Prop
+  | nil (heap) : Drain address [] heap heap
+  | cons {row rest heap middle final tuple}
+      (allocated : Mutable.allocateTuple row heap = some (.ok tuple, middle))
+      (tail : Drain address rest (middle.set address (.list [])) final) : Drain address (row :: rest) heap final
+
+theorem drain_exists (address : Nat) (rows : List (List Mutable.Value)) (heap : Mutable.Heap) :
+    ∃ final, Drain address rows heap final := by
+  induction rows generalizing heap with
+  | nil => exact ⟨heap, .nil heap⟩
+  | cons row rest ih =>
+    obtain ⟨tuple, middle, allocated⟩ := tuple_allocates row heap
+    obtain ⟨final, tail⟩ := ih (middle.set address (.list []))
+    exact ⟨final, .cons allocated tail⟩
+
+theorem source_function (combination : Bool) :
+    findFunctionIn Probe.module.body (functionName combination) = some (args, body combination) := by
+  cases combination <;> rfl
+
+theorem loop_returns (address : Nat) (captured : List (List Mutable.Value)) (heap final : Mutable.Heap)
+    (run : Drain address captured heap final) (items : List Mutable.Value) (env : HeapCalls.Env) (count : Int)
+    (found : heap[address]? = some (.list items)) (lookup : env "items" = some (.ref address))
+    (countLookup : env "count" = some (.scalar (.int count))) :
+    BlockReturns Probe.module env
+      (.permutationStepLoop "row" (captured.map (List.map sequenceSource)) loopBody [] :: following)
+      heap (.scalar (.int (count + captured.length))) final := by
+  induction run generalizing items env count with
+  | nil heap =>
+    apply BlockReturns.permutation_done
+    exact BlockReturns.return_value (Evaluates.lookup (by simpa using countLookup))
+  | @cons row rest heap middle final tuple allocated tail ih =>
+    have retained := allocateTuple_preserves_lookup heap middle row tuple address (.list items) found allocated
+    have bound := (List.getElem?_eq_some_iff.mp retained).1
+    have cleared : (middle.set address (.list []))[address]? = some (.list []) := List.getElem?_set_self bound
+    let nextEnv := setLocal (setLocal (setLocal env "row" tuple) "items" (.ref address)) "count" (.scalar (.int (count + 1)))
+    have continued := ih [] nextEnv (count + 1) cleared (by simp [nextEnv, setLocal]) (by simp [nextEnv, setLocal])
+    have counted : count + 1 + (rest.length : Int) = count + ((row :: rest).length : Int) := by simp; omega
+    rw [counted] at continued
+    apply BlockReturns.permutation_step (by simpa [List.map_map, Function.comp_def] using allocated)
+    apply BlockReturns.augAssign (left := .ref address) (by simp [setLocal, lookup]) Evaluates.constant
+      (by simpa using inplace_mult_list_eval middle address items 0 retained)
+    apply BlockReturns.augAssign (left := .scalar (.int count)) (value := .scalar (.int (count + 1)))
+      (by simp [setLocal, countLookup]) Evaluates.constant (by rfl)
+    simpa only [loopBody, List.cons_append, List.nil_append, Calls.loopContinuation, Calls.loopControl,
+      Calls.loopControlStmt, Bool.false_or, Bool.false_eq_true, if_false, nextEnv] using continued
+
+theorem captured (combination : Bool) (heap : Mutable.Heap) (address length : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (if combination then combinationRows else permutationRows) [.ref address, .scalar (.int length)] heap =
+      some (.ok ((rows combination length items).map (List.map sequenceSource)), heap) := by
+  cases combination with
+  | false => simp [permutationRows, Permutations.acquire, Permutations.size, Mutable.sequence, found, rows, Except.map,
+      show ¬ (length : Int) < 0 by omega]
+  | true => simpa [rows] using combinationRows_list heap address length items found
+
+theorem source_returns (combination : Bool) (heap final : Mutable.Heap) (address length : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) (run : Drain address (rows combination length items) heap final) :
+    ReturnsValue Probe.module (functionName combination) [.ref address, .scalar (.int length)] heap
+      (.scalar (.int (rows combination length items).length)) final := by
+  apply BlockReturns.function (source_function combination) (completed := [.ref address, .scalar (.int length)]) rfl
+  apply BlockReturns.assign Evaluates.constant
+  have arguments : Evaluates.Arguments Probe.module
+      (setLocal (functionEnv args (body combination) [.ref address, .scalar (.int length)] []) "count" (.scalar (.int 0)))
+      [.name "items", .name "length"] heap [.ref address, .scalar (.int length)] heap :=
+    .cons (Evaluates.lookup (by simp [setLocal, functionEnv, HeapCalls.argumentEnv, args]))
+      (.cons (Evaluates.lookup (by simp [setLocal, functionEnv, HeapCalls.argumentEnv, args, List.lookup])) .nil)
+  have started := captured combination heap address length items found
+  have continued := loop_returns address (rows combination length items) heap final run items
+    (setLocal (functionEnv args (body combination) [.ref address, .scalar (.int length)] []) "count" (.scalar (.int 0))) 0 found
+    (by simp [setLocal, functionEnv, HeapCalls.argumentEnv, args]) (by simp [setLocal])
+  cases combination with
+  | false =>
+    apply BlockReturns.for_permutations arguments started
+    simpa only [Int.zero_add] using continued
+  | true =>
+    apply BlockReturns.for_combinations arguments started
+    simpa only [Int.zero_add] using continued
+
+theorem drain_relocates (address : Nat) (captured : List (List Mutable.Value)) (heap final : Mutable.Heap)
+    (run : Drain address captured heap final) (physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout heap physical rename) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items))
+    (inside : ∀ row ∈ captured, ∀ value ∈ row, value.edge.Within heap.length) :
+    ∃ other nextMap, Drain (rename address) (captured.map (List.map (relocateValue rename))) physical other ∧
+      ExecutionLayout final other nextMap := by
+  induction run generalizing physical rename items with
+  | nil heap => exact ⟨physical, rename, .nil physical, layout⟩
+  | @cons row rest heap middle final tuple allocated tail ih =>
+    have bound := (List.getElem?_eq_some_iff.mp found).1
+    obtain ⟨left, right, logicalAfter, physicalAfter, nextMap, first, second, retained, _, _, agree⟩ :=
+      layout.allocateTuple row (inside row (List.mem_cons_self ..))
+    have same : tuple = .ref left ∧ middle = logicalAfter := by simpa [allocated] using first
+    obtain ⟨tupleEq, heapEq⟩ := same
+    subst tuple logicalAfter
+    have larger := allocateTuple_length heap middle row (.ref left) allocated
+    have still := allocateTuple_preserves_lookup heap middle row (.ref left) address (.list items) found allocated
+    have written := retained.set_list address items [] still (by simp)
+    have cleared : (middle.set address (.list []))[address]? = some (.list []) :=
+      List.getElem?_set_self ((List.getElem?_eq_some_iff.mp still).1)
+    have restInside : ∀ row ∈ rest, ∀ value ∈ row, value.edge.Within (middle.set address (.list [])).length := by
+      intro row member value present
+      exact valueWithin_mono _ _ value (by simpa using larger) (inside row (List.mem_cons_of_mem _ member) value present)
+    obtain ⟨other, finalMap, continued, finalLayout⟩ := ih _ nextMap written [] cleared restInside
+    have rowsSame : rest.map (List.map (relocateValue nextMap)) = rest.map (List.map (relocateValue rename)) := by
+      apply List.map_congr_left
+      intro row member
+      apply List.map_congr_left
+      intro value present
+      exact relocateValue_congr nextMap rename heap.length value agree (inside row (List.mem_cons_of_mem _ member) value present)
+    rw [rowsSame, agree address bound] at continued
+    exact ⟨other, finalMap, .cons second continued, finalLayout⟩
+
+theorem paired_returns (combination : Bool) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address length : Nat) (items : List Mutable.Value)
+    (found : logical[address]? = some (.list items)) :
+    ∃ final other nextMap,
+      ReturnsValue Probe.module (functionName combination) [.ref address, .scalar (.int length)] logical
+        (.scalar (.int (rows combination length items).length)) final ∧
+      ReturnsValue Probe.module (functionName combination) [.ref (rename address), .scalar (.int length)] physical
+        (.scalar (.int (rows combination length items).length)) other ∧
+      ExecutionLayout final other nextMap := by
+  obtain ⟨final, run⟩ := drain_exists address (rows combination length items) logical
+  have contents := layout.closed (.list items) (List.mem_of_getElem? found)
+  have bounded : ∀ row ∈ rows combination length items, ∀ value ∈ row, value.edge.Within logical.length := by
+    intro row member value present
+    apply contents value
+    cases combination with
+    | false => exact permutation_row_mem length items row member value present
+    | true => exact (Combinations.mem_rows_iff length items row).mp member |>.1.subset present
+  obtain ⟨other, nextMap, continued, finalLayout⟩ := drain_relocates address _ logical final run physical rename layout items found bounded
+  have rowsMoved : rows combination length (items.map (relocateValue rename)) =
+      (rows combination length items).map (List.map (relocateValue rename)) := by
+    cases combination <;> simp [rows, Permutations.rows_map, Combinations.rows_map]
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  refine ⟨final, other, nextMap, source_returns combination logical final address length items found run, ?_, finalLayout⟩
+  have returned := source_returns combination physical other (rename address) length (items.map (relocateValue rename)) moved
+    (by simpa only [rowsMoved] using continued)
+  simpa only [rowsMoved, List.length_map] using returned
+
+end MachinePositionalExamples
+'''
+AUDITS = ["MachinePositionalExamples." + name for name in (
+    "drain_exists", "loop_returns", "captured", "source_returns", "drain_relocates", "paired_returns",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "positionalPool_keeps_heap", "positionalPool_sequence", "positionalPool_relocates",
+    "permutation_acquire_pool", "combination_acquire_pool", "positionalSize_keeps_heap", "positionalSize_relocates",
+    "permutation_acquire_keeps_heap", "permutation_acquire_relocates", "combination_acquire_keeps_heap", "combination_acquire_relocates",
+    "permutation_row_mem", "permutation_acquire_rows", "combination_acquire_rows", "permutation_acquire_within", "combination_acquire_within",
+    "permutationRows_keeps_heap", "permutationRows_relocates", "permutationRows_within",
+    "combinationRows_keeps_heap", "combinationRows_relocates", "combinationRows_within",
+    "allocateTuple_preserves_lookup", "step_for_permutations_relocates", "step_permutation_start_relocates",
+    "StateWithin.for_permutations", "StateWithin.permutation_start", "step_for_combinations_relocates",
+    "step_combination_start_relocates", "StateWithin.for_combinations", "StateWithin.combination_start",
+    "row_values_relocate", "step_positional_loop_relocates",
+)]
+
+with project_temporary_directory(prefix="machine-positional-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for kind in ("permutations", "combinations"):
+        select = getattr(namespace["itertools"], kind)
+        count = namespace["count_" + kind]
+        for size in range(6):
+            for length in range(size + 2):
+                shared = []
+                items = [shared] * size
+                expected = sum(1 for _ in select(items, length))
+                assert count(items, length) == expected
+                assert len(items) == (0 if expected else size)
+                assert all(item is shared for item in items)
+        cycle = []
+        cycle.append(cycle)
+        assert count(cycle, 1) == 1 and cycle == []
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachinePositional\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"positional traversal: full snapshot iteration after clearing; {len(AUDITS)} axiom audits passed")
