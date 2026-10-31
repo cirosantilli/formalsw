@@ -158,6 +158,7 @@ roots = [
   "lang.py.FormalSW.MachineMethodInvariant",
   "lang.py.FormalSW.MachineStatementInvariant",
   "lang.py.FormalSW.MachineControlInvariant",
+  "lang.py.FormalSW.MachineBuiltinInvariant",
   "lang.py.FormalSW.MachineCallDispatchInvariant",
   "lang.py.FormalSW.MachineBinaryInvariant",
   "lang.py.FormalSW.MachineComparisonInvariant",

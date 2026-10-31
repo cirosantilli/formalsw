@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""
+Check length reads after argument mutations and under saved iterator consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(items, value):
+    items.append(value)
+    return items
+
+
+def nested(items, value):
+    return len(touch(items, value))
+
+
+def explicit(items, value):
+    items.append(value)
+    return len(items)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineBuiltinExamples
+set_option Elab.async false
+
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) :=
+  heap.set address (.list (items ++ [value]))
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, value] heap (.ref address) (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem length_after_append (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    primitive (.builtin .len) [.ref address] (after heap address items value) =
+      some (.ok (.scalar (.int (items.length + 1))), after heap address items value) := by
+  have bound : address < heap.length := (List.getElem?_eq_some_iff.mp found).1
+  change Mutable.length (.ref address) (after heap address items value) = _
+  simp [Mutable.length, after, bound]
+
+theorem nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "nested" [.ref address, value] heap
+      (.scalar (.int (items.length + 1))) (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.builtin (.cons
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (touch_returns heap address items value found)) .nil)
+    (length_after_append heap address items value found)
+
+theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "explicit" [.ref address, value] heap
+      (.scalar (.int (items.length + 1))) (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+    (length_after_append heap address items value found))
+
+/-- Length observes the argument's mutation, preserving the shared list and all its aliases. -/
+theorem length_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "nested" [.ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, value] heap
+        (.scalar (.int (items.length + 1))) (after heap address items value)) :
+      ((IteratorCalls.call Probe.module name [.ref address, value] heap).run choices).Finishes
+        ⟨.ok (.scalar (.int (items.length + 1))), [], after heap address items value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "nested" leftChoices (nested_returns heap address items value found))
+    (finishes "explicit" rightChoices (explicit_returns heap address items value found)) (Or.inl rfl)
+
+/-- Length execution consumes the append's actual output invariant, including exceptional outcomes. -/
+theorem append_then_length (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (values : List Mutable.Value)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (valuesInside : ∀ value ∈ values, value.edge.Within logical.length)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (after logical address items item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.operation (.builtin .len) values, [], after logical address items item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.operation (.builtin .len) values, [], after logical address items item⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have lengthInside : StateWithin ⟨.operation (.builtin .len) values, [], after logical address items item⟩ := by
+    exact ⟨⟨trivial, by simpa [after] using valuesInside⟩, by simp⟩
+  have raw := step_length_arguments_preserves Probe.module _ other nextMap logical.length physical.length
+    values [] [] retained lengthInside nextGlobals
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.operation (.builtin .len) values, [], after logical address items item⟩, used⟩ other nextMap
+    logical.length physical.length [] retained lengthInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨lengthInside.1, lengthInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
+end MachineBuiltinExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "length_scalar_result", "length_effect", "step_length_preserves", "step_length_arguments_preserves",
+)] + ["MachineBuiltinExamples." + name for name in (
+    "touch_returns", "length_after_append", "nested_returns", "explicit_returns", "length_equiv", "append_then_length",
+)]
+with project_temporary_directory(prefix="machine-builtin-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("nested", "explicit"):
+        for size in (0, 1, 17):
+            items = [None] * size
+            alias = items
+            assert namespace[name](items, items) == size + 1
+            assert items is alias and items[-1] is items
+            assert len(items) == size + 1
+            assert namespace[name](items, alias) == size + 2
+            assert items[-2] is items and items[-1] is items
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineBuiltinInvariant\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"builtin length: argument mutation, cyclic aliases, saved consumers; {len(AUDITS)} axiom audits passed")
