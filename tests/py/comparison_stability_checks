@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""
+Check recursive comparison stabilization, cycles and left-to-right short circuits.
+"""
+from pathlib import Path
+import re
+import subprocess
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+PROOF = r'''
+import lang.py.FormalSW.ComparisonStability
+
+open FormalSW.PyAst Mutable.Relocation
+namespace ComparisonStabilityExamples
+set_option Elab.async false
+
+/-- A recursive first pair blocks every later witness, even a scalar inequality. -/
+theorem leading_cycles_unresolved (heap : Mutable.Heap) (isTuple : Bool) (left right : Nat)
+    (xs ys : List Mutable.Value) (different : left ≠ right) (lengths : xs.length = ys.length)
+    (leftFound : heap[left]? = some (comparisonObject isTuple (.ref left :: xs)))
+    (rightFound : heap[right]? = some (comparisonObject isTuple (.ref right :: ys)))
+    (fuel : Nat) (equality : Bool) :
+    HeapSort.compare fuel heap equality (.ref left) (.ref right) = none := by
+  induction fuel generalizing equality with
+  | zero => rfl
+  | succ fuel ih =>
+    cases isTuple <;> cases equality <;>
+      simp [HeapSort.compare, comparisonObject] at leftFound rightFound ⊢ <;>
+      simp [leftFound, rightFound, different, lengths, HeapSort.lex, ih]
+
+/-- Comparing an object to itself uses identity without traversing a cycle. -/
+theorem identity_equal (heap : Mutable.Heap) (address fuel : Nat) (object : Mutable.Object)
+    (found : heap[address]? = some object) :
+    HeapSort.compare (fuel + 1) heap true (.ref address) (.ref address) = some (.ok true) := by
+  cases object <;> simp [HeapSort.compare, found]
+
+/-- A scalar mismatch before a recursive tail completes in both comparison modes. -/
+theorem mismatch_before_cycle (heap : Mutable.Heap) (isTuple : Bool) (left right fuel : Nat)
+    (x y : Int) (different : x ≠ y)
+    (leftFound : heap[left]? = some (comparisonObject isTuple [.scalar (.int x), .ref left]))
+    (rightFound : heap[right]? = some (comparisonObject isTuple [.scalar (.int y), .ref right]))
+    (equality : Bool) :
+    HeapSort.compare (fuel + 2) heap equality (.ref left) (.ref right) =
+      some (.ok (if equality then false else decide (x < y))) := by
+  have distinct : left ≠ right := by
+    intro same
+    subst right
+    have objects := leftFound.symm.trans rightFound
+    cases isTuple <;> simp [comparisonObject] at objects <;> exact different objects
+  cases isTuple <;> cases equality <;>
+    simp [comparisonObject] at leftFound rightFound <;>
+    simp [HeapSort.compare, leftFound, rightFound, distinct, HeapSort.lex,
+      scalarCompare, evalCmpOp, different]
+
+/-- Ordering raises before entering a recursive tail when the first values are incomparable. -/
+theorem error_before_cycle (heap : Mutable.Heap) (isTuple : Bool) (left right fuel : Nat) (x : Int)
+    (leftFound : heap[left]? = some (comparisonObject isTuple [.scalar .none, .ref left]))
+    (rightFound : heap[right]? = some (comparisonObject isTuple [.scalar (.int x), .ref right])) :
+    HeapSort.compare (fuel + 2) heap false (.ref left) (.ref right) = HeapSort.typeError := by
+  cases isTuple <;> simp [comparisonObject] at leftFound rightFound <;>
+    simp [HeapSort.compare, leftFound, rightFound, HeapSort.lex, scalarCompare]
+
+/-- The stable table preserves that exact exception rather than classifying it as unresolved. -/
+theorem stabilized_error_before_cycle (heap : Mutable.Heap) (isTuple : Bool) (left right : Nat) (x : Int)
+    (leftFound : heap[left]? = some (comparisonObject isTuple [.scalar .none, .ref left]))
+    (rightFound : heap[right]? = some (comparisonObject isTuple [.scalar (.int x), .ref right])) :
+    HeapSort.compare (2 * heap.length * heap.length + 1) heap false (.ref left) (.ref right) =
+      some (.error { typeName := "TypeError", args := [] }) := by
+  apply (compare_stabilized_result_iff heap false (.ref left) (.ref right) _).mpr
+  exact ⟨2, error_before_cycle heap isTuple left right 0 x leftFound rightFound⟩
+
+/-- Adding arbitrary private cells cannot unblock distinct cycles at native runtime fuel. -/
+theorem relocated_cycles_unresolved (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
+    (isTuple : Bool) (left right : Nat) (xs ys : List Mutable.Value)
+    (different : left ≠ right) (lengths : xs.length = ys.length)
+    (leftFound : logical[left]? = some (comparisonObject isTuple (.ref left :: xs)))
+    (rightFound : logical[right]? = some (comparisonObject isTuple (.ref right :: ys)))
+    (equality : Bool) :
+    HeapSort.compare (physical.length + 1) physical equality (.ref (rename left)) (.ref (rename right)) = none := by
+  exact layout.compare_stabilized_unresolved closed equality (.ref left) (.ref right)
+    (List.getElem?_eq_some_iff.mp leftFound).1 (List.getElem?_eq_some_iff.mp rightFound).1
+    (leading_cycles_unresolved logical isTuple left right xs ys different lengths leftFound rightFound _ equality) _
+
+/-- Dangling references remain unsupported, without assuming a closed heap. -/
+theorem missing_left_unresolved (heap : Mutable.Heap) (address fuel : Nat)
+    (missing : heap[address]? = none) (equality : Bool) (right : Mutable.Value) :
+    HeapSort.compare fuel heap equality (.ref address) right = none := by
+  cases fuel with
+  | zero => rfl
+  | succ fuel => cases right <;> simp [HeapSort.compare, missing]
+
+/-- The zero-object case still needs the initial positive fuel for scalar comparisons. -/
+theorem empty_heap_stabilized (extra : Nat) (equality : Bool) (left right : Mutable.Value) :
+    HeapSort.compare (1 + extra) [] equality left right = HeapSort.compare 1 [] equality left right :=
+  compare_stabilized [] extra equality left right
+
+end ComparisonStabilityExamples
+'''
+THEOREMS = [
+    "FormalSW.PyAst.Mutable.Relocation.finite_resolution_stable_on",
+    "FormalSW.PyAst.Mutable.Relocation.compare_positive_congr",
+    "FormalSW.PyAst.Mutable.Relocation.compare_step_congr",
+    "FormalSW.PyAst.Mutable.Relocation.mem_comparisonCoordinates",
+    "FormalSW.PyAst.Mutable.Relocation.length_comparisonCoordinates",
+    "FormalSW.PyAst.Mutable.Relocation.compare_stabilized",
+    "FormalSW.PyAst.Mutable.Relocation.compare_stabilized_none_iff",
+    "FormalSW.PyAst.Mutable.Relocation.compare_stabilized_result_iff",
+    "FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.compare_stabilized",
+    "FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.compare_stabilized_unresolved",
+    "ComparisonStabilityExamples.leading_cycles_unresolved",
+    "ComparisonStabilityExamples.identity_equal",
+    "ComparisonStabilityExamples.mismatch_before_cycle",
+    "ComparisonStabilityExamples.error_before_cycle",
+    "ComparisonStabilityExamples.stabilized_error_before_cycle",
+    "ComparisonStabilityExamples.relocated_cycles_unresolved",
+    "ComparisonStabilityExamples.missing_left_unresolved",
+    "ComparisonStabilityExamples.empty_heap_stabilized",
+]
+
+with project_temporary_directory(prefix="comparison-stability-") as temporary:
+    proof = Path(temporary) / "Checks.lean"
+    proof.write_text(PROOF + "\n".join(f"#print axioms {name}" for name in THEOREMS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(THEOREMS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"comparison stabilization: cycles, short circuits, exceptions and relocation; {len(THEOREMS)} axiom audits passed")
