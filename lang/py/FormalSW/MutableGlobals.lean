@@ -1249,6 +1249,12 @@ def sliceBounds (lower upper stride : Value) : Eval Py.Builtin.Slice.Slice := do
     let upper ← sliceBound upper
     return ⟨lower, upper, stride⟩
 
+/-- Integer slice bounds retain their signed values and preserve the heap. -/
+theorem sliceBounds_ints (lower upper stride : Int) (heap : Heap) (nonzero : stride ≠ 0) :
+    sliceBounds (.scalar (.int lower)) (.scalar (.int upper)) (.scalar (.int stride)) heap =
+      some (.ok { start := some lower, stop := some upper, step := some stride }, heap) := by
+  simp [sliceBounds, sliceBound, integer, nonzero]
+
 private def sequenceResult (result : Py.Builtin.Result α) : Eval α :=
   match result with
   | .ok value => pure value
