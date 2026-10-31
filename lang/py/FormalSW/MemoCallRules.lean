@@ -170,5 +170,19 @@ theorem assign (run : Evaluates module memoized spec env expression value)
   apply Runs.trans (run _)
   exact Runs.next (by trivial) rfl (rest stack)
 
+theorem augAssign (run : Evaluates module memoized spec env (.binOp (.name name) op expression) value)
+    (rest : BlockReturns module memoized spec (env.set name value) body result) :
+    BlockReturns module memoized spec env (.augAssign (.name name) op expression :: body) result := by
+  intro stack
+  exact Runs.next (by trivial) rfl ((run _).trans (Runs.next (by trivial) rfl (rest stack)))
+
+theorem while_loop (run : Evaluates module memoized spec env condition value)
+    (rest : BlockReturns module memoized spec env
+      ((if scalarTruth value then loop ++ [Calls.loopContinuation loop (.whileDo condition loop otherwise)]
+        else otherwise) ++ body) result) :
+    BlockReturns module memoized spec env (.whileDo condition loop otherwise :: body) result := by
+  intro stack
+  exact Runs.next (by trivial) rfl ((run _).trans (Runs.next (by trivial) rfl (rest stack)))
+
 end BlockReturns
 end FormalSW.PyAst.MemoCalls
