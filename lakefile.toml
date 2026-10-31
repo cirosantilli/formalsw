@@ -179,6 +179,8 @@ roots = [
   "lang.py.FormalSW.MachineBufferConstruction",
   "lang.py.FormalSW.DictionaryConstructionRelocation",
   "lang.py.FormalSW.MachineDictionaryConstruction",
+  "lang.py.FormalSW.NumericBuiltinRelocation",
+  "lang.py.FormalSW.MachineNumericBuiltins",
   "lang.py.FormalSW.MachineLoopInvariant",
   "lang.py.FormalSW.MachineLoopAcquisition",
   "lang.py.FormalSW.MachineExpressionInvariant",
