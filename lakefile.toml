@@ -216,6 +216,7 @@ roots = [
   "lang.py.FormalSW.SequenceAllocation",
   "lang.py.FormalSW.SequenceArithmeticAllocation",
   "lang.py.FormalSW.BufferAllocation",
+  "lang.py.FormalSW.BufferArithmeticAllocation",
   "lang.py.FormalSW.IteratorAllocatingOutcome",
   "lang.py.FormalSW.IteratorAllocatingTrace",
   "lang.py.FormalSW.IteratorAllocatingIsolation",
