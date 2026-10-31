@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""
+Check iterator set algebra, aliased operands, fresh copies and private consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Collector:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = self.left | self.right
+        return "123"
+
+
+def union(left, right):
+    return left | right
+
+
+def difference(left, right):
+    return left - right
+
+
+def update(left, right):
+    copied = left | right
+    left -= right
+    return copied
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace SetArithmeticIteratorExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Collector").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def fieldExpr (name : String) : Expr := .attribute (.name "self") name
+def tail : List Stmt := [.return (.constant (.string "123"))]
+def body : List Stmt := .assign [fieldExpr "link"] (.binOp (fieldExpr "left") .bitOr (fieldExpr "right")) :: tail
+def env (address : Nat) := functionEnv args body [.ref address] []
+def methodHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :
+    Except ExceptionObject Mutable.Value → Mutable.Heap
+  | .ok result => heap.set address (.instance classInfo.1 "Collector" (Mutable.putField fields "link" result))
+  | .error _ => heap
+def text (s : String) : Mutable.Value := .scalar (.string s)
+def methodOutcome (outcome : Except ExceptionObject Mutable.Value) := outcome.map (fun _ => text "123")
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class : Probe.module.findClass "Collector" = some classInfo := rfl
+theorem source_next : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args body)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Collector"
+    "__next__" fields classInfo.2 found source_class
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem field_read (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (name : String) (ordinary : name ≠ "__class__" ∧ name ≠ "__dict__" ∧ name ≠ "__weakref__") (value : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (field : fields.lookup name = some value) :
+    Evaluates Probe.module (env address) (fieldExpr name) heap value heap := by
+  apply Evaluates.field (Evaluates.lookup rfl)
+  simp [getAttribute, Mutable.eval_bind, found, instanceClass, source_class, field, ordinary.1, ordinary.2.1, ordinary.2.2]
+
+theorem method_trace (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (left right : Mutable.Value)
+    (items : List Constant) (resultAddress : Nat)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getLeft : fields.lookup "left" = some left) (getRight : fields.lookup "right" = some right)
+    (input : HeapCalls.Relocation.SetArithmeticInput heap .bitOr left right items)
+    (allocated : Mutable.allocateSet items heap = some (.ok (.ref resultAddress), after)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.method (.ref address) args body) [], [], heap⟩, used⟩ [])
+      (methodHeap after address fields (.ok (.ref resultAddress)))
+      (.completed (.ok ⟨methodOutcome (.ok (.ref resultAddress)), [], methodHeap after address fields (.ok (.ref resultAddress)), heap.length⟩) used []) := by
+  let frame := Frame.assignAttribute (.name "self") "link" tail (env address)
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.method (.ref address) args body) [], [], heap⟩
+      ⟨.value right, .binaryRight .bitOr left false :: [frame], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl
+      ((field_read heap address fields "left" (by decide) left found getLeft heap.length
+        [.binaryLeft .bitOr (fieldExpr "right") (env address) false, frame]).trans
+        (.next rfl (field_read heap address fields "right" (by decide) right found getRight heap.length
+          [.binaryRight .bitOr left false, frame])))))
+  have retained : after[address]? = some (.instance classInfo.1 "Collector" fields) := by
+    exact Heapq.preserves_allocateSet (SavedCell address (.instance classInfo.1 "Collector" fields))
+      (SavedCell.allocates address _) items heap _ after found allocated
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.value right, .binaryRight .bitOr left false :: [frame], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · have equal : heap.length = resultAddress ∧ heap ++ [.set items] = after := by
+      simpa [Mutable.allocateSet, Except.map] using allocated
+    have built : AllocatingTrace Probe.module heap.length choices [] heap
+        (.running ⟨⟨.value right, .binaryRight .bitOr left false :: [frame], heap⟩, used⟩ []) after
+        (.running ⟨⟨.value (.ref resultAddress), [frame], after⟩, used⟩ []) := by
+      simpa only [← equal.1, ← equal.2] using
+        (AllocatingTrace.setArithmetic (module := Probe.module) (anchors := heap.length) (choices := choices) (globals := [])
+          heap .bitOr left right items [frame] used [] input)
+    let result : Mutable.Value := .ref resultAddress
+    have write := Mutable.writeField_result (name := "link") (value := result) retained (by simp)
+    have assigned : HeapCalls.Reaches Probe.module heap.length
+        ⟨.value result, [frame], after⟩
+        ⟨.block tail (env address), [], methodHeap after address fields (.ok result)⟩ := by
+      apply HeapCalls.Reaches.next rfl
+      apply (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) .nil)
+        (.setField "link" result) [] heap.length _).trans
+      exact .next (following := ⟨.value (.scalar .none), [.discard tail (env address)], methodHeap after address fields (.ok result)⟩)
+        (by simp [HeapCalls.step, primitive, HeapCalls.result, run, write, methodHeap]) (.next rfl .refl)
+    have returned : BlockReturns Probe.module (env address) tail (methodHeap after address fields (.ok result))
+        (text "123") (methodHeap after address fields (.ok result)) := BlockReturns.return_value Evaluates.constant
+    exact built.trans (.stable rfl rfl (by simp [methodHeap])
+      ((IteratorCalls.Reaches.of_heap (assigned.trans (returned heap.length [])) []).trans (.next (core_done rfl rfl) .refl)))
+
+theorem next_run (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (left right : Mutable.Value)
+    (items : List Constant) (resultAddress : Nat)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getLeft : fields.lookup "left" = some left) (getRight : fields.lookup "right" = some right)
+    (input : HeapCalls.Relocation.SetArithmeticInput heap .bitOr left right items)
+    (allocated : Mutable.allocateSet items heap = some (.ok (.ref resultAddress), after)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (methodOutcome (.ok (.ref resultAddress)))
+      (methodHeap after address fields (.ok (.ref resultAddress))) used :=
+  ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], next_bound heap address fields found,
+    method_trace choices used heap after address fields left right items resultAddress found getLeft getRight input allocated⟩
+
+
+theorem union_next (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (address left right : Nat) (fields : List (String × Mutable.Value)) (xs ys : List Constant)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getLeft : fields.lookup "left" = some (.ref left)) (getRight : fields.lookup "right" = some (.ref right))
+    (first : heap[left]? = some (.set xs)) (second : heap[right]? = some (.set ys)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (.ok (text "123"))
+      (methodHeap (heap ++ [.set (ScalarSet.union xs ys)]) address fields (.ok (.ref heap.length))) used :=
+  next_run choices used heap _ address fields (.ref left) (.ref right) _ heap.length
+    found getLeft getRight (.union left right xs ys first second) rfl
+
+/-- Every finite prefix allocates one fresh set per yield; the source sets may alias. -/
+theorem prefixes (n : Nat) (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (address left right : Nat) (fields : List (String × Mutable.Value)) (xs ys : List Constant)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getLeft : fields.lookup "left" = some (.ref left)) (getRight : fields.lookup "right" = some (.ref right))
+    (first : heap[left]? = some (.set xs)) (second : heap[right]? = some (.set ys)) :
+    ∃ after, AllocatingYieldPrefix Probe.module choices (.ref address) text heap used (List.replicate n "123") after used ∧
+      after.length = heap.length + n := by
+  induction n generalizing heap fields with
+  | zero => exact ⟨heap, .nil, by simp⟩
+  | succ n ih =>
+    let middle := heap ++ [Mutable.Object.set (ScalarSet.union xs ys)]
+    let nextFields := Mutable.putField fields "link" (.ref heap.length)
+    let nextHeap := methodHeap middle address fields (.ok (.ref heap.length))
+    have ran := union_next choices used heap address left right fields xs ys found getLeft getRight first second
+    have bounded := (List.getElem?_eq_some_iff.mp found).1
+    have leftInside := (List.getElem?_eq_some_iff.mp first).1
+    have rightInside := (List.getElem?_eq_some_iff.mp second).1
+    have separateLeft : address ≠ left := by
+      intro same
+      subst left
+      rw [found] at first
+      cases first
+    have separateRight : address ≠ right := by
+      intro same
+      subst right
+      rw [found] at second
+      cases second
+    obtain ⟨after, later, size⟩ := ih nextHeap nextFields
+      (by simp [nextHeap, methodHeap, middle, nextFields, show address < heap.length + 1 by omega])
+      (by simpa [nextFields, Mutable.putField_lookup_other] using getLeft)
+      (by simpa [nextFields, Mutable.putField_lookup_other] using getRight)
+      (by simpa only [nextHeap, methodHeap, List.getElem?_set_ne separateLeft, middle, List.getElem?_append_left leftInside] using first)
+      (by simpa only [nextHeap, methodHeap, List.getElem?_set_ne separateRight, middle, List.getElem?_append_left rightInside] using second)
+    refine ⟨after, .cons ran later, ?_⟩
+    simp only [nextHeap, methodHeap, middle, List.length_set, List.length_append, List.length_singleton] at size
+    omega
+
+theorem isolated_next (choices : ChoiceSchedule) (used anchors : Nat) (logical physical : Mutable.Heap)
+    (rename : Nat → Nat) (address left right : Nat) (fields : List (String × Mutable.Value)) (xs ys : List Constant)
+    (layout : ExecutionLayout logical physical rename)
+    (found : logical[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getLeft : fields.lookup "left" = some (.ref left)) (getRight : fields.lookup "right" = some (.ref right))
+    (first : logical[left]? = some (.set xs)) (second : logical[right]? = some (.set ys)) :
+    ∃ other nextMap,
+      ExecutionLayout (methodHeap (logical ++ [.set (ScalarSet.union xs ys)]) address fields (.ok (.ref logical.length))) other nextMap ∧
+      (∀ privateAddress object, object ≠ .tuple [] → PrivateLayout logical physical rename privateAddress object →
+        PrivateLayout (methodHeap (logical ++ [.set (ScalarSet.union xs ys)]) address fields (.ok (.ref logical.length))) other nextMap privateAddress object) ∧
+      ∀ loop resumes, IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following) loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (loop.body ++ [Calls.loopContinuation loop.body (loopCode loop (.ref (rename address)))]
+          ++ loop.following) (setLocal loop.env loop.name (text "123")), loop.stack, other⟩, used⟩ resumes) := by
+  obtain ⟨other, nextMap, extended, kept, ran⟩ :=
+    (union_next choices used logical address left right fields xs ys found getLeft getRight first second).scalar_isolated
+      SetArithmeticIteratorExamples.source physical rename layout anchors
+  exact ⟨other, nextMap, extended.layout, kept, ran⟩
+
+theorem union_entry (heap : Mutable.Heap) (left right : Mutable.Value) :
+    HeapCalls.Reaches Probe.module heap.length ⟨.operation (.call "union") [left, right], [], heap⟩
+      ⟨.value right, [.binaryRight .bitOr left false], heap⟩ := by
+  repeat first | exact .refl | refine .next rfl ?_
+
+theorem difference_entry (heap : Mutable.Heap) (left right : Mutable.Value) :
+    HeapCalls.Reaches Probe.module heap.length ⟨.operation (.call "difference") [left, right], [], heap⟩
+      ⟨.value right, [.binaryRight .sub left false], heap⟩ := by
+  repeat first | exact .refl | refine .next rfl ?_
+
+theorem arithmetic_call (name : String) (op : BinOp) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (left right : Mutable.Value) (items : List Constant)
+    (entered : HeapCalls.Reaches Probe.module heap.length ⟨.operation (.call name) [left, right], [], heap⟩
+      ⟨.value right, [.binaryRight op left false], heap⟩)
+    (input : HeapCalls.Relocation.SetArithmeticInput heap op left right items) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call name) [left, right], [], heap⟩, used⟩ []) (heap ++ [.set items])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.set items], heap.length⟩) used []) := by
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.value right, [.binaryRight op left false], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · exact (AllocatingTrace.setArithmetic heap op left right items [] used [] input).trans
+      (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+theorem union_call (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (left right : Nat)
+    (xs ys : List Constant) (first : heap[left]? = some (.set xs)) (second : heap[right]? = some (.set ys)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "union") [.ref left, .ref right], [], heap⟩, used⟩ [])
+      (heap ++ [.set (ScalarSet.union xs ys)])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.set (ScalarSet.union xs ys)], heap.length⟩) used []) :=
+  arithmetic_call "union" .bitOr choices used heap _ _ _ (union_entry heap _ _) (.union left right xs ys first second)
+
+theorem difference_call (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (left right : Nat)
+    (xs ys : List Constant) (first : heap[left]? = some (.set xs)) (second : heap[right]? = some (.set ys)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "difference") [.ref left, .ref right], [], heap⟩, used⟩ [])
+      (heap ++ [.set (ScalarSet.difference xs ys)])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.set (ScalarSet.difference xs ys)], heap.length⟩) used []) :=
+  arithmetic_call "difference" .sub choices used heap _ _ _ (difference_entry heap _ _) (.difference left right xs ys first second)
+
+def updateTail : List Stmt := [.augAssign (.name "left") .sub (.name "right"), .return (.name "copied")]
+def updateBody : List Stmt := .assign [.name "copied"] (.binOp (.name "left") .bitOr (.name "right")) :: updateTail
+def updateArgs : List Arg := [{name := "left", annotation := none}, {name := "right", annotation := none}]
+def updateEnv (left right : Nat) := functionEnv updateArgs updateBody [.ref left, .ref right] []
+def updated (heap : Mutable.Heap) (left : Nat) (xs ys : List Constant) : Mutable.Heap :=
+  (heap ++ [Mutable.Object.set (ScalarSet.union xs ys)]).set left (.set (ScalarSet.difference xs ys))
+
+/-- Mutation of either aliased operand after copying leaves the new set and private consumers intact. -/
+theorem update_trace (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (left right : Nat)
+    (xs ys : List Constant) (first : heap[left]? = some (.set xs)) (second : heap[right]? = some (.set ys)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "update") [.ref left, .ref right], [], heap⟩, used⟩ []) (updated heap left xs ys)
+      (.completed (.ok ⟨.ok (.ref heap.length), [], updated heap left xs ys, heap.length⟩) used []) := by
+  let frame := Frame.assign "copied" updateTail (updateEnv left right)
+  let middle := heap ++ [Mutable.Object.set (ScalarSet.union xs ys)]
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.call "update") [.ref left, .ref right], [], heap⟩
+      ⟨.value (.ref right), [.binaryRight .bitOr (.ref left) false, frame], heap⟩ := by
+    repeat first | exact .refl | refine .next rfl ?_
+  have leftInside := (List.getElem?_eq_some_iff.mp first).1
+  have rightInside := (List.getElem?_eq_some_iff.mp second).1
+  have middleLeft : middle[left]? = some (.set xs) := by
+    simpa only [middle, List.getElem?_append_left leftInside] using first
+  have middleRight : middle[right]? = some (.set ys) := by
+    simpa only [middle, List.getElem?_append_left rightInside] using second
+  have returned : BlockReturns Probe.module (setLocal (updateEnv left right) "copied" (.ref heap.length))
+      updateTail middle (.ref heap.length) (updated heap left xs ys) := by
+    exact BlockReturns.augAssign rfl (Evaluates.lookup rfl)
+      (HeapCalls.inplace_difference_sets middle left right xs ys middleLeft middleRight)
+      (BlockReturns.return_value (Evaluates.lookup rfl))
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.value (.ref right), [.binaryRight .bitOr (.ref left) false, frame], heap⟩, used⟩ [])
+    (.stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])) ?_
+  refine (AllocatingTrace.setArithmetic heap .bitOr (.ref left) (.ref right) (ScalarSet.union xs ys)
+    [frame] used [] (.union left right xs ys first second)).trans ?_
+  exact .stable rfl rfl (by simp [updated])
+    ((IteratorCalls.Reaches.of_heap (.next rfl (returned heap.length [])) []).trans (.next (core_done rfl rfl) .refl))
+
+theorem isolated_update (choices : ChoiceSchedule) (used anchors : Nat) (logical physical : Mutable.Heap)
+    (rename : Nat → Nat) (left right : Nat) (xs ys : List Constant)
+    (layout : ExecutionLayout logical physical rename)
+    (first : logical[left]? = some (.set xs)) (second : logical[right]? = some (.set ys)) :
+    ∃ other nextMap, ExecutionLayout (updated logical left xs ys) other nextMap ∧
+      (∀ address object, object ≠ .tuple [] → PrivateLayout logical physical rename address object →
+        PrivateLayout (updated logical left xs ys) other nextMap address object) ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.operation (.call "update") [.ref (rename left), .ref (rename right)], [], physical⟩, used⟩ [])
+        (.completed (.ok ⟨.ok (.ref (nextMap logical.length)), [], other, anchors⟩) used []) := by
+  have inside : IteratorCalls.Relocation.StateWithin logical.length
+      (.running ⟨⟨.operation (.call "update") [.ref left, .ref right], [], logical⟩, used⟩ []) := by
+    have li := (List.getElem?_eq_some_iff.mp first).1
+    have ri := (List.getElem?_eq_some_iff.mp second).1
+    simp [IteratorCalls.Relocation.StateWithin,
+      HeapCalls.Relocation.WorkWithin, HeapCalls.Relocation.OperationWithin, Mutable.Value.edge, Graph.Edge.Within, li, ri]
+  obtain ⟨other, nextMap, extended, _, kept, ran⟩ :=
+    (update_trace choices used logical left right xs ys first second).isolated
+      source physical rename anchors layout inside (by simp [HeapCalls.Relocation.GlobalsWithin])
+  exact ⟨other, nextMap, extended.layout, kept, ran⟩
+
+end SetArithmeticIteratorExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation.SetArithmeticInput." + name for name in (
+    "relocates", "binary",
+)] + ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "setArithmetic_step", "AllocatingTrace.reaches", "AllocatingTrace.isolated",
+)] + ["SetArithmeticIteratorExamples." + name for name in (
+    "source", "source_class", "source_next", "next_bound", "field_read", "method_trace", "next_run",
+    "union_next", "prefixes", "isolated_next", "union_entry", "difference_entry", "arithmetic_call",
+    "union_call", "difference_call", "update_trace", "isolated_update",
+)]
+
+with project_temporary_directory(prefix="iterator-set-arithmetic-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for xs, ys in (([], []), ([True, 2, 3], [1, 3, 4]), ([None, "λ", b"x"], [None, b"y"]),
+                   ([2**140, -3], [2**140, 7])):
+        for shared in (False, True):
+            left = set(xs)
+            right = left if shared else set(ys)
+            before_left, before_right = left.copy(), right.copy()
+            collector = namespace["Collector"]()
+            collector.left, collector.right = left, right
+            previous = []
+            for _ in range(5):
+                assert next(collector) == "123"
+                assert collector.link == before_left | before_right
+                assert collector.link is not left and collector.link is not right
+                assert all(collector.link is not item for item in previous)
+                previous.append(collector.link)
+            for name, expected in (("union", before_left | before_right), ("difference", before_left - before_right)):
+                result = namespace[name](left, right)
+                assert result == expected and result is not left and result is not right
+                assert left == before_left and right == before_right
+            copied = namespace["update"](left, right)
+            assert copied == before_left | before_right and copied is not left and copied is not right
+            assert left == before_left - before_right
+            assert right == (left if shared else before_right)
+            assert all(item == copied for item in previous)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAllocatingAcquisition\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"set algebra iterators: fresh union and difference, aliased updates, finite prefixes and private consumers; {len(AUDITS)} axiom audits passed")

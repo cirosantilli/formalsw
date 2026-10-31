@@ -127,6 +127,28 @@ theorem AllocatingTrace.isolated {module : Module} {logicalAnchors : Nat} {choic
         (resumes.map (Relocation.relocateResume rename))
         (input.relocates layout
           (by simpa only [FrameWithin] using inside.2.1 _ (List.mem_cons_self ..)) inside.1)
+  | setArithmetic heap op left right items stack used resumes input =>
+    let nextMap := extendMap rename heap.length physical.length
+    let other := physical ++ [Mutable.Object.set items]
+    have agree : ∀ index < heap.length, nextMap index = rename index := extendMap_old _ _ _
+    have retained := (layout.allocateSet items).2.2
+    have stackInside : ∀ frame ∈ stack, FrameWithin heap.length frame :=
+      fun frame member => inside.2.1 frame (List.mem_cons_of_mem _ member)
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree stackInside
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    refine ⟨other, nextMap, ⟨retained, by simp, by simp [other], agree⟩, ?_, ?_, ?_⟩
+    · exact ⟨by simp [WorkWithin, Mutable.Value.edge, Graph.Edge.Within],
+        fun frame member => (stackInside frame member).mono (by simp),
+        fun pending member => (inside.2.2 pending member).mono (by simp)⟩
+    · intro address object _ saved
+      exact (saved.allocateSet items).2.2
+    · apply Reaches.next ?_ .refl
+      simp only [Relocation.relocateState, Relocation.relocateCore, HeapCalls.Relocation.relocateState,
+        relocateWork, List.map_cons, relocateFrame, relocateValue, nextMap, extendMap_new, stackSame, resumesSame]
+      exact setArithmetic_step module physicalAnchors used choices (relocateGlobals rename globals)
+        physical op (relocateValue rename left) (relocateValue rename right) items (stack.map (relocateFrame rename))
+        (resumes.map (Relocation.relocateResume rename))
+        (input.relocates layout)
   | sequenceArithmetic heap after op left right asTuple items address stack used resumes input allocated =>
     obtain ⟨other, nextMap, paired, retained, agree, grows, physicalGrows, bounded, kept⟩ :=
       layout.allocateSequence asTuple items (input.within layout.closed) address after allocated

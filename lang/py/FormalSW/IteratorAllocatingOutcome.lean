@@ -3,6 +3,7 @@ import lang.py.FormalSW.DictionaryAllocation
 import lang.py.FormalSW.SequenceAllocation
 import lang.py.FormalSW.BufferAllocation
 import lang.py.FormalSW.BufferArithmeticAllocation
+import lang.py.FormalSW.SetArithmeticAllocation
 import lang.py.FormalSW.SequenceArithmeticAllocation
 
 /-! Allocating operations retain their heap on success and on ordinary exceptions. -/
@@ -142,6 +143,16 @@ theorem bufferArithmetic_step (module : Module) (anchors used : Nat) (choices : 
     (input : BufferArithmeticInput heap op left right bytes) :
     step module anchors choices (.running ⟨⟨.value right, .binaryRight op left false :: stack, heap⟩, used⟩ resumes) globals =
       .next (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [.bytearray bytes]⟩, used⟩ resumes) := by
+  have ran := input.binary
+  apply core_next rfl
+  simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, result, run, ran]
+
+theorem setArithmetic_step (module : Module) (anchors used : Nat) (choices : ChoiceSchedule)
+    (globals : Mutable.Globals) (heap : Mutable.Heap) (op : BinOp) (left right : Mutable.Value)
+    (items : List Constant) (stack : List Frame) (resumes : List Resume)
+    (input : SetArithmeticInput heap op left right items) :
+    step module anchors choices (.running ⟨⟨.value right, .binaryRight op left false :: stack, heap⟩, used⟩ resumes) globals =
+      .next (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [.set items]⟩, used⟩ resumes) := by
   have ran := input.binary
   apply core_next rfl
   simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, result, run, ran]

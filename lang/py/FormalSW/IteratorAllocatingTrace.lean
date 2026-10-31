@@ -62,6 +62,13 @@ inductive AllocatingTrace (module : Module) (anchors : Nat) (choices : ChoiceSch
         (.running ⟨⟨.value right, .binaryRight op left false :: stack, heap⟩, used⟩ resumes)
         (heap ++ [.bytearray bytes])
         (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [.bytearray bytes]⟩, used⟩ resumes)
+  | setArithmetic (heap : Mutable.Heap) (op : BinOp) (left right : Mutable.Value)
+      (items : List Constant) (stack : List Frame) (used : Nat) (resumes : List Resume)
+      (input : SetArithmeticInput heap op left right items) :
+      AllocatingTrace module anchors choices globals heap
+        (.running ⟨⟨.value right, .binaryRight op left false :: stack, heap⟩, used⟩ resumes)
+        (heap ++ [.set items])
+        (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [.set items]⟩, used⟩ resumes)
   | sequenceArithmetic (heap after : Mutable.Heap) (op : BinOp) (left right : Mutable.Value)
       (asTuple : Bool) (items : List Mutable.Value) (address : Nat) (stack : List Frame) (used : Nat) (resumes : List Resume)
       (input : SequenceArithmeticInput heap op left right asTuple items)
@@ -144,7 +151,7 @@ theorem AllocatingTrace.heaps {module : Module} {anchors : Nat} {choices : Choic
     HeapAt before first ∧ HeapAt after final := by
   induction trace with
   | stable firstHeap finalHeap => exact ⟨firstHeap, finalHeap⟩
-  | list | dictionary | tuple | sequenceConstruction | bufferConstruction | sequenceArithmetic | bufferArithmetic | newInstance | initializedInstance | dataInstance => exact ⟨rfl, rfl⟩
+  | list | dictionary | tuple | sequenceConstruction | bufferConstruction | sequenceArithmetic | bufferArithmetic | setArithmetic | newInstance | initializedInstance | dataInstance => exact ⟨rfl, rfl⟩
   | setAllocation _ _ _ _ _ _ _ _ outcome _ _ => cases outcome <;> exact ⟨rfl, rfl⟩
   | dictionaryConstruct _ _ _ _ _ _ outcome _ _ => cases outcome <;> exact ⟨rfl, rfl⟩
   | trans _ _ left right => exact ⟨left.1, right.2⟩
@@ -162,6 +169,8 @@ theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : Cho
     exact .next (bufferAllocation_step module anchors used choices globals heap operation values bytes stack resumes input) .refl
   | bufferArithmetic heap op left right bytes stack used resumes input =>
     exact .next (bufferArithmetic_step module anchors used choices globals heap op left right bytes stack resumes input) .refl
+  | setArithmetic heap op left right items stack used resumes input =>
+    exact .next (setArithmetic_step module anchors used choices globals heap op left right items stack resumes input) .refl
   | sequenceArithmetic heap after op left right asTuple items address stack used resumes input allocated =>
     exact .next (sequenceArithmetic_step module anchors used choices globals heap after op left right asTuple items address stack resumes input allocated) .refl
   | sequenceConstruction heap after operation values items asTuple address stack used resumes input allocated =>
