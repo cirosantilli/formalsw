@@ -32,6 +32,10 @@ def unpack(items, start):
     prepare(items, start)
     value, value = items
     return value
+
+def direct(items, start):
+    prepare(items, start)
+    return start
 '''
 PROOF = r'''
 open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
@@ -212,11 +216,83 @@ theorem paired_finishes (logical physical : Mutable.Heap) (rename : Nat → Nat)
       exact bounded)
   simpa [after] using retained
 
+theorem direct_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (start : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "direct" [.ref address, start] heap start (after heap address items start) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+    (prepare_returns heap address items start found))
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+/-- Repeated targets retain the last value while the preceding shared append remains observable. -/
+theorem unpack_equiv (heap : Mutable.Heap) (address : Nat) (first last : Mutable.Value)
+    (found : heap[address]? = some (.list [first])) :
+    (IteratorCalls.call Probe.module "unpack" [.ref address, last] heap).Equiv
+      (IteratorCalls.call Probe.module "direct" [.ref address, last] heap) := by
+  have left : (HeapCalls.call Probe.module "unpack" [.ref address, last] heap).Finishes
+      ⟨.ok last, [], after heap address [first] last, heap.length⟩ := unpack_finishes heap address [first] last found
+  have right := (direct_returns heap address [first] last found).finishes
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (IteratorCalls.finishes_of_set (SetCalls.finishes_of_heap left leftChoices 0) (by
+      intro completion equal; cases equal; simp))
+    (IteratorCalls.finishes_of_set (SetCalls.finishes_of_heap right rightChoices 0) (by
+      intro completion equal; cases equal; simp)) (Or.inl rfl)
+
+/-- Unpacking uses the append's proved output invariant for any target count and saved consumers. -/
+theorem append_then_unpack (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (names : List String) (following : List Stmt) (env : HeapCalls.Env)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (envInside : EnvWithin logical.length env)
+    (bodyInside : ∀ statement ∈ following, StmtWithin logical.length statement)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (after logical address items item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.value (.ref address), [.unpack names following env], after logical address items item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.value (.ref address), [.unpack names following env], after logical address items item⟩, used⟩ resumes))) := by
+  have addressInside := (List.getElem?_eq_some_iff.mp found).1
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have unpackInside : StateWithin ⟨.value (.ref address), [.unpack names following env], after logical address items item⟩ := by
+    refine ⟨Nat.lt_of_lt_of_le addressInside larger, ?_⟩
+    simp only [List.mem_singleton, forall_eq, FrameWithin]
+    exact ⟨envInside.mono larger, fun statement member => (bodyInside statement member).mono larger⟩
+  have raw := step_unpack_preserves Probe.module _ other nextMap logical.length physical.length
+    (.ref address) names following env [] [] retained unpackInside nextGlobals
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.value (.ref address), [.unpack names following env], after logical address items item⟩, used⟩ other nextMap
+    logical.length physical.length [] retained unpackInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨unpackInside.1, unpackInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
 end MachineBindingExamples
 '''
 AUDITS = ["MachineBindingExamples." + name for name in (
+    "direct_returns", "unpack_equiv", "append_then_unpack",
     "prepare_returns", "source_finishes", "unpack_finishes", "answers_relocate", "paired_finishes",
 )] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "step_unpack_preserves", "step_unpack_start_preserves", "step_assignment", "step_assignment_preserves",
     "step_for_unpack_dispatch", "step_for_unpack_relocates", "step_for_other_dispatch",
     "step_for_other_relocates", "step_for_relocates", "StateWithin.for_unpack",
     "StateWithin.for_other", "StateWithin.forIn",
@@ -270,12 +346,15 @@ with project_temporary_directory(prefix="machine-binding-") as temporary:
         else:
             assert count == 1 and result is value
         assert len(items) == count + 1 and items[-1] is value
-    cycle = [object()]
-    assert namespace["unpack"](cycle, cycle) is cycle and cycle[-1] is cycle
+    for name in ("unpack", "direct"):
+        cycle = []
+        cycle.append(cycle)
+        assert namespace[name](cycle, cycle) is cycle
+        assert len(cycle) == 2 and cycle[0] is cycle and cycle[1] is cycle
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineForDispatch\n"
+    proof.write_text("import lang.py.FormalSW.MachineStatementInvariant\nimport lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
