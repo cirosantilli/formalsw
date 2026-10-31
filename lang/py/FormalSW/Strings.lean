@@ -2,6 +2,7 @@ import lang.py.FormalSW.Runtime
 import lang.py.builtin.type.sequence
 import lang.py.builtin.type.bytes
 import lang.py.builtin.function
+import lang.py.builtin.type.unicode
 
 /-! Scalar sequence operations distinguish Unicode characters from raw bytes.
 As with the unbounded call stack, decimal conversion has no configurable
@@ -41,6 +42,10 @@ def str : List Constant → Except ExceptionObject Constant
   | [] => .ok (.string "")
   | [value] => .ok (.string (convert value))
   | _ => .error typeError
+
+/-- Empty strings fail; every character must have the Unicode Decimal or Digit property. -/
+def isDigit (text : String) : Bool :=
+  !text.isEmpty && text.toList.all fun character => Py.Builtin.Unicode.isDigit character.toNat
 
 /-- Zero padding counts Unicode characters and follows an optional ASCII sign. -/
 def zfill (text : String) (width : Int) : String :=

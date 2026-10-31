@@ -70,6 +70,7 @@ roots = [
   "lang.py.FormalSW.ComprehensionCalls",
   "lang.py.FormalSW.GeneratorCalls",
   "lang.py.FormalSW.NextCalls",
+  "lang.py.FormalSW.DigitCalls",
   "lang.py.FormalSW.PermutationCalls",
   "lang.py.FormalSW.CombinationCalls",
   "lang.py.FormalSW.ZipCalls",

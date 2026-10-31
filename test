@@ -113,6 +113,7 @@ def main() -> int:
         TestCase("Unicode whitespace methods", Path("tests/py/whitespace_calls.py"), 0, "All 6 checks passed"),
         TestCase("string joining", Path("tests/py/join_calls.py"), 0, "All 5 checks passed"),
         TestCase("ASCII string uppercasing", Path("tests/py/string_upper.py"), 0, "All 2 checks passed"),
+        TestCase("Unicode digit classification", Path("tests/py/string_digits.py"), 0, "All 5 checks passed"),
         TestCase("generator exception boundaries", Path("tests/py/generator_exceptions.py"), 0, "All 6 checks passed"),
         TestCase("immediate generator consumers", Path("tests/py/consumed_generators.py"), 0, "All 8 checks passed"),
         TestCase("short-circuiting truth consumers", Path("tests/py/truth_consumers.py"), 0, "All 2 checks passed"),

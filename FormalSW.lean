@@ -30,6 +30,7 @@ import lang.py.FormalSW.ComprehensionCalls
 import lang.py.FormalSW.DictionaryValuesCalls
 import lang.py.FormalSW.GeneratorCalls
 import lang.py.FormalSW.NextCalls
+import lang.py.FormalSW.DigitCalls
 import lang.py.FormalSW.PermutationCalls
 import lang.py.FormalSW.CombinationCalls
 import lang.py.FormalSW.ZipCalls

@@ -566,7 +566,7 @@ def uses_heap_calls(module, function):
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes | {"bytearray", "list", "tuple", "set", "dict", "sorted", "all", "any"}
                     or isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id in ("divmod", "bytes") and not bindings(module, node.func.id)
-                    or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get', 'setdefault', 'pop', 'count', 'join', 'replace', 'zfill', 'sort', 'strip', 'split', 'upper')):
+                    or isinstance(node, ast.Attribute) and node.attr in ('append', 'add', 'get', 'setdefault', 'pop', 'count', 'join', 'replace', 'zfill', 'sort', 'strip', 'split', 'upper', 'isdigit')):
                 return True
             pending.extend(functions[target] for target in call_targets(node) if target in functions)
     return False

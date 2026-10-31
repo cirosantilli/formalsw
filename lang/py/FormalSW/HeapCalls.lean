@@ -534,6 +534,7 @@ inductive Operation where
   | generatorCollect (action : GeneratorAction) (element : Expr) (generators : List (Expr × Expr × List Expr)) (env : Env)
   | nextGenerator (fallback : Option Expr) (element : Expr)
       (generators : List (Expr × Expr × List Expr)) (env : Env)
+  | isDigit (receiver : Value)
 
 /-- The sequence reference and lexical key environment persist across key calls. -/
 structure SequenceExtremum where
@@ -1410,6 +1411,14 @@ def primitive : Operation → List Value → Eval Value
   | .zfill _, _ => Mutable.error "TypeError"
   | .upper text, [] => scalarResult (Strings.upperCall text [])
   | .upper _, _ => Mutable.error "TypeError"
+  | .isDigit (.scalar (.string text)), [] => pure (.scalar (.bool (Strings.isDigit text)))
+  | .isDigit (.scalar (.bytes bytes)), [] =>
+      pure (.scalar (.bool (Py.Builtin.Bytes.isDigit bytes)))
+  | .isDigit (.ref address), [] => do
+      match (← get)[address]? with
+      | some (.bytearray bytes) => pure (.scalar (.bool (Py.Builtin.Bytes.isDigit bytes)))
+      | _ => Mutable.unsupported
+  | .isDigit _, _ => Mutable.error "TypeError"
   | .join separator, [value] => do
       if let .ref address := value then
         match (← get)[address]? with
@@ -1699,6 +1708,9 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
               | some (.list _) => pure (.count address)
               | _ => Mutable.unsupported
             else if name = "get" ∨ name = "setdefault" then Mutable.error "AttributeError"
+            else if name = "isdigit" then match (← get)[address]? with
+              | some (.bytearray _) => pure (.isDigit receiver)
+              | _ => Mutable.error "AttributeError"
             else if name = "upper" then match (← get)[address]? with
               | some (.bytearray _) => Mutable.unsupported
               | _ => Mutable.error "AttributeError"
@@ -1714,17 +1726,20 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
             else Mutable.unsupported
         | some (.set _) | some (.keySet _) =>
             if name = "add" then pure (.add address)
-            else if name = "count" ∨ name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
+            else if name = "count" ∨ name = "append" ∨ name = "get" ∨ name = "setdefault" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" ∨ name = "isdigit" then Mutable.error "AttributeError" else Mutable.unsupported
         | some (.dict _) | some (.keyDict _) =>
             if name = "get" then pure (.dictionaryGet address)
             else if name = "setdefault" then pure (.dictionarySetDefault address)
             else if name = "clear" then pure (.dictionaryClear address)
-            else if name = "count" ∨ name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
+            else if name = "count" ∨ name = "append" ∨ name = "add" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" ∨ name = "isdigit" then Mutable.error "AttributeError" else Mutable.unsupported
         | some (.tuple _) =>
-            if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
+            if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" ∨ name = "isdigit" then Mutable.error "AttributeError" else Mutable.unsupported
         | none => Mutable.unsupported
     | .scalar value =>
-        if name = "upper" then match value with
+        if name = "isdigit" then match value with
+          | .string _ | .bytes _ => pure (.isDigit receiver)
+          | _ => Mutable.error "AttributeError"
+        else if name = "upper" then match value with
           | .string text => pure (.upper text)
           | .bytes _ => Mutable.unsupported
           | _ => Mutable.error "AttributeError"
@@ -1751,7 +1766,7 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
         else if name = "count" then match value with
           | .string _ | .bytes _ => Mutable.unsupported
           | _ => Mutable.error "AttributeError"
-        else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" then Mutable.error "AttributeError" else Mutable.unsupported
+        else if name = "append" ∨ name = "add" ∨ name = "get" ∨ name = "setdefault" ∨ name = "pop" ∨ name = "replace" ∨ name = "zfill" ∨ name = "sort" ∨ name = "strip" ∨ name = "split" ∨ name = "upper" ∨ name = "isdigit" then Mutable.error "AttributeError" else Mutable.unsupported
   if name = "$formalsw.sort.reverse" then
     match (← resolve "sort") with
     | .sort address => pure (.sortReverse address)
@@ -2575,7 +2590,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | isDigit _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>

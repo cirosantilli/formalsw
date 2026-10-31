@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+Compare Unicode and ASCII digit tests, dispatch, and evaluation order with Python.
+"""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import unicodedata
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def string(value):
+    return '(String.ofList [' + ', '.join(f'Char.ofNat {ord(ch)}' for ch in value) + '])'
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    return '.string ' + string(value)
+
+
+source = '''
+def convert(text: str):
+    return text.isdigit()
+def receiver(log: list[str]):
+    log.append("receiver")
+    return "٢²0"
+def argument(log: list[str]):
+    log.append("argument")
+    return 1
+def fail(log: list[str]):
+    log.append("failure")
+    raise ValueError()
+def ordered(log: list[str]):
+    return receiver(log).isdigit()
+def wrong_arity(log: list[str]):
+    return receiver(log).isdigit(argument(log), argument(log))
+def argument_failure(log: list[str]):
+    return receiver(log).isdigit(fail(log))
+def receiver_failure(log: list[str]):
+    return fail(log).isdigit(argument(log))
+def missing_scalar(log: list[str]):
+    return (3).isdigit(argument(log))
+def missing_list(log: list[str]):
+    return log.isdigit(argument(log))
+def missing_tuple(log: list[str]):
+    return ().isdigit(argument(log))
+def missing_set(log: list[str]):
+    return set().isdigit(argument(log))
+def missing_dict(log: list[str]):
+    return {}.isdigit(argument(log))
+def bytes_wrong_arity(log: list[str]):
+    return b"12".isdigit(argument(log))
+def buffer_wrong_arity(log: list[str]):
+    return bytearray([49]).isdigit(argument(log))
+class Custom:
+    def isdigit(self, log: list[str]):
+        log.append("custom")
+        return 7
+class Field:
+    def __init__(self):
+        self.isdigit = 3
+def custom(log: list[str]):
+    return Custom().isdigit(log)
+def field_not_callable(log: list[str]):
+    return Field().isdigit(argument(log))
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+functions = [node for node in program.body if isinstance(node, ast.FunctionDef)]
+for function in functions:
+    assert not checker.check(function.name), (function.name, checker.check(function.name))
+assert uses_heap_calls(program, functions[0])
+assert SupportChecker(ast.parse('def f(text: str): return text.isdigit(value=1)')).check('f')
+world = {}
+exec(source, world)
+checks = []
+
+
+def compare(value):
+    if type(value) is bytearray:
+        argument = '.ref 0'
+        heap = '[.bytearray [' + ', '.join(map(str, value)) + ']]'
+    else:
+        argument = '.scalar (' + constant(value) + ')'
+        heap = '[]'
+    try:
+        answer = world['convert'](value)
+        outcome = '.ok (.scalar (' + constant(answer) + '))'
+    except AttributeError:
+        outcome = '.error ⟨"AttributeError", []⟩'
+    checks.append(f'example : (match (HeapCalls.call source "convert" [{argument}] {heap}).execution.observe 100 with\n'
+                  f'  | .done (.ok c) => c.outcome == {outcome} && c.heap == {heap}\n'
+                  '  | _ => false) = true := by native_decide')
+
+
+for text in ('', '0', '1234567890', '٢²０', 'Ⅳ', '½', '四', '²', '₁', '①', '⑩', '⓪', '𐩀',
+             '𐹠', '\U00010d40', '\U0001ccf0', '12\x00', '1\u0301', '12a', ' 12', '12\n', '😀',
+             ''.join(chr(point) for point in range(128))):
+    compare(text)
+for value in (None, False, True, 0, 123):
+    compare(value)
+for factory in (bytes, bytearray):
+    for values in ([], [48], [48, 57], [47], [58], [178], [0], list(range(256))):
+        compare(factory(values))
+
+with project_temporary_directory(prefix='digit-check-') as directory:
+    directory = Path(directory)
+    path = directory / 'source.py'
+    path.write_text(source)
+    module = api['source_module'](path)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    prelude = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+               'def source : Module := pyast_from_json% (include_str "source.json")']
+    for function in functions[4:]:
+        name = function.name
+        log = []
+        try:
+            answer = world[name](log)
+            outcome = '.ok (.scalar (' + constant(answer) + '))'
+        except (AttributeError, TypeError, ValueError) as error:
+            outcome = f'.error ⟨"{type(error).__name__}", []⟩'
+        values = ', '.join('.scalar (' + constant(value) + ')' for value in log)
+        checks.append(f'example : (match (HeapCalls.call source "{name}" [.ref 0] [.list []]).execution.observe 500 with\n'
+                      f'  | .done (.ok c) => c.outcome == {outcome} && c.heap[0]? == some (.list [{values}])\n'
+                      '  | _ => false) = true := by native_decide')
+    for point in range(256):
+        expected = str(bytes([point]).isdigit()).lower()
+        checks.append(f'example : FormalSW.Py.Builtin.Bytes.isDigit [{point}] = {expected} := by native_decide')
+    proof = directory / 'Checks.lean'
+    for start in range(0, len(checks), 50):
+        proof.write_text('\n'.join(prelude + checks[start:start + 50]) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+    print(f'{len(checks)} digit method and byte classification comparisons passed', flush=True)
+
+    # The model and project Python version use this same finite Unicode database.
+    assert unicodedata.unidata_version == '16.0.0', unicodedata.unidata_version
+    for plane in range(17):
+        start = plane * 0x10000
+        points = [point for point in range(start, start + 0x10000) if chr(point).isdigit()]
+        expected = '[' + ', '.join(map(str, points)) + ']'
+        proof.write_text('\n'.join([
+            'import FormalSW',
+            'example : ((List.range 0x10000).filter fun offset =>',
+            f'  FormalSW.Py.Builtin.Unicode.isDigit ({start} + offset)).map ({start} + ·) =',
+            f'  {expected} := by native_decide',
+        ]) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+        print(f'Checked Unicode digit plane {plane}', flush=True)
+
+print('All 1,114,112 Unicode code points agree with Python isdigit()')
