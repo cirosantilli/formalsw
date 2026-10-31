@@ -15,7 +15,7 @@ from lang.py.class_support import resolve_record_inputs
 from lang.py.typing_support import resolve_typing_annotations
 from lang.py.mutable_support import check_mutable
 from lang.py.sorting_support import MERGE_SORT, QUICK_SORT, body_of, matches_sort
-from lang.py.memo_support import cache_decorator, uses_memoized
+from lang.py.memo_support import cache_argument, cache_decorator, uses_memoized
 from lang.py.named_callbacks import lower_named_callbacks
 from lang.py.call_support import uses_parallel_model, check_calls, uses_calls_model, uses_heap_calls, uses_set_iteration, uses_heap_memoized, uses_builtin, uses_method, uses_library_calls, uses_bytes, uses_assertions
 
@@ -84,8 +84,8 @@ class SupportChecker:
         if function.decorator_list and not cache_decorator(self.module, function):
             reject(function, 'decorators require an unmodified functools.lru_cache(None) import')
         if cache_decorator(self.module, function):
-            if function.args.defaults or any(annotation_kind(arg.annotation) != 'int' for arg in function.args.args):
-                reject(function, 'memoized functions require integer positional arguments without defaults')
+            if function.args.defaults or any(not cache_argument(arg.annotation) for arg in function.args.args):
+                reject(function, 'memoized functions require integer or immutable integer-tuple positional arguments without defaults')
             if parallel or mutable or uses_parallel_model(function):
                 reject(function, 'memoized functions require scalar call execution')
         if getattr(function, 'type_params', []):

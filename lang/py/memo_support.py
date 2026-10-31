@@ -4,6 +4,7 @@ from pathlib import Path
 
 from lang.py.imports import bindings
 from lang.py.call_graph import call_targets
+from lang.py.global_inputs import annotation_kind
 
 
 def cache_decorator(module, function):
@@ -67,6 +68,27 @@ def cache_decorator(module, function):
     if any((root / 'functools.py').exists() or (root / 'functools').is_dir() for root in roots):
         return False
     return True
+
+
+
+def cache_argument(annotation):
+    """Accept integer leaves in fixed or variadic immutable tuple annotations."""
+    kind = annotation_kind(annotation)
+    if kind is None:
+        return False
+
+    def accepted(node):
+        if isinstance(node, ast.Name):
+            return node.id == 'int'
+        if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+                and node.value.id == 'tuple'):
+            return False
+        fields = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+        if len(fields) == 2 and isinstance(fields[1], ast.Constant) and fields[1].value is Ellipsis:
+            fields = fields[:1]
+        return all(accepted(field) for field in fields)
+
+    return accepted(ast.parse(kind, mode='eval').body)
 
 
 def memoized_names(module):

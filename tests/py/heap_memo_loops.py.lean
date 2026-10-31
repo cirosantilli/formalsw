@@ -8,7 +8,7 @@ private abbrev number (n : Int) : Mutable.Value := .scalar (.int n)
 
 /-- Successful cached results are scalars, even though misses allocate a list. -/
 private def spec (_heap : Mutable.Heap) (key : MemoCalls.Key) (value : Mutable.Value) : Prop :=
-  ∃ n, key = ⟨"seed", [n]⟩ ∧ value = number n
+  ∃ n, key = ⟨"seed", [n], none⟩ ∧ value = number n
 
 private theorem preserves (before after : Mutable.Heap) : Cache.Preserves spec before after :=
   fun _ valid => valid

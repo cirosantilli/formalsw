@@ -1,4 +1,5 @@
 import lang.py.FormalSW.Calls
+import lang.py.FormalSW.HashKeys
 
 /-! Scalar calls with unbounded memoization. Cache keys contain exact integer
 arguments; cache observation and mutation are not exposed to source programs.
@@ -10,6 +11,7 @@ namespace FormalSW.PyAst.MemoCalls
 structure Key where
   name : String
   arguments : List Int
+  structuredArguments : Option (List HashKey) := none
 deriving DecidableEq, BEq
 
 abbrev Cache := Key → Option Constant
@@ -92,7 +94,7 @@ def step (module : Module) (memoized : List String) (state : State) : Step State
         match integerArguments values with
         | none => .unsupported
         | some arguments =>
-            let key : Key := ⟨name, arguments⟩
+            let key : Key := ⟨name, arguments, none⟩
             match state.cache key with
             | some value => .next { state with current := ⟨.value value, stack⟩ }
             | none =>
@@ -255,18 +257,18 @@ theorem memoized_function (cached : name ∈ memoized)
     (arity : args.length = values.length)
     (run : BlockReturns module memoized spec (argumentEnv args (values.map Constant.int))
       (executableBody body) value)
-    (correct : spec ⟨name, values⟩ value)
-    (unique : ∀ other, spec ⟨name, values⟩ other → other = value) :
+    (correct : spec ⟨name, values, none⟩ value)
+    (unique : ∀ other, spec ⟨name, values, none⟩ other → other = value) :
     ReturnsValue module memoized spec name (values.map Constant.int) value := by
   intro stack callers cache valid
-  cases hit : cache ⟨name, values⟩ with
+  cases hit : cache ⟨name, values, none⟩ with
   | some other =>
       have equal := unique other (valid _ _ hit)
       subst other
       exact ⟨cache, valid, .next (by simp [step, cached, hit]) .refl⟩
   | none =>
-      obtain ⟨updated, preserved, bodyRun⟩ := run [] (⟨⟨name, values⟩, stack⟩ :: callers) cache valid
-      refine ⟨updated.insert ⟨name, values⟩ value, preserved.insert correct, ?_⟩
+      obtain ⟨updated, preserved, bodyRun⟩ := run [] (⟨⟨name, values, none⟩, stack⟩ :: callers) cache valid
+      refine ⟨updated.insert ⟨name, values, none⟩ value, preserved.insert correct, ?_⟩
       exact .next (by simp [step, cached, hit, Calls.step, found, arity])
         (bodyRun.trans (.next rfl .refl))
 

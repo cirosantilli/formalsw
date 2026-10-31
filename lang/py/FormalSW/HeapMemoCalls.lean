@@ -69,6 +69,64 @@ def integerArguments : List Value → Option (List Int)
   | nil => rfl
   | cons value values ih => simp [integerArguments, ih]
 
+mutual
+  /-- Integer leaves and immutable tuples have structural cache keys. -/
+  def integerKey : HashKey → Bool
+    | .scalar (.int _) => true
+    | .scalar _ => false
+    | .tuple items => integerKeys items
+  def integerKeys : List HashKey → Bool
+    | [] => true
+    | key :: rest => integerKey key && integerKeys rest
+end
+
+def argumentKeys (heap : Heap) : List Value → Option (Except ExceptionObject (List HashKey))
+  | [] => some (.ok [])
+  | value :: rest => do
+      match ← Mutable.keyOf heap value with
+      | .error error => return .error error
+      | .ok key => return (← argumentKeys heap rest).map (key :: ·)
+
+/-- Integer-only calls retain their scalar keys; tuple calls carry resolved immutable values. -/
+def memoKey (heap : Heap) (name : String) (values : List Value) : Option (Except ExceptionObject Key) :=
+  match integerArguments values with
+  | some integers => some (.ok ⟨name, integers, none⟩)
+  | none => do
+      match ← argumentKeys heap values with
+      | .error error => return .error error
+      | .ok keys => if integerKeys keys then return .ok ⟨name, [], some keys⟩ else none
+
+@[simp] theorem memoKey_integers (heap : Heap) (name : String) (values : List Int) :
+    memoKey heap name (values.map (fun value => Mutable.Value.scalar (.int value))) =
+      some (.ok ⟨name, values, none⟩) := by
+  simp [memoKey]
+
+theorem keyOf_tuple_integers (heap : Heap) (address : Nat) (items : List Int)
+    (found : heap[address]? = some (.tuple (items.map (fun value => Mutable.Value.scalar (.int value))))) :
+    Mutable.keyOf heap (.ref address) =
+      some (.ok (.tuple (items.map (fun value => HashKey.scalar (.int value))))) := by
+  have resolved := Mutable.hashKey_tuple_scalars heap address (items.map Constant.int)
+    (by simpa only [List.map_map] using found)
+  cases decision : Mutable.keyOf heap (.ref address) with
+  | none => simp [Mutable.hashKey, decision] at resolved
+  | some value => simpa [Mutable.hashKey, decision] using resolved
+
+@[simp] theorem integerKeys_map (items : List Int) :
+    integerKeys (items.map (fun value => HashKey.scalar (.int value))) = true := by
+  induction items with
+  | nil => rfl
+  | cons value rest ih => simp [integerKeys, integerKey, ih]
+
+theorem memoKey_integer_tuple (heap : Heap) (name : String) (n : Int) (address : Nat)
+    (items : List Int)
+    (found : heap[address]? = some (.tuple (items.map (fun value => Mutable.Value.scalar (.int value))))) :
+    memoKey heap name [.scalar (.int n), .ref address] =
+      some (.ok ⟨name, [], some [.scalar (.int n),
+        .tuple (items.map (fun value => HashKey.scalar (.int value)))]⟩) := by
+  have key := keyOf_tuple_integers heap address items found
+  have scalarKey : Mutable.keyOf heap (.scalar (.int n)) = some (.ok (.scalar (.int n))) := rfl
+  simp [memoKey, integerArguments, argumentKeys, key, scalarKey, Except.map, integerKeys, integerKey]
+
 /-- Private source encoding for a protected compiler tuple constant. -/
 def pooledTuple (identity : String) (items : List Expr) : Expr :=
   .consumeGenerator (.call (.name "$formalsw.constant.tuple") [.constant (.string identity)]) (.tuple items) []
@@ -80,7 +138,7 @@ def pooledTupleParts : Expr → Option (String × List Expr)
 
 def pooledIdentity (expression : Expr) : Option String := (pooledTupleParts expression).map Prod.fst
 
-def literalKey (identity : String) : Key := ⟨"$formalsw.constant.tuple:" ++ identity, []⟩
+def literalKey (identity : String) : Key := ⟨"$formalsw.constant.tuple:" ++ identity, [], none⟩
 
 /-- Source proofs can name compiler-derived keys without embedding a source hash. -/
 def pooledKey (expression : Expr) : Option Key := (pooledIdentity expression).map literalKey
@@ -135,10 +193,10 @@ def step (module : Module) (anchors : Nat) (state : State)
           .next ⟨⟨.value value, caller.stack, heap⟩, callers, state.cache.insert caller.key value⟩
   | ⟨.operation (.call name) values, stack, heap⟩ =>
       if name ∈ module.memoizedFunctions then
-        match integerArguments values with
+        match memoKey heap name values with
         | none => .unsupported
-        | some arguments =>
-            let key : Key := ⟨name, arguments⟩
+        | some (.error error) => .done (.ok ⟨.error error, globals, heap, anchors⟩)
+        | some (.ok key) =>
             match state.cache key with
             | some value => .next { state with current := ⟨.value value, stack, heap⟩ }
             | none =>
@@ -380,25 +438,50 @@ theorem BlockReturnsRel.consequence (run : BlockReturnsRel (globals := globals) 
   rintro final ⟨value, after, rfl, holds⟩
   exact ⟨value, after, rfl, weaken value after holds⟩
 
+/-- A resolved tuple key uses the same hit, miss, and original-body protocol as an integer key. -/
+theorem BlockReturnsRel.memoized_key (cached : name ∈ module.memoizedFunctions)
+    (found : findFunctionIn module.body name = some (args, body))
+    (resolved : memoKey heap name values = some (.ok key))
+    (arguments : HeapCalls.completeArguments args values = some completed)
+    (run : BlockReturnsRel (globals := globals) module spec
+      (HeapCalls.functionEnv args body completed globals) (executableBody body) heap
+      (fun value after => post value after ∧ spec after key value))
+    (hit : ∀ value, spec heap key value → post value heap) :
+    ReturnsRel (globals := globals) module spec name values heap post := by
+  intro anchors stack callers cache valid
+  cases cachedValue : cache key with
+  | some value =>
+      exact ⟨⟨.value value, stack, heap⟩, cache,
+        ⟨value, heap, rfl, hit value (valid _ _ cachedValue)⟩, valid,
+        .next (by simp [step, cached, resolved, cachedValue]) .refl⟩
+  | none =>
+      obtain ⟨final, updated, ⟨value, after, same, holds, correct⟩, preserved, reached⟩ :=
+        run anchors [] (⟨key, stack⟩ :: callers) cache valid
+      subst final
+      refine ⟨⟨.value value, stack, after⟩, updated.insert key value,
+        ⟨value, after, rfl, holds⟩, preserved.insert correct, ?_⟩
+      exact .next (by simp [step, cached, resolved, cachedValue, HeapCalls.step, found, arguments])
+        (reached.trans (.next rfl .refl))
+
 /-- Hits use the current heap invariant; misses execute the source body and insert only its actual return. -/
 theorem BlockReturnsRel.memoized_function (cached : name ∈ module.memoizedFunctions)
     (found : findFunctionIn module.body name = some (args, body))
     (arguments : HeapCalls.completeArguments args (values.map (fun value => Mutable.Value.scalar (.int value))) = some completed)
     (run : BlockReturnsRel (globals := globals) module spec (HeapCalls.functionEnv args body completed globals)
-      (executableBody body) heap (fun value after => post value after ∧ spec after ⟨name, values⟩ value))
-    (hit : ∀ value, spec heap ⟨name, values⟩ value → post value heap) :
+      (executableBody body) heap (fun value after => post value after ∧ spec after ⟨name, values, none⟩ value))
+    (hit : ∀ value, spec heap ⟨name, values, none⟩ value → post value heap) :
     ReturnsRel (globals := globals) module spec name (values.map (fun value => Mutable.Value.scalar (.int value))) heap post := by
   intro anchors stack callers cache valid
-  cases cachedValue : cache ⟨name, values⟩ with
+  cases cachedValue : cache ⟨name, values, none⟩ with
   | some value =>
       exact ⟨⟨.value value, stack, heap⟩, cache,
         ⟨value, heap, rfl, hit value (valid _ _ cachedValue)⟩, valid,
         .next (by simp [step, cached, cachedValue]) .refl⟩
   | none =>
       obtain ⟨final, updated, ⟨value, after, same, holds, correct⟩, preserved, reached⟩ :=
-        run anchors [] (⟨⟨name, values⟩, stack⟩ :: callers) cache valid
+        run anchors [] (⟨⟨name, values, none⟩, stack⟩ :: callers) cache valid
       subst final
-      refine ⟨⟨.value value, stack, after⟩, updated.insert ⟨name, values⟩ value,
+      refine ⟨⟨.value value, stack, after⟩, updated.insert ⟨name, values, none⟩ value,
         ⟨value, after, rfl, holds⟩, preserved.insert correct, ?_⟩
       exact .next (by simp [step, cached, cachedValue, HeapCalls.step, found, arguments])
         (reached.trans (.next rfl .refl))

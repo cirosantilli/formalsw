@@ -10,7 +10,7 @@ private def Pair (heap : Mutable.Heap) (value : Mutable.Value) (n : Int) : Prop 
     heap[address]? = some (.tuple [.scalar (.int n), .scalar (.int (n + 1))])
 
 private def spec (heap : Mutable.Heap) (key : MemoCalls.Key) (value : Mutable.Value) : Prop :=
-  ∃ n, key = ⟨"cached_pair", [n]⟩ ∧ Pair heap value n
+  ∃ n, key = ⟨"cached_pair", [n], none⟩ ∧ Pair heap value n
 
 private theorem preserves (heap extra : Mutable.Heap) : Cache.Preserves spec heap (heap ++ extra) := by
   apply Cache.preserves_append

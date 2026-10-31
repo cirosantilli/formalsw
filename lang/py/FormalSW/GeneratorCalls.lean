@@ -149,6 +149,16 @@ theorem Evaluates.consume_generator_list
     Evaluates (globals := globals) module env (.consumeGenerator (.builtinCall .list []) element generators)
       heap value finalHeap := fun anchors stack => .next rfl (collected anchors stack)
 
+/-- Tuple construction preserves each yielded value while the private collector remains unreachable. -/
+theorem Evaluates.consume_generator_tuple
+    (collected : Evaluates (globals := globals) module env
+      (.consumeGenerator (.builtinCall .list []) element generators) heap collectedValue middle)
+    (converted : primitive (.builtin .tuple) [collectedValue] middle = some (.ok value, finalHeap)) :
+    Evaluates (globals := globals) module env (.consumeGenerator (.builtinCall .tuple []) element generators)
+      heap value finalHeap := by
+  intro anchors stack
+  exact .next rfl ((Evaluates.builtin (.cons collected .nil) converted) anchors stack)
+
 theorem Evaluates.consume_generator_sorted
     (collected : GeneratorCollects (globals := globals) module .sorted element generators env heap value finalHeap) :
     Evaluates (globals := globals) module env (.consumeGenerator (.builtinCall .sorted []) element generators)

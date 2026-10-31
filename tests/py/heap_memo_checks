@@ -22,6 +22,14 @@ source = """
 from functools import lru_cache
 
 @lru_cache(None)
+def tuple_key(items: tuple[int, ...]) -> tuple[int, ...]:
+    return items
+
+@lru_cache(None)
+def nested_tuple_key(items: tuple[tuple[int, ...], ...]) -> tuple[tuple[int, ...], ...]:
+    return items
+
+@lru_cache(None)
 def pair(n: int) -> tuple[int, int]:
     return n, n + 1
 
@@ -69,6 +77,12 @@ def stop(n: int) -> tuple[int, int]:
     raise StopIteration()
 """
 bodies = {
+    'fresh_tuple_keys': 'first = tuple([n, n + 1])\nsecond = tuple([n, n + 1])\na = tuple_key(first)\nb = tuple_key(second)\nif a is first and b is first and b is not second:\n    return b[0] + b[1]\nreturn -999',
+    'ordered_tuple_keys': 'first = tuple([n, n + 1])\nsecond = tuple([n + 1, n])\na = tuple_key(first)\nb = tuple_key(second)\nif a is first and b is second:\n    return a[0] + b[0]\nreturn -999',
+    'nested_tuple_keys': 'first = tuple([tuple([n])])\nsecond = tuple([tuple([n])])\na = nested_tuple_key(first)\nb = nested_tuple_key(second)\nif a is first and b is first and b is not second:\n    return b[0][0]\nreturn -999',
+    'generated_tuple_keys': 'first = tuple(n + i for i in range(3))\nsecond = tuple(n + i for i in range(4) if i < 3)\na = tuple_key(first)\nb = tuple_key(second)\nif a is first and b is first and b is not second:\n    return b[0] + b[2]\nreturn -999',
+    'empty_tuple_key': 'return len(tuple_key(tuple([])))',
+    'unhashable_tuple_key': 'return len(tuple_key(tuple([[n]])))',
     'tuple_hit': 'first = pair(n)\nsecond = pair(n)\nif first is second:\n    return first[0] + second[1]\nreturn -999',
     'list_hit': 'first = mutable(n)\nfirst.append(n + 1)\nsecond = mutable(n)\nif first is second:\n    return 100 * len(second) + second[1]\nreturn -999',
     'nested_alias': 'first = nested(n)\nsecond = mutable(n)\nfirst[1].append(n + 1)\nif first[1] is second:\n    return 100 * len(second) + second[1]\nreturn -999',
@@ -92,6 +106,12 @@ for name in bodies:
     assert not checker.check(name), (name, checker.check(name))
     function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name)
     assert memo_heap_runtime(module, function) == 'HeapMemoCalls'
+
+for annotation in ('list[int]', 'tuple[list[int], ...]', 'tuple[str, ...]', 'tuple[bool, ...]'):
+    invalid = ast.parse('from functools import lru_cache\n@lru_cache(None)\n'
+                        f'def invalid(value: {annotation}) -> int:\n    return 0\n')
+    issues = SupportChecker(invalid).check('invalid')
+    assert any('immutable integer-tuple positional arguments' in issue.reason for issue in issues), annotation
 
 lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
          'def source : Module := pyast_from_json% (include_str "source.json")']
@@ -121,7 +141,7 @@ lines.extend([
     '    | .next following => failedMissCache fuel following',
     '    | .done (.ok completion) => match completion.outcome with',
     '      | .error error => (error.typeName == "ZeroDivisionError") &&',
-    '          (state.cache ⟨"nested_error", [4]⟩).isNone && (state.cache ⟨"pair", [4]⟩).isSome',
+    '          (state.cache ⟨"nested_error", [4], none⟩).isNone && (state.cache ⟨"pair", [4], none⟩).isSome',
     '      | _ => false',
     '    | _ => false',
     'example : failedMissCache 3000 ⟨⟨.operation (.call "nested_error") [.scalar (.int 4)], [], []⟩, [], HeapMemoCalls.Cache.empty⟩ = true := by native_decide',

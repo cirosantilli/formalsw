@@ -11,7 +11,7 @@ private def program : Module := { body := [
       (.call (.name "count") [.binOp (.name "n") .sub (.constant (.int 1))]))]] }
 
 private def spec (key : Key) (value : Constant) : Prop :=
-  ∃ n : Nat, key = ⟨"count", [n]⟩ ∧ value = .int n
+  ∃ n : Nat, key = ⟨"count", [n], none⟩ ∧ value = .int n
 
 private theorem count_body (n : Nat) :
     ReturnsValue program ["count"] spec "count" [.int n] (.int n) := by

@@ -8,7 +8,7 @@ from lang.py.imports import bindings
 from lang.py.permutation_support import permutation_binding, permutation_arguments, combination_binding, combination_arguments
 from lang.py.defaults import literal_default
 from lang.py.named_callbacks import callback_bindings_valid, callback_signature
-from lang.py.memo_support import cache_decorator, uses_memoized
+from lang.py.memo_support import cache_argument, cache_decorator, uses_memoized
 from lang.py.call_graph import call_targets
 from lang.py.sorting_support import uses_sort_model
 from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays, unpacked_return_tuple_displays, globally_private_return_tuple_displays, compared_set_tuple_displays, compared_local_tuple_displays, runtime_tuple_element
@@ -286,7 +286,7 @@ def consumed_generator(node):
             elt=ast.Name(id=name, ctx=ast.Load()), generators=[ast.comprehension(
                 target=ast.Name(id=name, ctx=ast.Store()), iter=iterable, ifs=[], is_async=0)]), iterable)
     if (isinstance(iterable, ast.GeneratorExp)
-            and (isinstance(node.func, ast.Name) and node.func.id in ('list', 'sorted', 'all', 'any')
+            and (isinstance(node.func, ast.Name) and node.func.id in ('list', 'tuple', 'sorted', 'all', 'any')
                  or isinstance(node.func, ast.Attribute) and node.func.attr == 'join')):
         return node.func, iterable
     return None
@@ -752,9 +752,9 @@ def check_calls(module, function, reject, *, heap=False):
             return
         if uses_parallel_model(function):
             reject(function, 'call execution does not support parallel workers')
-        if cached and (function.args.defaults or any(annotation_kind(arg.annotation) != 'int'
+        if cached and (function.args.defaults or any(not cache_argument(arg.annotation)
                                                    for arg in function.args.args)):
-            reject(function, 'memoized functions require integer positional arguments without defaults')
+            reject(function, 'memoized functions require integer or immutable integer-tuple positional arguments without defaults')
         if function.decorator_list and not cached or getattr(function, 'type_params', []) or function.args.posonlyargs or \
                 function.args.kwonlyargs or function.args.vararg or function.args.kwarg:
             reject(function, 'call execution requires undecorated plain positional functions')

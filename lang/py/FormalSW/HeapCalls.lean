@@ -1908,6 +1908,9 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           .next (truthGeneratorArguments false element generators env stack heap)
       | .consumeGenerator (.builtinCall .list []) element generators =>
           .next (generatorArguments .list element generators env stack heap)
+      | .consumeGenerator (.builtinCall .tuple []) element generators =>
+          .next ⟨.expr (.builtinCall .tuple
+            [.consumeGenerator (.builtinCall .list []) element generators]) env, stack, heap⟩
       | .consumeGenerator (.builtinCall .sorted []) element generators =>
           .next (generatorArguments .sorted element generators env stack heap)
       | .consumeGenerator (.builtinCall .sortedReverse [.constant (.bool reverse)]) element generators =>

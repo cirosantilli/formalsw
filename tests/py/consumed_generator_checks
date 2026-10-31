@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compare immediate list, sorted, and string-join generators with Python.
+Compare immediate list, tuple, sorted, and string-join generators with Python.
 """
 import ast
 import json
@@ -66,6 +66,10 @@ def aliased(xs: list[int]):
     result = list(row for row in [xs, xs])
     result[0].append(4)
     return result
+def tuple_aliased(xs: list[int]):
+    result = tuple(row for row in [xs, xs])
+    result[0].append(4)
+    return result
 def nested_join(xs: list[int]):
     return "".join(row for row in [xs, xs])
 def reverse_sorted(xs: list[int]):
@@ -76,7 +80,7 @@ class Sink:
 def custom_join(xs: list[int]):
     return Sink().join(x for x in xs)
 '''
-names = ['receiver_order', 'bad_receiver', 'aliased', 'nested_join', 'reverse_sorted']
+names = ['receiver_order', 'bad_receiver', 'aliased', 'tuple_aliased', 'nested_join', 'reverse_sorted']
 generators = {
     'basic': ('x', 'for x in xs'),
     'filtered': ('x', 'for x in xs if x % 2 == 0'),
@@ -89,7 +93,7 @@ generators = {
     'inside_error': ('fail(xs, x)', 'for x in xs'),
     'first_error': ('x', 'for x in fail_sequence(xs)'),
 }
-for consumer in ('list', 'sorted', 'join'):
+for consumer in ('list', 'tuple', 'sorted', 'join'):
     call = '"λ".join' if consumer == 'join' else consumer
     for variant, (element, loops) in generators.items():
         name = consumer + '_' + variant
@@ -153,7 +157,7 @@ for expression in ('sorted((x for x in xs), unknown=True)', 'list(x async for x 
                    '"".join(iterable=(x for x in xs))'):
     module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
     assert SupportChecker(module).check('f'), expression
-for builtin in ('list', 'sorted'):
+for builtin in ('list', 'tuple', 'sorted'):
     for binding in (f'{builtin} = 1\n', f'from somewhere import {builtin}\n'):
         module = ast.parse(binding + f'def f(xs: list[int]):\n    return {builtin}(x for x in xs)\n')
         assert SupportChecker(module).check('f'), binding

@@ -6,7 +6,7 @@ namespace tests.py.memo_heap_calls
 open FormalSW.PyAst
 private abbrev program := MemoHeapCallsAst.module
 private def spec (key : MemoCalls.Key) (value : Constant) : Prop :=
-  ∃ n : Int, key = ⟨"double", [n]⟩ ∧ value = .int (n + n)
+  ∃ n : Int, key = ⟨"double", [n], none⟩ ∧ value = .int (n + n)
 
 private theorem double_result (n : Int) :
     MemoCalls.ReturnsValue program program.memoizedFunctions spec "double" [.int n] (.int (n + n)) := by
