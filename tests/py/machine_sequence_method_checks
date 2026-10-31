@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""
+Check live append and pop, index errors, returned aliases and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def roundtrip(items, value):
+    items.append(value)
+    return items.pop()
+
+
+def direct(items, value):
+    return value
+
+
+def bad_index(items, value):
+    items.append(value)
+    return "bad"
+
+
+def invalid(items, value):
+    return items.pop(bad_index(items, value))
+'''
+PROOF = r'''
+
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineSequenceExamples
+set_option Elab.async false
+
+theorem append_pop_restores (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    Mutable.popItem address (.scalar (.int (-1))) (heap.set address (.list (items ++ [value]))) = some (.ok value, heap) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have changed : (heap.set address (.list (items ++ [value])))[address]? = some (.list (items ++ [value])) := by
+    simp [valid]
+  have popped := Heapq.popItem_last (heap.set address (.list (items ++ [value]))) address items value changed
+  rw [List.set_set] at popped
+  have original : heap[address] = .list items := (List.getElem?_eq_some_iff.mp found).2
+  rw [← original, List.set_getElem_self valid] at popped
+  exact popped
+
+theorem roundtrip_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "roundtrip" [.ref address, value] heap value heap := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have changed : (heap.set address (.list (items ++ [value])))[address]? = some (.list (items ++ [value])) := by
+    simp [valid]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.pop rfl (by simp [bindMethod, changed]) .nil
+  simpa [primitive] using append_pop_restores heap address items value found
+
+theorem direct_returns (heap : Mutable.Heap) (address : Nat) (value : Mutable.Value) :
+    ReturnsValue Probe.module "direct" [.ref address, value] heap value heap := by
+  apply BlockReturns.function rfl rfl
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem roundtrip_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "roundtrip" [.ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "direct" [.ref address, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, value] heap value heap) :
+      ((IteratorCalls.call Probe.module name [.ref address, value] heap).run choices).Finishes
+        ⟨.ok value, [], heap, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "roundtrip" leftChoices (roundtrip_returns heap address items value found))
+    (finishes "direct" rightChoices (direct_returns heap address value)) (Or.inl rfl)
+
+theorem bad_index_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "bad_index" [.ref address, value] heap (.scalar (.string "bad"))
+      (heap.set address (.list (items ++ [value]))) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value Evaluates.constant
+
+theorem invalid_retains_append (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "invalid") [.ref address, value], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], heap.set address (.list (items ++ [value])), heap.length⟩) := by
+  repeat first
+    | exact .done rfl
+    | refine .next rfl ?_
+  let env := functionEnv [⟨"items", none, none⟩, ⟨"value", none, none⟩]
+    [.return (.call (.attribute (.name "items") "pop") [.call (.name "bad_index") [.name "items", .name "value"]])]
+    [.ref address, value] []
+  refine .next (following := argumentsState (.pop address) env []
+    [.call (.name "bad_index") [.name "items", .name "value"]] [] heap) ?_ ?_
+  · simp [step, run, bindMethod, found, argumentsState, env]
+  apply (Evaluates.arguments_reach (.cons
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (bad_index_returns heap address items value found)) .nil) (.pop address) [] heap.length []).finishes
+  exact .done rfl
+
+/-- Sequence mutation uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_mutation (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (operation : Operation) (covered : SequenceMutationOperation operation) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation operation values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_sequenceMutation_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used operation values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained covered
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineSequenceExamples
+'''
+AUDITS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
+    "ExecutionLayout.appendItem", "popItem_index", "RuntimeLayout.popIndex_relocates", "popIndex_heap",
+    "popSelection_map", "popSelection_members", "list_popSelection", "popItem_list_selection",
+    "popItem_buffer_selection", "ExecutionLayout.popItem_integer",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "result_appendItem_preserves", "result_popItem_preserves", "step_sequenceMutation_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_sequenceMutation_preserves"] + ["MachineSequenceExamples." + name for name in (
+    "append_pop_restores", "roundtrip_returns", "direct_returns", "roundtrip_equiv", "bad_index_returns", "invalid_retains_append", "append_then_mutation",
+)]
+with project_temporary_directory(prefix="machine-sequence-method-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for size in (0, 1, 17):
+        for name in ("roundtrip", "direct"):
+            items = [object() for _ in range(size)]
+            before = items.copy()
+            result = namespace[name](items, items)
+            assert result is items and items == before
+        items = [object() for _ in range(size)]
+        try:
+            namespace["invalid"](items, items)
+        except TypeError:
+            assert len(items) == size + 1 and items[-1] is items
+        else:
+            raise AssertionError("invalid index must raise after argument effects")
+        for value in (0, 127, 255):
+            items = bytearray(range(size))
+            before = items.copy()
+            result = namespace["roundtrip"](items, value)
+            assert result == value and items == before
+        for value, error in ((-1, ValueError), (256, ValueError), ("bad", TypeError)):
+            items = bytearray(range(size))
+            before = items.copy()
+            try:
+                namespace["roundtrip"](items, value)
+            except error:
+                assert items == before
+            else:
+                raise AssertionError((value, error))
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineSequenceMethods\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        "import lang.py.FormalSW.HeapqContents\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"sequence methods: append/pop cancellation, live aliases and index-error effects; {len(AUDITS)} axiom audits passed")

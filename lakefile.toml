@@ -163,6 +163,8 @@ roots = [
   "lang.py.FormalSW.MachineCollectorInvariant",
   "lang.py.FormalSW.DictionaryMethodRelocation",
   "lang.py.FormalSW.MachineDictionaryMethods",
+  "lang.py.FormalSW.SequenceMethodRelocation",
+  "lang.py.FormalSW.MachineSequenceMethods",
   "lang.py.FormalSW.MachineLoopInvariant",
   "lang.py.FormalSW.MachineLoopAcquisition",
   "lang.py.FormalSW.MachineExpressionInvariant",
