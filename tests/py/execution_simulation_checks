@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""
+Check complete source traces, alias-preserving returns, and supported divergence.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def countdown(n, value):
+    while n:
+        n -= 1
+    return value
+
+def reject(value):
+    raise ValueError(value)
+
+def direct(n, value):
+    return value
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace ExecutionSimulationExamples
+set_option Elab.async false
+
+inductive Phase where
+  | call | loop | condition | test | body | load | left | right | subtract | store | returning | result | finish
+abbrev Cursor := Phase × Int
+
+def args : List Arg := [{name := "n", annotation := none}, {name := "value", annotation := none}]
+def decrement : Stmt := .augAssign (.name "n") .sub (.constant (.int 1))
+def loop : Stmt := .whileDo (.name "n") [decrement] []
+def following : List Stmt := [.return (.name "value")]
+def body : List Stmt := loop :: following
+
+theorem source_function : findFunctionIn Probe.module.body "countdown" = some (args, body) := rfl
+
+def env (n : Int) (value : Mutable.Value) : HeapCalls.Env := HeapCalls.argumentEnv args [.scalar (.int n), value]
+def assign (n : Int) (value : Mutable.Value) : Frame := .assign "n" body (env n value)
+def branch (n : Int) (value : Mutable.Value) : Frame := .branch [decrement, loop] [] following (env n value)
+def encode (heap : Mutable.Heap) (value : Mutable.Value) : Cursor → HeapCalls.State
+  | (.call, n) => ⟨.operation (.call "countdown") [.scalar (.int n), value], [], heap⟩
+  | (.loop, n) => ⟨.block body (env n value), [], heap⟩
+  | (.condition, n) => ⟨.expr (.name "n") (env n value), [branch n value], heap⟩
+  | (.test, n) => ⟨.value (.scalar (.int n)), [branch n value], heap⟩
+  | (.body, n) => ⟨.block (decrement :: body) (env n value), [], heap⟩
+  | (.load, n) => ⟨.expr (.name "n") (env n value), [.binaryLeft .sub (.constant (.int 1)) (env n value) true, assign n value], heap⟩
+  | (.left, n) => ⟨.value (.scalar (.int n)), [.binaryLeft .sub (.constant (.int 1)) (env n value) true, assign n value], heap⟩
+  | (.right, n) => ⟨.expr (.constant (.int 1)) (env n value), [.binaryRight .sub (.scalar (.int n)) true, assign n value], heap⟩
+  | (.subtract, n) => ⟨.value (.scalar (.int 1)), [.binaryRight .sub (.scalar (.int n)) true, assign n value], heap⟩
+  | (.store, n) => ⟨.value (.scalar (.int (n - 1))), [assign n value], heap⟩
+  | (.returning, n) => ⟨.block following (env n value), [], heap⟩
+  | (.result, n) => ⟨.expr (.name "value") (env n value), [], heap⟩
+  | (.finish, _) => ⟨.value value, [], heap⟩
+
+def traceStep : Cursor → Step Cursor Unit
+  | (.call, n) => .next (.loop, n)
+  | (.loop, n) => .next (.condition, n)
+  | (.condition, n) => .next (.test, n)
+  | (.test, n) => .next (if n = 0 then (.returning, n) else (.body, n))
+  | (.body, n) => .next (.load, n)
+  | (.load, n) => .next (.left, n)
+  | (.left, n) => .next (.right, n)
+  | (.right, n) => .next (.subtract, n)
+  | (.subtract, n) => .next (.store, n)
+  | (.store, n) => .next (.loop, n - 1)
+  | (.returning, n) => .next (.result, n)
+  | (.result, n) => .next (.finish, n)
+  | (.finish, _) => .done (.ok ())
+
+def trace (n : Int) : Execution Unit := ⟨Cursor, (.call, n), traceStep⟩
+def completion (heap : Mutable.Heap) (value : Mutable.Value) (_ : Unit) : Mutable.Completion :=
+  ⟨.ok value, [], heap, heap.length⟩
+
+theorem set_n (n next : Int) (value : Mutable.Value) :
+    setLocal (env n value) "n" (.scalar (.int next)) = env next value := by
+  funext name
+  by_cases same : name = "n"
+  · subst name; rfl
+  · simp [env, HeapCalls.argumentEnv, args, setLocal, List.lookup, same, beq_eq_false_iff_ne.mpr same]
+
+theorem step_encode (heap : Mutable.Heap) (value : Mutable.Value) (cursor : Cursor) :
+    HeapCalls.step Probe.module heap.length (encode heap value cursor) =
+      (traceStep cursor).map (encode heap value) (completion heap value) := by
+  rcases cursor with ⟨phase, n⟩
+  cases phase <;> try rfl
+  case test =>
+    by_cases zero : n = 0 <;>
+      simp [encode, traceStep, Step.map, HeapCalls.step, branch, Mutable.truth, scalarTruth, run,
+        loop, body, following, zero]
+  case store =>
+    change Step.next (σ := HeapCalls.State) (α := Mutable.Completion) ⟨.block body (setLocal (env n value) "n" (.scalar (.int (n - 1)))), [], heap⟩ =
+      .next ⟨.block body (env (n - 1) value), [], heap⟩
+    rw [set_n]
+
+theorem source_bisimulation (heap : Mutable.Heap) (value : Mutable.Value) (n : Int) :
+    Execution.Bisimulation (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] heap).execution (trace n)
+      (fun state cursor => state = encode heap value cursor)
+      (fun actual result => actual = result.map (completion heap value)) :=
+  Execution.Bisimulation.of_encoding
+    (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] heap).execution
+    (trace n) (encode heap value) (completion heap value) rfl (step_encode heap value)
+
+theorem iteration (n : Int) (nonzero : n ≠ 0) {outcome : Except ExceptionObject Unit}
+    (rest : Finishes traceStep (.loop, n - 1) outcome) : Finishes traceStep (.loop, n) outcome := by
+  apply Finishes.next (step := traceStep) rfl
+  apply Finishes.next (step := traceStep) rfl
+  apply Finishes.next (step := traceStep) (following := (.body, n)) (by simp [traceStep, nonzero])
+  exact .next rfl (.next rfl (.next rfl (.next rfl (.next rfl (.next rfl rest)))))
+
+theorem trace_finishes (n : Nat) : Finishes (trace n).step (trace n).initial (.ok ()) := by
+  have loop_finishes : ∀ n : Nat, Finishes traceStep (.loop, (n : Int)) (.ok ()) := by
+    intro n
+    induction n with
+    | zero => exact .next rfl (.next rfl (.next rfl (.next rfl (.next rfl (.done rfl)))))
+    | succ n ih =>
+      apply iteration (n + 1) (by omega)
+      simpa using ih
+  exact .next rfl (loop_finishes n)
+
+def live : Phase → Prop
+  | .returning | .result | .finish => False
+  | _ => True
+
+theorem trace_diverges (n : Int) (negative : n < 0) : (trace n).Diverges := by
+  refine ⟨fun cursor => live cursor.1 ∧ cursor.2 < 0, ⟨True.intro, negative⟩, ?_⟩
+  rintro ⟨phase, count⟩ ⟨valid, negative⟩
+  cases phase <;> simp only [live] at valid
+  all_goals try contradiction
+  all_goals try exact ⟨_, rfl, True.intro, negative⟩
+  case test => exact ⟨(.body, count), by simp [trace, traceStep, show count ≠ 0 by omega], True.intro, negative⟩
+  case store => exact ⟨(.loop, count - 1), rfl, True.intro, by omega⟩
+
+theorem source_returns (heap : Mutable.Heap) (value : Mutable.Value) (n : Nat) :
+    (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] heap).Finishes
+      ⟨.ok value, [], heap, heap.length⟩ := by
+  obtain ⟨result, related, finished⟩ := (source_bisimulation heap value n).flip.finishes (trace_finishes n)
+  have same : result = .ok (completion heap value ()) := related
+  simpa only [same] using finished
+
+theorem source_diverges (heap : Mutable.Heap) (value : Mutable.Value) (n : Int) (negative : n < 0) :
+    (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] heap).Diverges :=
+  (source_bisimulation heap value n).flip.diverges (trace_diverges n negative)
+
+theorem paired_executions (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (value : Mutable.Value) (n : Int) :
+    Execution.Bisimulation
+      (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] logical).execution
+      (HeapCalls.call Probe.module "countdown" [.scalar (.int n), relocateValue rename value] physical).execution
+      (fun a b => ∃ cursor, a = encode logical value cursor ∧ b = encode physical (relocateValue rename value) cursor)
+      (fun a b => ∃ outcome : Except ExceptionObject Unit, a = outcome.map (completion logical value) ∧
+        b = outcome.map (completion physical (relocateValue rename value))) :=
+  (source_bisimulation logical value n).trans (source_bisimulation physical (relocateValue rename value) n).flip
+
+theorem paired_supported (logical physical : Mutable.Heap) (rename : Nat → Nat) (value : Mutable.Value) (n : Int) :
+    (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] logical).execution.Supported ↔
+      (HeapCalls.call Probe.module "countdown" [.scalar (.int n), relocateValue rename value] physical).execution.Supported :=
+  (paired_executions logical physical rename value n).supported_iff
+
+
+
+theorem paired_behavior (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (value : Mutable.Value) (n : Int)
+    (equivalent : (completion logical value ()).Equivalent (completion physical (relocateValue rename value) ())) :
+    (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] logical).Equiv
+        (HeapCalls.call Probe.module "countdown" [.scalar (.int n), relocateValue rename value] physical) ∧
+    ((HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] logical).execution.Supported ↔
+        (HeapCalls.call Probe.module "countdown" [.scalar (.int n), relocateValue rename value] physical).execution.Supported) ∧
+    ((HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] logical).Diverges ↔
+        (HeapCalls.call Probe.module "countdown" [.scalar (.int n), relocateValue rename value] physical).Diverges) := by
+  apply Mutable.Call.behavior_of_bisimulation (paired_executions logical physical rename value n)
+  rintro a b ⟨outcome, rfl, rfl⟩
+  cases outcome with
+  | error exception => rfl
+  | ok token => cases token; exact equivalent
+
+theorem direct_returns (heap : Mutable.Heap) (value : Mutable.Value) (n : Int) :
+    (HeapCalls.call Probe.module "direct" [.scalar (.int n), value] heap).Finishes
+      ⟨.ok value, [], heap, heap.length⟩ := by
+  have returned : ReturnsValue Probe.module "direct" [.scalar (.int n), value] heap value heap := by
+    apply BlockReturns.function (args := args) (body := following) rfl (completed := [.scalar (.int n), value]) rfl
+    apply BlockReturns.return_value
+    exact Evaluates.lookup rfl
+  exact returned.finishes
+
+theorem remove_loop_equiv (heap : Mutable.Heap) (value : Mutable.Value) (n : Nat) :
+    (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] heap).Equiv
+      (HeapCalls.call Probe.module "direct" [.scalar (.int n), value] heap) :=
+  Mutable.Call.equiv_of_finishes (source_returns heap value n) (direct_returns heap value n) (Or.inl rfl)
+
+theorem negative_not_equiv (heap : Mutable.Heap) (value : Mutable.Value) (n : Int) (negative : n < 0) :
+    ¬ (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] heap).Equiv
+      (HeapCalls.call Probe.module "direct" [.scalar (.int n), value] heap) := by
+  intro equivalent
+  have halted := equivalent.halts_iff.mpr ⟨_, direct_returns heap value n⟩
+  exact Mutable.Call.diverges_not_halts (source_diverges heap value n negative) halted
+
+inductive RejectPhase where
+  | call | body | argument | supplied | raising
+
+def rejectArgs : List Arg := [{name := "value", annotation := none}]
+def rejectBody : List Stmt := [.raise (some (.call (.name "ValueError") [.name "value"]))]
+def rejectEnv (value : Mutable.Value) : HeapCalls.Env := HeapCalls.argumentEnv rejectArgs [value]
+def rejectEncode (heap : Mutable.Heap) (value : Mutable.Value) : RejectPhase → HeapCalls.State
+  | .call => ⟨.operation (.call "reject") [value], [], heap⟩
+  | .body => ⟨.block rejectBody (rejectEnv value), [], heap⟩
+  | .argument => ⟨.expr (.name "value") (rejectEnv value), [.arguments (.raiseException "ValueError") [] [] (rejectEnv value)], heap⟩
+  | .supplied => ⟨.value value, [.arguments (.raiseException "ValueError") [] [] (rejectEnv value)], heap⟩
+  | .raising => ⟨.operation (.raiseException "ValueError") [value], [], heap⟩
+
+def rejectStep (value : Mutable.Value) : RejectPhase → Step RejectPhase Constant
+  | .call => .next .body
+  | .body => .next .argument
+  | .argument => .next .supplied
+  | .supplied => .next .raising
+  | .raising => match value with
+      | .scalar payload => .done (.ok payload)
+      | .ref _ => .unsupported
+
+def rejectTrace (value : Mutable.Value) : Execution Constant := ⟨RejectPhase, .call, rejectStep value⟩
+def rejectCompletion (heap : Mutable.Heap) (payload : Constant) : Mutable.Completion :=
+  ⟨.error ⟨"ValueError", [payload]⟩, [], heap, heap.length⟩
+
+theorem reject_step_encode (heap : Mutable.Heap) (value : Mutable.Value) (phase : RejectPhase) :
+    HeapCalls.step Probe.module heap.length (rejectEncode heap value phase) =
+      (rejectStep value phase).map (rejectEncode heap value) (rejectCompletion heap) := by
+  cases phase <;> try rfl
+  cases value <;> rfl
+
+theorem reject_bisimulation (heap : Mutable.Heap) (value : Mutable.Value) :
+    Execution.Bisimulation (HeapCalls.call Probe.module "reject" [value] heap).execution (rejectTrace value)
+      (fun state phase => state = rejectEncode heap value phase)
+      (fun actual result => actual = result.map (rejectCompletion heap)) :=
+  Execution.Bisimulation.of_encoding (HeapCalls.call Probe.module "reject" [value] heap).execution
+    (rejectTrace value) (rejectEncode heap value) (rejectCompletion heap) rfl (reject_step_encode heap value)
+
+theorem source_throws (heap : Mutable.Heap) (payload : Constant) :
+    (HeapCalls.call Probe.module "reject" [.scalar payload] heap).Finishes (rejectCompletion heap payload) := by
+  have finished : Finishes (rejectTrace (.scalar payload)).step (rejectTrace (.scalar payload)).initial (.ok payload) :=
+    .next rfl (.next rfl (.next rfl (.next rfl (.done rfl))))
+  obtain ⟨result, related, transported⟩ := (reject_bisimulation heap (.scalar payload)).flip.finishes finished
+  have same : result = .ok (rejectCompletion heap payload) := related
+  simpa only [same] using transported
+
+theorem reference_payload_unsupported (heap : Mutable.Heap) (address : Nat) :
+    ¬ (HeapCalls.call Probe.module "reject" [.ref address] heap).execution.Supported := by
+  intro supported
+  have other := (reject_bisimulation heap (.ref address)).supported_iff.mp supported
+  exact other 5 rfl
+
+theorem reference_payload_not_divergent (heap : Mutable.Heap) (address : Nat) :
+    ¬ (HeapCalls.call Probe.module "reject" [.ref address] heap).Diverges :=
+  fun diverges => reference_payload_unsupported heap address diverges.supported
+
+end ExecutionSimulationExamples
+'''
+AUDITS = ["ExecutionSimulationExamples." + name for name in (
+    "step_encode", "source_bisimulation", "iteration", "trace_finishes", "trace_diverges",
+    "source_returns", "source_diverges", "paired_executions", "paired_supported", "paired_behavior",
+    "direct_returns", "remove_loop_equiv", "negative_not_equiv",
+    "reject_step_encode", "reject_bisimulation", "source_throws", "reference_payload_unsupported", "reference_payload_not_divergent",
+)] + ["FormalSW.PyAst.Execution.Bisimulation." + name for name in (
+    "flip", "of_encoding", "trans", "finishes_from", "finishes", "diverges", "diverges_iff",
+    "halts_iff", "observe_from", "observe", "supported_iff", "equiv",
+)] + ["FormalSW.PyAst.Mutable.Call." + name for name in (
+    "equiv_of_bisimulation", "behavior_of_bisimulation",
+)]
+
+with project_temporary_directory(prefix="execution-simulation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for n in (0, 1, 2, 31):
+        value = []
+        value.append(value)
+        assert namespace["countdown"](n, value) is namespace["direct"](n, value) is value
+        assert value[0] is value
+    for value in (None, True, -10**100, "failure", b"failure"):
+        try:
+            namespace["reject"](value)
+        except ValueError as error:
+            assert error.args == (value,)
+        else:
+            raise AssertionError("reject returned")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MutableSimulation\nimport lang.py.FormalSW.MachineLoops\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"execution simulation: loop-removal equivalence, aliases, exceptions and supported divergence; {len(AUDITS)} axiom audits passed")

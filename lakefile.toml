@@ -18,6 +18,8 @@ roots = [
   "lang.py.FormalSW.Model",
   "lang.py.FormalSW.Python",
   "lang.py.FormalSW.Execution",
+  "lang.py.FormalSW.ExecutionSimulation",
+  "lang.py.FormalSW.MutableSimulation",
   "lang.py.FormalSW.Runtime",
   "lang.py.FormalSW.Math",
   "lang.py.FormalSW.Strings",
