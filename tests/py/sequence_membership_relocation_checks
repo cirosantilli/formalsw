@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""
+Check complete comparison dispatch and ordered sequence membership in parsed source.
+"""
+from dataclasses import make_dataclass
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def compare(left, right):
+    answer = left == right
+    return [left, right, answer]
+
+def search(needle, items):
+    present = needle in items
+    absent = needle not in items
+    return [needle, items, present, absent]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace SequenceMembershipExamples
+set_option Elab.async false
+
+def comparedHeap (heap : Mutable.Heap) (left right : Mutable.Value) (answer : Bool) :=
+  heap ++ [Mutable.Object.list [left, right, .scalar (.bool answer)]]
+
+theorem source_compares (heap : Mutable.Heap) (left right : Mutable.Value) (answer : Bool)
+    (compared : HeapCalls.compare .eq left right heap = some (.ok (.scalar (.bool answer)), heap)) :
+    ReturnsValue Probe.module "compare" [left, right] heap (.ref heap.length) (comparedHeap heap left right answer) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.compare (Evaluates.lookup rfl) (Evaluates.lookup rfl) compared)
+  exact BlockReturns.return_value (Evaluates.list (.cons (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))))
+
+/-- No operand-kind premise: all modeled comparison branches use the same execution theorem. -/
+theorem paired_comparisons (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Mutable.Value) (answer : Bool)
+    (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length)
+    (compared : HeapCalls.compare .eq left right logical = some (.ok (.scalar (.bool answer)), logical)) :
+    ∃ nextMap,
+      ReturnsValue Probe.module "compare" [left, right] logical (.ref logical.length)
+        (comparedHeap logical left right answer) ∧
+      ReturnsValue Probe.module "compare" [relocateValue rename left, relocateValue rename right] physical
+        (.ref physical.length) (comparedHeap physical (relocateValue rename left) (relocateValue rename right) answer) ∧
+      ExecutionLayout (comparedHeap logical left right answer)
+        (comparedHeap physical (relocateValue rename left) (relocateValue rename right) answer) nextMap ∧
+      nextMap logical.length = physical.length ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  have other := layout.compare .eq left right leftInside rightInside _ _ compared
+  have inside : ∀ value ∈ [left, right, Mutable.Value.scalar (.bool answer)], value.edge.Within logical.length := by
+    simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq]
+    exact ⟨leftInside, rightInside, trivial⟩
+  have retained := (other.2.1.allocate_list [left, right, .scalar (.bool answer)] inside).2.2
+  refine ⟨extendMap rename logical.length physical.length, source_compares logical left right answer compared,
+    source_compares physical (relocateValue rename left) (relocateValue rename right) answer other.1,
+    ?_, extendMap_new _ _ _, fun index bound => extendMap_old _ _ _ _ bound⟩
+  simpa only [comparedHeap, List.map_cons, List.map_nil, show relocateValue rename (.scalar (.bool answer)) =
+    Mutable.Value.scalar (.bool answer) from rfl] using retained
+
+def resultHeap (heap : Mutable.Heap) (needle : Mutable.Value) (address : Nat) (present absent : Bool) :=
+  heap ++ [Mutable.Object.list [needle, .ref address, .scalar (.bool present), .scalar (.bool absent)]]
+
+theorem source_searches (heap : Mutable.Heap) (needle : Mutable.Value) (address : Nat) (present absent : Bool)
+    (searched : HeapCalls.membership needle (.ref address) false heap = some (.ok (.scalar (.bool present)), heap))
+    (negated : HeapCalls.membership needle (.ref address) true heap = some (.ok (.scalar (.bool absent)), heap)) :
+    ReturnsValue Probe.module "search" [needle, .ref address] heap (.ref heap.length)
+      (resultHeap heap needle address present absent) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.membership (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) searched)
+  apply BlockReturns.assign (Evaluates.membership (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) negated)
+  exact BlockReturns.return_value (Evaluates.list (.cons (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))))
+
+theorem paired_searches (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (isTuple : Bool) (needle : Mutable.Value)
+    (address : Nat) (items : List Mutable.Value) (present absent : Bool)
+    (found : logical[address]? = some (comparisonObject isTuple items))
+    (needleInside : needle.edge.Within logical.length)
+    (searched : HeapCalls.membership needle (.ref address) false logical = some (.ok (.scalar (.bool present)), logical))
+    (negated : HeapCalls.membership needle (.ref address) true logical = some (.ok (.scalar (.bool absent)), logical)) :
+    ∃ nextMap,
+      ReturnsValue Probe.module "search" [needle, .ref address] logical (.ref logical.length)
+        (resultHeap logical needle address present absent) ∧
+      ReturnsValue Probe.module "search" [relocateValue rename needle, .ref (rename address)] physical (.ref physical.length)
+        (resultHeap physical (relocateValue rename needle) (rename address) present absent) ∧
+      ExecutionLayout (resultHeap logical needle address present absent)
+        (resultHeap physical (relocateValue rename needle) (rename address) present absent) nextMap ∧
+      nextMap logical.length = physical.length ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  have other := layout.membership_sequences isTuple needle address items false found needleInside _ _ searched
+  have otherNegated := other.2.membership_sequences isTuple needle address items true found needleInside _ _ negated
+  have addressInside := (List.getElem?_eq_some_iff.mp found).1
+  have inside : ∀ value ∈ [needle, Mutable.Value.ref address, .scalar (.bool present), .scalar (.bool absent)],
+      value.edge.Within logical.length := by
+    simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq]
+    exact ⟨needleInside, addressInside, trivial, trivial⟩
+  have retained := (otherNegated.2.allocate_list [needle, .ref address, .scalar (.bool present), .scalar (.bool absent)] inside).2.2
+  refine ⟨extendMap rename logical.length physical.length,
+    source_searches logical needle address present absent searched negated,
+    source_searches physical (relocateValue rename needle) (rename address) present absent other.1 otherNegated.1,
+    ?_, extendMap_new _ _ _, fun index bound => extendMap_old _ _ _ _ bound⟩
+  simpa only [resultHeap, List.map_cons, List.map_nil, relocateValue] using retained
+
+theorem identity_head (heap : Mutable.Heap) (needle : Mutable.Value) (rest : List Mutable.Value) :
+    HeapCalls.sequenceContains needle (needle :: rest) heap = some (.ok true, heap) := by
+  simp [HeapCalls.sequenceContains]
+
+theorem source_identity (heap : Mutable.Heap) (isTuple : Bool) (needle : Mutable.Value) (address : Nat)
+    (rest : List Mutable.Value) (found : heap[address]? = some (comparisonObject isTuple (needle :: rest))) :
+    ReturnsValue Probe.module "search" [needle, .ref address] heap (.ref heap.length)
+      (resultHeap heap needle address true false) := by
+  apply source_searches
+  · rw [membership_sequence_eq heap isTuple needle address _ false found, identity_head]
+    rfl
+  · rw [membership_sequence_eq heap isTuple needle address _ true found, identity_head]
+    rfl
+
+theorem unsupported_head (heap : Mutable.Heap) (needle item : Mutable.Value) (rest : List Mutable.Value)
+    (different : item ≠ needle) (unsupported : HeapCalls.compare .eq item needle heap = none) :
+    HeapCalls.sequenceContains needle (item :: rest) heap = none := by
+  simp [HeapCalls.sequenceContains, different, unsupported, Mutable.eval_bind]
+
+theorem failure_before_match (heap : Mutable.Heap) (needle item : Mutable.Value) (rest : List Mutable.Value)
+    (different : item ≠ needle) (exception : ExceptionObject)
+    (failed : HeapCalls.compare .eq item needle heap = some (.error exception, heap)) :
+    HeapCalls.sequenceContains needle (item :: needle :: rest) heap = some (.error exception, heap) := by
+  simp [HeapCalls.sequenceContains, different, failed, Mutable.eval_bind]
+
+theorem source_failed (heap : Mutable.Heap) (needle : Mutable.Value) (address : Nat) (exception : ExceptionObject)
+    (failed : HeapCalls.membership needle (.ref address) false heap = some (.error exception, heap)) :
+    (HeapCalls.call Probe.module "search" [needle, .ref address] heap).Finishes
+      ⟨.error exception, [], heap, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.argumentsState, HeapCalls.result, HeapCalls.run, HeapCalls.primitive, failed,
+    HeapCalls.done, HeapCalls.protectGenerator, Frame.inGenerator, Calls.generatorException])
+
+theorem paired_failures (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (isTuple : Bool) (needle : Mutable.Value)
+    (address : Nat) (items : List Mutable.Value) (exception : ExceptionObject)
+    (found : logical[address]? = some (comparisonObject isTuple items))
+    (needleInside : needle.edge.Within logical.length)
+    (failed : HeapCalls.membership needle (.ref address) false logical = some (.error exception, logical)) :
+    (HeapCalls.call Probe.module "search" [needle, .ref address] logical).Finishes
+        ⟨.error exception, [], logical, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "search" [relocateValue rename needle, .ref (rename address)] physical).Finishes
+        ⟨.error exception, [], physical, physical.length⟩ ∧ ExecutionLayout logical physical rename := by
+  have other := layout.membership_sequences isTuple needle address items false found needleInside _ _ failed
+  exact ⟨source_failed logical needle address exception failed,
+    source_failed physical (relocateValue rename needle) (rename address) exception other.1, other.2⟩
+
+theorem missing_field_source (heap : Mutable.Heap) (isTuple : Bool) (needle item address : Nat)
+    (origin name field : String) (frozen : Bool) (fields otherFields : List (String × Mutable.Value))
+    (rest : List Mutable.Value) (different : item ≠ needle)
+    (first : heap[item]? = some (.dataInstance origin name frozen [field] fields))
+    (second : heap[needle]? = some (.dataInstance origin name frozen [field] otherFields))
+    (missing : fields.lookup field = none)
+    (container : heap[address]? = some (comparisonObject isTuple (.ref item :: .ref needle :: rest))) :
+    (HeapCalls.call Probe.module "search" [.ref needle, .ref address] heap).Finishes
+      ⟨.error { typeName := "AttributeError", args := [] }, [], heap, heap.length⟩ := by
+  have comparison : HeapCalls.compare .eq (.ref item) (.ref needle) heap =
+      some (.error { typeName := "AttributeError", args := [] }, heap) := by
+    rw [compare_dataInstances_eq heap .eq item needle origin name frozen [field] fields
+      origin name frozen [field] otherFields first second]
+    simp [comparisonEval, dataEqualityAnswer, declaredValues, missing, bind, Except.bind, Except.map]
+  apply source_failed
+  rw [membership_sequence_eq heap isTuple (.ref needle) address _ false container,
+    failure_before_match heap (.ref needle) (.ref item) rest (by simpa using different) _ comparison]
+  rfl
+
+#print axioms source_compares
+#print axioms paired_comparisons
+#print axioms source_searches
+#print axioms paired_searches
+#print axioms identity_head
+#print axioms source_identity
+#print axioms unsupported_head
+#print axioms failure_before_match
+#print axioms source_failed
+#print axioms paired_failures
+#print axioms missing_field_source
+#print axioms compareScalars_eq
+#print axioms compareDifferent_eq
+#print axioms simpleComparison_relocates
+#print axioms simpleComparison_eq
+#print axioms compare_scalar_ref_eq
+#print axioms compare_ref_scalar_eq
+#print axioms RuntimeLayout.compare_sequences
+#print axioms RuntimeLayout.compare
+#print axioms compare_sequences_readonly
+#print axioms compare_readonly
+#print axioms compare_effect
+#print axioms ExecutionLayout.compare
+#print axioms relocateValue_eq_iff
+#print axioms RuntimeLayout.sequenceContains
+#print axioms ExecutionLayout.sequenceContains
+#print axioms membership_sequence_eq
+#print axioms RuntimeLayout.membership_sequences
+#print axioms ExecutionLayout.membership_sequences
+end SequenceMembershipExamples
+'''
+
+with project_temporary_directory(prefix="sequence-membership-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    compare, search = namespace["compare"], namespace["search"]
+    cycle = []
+    cycle.append(cycle)
+    Record = make_dataclass("Record", ["value"])
+    left_object, right_object = object(), object()
+    pairs = ((True, 1, True), (b"abc", bytearray(b"abc"), True),
+             ({(1, True)}, {(True, 1)}, True), ({"x": cycle}, {"x": cycle}, True),
+             (Record(cycle), Record(cycle), True), (left_object, left_object, True),
+             (left_object, right_object, False), (cycle, cycle, True), (2**180, -2**190, False))
+    for left, right, expected in pairs:
+        result = compare(left, right)
+        assert result[0] is left and result[1] is right and result[2] is expected
+    missing = Record(0)
+    del missing.value
+    for shape in (list, tuple):
+        for needle, values, expected in (
+            (1, [0, True, 2], True), (bytearray(b"ab"), [b"x", b"ab"], True),
+            ({(1, True)}, [{(True, 1)}], True), ({"x": cycle}, [{"x": cycle}], True),
+            (Record(cycle), [Record(cycle)], True), (cycle, [cycle, missing], True),
+            (left_object, [right_object, left_object], True), (2**180, [-2**190], False),
+            (Record(1), [], False),
+        ):
+            items = shape(values)
+            result = search(needle, items)
+            assert result[0] is needle and result[1] is items and result[2:] == [expected, not expected]
+        needle = Record(1)
+        items = shape([missing, needle])
+        try:
+            search(needle, items)
+        except AttributeError:
+            assert items[0] is missing and items[1] is needle and needle.value == 1
+        else:
+            raise AssertionError("an earlier comparison failure must precede a later identity match")
+        items = shape([needle, missing])
+        assert search(needle, items)[2:] == [True, False]
+    self_result = search(cycle, cycle)
+    assert self_result[0] is cycle and self_result[1] is cycle and self_result[2:] == [True, False]
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.SequenceMembershipRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 29, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("sequence membership relocation: complete comparison dispatch, aliases, ordered matches, and failures; 29 axiom audits passed")
