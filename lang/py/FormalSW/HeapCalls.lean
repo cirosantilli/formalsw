@@ -155,6 +155,12 @@ private def equalKeyEntries : List (HashDict.Entry Value) → List (HashDict.Ent
 private def equalKeyDictionaries (left right : List (HashDict.Entry Value)) : Option Bool :=
   if left.length = right.length then equalKeyEntries left right else some false
 
+/-- Proof-facing access to the actual cached-key dictionary value comparison. -/
+abbrev dictionaryEntriesEqual := equalKeyEntries
+
+/-- Dictionary equality checks cardinality before comparing the stored values. -/
+abbrev keyDictionariesEqual := equalKeyDictionaries
+
 @[simp] def compareScalars (op : CmpOp) (left right : Constant) : Eval Value :=
   match scalarCompare op left right with
   | some value => pure (.scalar (.bool value))

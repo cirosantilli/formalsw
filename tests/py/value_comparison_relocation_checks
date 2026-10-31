@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""
+Check source equality across relocated dictionaries and dataclass fields.
+"""
+from dataclasses import make_dataclass
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def equal(left, right):
+    same = left == right
+    different = left != right
+    return [same, different, left, right]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace ValueComparisonExamples
+set_option Elab.async false
+
+def resultHeap (heap : Mutable.Heap) (left right : Nat) (same different : Bool) : Mutable.Heap :=
+  heap ++ [.list [.scalar (.bool same), .scalar (.bool different), .ref left, .ref right]]
+
+theorem source_returns (heap : Mutable.Heap) (left right : Nat) (same different : Bool)
+    (equal : HeapCalls.compare .eq (.ref left) (.ref right) heap = some (.ok (.scalar (.bool same)), heap))
+    (unequal : HeapCalls.compare .notEq (.ref left) (.ref right) heap = some (.ok (.scalar (.bool different)), heap)) :
+    ReturnsValue Probe.module "equal" [.ref left, .ref right] heap (.ref heap.length)
+      (resultHeap heap left right same different) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.compare (Evaluates.lookup rfl) (Evaluates.lookup rfl) equal)
+  apply BlockReturns.assign (Evaluates.compare (Evaluates.lookup rfl) (Evaluates.lookup rfl) unequal)
+  exact BlockReturns.return_value (Evaluates.list (.cons (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))))
+
+def Paired (logical physical : Mutable.Heap) (rename : Nat → Nat) (left right : Nat) (same different : Bool) : Prop :=
+  ∃ nextMap,
+    ReturnsValue Probe.module "equal" [.ref left, .ref right] logical (.ref logical.length)
+      (resultHeap logical left right same different) ∧
+    ReturnsValue Probe.module "equal" [.ref (rename left), .ref (rename right)] physical (.ref physical.length)
+      (resultHeap physical (rename left) (rename right) same different) ∧
+    ExecutionLayout (resultHeap logical left right same different)
+      (resultHeap physical (rename left) (rename right) same different) nextMap ∧
+    nextMap logical.length = physical.length ∧
+    (∀ index < logical.length, nextMap index = rename index)
+
+theorem paired_sources (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat) (same different : Bool)
+    (leftInside : left < logical.length) (rightInside : right < logical.length)
+    (equal : HeapCalls.compare .eq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool same)), logical))
+    (unequal : HeapCalls.compare .notEq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool different)), logical))
+    (transport : ∀ op, HeapCalls.compare op (.ref (rename left)) (.ref (rename right)) physical =
+      (HeapCalls.compare op (.ref left) (.ref right) logical).map
+        (fun pair => (pair.1.map (relocateValue rename), physical))) :
+    Paired logical physical rename left right same different := by
+  have otherEqual := transport .eq
+  have otherUnequal := transport .notEq
+  rw [equal] at otherEqual
+  rw [unequal] at otherUnequal
+  have inside : ∀ value ∈ [Mutable.Value.scalar (.bool same), .scalar (.bool different), .ref left, .ref right],
+      value.edge.Within logical.length := by
+    simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq,
+      Mutable.Value.edge, Graph.Edge.Within]
+    exact ⟨trivial, trivial, leftInside, rightInside⟩
+  have retained := (layout.allocate_list [.scalar (.bool same), .scalar (.bool different), .ref left, .ref right] inside).2.2
+  refine ⟨extendMap rename logical.length physical.length,
+    source_returns logical left right same different equal unequal,
+    source_returns physical (rename left) (rename right) same different otherEqual otherUnequal,
+    ?_, extendMap_new _ _ _, ?_⟩
+  · simpa only [resultHeap, List.map_cons, List.map_nil, relocateValue] using retained
+  · exact fun index bound => extendMap_old _ _ _ _ bound
+
+theorem paired_dicts (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat)
+    (xs ys : List (Constant × Mutable.Value)) (same different : Bool)
+    (first : logical[left]? = some (.dict xs)) (second : logical[right]? = some (.dict ys))
+    (equal : HeapCalls.compare .eq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool same)), logical))
+    (unequal : HeapCalls.compare .notEq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool different)), logical)) :
+    Paired logical physical rename left right same different :=
+  paired_sources logical physical rename layout left right same different
+    (List.getElem?_eq_some_iff.mp first).1 (List.getElem?_eq_some_iff.mp second).1 equal unequal
+    (fun op => layout.runtime.compare_dicts layout.closed op left right xs ys first second)
+
+theorem paired_promoted (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat)
+    (xs : List (Constant × Mutable.Value)) (ys : List (HashDict.Entry Mutable.Value)) (same different : Bool)
+    (first : logical[left]? = some (.dict xs)) (second : logical[right]? = some (.keyDict ys))
+    (equal : HeapCalls.compare .eq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool same)), logical))
+    (unequal : HeapCalls.compare .notEq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool different)), logical)) :
+    Paired logical physical rename left right same different :=
+  paired_sources logical physical rename layout left right same different
+    (List.getElem?_eq_some_iff.mp first).1 (List.getElem?_eq_some_iff.mp second).1 equal unequal
+    (fun op => layout.runtime.compare_dict_keyDict layout.closed op left right xs ys first second)
+
+theorem paired_keyDicts (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat)
+    (xs ys : List (HashDict.Entry Mutable.Value)) (object : Mutable.Object) (same different : Bool)
+    (first : logical[left]? = some (.keyDict xs)) (second : logical[right]? = some object)
+    (entries : Mutable.dictionaryEntries object = some ys)
+    (equal : HeapCalls.compare .eq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool same)), logical))
+    (unequal : HeapCalls.compare .notEq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool different)), logical)) :
+    Paired logical physical rename left right same different :=
+  paired_sources logical physical rename layout left right same different
+    (List.getElem?_eq_some_iff.mp first).1 (List.getElem?_eq_some_iff.mp second).1 equal unequal
+    (fun op => layout.runtime.compare_keyDict layout.closed op left right xs ys object first second entries)
+
+theorem paired_dataInstances (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat) (same different : Bool)
+    (origin name : String) (frozen : Bool) (declared : List String) (fields : List (String × Mutable.Value))
+    (otherOrigin otherName : String) (otherFrozen : Bool) (otherDeclared : List String)
+    (otherFields : List (String × Mutable.Value))
+    (first : logical[left]? = some (.dataInstance origin name frozen declared fields))
+    (second : logical[right]? = some (.dataInstance otherOrigin otherName otherFrozen otherDeclared otherFields))
+    (equal : HeapCalls.compare .eq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool same)), logical))
+    (unequal : HeapCalls.compare .notEq (.ref left) (.ref right) logical = some (.ok (.scalar (.bool different)), logical)) :
+    Paired logical physical rename left right same different :=
+  paired_sources logical physical rename layout left right same different
+    (List.getElem?_eq_some_iff.mp first).1 (List.getElem?_eq_some_iff.mp second).1 equal unequal
+    (fun op => layout.runtime.compare_dataInstances layout.closed op left right
+      origin name frozen declared fields otherOrigin otherName otherFrozen otherDeclared otherFields first second)
+
+/-- Dictionary self-comparison succeeds even when the values contain cycles or unsupported objects. -/
+theorem same_dictionary (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (found : heap[address]? = some (.dict entries)) :
+    ReturnsValue Probe.module "equal" [.ref address, .ref address] heap (.ref heap.length)
+      (resultHeap heap address address true false) := by
+  apply source_returns
+  · rw [compare_dicts_eq heap .eq address address entries entries found found]
+    simp [comparisonEval, equalityAnswer, Except.map]
+  · rw [compare_dicts_eq heap .notEq address address entries entries found found]
+    simp [comparisonEval, equalityAnswer, Except.map]
+
+theorem source_failed (heap : Mutable.Heap) (left right : Nat) (exception : ExceptionObject)
+    (failed : HeapCalls.compare .eq (.ref left) (.ref right) heap = some (.error exception, heap)) :
+    (HeapCalls.call Probe.module "equal" [.ref left, .ref right] heap).Finishes
+      ⟨.error exception, [], heap, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, failed, HeapCalls.done,
+    HeapCalls.protectGenerator, Frame.inGenerator, Calls.generatorException])
+
+theorem missing_field (heap : Mutable.Heap) (left right : Nat) (origin name field : String)
+    (frozen : Bool) (fields otherFields : List (String × Mutable.Value))
+    (first : heap[left]? = some (.dataInstance origin name frozen [field] fields))
+    (second : heap[right]? = some (.dataInstance origin name frozen [field] otherFields))
+    (missing : fields.lookup field = none) :
+    HeapCalls.compare .eq (.ref left) (.ref right) heap =
+      some (.error { typeName := "AttributeError", args := [] }, heap) := by
+  rw [compare_dataInstances_eq heap .eq left right origin name frozen [field] fields
+    origin name frozen [field] otherFields first second]
+  simp [comparisonEval, dataEqualityAnswer, declaredValues, missing, bind, Except.bind, Except.map]
+
+/-- Both full source calls fail before constructing the return list; there is no counterpart-execution premise. -/
+theorem paired_missing_field (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat) (origin name field : String)
+    (frozen : Bool) (fields otherFields : List (String × Mutable.Value))
+    (first : logical[left]? = some (.dataInstance origin name frozen [field] fields))
+    (second : logical[right]? = some (.dataInstance origin name frozen [field] otherFields))
+    (missing : fields.lookup field = none) :
+    (HeapCalls.call Probe.module "equal" [.ref left, .ref right] logical).Finishes
+        ⟨.error { typeName := "AttributeError", args := [] }, [], logical, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "equal" [.ref (rename left), .ref (rename right)] physical).Finishes
+        ⟨.error { typeName := "AttributeError", args := [] }, [], physical, physical.length⟩ ∧
+      ExecutionLayout logical physical rename := by
+  have failed := missing_field logical left right origin name field frozen fields otherFields first second missing
+  have other := layout.runtime.compare_dataInstances layout.closed .eq left right
+    origin name frozen [field] fields origin name frozen [field] otherFields first second
+  rw [failed] at other
+  exact ⟨source_failed logical left right _ failed, source_failed physical (rename left) (rename right) _ other, layout⟩
+
+#print axioms source_returns
+#print axioms paired_sources
+#print axioms paired_dicts
+#print axioms paired_promoted
+#print axioms paired_keyDicts
+#print axioms paired_dataInstances
+#print axioms same_dictionary
+#print axioms source_failed
+#print axioms missing_field
+#print axioms paired_missing_field
+#print axioms equalEntries_relocates
+#print axioms equalDictionaries_relocates
+#print axioms dictionaryEntriesEqual_cons
+#print axioms hash_lookup_within
+#print axioms dictionaryEntriesEqual_relocates
+#print axioms keyDictionariesEqual_relocates
+#print axioms compareKeySets_relocates
+#print axioms declaredValues_relocates
+#print axioms declaredValues_within
+#print axioms declaredValues_eval
+#print axioms comparisonEval_relocates
+#print axioms compare_dicts_eq
+#print axioms compare_dict_keyDict_eq
+#print axioms compare_keyDict_eq
+#print axioms dictionaryEntries_relocates
+#print axioms dictionaryEntries_within
+#print axioms RuntimeLayout.compare_dicts
+#print axioms RuntimeLayout.compare_dict_keyDict
+#print axioms RuntimeLayout.compare_keyDict
+#print axioms dataEqualityAnswer_relocates
+#print axioms compare_dataInstances_eq
+#print axioms RuntimeLayout.compare_dataInstances
+end ValueComparisonExamples
+'''
+
+with project_temporary_directory(prefix="value-comparison-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    equal = namespace["equal"]
+    cycle = []
+    cycle.append(cycle)
+    for left, right, same in (
+        ({True: cycle, "x": 2**180}, {"x": 2**180, 1: cycle}, True),
+        ({(1, True): cycle, "x": -2**190}, {"x": -2**190, (True, 1): cycle}, True),
+        ({"x": 1}, {"x": 2}, False),
+        ({"x": cycle}, {"y": cycle}, False),
+        ({}, {}, True),
+    ):
+        result = equal(left, right)
+        assert result[:2] == [same, not same] and result[2] is left and result[3] is right
+        assert list(left.keys()) == list(result[2].keys())
+        assert equal(left, left)[:2] == [True, False]
+    Record = make_dataclass("Record", ["head", "tail"])
+    OtherRecord = make_dataclass("Record", ["head", "tail"])
+    for left, right, same in (
+        (Record(cycle, True), Record(cycle, 1), True),
+        (Record(cycle, -2**150), Record(cycle, 2**150), False),
+        (Record(cycle, 1), OtherRecord(cycle, 1), False),
+    ):
+        result = equal(left, right)
+        assert result[:2] == [same, not same] and result[2] is left and result[3] is right
+    missing = Record(cycle, 0)
+    del missing.head
+    intact = Record(cycle, 0)
+    try:
+        equal(missing, intact)
+    except AttributeError:
+        assert not hasattr(missing, "head") and intact.head is cycle and cycle[0] is cycle
+    else:
+        raise AssertionError("missing declared field should fail before returning a list")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.ValueComparisonRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 32, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("value comparison relocation: dictionary representations, dataclass fields, aliases, and errors; 32 axiom audits passed")
