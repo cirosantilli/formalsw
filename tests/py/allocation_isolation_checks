@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+Check private-cell exclusion through tuple interning and subsequent allocation.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def wrapped(items):
+    return [tuple(items)]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace AllocationIsolationExamples
+set_option Elab.async false
+
+/-- The actual parsed function retains element aliases, even if they point back to its input. -/
+theorem wrapped_returns (heap middle : Mutable.Heap) (source result : Nat) (items : List Mutable.Value)
+    (found : heap[source]? = some (.list items))
+    (allocated : Mutable.allocateTuple items heap = some (.ok (.ref result), middle)) :
+    ReturnsValue Probe.module "wrapped" [.ref source] heap (.ref middle.length)
+      (middle ++ [.list [.ref result]]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.list
+  apply Evaluates.Arguments.cons (middle := middle)
+  · apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+    rw [primitive_tuple_list heap source items found]
+    exact allocated
+  · exact .nil
+
+/-- Both complete calls use the allocator's actual witnesses, then extend that same map for the list. -/
+theorem paired_wrapped (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (source privateAddress : Nat) (object : Mutable.Object) (items : List Mutable.Value)
+    (layout : PrivateLayout logical physical rename privateAddress object) (nonempty : object ≠ .tuple [])
+    (found : logical[source]? = some (.list items)) :
+    ∃ logicalAfter physicalAfter nextMap left right,
+      ReturnsValue Probe.module "wrapped" [.ref source] logical (.ref left) logicalAfter ∧
+      ReturnsValue Probe.module "wrapped" [.ref (rename source)] physical (.ref right) physicalAfter ∧
+      PrivateLayout logicalAfter physicalAfter nextMap privateAddress object ∧
+      left < logicalAfter.length ∧ nextMap left = right := by
+  have itemsInside : ∀ value ∈ items, value.edge.Within logical.length :=
+    layout.layout.closed (.list items) (List.mem_of_getElem? found)
+  have physicalFound := layout.layout.runtime.lookup source (.list items) found
+  obtain ⟨left, right, logicalMiddle, physicalMiddle, middleMap, leftRun, rightRun, middleLayout,
+    bounded, same, _⟩ := layout.allocateTuple nonempty items itemsInside
+  have inside : ∀ value ∈ [Mutable.Value.ref left], value.edge.Within logicalMiddle.length := by
+    intro value member
+    obtain rfl := List.mem_singleton.mp member
+    exact bounded
+  obtain ⟨_, _, finalLayout⟩ := middleLayout.allocate_list [.ref left] inside
+  simp only [List.map_cons, List.map_nil, relocateValue, same] at finalLayout
+  refine ⟨logicalMiddle ++ [.list [.ref left]], physicalMiddle ++ [.list [.ref right]],
+    extendMap middleMap logicalMiddle.length physicalMiddle.length, logicalMiddle.length, physicalMiddle.length,
+    wrapped_returns logical logicalMiddle source left items found leftRun,
+    wrapped_returns physical physicalMiddle (rename source) right _ physicalFound rightRun,
+    finalLayout, by simp, extendMap_new ..⟩
+
+/-- A mapped receiver created by an earlier allocation is still separate during a later write. -/
+theorem next_append_private (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (privateAddress receiver anchors : Nat) (object : Mutable.Object) (value : Mutable.Value)
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (receiverInside : receiver < logical.length) (valueInside : value.edge.Within logical.length) :
+    Framing.RetainsCell privateAddress object
+      (HeapCalls.step Probe.module anchors
+        (relocateState rename physical ⟨.operation (.append receiver) [value], [], logical⟩)) := by
+  apply Framing.relocated_step_cell Probe.module rename physical privateAddress anchors object _ []
+    ?_ layout.excludes layout.saved
+  refine ⟨⟨receiverInside, ?_⟩, by simp⟩
+  intro item member
+  obtain rfl := List.mem_singleton.mp member
+  exact valueInside
+
+/-- Interning can expose an old empty tuple; preserving contents alone would miss this. -/
+theorem empty_tuple_boundary :
+    PrivateLayout [] [.tuple []] id 0 (.tuple []) ∧
+    Mutable.allocateTuple [] [] = some (.ok (.ref 0), [.tuple []]) ∧
+    Mutable.allocateTuple [] [.tuple []] = some (.ok (.ref 0), [.tuple []]) ∧
+    ¬ ∃ nextMap, PrivateLayout [.tuple []] [.tuple []] nextMap 0 (.tuple []) := by
+  refine ⟨⟨⟨⟨?_, ?_⟩, ?_, ?_⟩, rfl, ?_⟩, rfl, rfl, ?_⟩
+  · intro i bound
+    simp at bound
+  · intro index object found
+    simp at found
+  · intro object member
+    simp at member
+  · intro address selected
+    simp [emptyTupleAddress] at selected
+  · intro source bounded
+    simp at bounded
+  · rintro ⟨nextMap, after⟩
+    have bound := after.layout.runtime.bound 0 (by simp)
+    have excluded := after.excludes 0 (by simp)
+    simp only [List.length_cons, List.length_nil] at bound
+    exact excluded (by omega)
+
+/-- An extra empty tuple may be reused while a different, arbitrary list stays private. -/
+theorem reuse_beside_private_list (items : List Mutable.Value) :
+    ∃ nextMap, PrivateLayout [.tuple []] [.list items, .tuple []] nextMap 0 (.list items) ∧ nextMap 0 = 1 := by
+  have before : PrivateLayout [] [.list items, .tuple []] id 0 (.list items) := by
+    refine ⟨⟨⟨?_, ?_⟩, ?_, ?_⟩, rfl, ?_⟩
+    · intro i bound
+      simp at bound
+    · intro index object found
+      simp at found
+    · intro object member
+      simp at member
+    · intro address selected
+      simp [emptyTupleAddress] at selected
+    · intro source bounded
+      simp at bounded
+  obtain ⟨left, right, logicalAfter, physicalAfter, nextMap, leftRun, rightRun, retained, _, same, _⟩ :=
+    before.allocateTuple (by simp) [] (by simp)
+  have first : Mutable.allocateTuple [] [] = some (.ok (.ref 0), [.tuple []]) := rfl
+  have second : Mutable.allocateTuple [] [.list items, .tuple []] =
+      some (.ok (.ref 1), [.list items, .tuple []]) := rfl
+  rw [first] at leftRun
+  rw [show [].map (relocateValue id) = [] from rfl, second] at rightRun
+  simp only [Option.some.injEq, Prod.mk.injEq, Except.ok.injEq, Mutable.Value.ref.injEq] at leftRun rightRun
+  obtain ⟨rfl, rfl⟩ := leftRun
+  obtain ⟨rfl, rfl⟩ := rightRun
+  exact ⟨nextMap, retained, same⟩
+
+end AllocationIsolationExamples
+'''
+AUDITS = [
+    "FormalSW.PyAst.Mutable.Relocation.extendMap_excludes",
+    "FormalSW.PyAst.Mutable.Relocation.PrivateLayout.preserves",
+    "FormalSW.PyAst.Mutable.Relocation.PrivateLayout.append_object",
+    "FormalSW.PyAst.Mutable.Relocation.PrivateLayout.append_existing",
+    "FormalSW.PyAst.Mutable.Relocation.PrivateLayout.allocate_list",
+    "FormalSW.PyAst.Mutable.Relocation.PrivateLayout.allocateSet",
+    "FormalSW.PyAst.Mutable.Relocation.PrivateLayout.allocateBuffer",
+    "FormalSW.PyAst.Mutable.Relocation.PrivateLayout.allocateDict",
+    "FormalSW.PyAst.Mutable.Relocation.PrivateLayout.allocateInstance",
+    "FormalSW.PyAst.Mutable.Relocation.allocateTuple_shape",
+    "FormalSW.PyAst.Mutable.Relocation.allocateTuple_new_address",
+    "FormalSW.PyAst.Mutable.Relocation.allocateTuple_result_separate",
+    "FormalSW.PyAst.Mutable.Relocation.allocateTuple_map_excludes",
+    "FormalSW.PyAst.Mutable.Relocation.PrivateLayout.allocateTuple",
+    "FormalSW.PyAst.HeapCalls.Relocation.step_list_private",
+    "FormalSW.PyAst.HeapCalls.Relocation.step_tuple_private",
+    "FormalSW.PyAst.HeapCalls.Relocation.private_state_separate",
+    "AllocationIsolationExamples.wrapped_returns",
+    "AllocationIsolationExamples.paired_wrapped",
+    "AllocationIsolationExamples.next_append_private",
+    "AllocationIsolationExamples.empty_tuple_boundary",
+    "AllocationIsolationExamples.reuse_beside_private_list",
+]
+
+with project_temporary_directory(prefix="allocation-isolation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    wrapped = namespace["wrapped"]
+    assert wrapped([]) == [()]
+    shared = []
+    shared.append(shared)
+    source = [shared, shared]
+    result = wrapped(source)
+    assert isinstance(result, list) and isinstance(result[0], tuple)
+    assert result[0][0] is shared and result[0][1] is shared
+    assert source[0] is shared and source[1] is shared and shared[0] is shared
+    cyclic = []
+    cyclic.append(cyclic)
+    result = wrapped(cyclic)
+    assert result[0][0] is cyclic and cyclic[0] is cyclic
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineAllocationIsolation\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"allocation isolation: parsed calls, cyclic aliases, tuple reuse and private writes; {len(AUDITS)} axiom audits passed")

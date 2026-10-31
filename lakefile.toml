@@ -216,6 +216,8 @@ roots = [
   "lang.py.FormalSW.ConstructionFrame",
   "lang.py.FormalSW.ConstructionMachineFrame",
   "lang.py.FormalSW.AllocationFrame",
+  "lang.py.FormalSW.AllocationIsolation",
+  "lang.py.FormalSW.MachineAllocationIsolation",
   "lang.py.FormalSW.AllocationMachineFrame",
   "lang.py.FormalSW.ReadHeapFrame",
   "lang.py.FormalSW.PrimitiveHeapFrame",
