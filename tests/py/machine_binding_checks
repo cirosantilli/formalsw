@@ -101,8 +101,8 @@ theorem source_finishes (repeated : Bool) (heap : Mutable.Heap) (address : Nat) 
       ⟨.operation (.call (functionName repeated)) [.ref address, start], [], heap⟩ [] = _
     simp [HeapCalls.step, source_function, show completeArguments args [.ref address, start] = some [.ref address, start] from rfl,
       executableBody, body, env]
-  · apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (step_for_enumerate Probe.module heap heap.length false (indexName repeated) "value"
-      (.name "items") (some prepareCall) (loopBody repeated) [] following env [] [])
+  · apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (step_for_unpack_dispatch Probe.module heap heap.length false [.name (indexName repeated), .name "value"]
+      (.call (.name "enumerate") [.name "items", prepareCall]) (loopBody repeated) [] following env [] [])
     apply (Evaluates.lookup (module := Probe.module) (heap := heap) (env := env) (value := .ref address) rfl
       heap.length _).finishes
     apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
@@ -217,6 +217,9 @@ end MachineBindingExamples
 AUDITS = ["MachineBindingExamples." + name for name in (
     "prepare_returns", "source_finishes", "unpack_finishes", "answers_relocate", "paired_finishes",
 )] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "step_for_unpack_dispatch", "step_for_unpack_relocates", "step_for_other_dispatch",
+    "step_for_other_relocates", "step_for_relocates", "StateWithin.for_unpack",
+    "StateWithin.for_other", "StateWithin.forIn",
     "assignNames_relocate", "EnvWithin.assignNames", "run_sequence_relocates", "run_sequence_within",
     "step_unpack_relocates", "step_unpack_start_relocates", "step_unpack_loop_relocates",
     "StateWithin.unpack", "StateWithin.unpack_start", "StateWithin.unpack_loop",
@@ -272,7 +275,7 @@ with project_temporary_directory(prefix="machine-binding-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineEnumerate\n"
+    proof.write_text("import lang.py.FormalSW.MachineForDispatch\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
