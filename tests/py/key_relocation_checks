@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+Prove tuple-key resolution and source dictionary reads across differing layouts.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def lookup(mapping, key):
+    return mapping[key]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace KeyRelocationExamples
+set_option Elab.async false
+
+/-- The actual parsed source returns or raises exactly as its primitive read does. -/
+theorem source_finishes (heap : Mutable.Heap) (address : Nat) (key : Mutable.Value)
+    (outcome : Except ExceptionObject Mutable.Value)
+    (executed : Mutable.getItem (.ref address) key heap = some (outcome, heap)) :
+    (HeapCalls.call Probe.module "lookup" [.ref address, key] heap).Finishes
+      ⟨outcome, [], heap, heap.length⟩ := by
+  cases outcome with
+  | ok value =>
+    apply ReturnsValue.finishes
+    apply BlockReturns.function rfl rfl
+    exact BlockReturns.return_value
+      (Evaluates.subscript (by intros; simp) (Evaluates.lookup rfl) (Evaluates.lookup rfl) executed)
+  | error exception =>
+    change Finishes (HeapCalls.step Probe.module heap.length) _ _
+    repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+    exact .done (by simp [HeapCalls.step, HeapCalls.argumentsState, HeapCalls.primitive,
+      HeapCalls.result, HeapCalls.run, executed, HeapCalls.done, HeapCalls.protectGenerator,
+      Calls.generatorException])
+
+/-- This source correspondence uses each heap's actual key allowance, not a shared artificial budget. -/
+theorem paired_reads (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat)
+    (entries : List (HashDict.Entry Mutable.Value)) (key : Mutable.Value)
+    (found : logical[address]? = some (.keyDict entries))
+    (inside : key.edge.Within logical.length) (outcome : Except ExceptionObject Mutable.Value)
+    (after : Mutable.Heap)
+    (executed : Mutable.getItem (.ref address) key logical = some (outcome, after)) :
+    (HeapCalls.call Probe.module "lookup" [.ref address, key] logical).Finishes
+        ⟨outcome, [], after, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "lookup" [.ref (rename address), relocateValue rename key]
+        physical).Finishes ⟨outcome.map (relocateValue rename), [], physical, physical.length⟩ ∧
+      ExecutionLayout after physical rename := by
+  obtain ⟨read, retained, unchanged, _⟩ :=
+    layout.getItem_keyDict address entries key found inside outcome after executed
+  subst after
+  exact ⟨source_finishes logical address key outcome executed,
+    source_finishes physical (rename address) (relocateValue rename key) _ read, retained⟩
+
+/-- A malformed tuple cycle remains unresolved at every allowance. -/
+theorem cycle_unresolved (heap : Mutable.Heap) (address : Nat) (tail : List Mutable.Value)
+    (found : heap[address]? = some (.tuple (.ref address :: tail))) (fuel : Nat) :
+    Mutable.keyOfFuel heap fuel (.ref address) = none := by
+  induction fuel with
+  | zero => rfl
+  | succ fuel ih => simp [keyOfFuel_ref, found, collectResolved, ih]
+
+/-- Left-to-right resolution raises for an unhashable first item without visiting the cyclic tail. -/
+theorem unhashable_before_cycle (heap : Mutable.Heap) (address bad : Nat)
+    (items : List Mutable.Value)
+    (found : heap[address]? = some (.tuple [.ref bad, .ref address]))
+    (badFound : heap[bad]? = some (.list items)) :
+    Mutable.keyOf heap (.ref address) = some (.error {typeName := "TypeError", args := []}) := by
+  have nonempty : 0 < heap.length := by
+    have bound := (List.getElem?_eq_some_iff.mp found).1
+    omega
+  obtain ⟨fuel, length⟩ := Nat.exists_eq_succ_of_ne_zero (by omega : heap.length ≠ 0)
+  simp only [Mutable.keyOf, length, keyOfFuel_ref, found, collectResolved, badFound]
+  rfl
+
+/-- Interleaving arbitrary private cells cannot make a cyclic key suddenly hashable. -/
+theorem relocated_cycle_unresolved (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
+    (address : Nat) (tail : List Mutable.Value)
+    (found : logical[address]? = some (.tuple (.ref address :: tail))) :
+    Mutable.keyOf physical (.ref (rename address)) = none := by
+  have same := layout.keyOf closed (.ref address) (List.getElem?_eq_some_iff.mp found).1
+  simp only [relocateValue] at same
+  rw [same]
+  exact cycle_unresolved logical address tail found _
+
+/-- Unsupported primitive reads remain unsupported after relocation. -/
+theorem unsupported_read (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat)
+    (entries : List (HashDict.Entry Mutable.Value)) (key : Mutable.Value)
+    (found : logical[address]? = some (.keyDict entries))
+    (inside : key.edge.Within logical.length)
+    (unsupported : Mutable.getItem (.ref address) key logical = none) :
+    Mutable.getItem (.ref (rename address)) (relocateValue rename key) physical = none := by
+  simpa only [unsupported, Option.map_none] using
+    layout.runtime.getItem_keyDict layout.closed address entries key found inside
+
+#print axioms source_finishes
+#print axioms paired_reads
+#print axioms cycle_unresolved
+#print axioms unhashable_before_cycle
+#print axioms relocated_cycle_unresolved
+#print axioms unsupported_read
+#print axioms keyOfFuel_ref
+#print axioms keyOfFuel_step_extends
+#print axioms finite_resolution_stable
+#print axioms keyOfFuel_stabilized
+#print axioms keyOfFuel_eq_keyOf
+#print axioms RuntimeLayout.keyOfFuel
+#print axioms RuntimeLayout.keyOf
+#print axioms ExecutionLayout.hashKey
+#print axioms RuntimeLayout.getItem_keyDict
+#print axioms ExecutionLayout.getItem_keyDict
+end KeyRelocationExamples
+'''
+
+with project_temporary_directory(prefix="key-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    lookup = namespace["lookup"]
+    value = []
+    mapping = {((True,), (2, 3)): value}
+    assert lookup(mapping, ((1,), (2, 3))) is value
+    value.append(mapping)
+    assert lookup(mapping, ((True,), (2, 3)))[0] is mapping
+    for key in (([],), (1, []), []):
+        try:
+            lookup(mapping, key)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError(key)
+    try:
+        lookup(mapping, "missing")
+    except KeyError as exception:
+        assert exception.args == ("missing",)
+    else:
+        raise AssertionError("missing scalar key did not raise")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.KeyRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 16, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("key relocation: source dictionary reads, cycles, allowance stabilization; sixteen axiom audits passed")
