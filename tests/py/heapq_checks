@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""
+Compare min-heap layouts, shared references and partial failures with CPython.
+"""
+import ast
+import heapq
+import itertools
+import json
+from pathlib import Path
+import random
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.heapq_support import heapq_binding
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bytes:
+        return '.bytes [' + ', '.join(map(str, value)) + ']'
+    assert type(value) is str
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+class Heap:
+    def __init__(self):
+        self.objects = []
+        self.addresses = {}
+
+    def value(self, value):
+        if type(value) not in (list, tuple):
+            return '.scalar (' + constant(value) + ')'
+        identity = id(value)
+        if identity not in self.addresses:
+            self.addresses[identity] = len(self.objects)
+            self.objects.append(value)
+            for item in value:
+                self.value(item)
+        return f'.ref {self.addresses[identity]}'
+
+    def expression(self):
+        return '[' + ', '.join(
+            ('.list' if type(value) is list else '.tuple') + ' ['
+            + ', '.join(map(self.value, value)) + ']'
+            for value in self.objects) + ']'
+
+
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 16384',
+         'set_option maxHeartbeats 2000000', '''
+structure HeapqCase where
+  index : Nat
+  operation : Nat
+  arguments : List Mutable.Value
+  before : Mutable.Heap
+  outcome : Except ExceptionObject Mutable.Value
+  after : Mutable.Heap
+
+def checkHeapq (cases : List HeapqCase) : Bool :=
+  cases.all fun c =>
+    let operation := match c.operation with
+      | 0 => Heapq.heapify
+      | 1 => Heapq.heappush
+      | _ => Heapq.heappop
+    decide (operation c.arguments c.before = some (c.outcome, c.after))
+''']
+count = 0
+primitive_cases = []
+
+
+def primitive(operation, arguments):
+    global count
+    heap = Heap()
+    args = '[' + ', '.join(map(heap.value, arguments)) + ']'
+    # Keep unrelated objects and an additional path to every input list alive.
+    anchors = [value for value in arguments if type(value) in (list, tuple)]
+    heap.value([anchors, anchors, ['unrelated']])
+    before = heap.expression()
+    try:
+        result = getattr(heapq, operation)(*arguments)
+        expected = '.ok (' + heap.value(result) + ')'
+    except (TypeError, IndexError) as error:
+        expected = f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+    after = heap.expression()
+    tag = ('heapify', 'heappush', 'heappop').index(operation)
+    primitive_cases.append(
+        f'⟨{count}, {tag}, {args}, {before}, {expected}, {after}⟩')
+    count += 1
+
+
+cases = [[], [1], [True, 1, False, 0], [None], [1, None], [2, 1, 'x'],
+         ['x', 5, 6], [0, 1, 2, 'x', 4, 5, 6, 7],
+         ['٢', '²', '0', '9', '😀'], [b'b', b'a', b'a']]
+cases += [list(values) for length in range(2, 5)
+          for values in itertools.product((-2, 0, 1), repeat=length)]
+for initial in cases:
+    for operation in ('heapify', 'heappop'):
+        primitive(operation, [initial.copy()])
+    for item in (-3, 0, 'x'):
+        primitive('heappush', [initial.copy(), item])
+
+for operation in ('heapify', 'heappop', 'heappush'):
+    for arguments in ([], [None], [()], [3], [[], 1, 2]):
+        primitive(operation, arguments)
+for rows in ([[2], [1], [1]], [(2, 'b'), (1, 'a'), (1, 'a')], [[1], (1,)]):
+    primitive('heapify', [rows.copy()])
+    primitive('heappop', [rows.copy()])
+    primitive('heappush', [rows.copy(), rows[0]])
+
+# Equal children must choose the right reference, even with equal contents.
+a, b = [1], [1]
+primitive('heappop', [[a, a, b, [9]]])
+
+# Exercise both heapify traversal orders, including failures after earlier swaps.
+large_cases = []
+
+
+def large_heapify(initial):
+    global count
+    value = initial.copy()
+    try:
+        heapq.heapify(value)
+        error = False
+    except TypeError:
+        error = True
+    large_cases.append({'before': initial, 'after': value, 'error': error})
+    count += 1
+
+
+rng = random.Random(79)
+for size in (2500, 2501, 4097):
+    initial = list(range(size))
+    rng.shuffle(initial)
+    large_heapify(initial.copy())
+    for position in (0, size // 3, size - 1):
+        mixed = initial.copy()
+        mixed[position] = 'incomparable'
+        large_heapify(mixed)
+
+# Compile the comparison loop once; batches keep large literal heaps independent.
+batches = [primitive_cases[start:start + 25] for start in range(0, len(primitive_cases), 25)]
+primitive_proofs = []
+for index, cases in enumerate(batches):
+    batch = ',\n'.join(cases)
+    primitive_proofs.append('\n'.join(lines) + f'''
+def cases : List HeapqCase := [
+{batch}
+]
+example : checkHeapq cases = true := by native_decide
+''')
+
+# Parse large fixtures at runtime to keep their data out of Lean's elaborator.
+large_prelude = '''
+def largeValue (value : Lean.Json) : Except String Mutable.Value := do
+  match value.getInt? with
+  | .ok n => return .scalar (.int n)
+  | .error _ => return .scalar (.string (← value.getStr?))
+
+def checkLargeHeapq (text : String) : Bool :=
+  let result : Except String Bool := do
+    let json ← Lean.Json.parse text
+    let before ← (← json.getObjValAs? (List Lean.Json) "before").mapM largeValue
+    let after ← (← json.getObjValAs? (List Lean.Json) "after").mapM largeValue
+    let failed ← json.getObjValAs? Bool "error"
+    let heap : Mutable.Heap := [.list before, .list [.ref 0, .ref 0],
+      .list [.scalar (.string "unrelated")]]
+    let outcome : Except ExceptionObject Mutable.Value :=
+      if failed then .error ⟨"TypeError", []⟩ else .ok (.scalar .none)
+    return decide (Heapq.heapify [.ref 0] heap =
+      some (outcome, heap.set 0 (.list after)))
+  result.toOption.getD false
+'''
+for case in large_cases:
+    fixture = json.dumps(json.dumps(case), ensure_ascii=False)
+    primitive_proofs.append('\n'.join(lines) + large_prelude
+                            + f'\nexample : checkLargeHeapq {fixture} = true := by native_decide\n')
+
+source = '''
+import heapq as h
+from heapq import heappush as push
+from heapq import heappop as pop
+
+def make(xs: list[int]):
+    alias = xs
+    result = h.heapify(xs)
+    return [alias, result]
+def add(xs: list[int], item: int):
+    result = push(xs, item)
+    return [xs, result]
+def take(xs: list[int]):
+    return [xs, pop(xs)]
+def touch(xs: list[int]):
+    xs.append(-9)
+    return 0
+def excess(xs: list[int]):
+    return pop(xs, touch(xs))
+def argument_effect(xs: list[int]):
+    return push(xs, pop(xs))
+def missing(xs: list[int]):
+    return push(xs)
+def wrong_receiver(xs: list[int]):
+    return push(3, touch(xs))
+def scalar(n: int):
+    return h.heapify(n)
+'''
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in (part for part in program.body if isinstance(part, ast.FunctionDef)):
+    assert not checker.check(function.name), function.name
+    assert uses_heap_calls(program, function)
+world = {}
+exec(source, world)
+lines.append('def source : Module := pyast_from_json% (include_str "source.json")')
+for name in ('make', 'add', 'take', 'excess', 'argument_effect', 'missing', 'wrong_receiver'):
+    for initial in ([], [2], [7, 1, 3, 1], [1, 'x', 2, 3]):
+        value = initial.copy()
+        heap = Heap()
+        arguments = [value, -1] if name == 'add' else [value]
+        args = '[' + ', '.join(map(heap.value, arguments)) + ']'
+        before = heap.expression()
+        try:
+            result = world[name](*arguments)
+            outcome = 'match c.outcome with | .ok _ => true | _ => false'
+            roots = [value, result]
+        except (TypeError, IndexError) as error:
+            outcome = ('match c.outcome with | .error e => decide '
+                       f'(e = ⟨"{type(error).__name__}", []⟩) | _ => false')
+            roots = [value]
+        expected = data(snapshot_roots(roots))
+        lines.extend([
+            f'-- {name}, source case {count}',
+            f'example : (match (HeapCalls.call source "{name}" {args} {before}).execution.observe 3000 with',
+            f'  | .done (.ok c) => ({outcome}) &&',
+            f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+            '  | _ => false) = true := by native_decide',
+        ])
+        count += 1
+
+unsafe = (
+    '\nh = 3\n', '\ndel h\n', '\npush = pop\n',
+    '\nh.heappush = pop\n', '\ndef mutate():\n    h.heappop = push\n',
+    '\nescaped = h\n', '\nescaped = h.heapify\n', '\nescaped = push\n',
+    '\ndef escape():\n    return h\n', '\ndef mutate():\n    global h\n    h = 3\n',
+    '\nimport heapq as h\n', '\nimport heapq as other\nother.heapify = push\n',
+)
+for suffix in unsafe:
+    module = ast.parse(source + suffix)
+    assert SupportChecker(module).check('make'), suffix
+for text in (
+    'import heapq\ndef f(xs: list[int]): return heapq.heapify(heap=xs)',
+    'import heapq\ndef f(heapq: int): return heapq.heapify([])',
+    'from heapq import heapify, heapify\ndef f(xs: list[int]): return heapify(xs)',
+):
+    assert SupportChecker(ast.parse(text)).check('f'), text
+
+with project_temporary_directory(prefix='heapq-') as directory:
+    directory = Path(directory)
+    program.formalsw_source = directory / 'source.py'
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    for shadow in ('heapq.py', 'heapq'):
+        path = directory / shadow
+        path.write_text('') if path.suffix else path.mkdir()
+        assert SupportChecker(program).check('make')
+        assert heapq_binding(ast.parse('h.heapify([])').body[0].value, program) is None
+        path.unlink() if path.suffix else path.rmdir()
+    proof = directory / 'Checks.lean'
+    for index, text in enumerate(primitive_proofs):
+        proof.write_text(text)
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+        print(f'Checked heapq batch {index + 1}/{len(primitive_proofs)}', flush=True)
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} heapq Python comparisons passed, including layouts, aliases and partial failures')

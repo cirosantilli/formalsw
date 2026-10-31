@@ -2,6 +2,7 @@ import lang.py.FormalSW.Instances
 import lang.py.FormalSW.Linking
 import lang.py.FormalSW.ScalarSort
 import lang.py.FormalSW.HeapSort
+import lang.py.FormalSW.Heapq
 import lang.py.FormalSW.Permutations
 import lang.py.FormalSW.Combinations
 import lang.py.FormalSW.StringReplace
@@ -1246,6 +1247,9 @@ def clearDictionary (address : Nat) : Eval Value := do
   | none => Mutable.unsupported
 
 def primitive : Operation → List Value → Eval Value
+  | .builtin .heapqHeapify, values => Heapq.heapify values
+  | .builtin .heapqPush, values => Heapq.heappush values
+  | .builtin .heapqPop, values => Heapq.heappop values
   | .membership negated, [needle, container] => membership needle container negated
   | .notCallable, _ => Mutable.error "TypeError"
   | .setField name value, [receiver] => Mutable.writeField receiver name value

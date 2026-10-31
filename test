@@ -460,6 +460,14 @@ def main() -> int:
     print(f"{'PASS' if pop_checks_passed else 'FAIL'} list removal and argument effects", flush=True)
     if not pop_checks_passed:
         print(textwrap.indent((pop_checks.stdout + pop_checks.stderr).rstrip(), "  "))
+    heapq_checks = subprocess.run(
+        [sys.executable, "tests/py/heapq_checks"],
+        cwd=REPO, text=True, capture_output=True,
+    )
+    heapq_checks_passed = heapq_checks.returncode == 0
+    print(f"{'PASS' if heapq_checks_passed else 'FAIL'} heapq layouts and partial failures", flush=True)
+    if not heapq_checks_passed:
+        print(textwrap.indent((heapq_checks.stdout + heapq_checks.stderr).rstrip(), "  "))
     join_checks = subprocess.run(
         [sys.executable, "tests/py/join_checks"],
         cwd=REPO, text=True, capture_output=True,
@@ -587,6 +595,7 @@ def main() -> int:
         and call_checks_passed
         and list_checks_passed
         and pop_checks_passed
+        and heapq_checks_passed
         and join_checks_passed
         and generator_exception_checks_passed
         and consumed_generator_checks_passed

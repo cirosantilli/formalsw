@@ -3,12 +3,14 @@ import lang.py.FormalSW.ScalarSets
 import lang.py.FormalSW.ScalarDicts
 import lang.py.FormalSW.ScalarSort
 import lang.py.FormalSW.HeapSort
+import lang.py.FormalSW.Heapq
 import lang.py.FormalSW.MutableGlobals
 import lang.py.FormalSW.ContainerTypes
 import lang.py.FormalSW.Permutations
 import lang.py.FormalSW.Combinations
 import lang.py.FormalSW.Instances
 import lang.py.FormalSW.HeapCalls
+import lang.py.FormalSW.HeapqCalls
 import lang.py.FormalSW.CallDefaults
 import lang.py.FormalSW.HeapSortingCalls
 import lang.py.FormalSW.ReverseSortingCalls

@@ -154,6 +154,10 @@ inductive Builtin where
   | sorted
   /-- The keyword-only reverse argument is distinct from a second positional argument. -/
   | sortedReverse
+  /-- Resolved standard-library heap operations mutate their list argument. -/
+  | heapqHeapify
+  | heapqPush
+  | heapqPop
 deriving Repr, BEq, Lean.ToExpr
 
 /-- Python expressions currently represented by the AST bridge. -/
@@ -566,6 +570,9 @@ partial def Expr.fromJson? (json : Lean.Json) : Except String Expr := do
         | "set" => pure Builtin.set
         | "sorted" => pure Builtin.sorted
         | "$formalsw.sorted.reverse" => pure Builtin.sortedReverse
+        | "$formalsw.heapq.heapify" => pure Builtin.heapqHeapify
+        | "$formalsw.heapq.heappush" => pure Builtin.heapqPush
+        | "$formalsw.heapq.heappop" => pure Builtin.heapqPop
         | "int.bit_length" => pure Builtin.intBitLength
         | "int.bit_count" => pure Builtin.intBitCount
         | "identity" => pure Builtin.identity

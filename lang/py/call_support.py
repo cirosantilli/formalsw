@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from lang.py.global_inputs import GlobalInputError, function_globals, annotation_kind, needs_heap_globals
 from lang.py.imports import bindings
+from lang.py.heapq_support import heapq_binding, heapq_functions
 from lang.py.permutation_support import permutation_binding, permutation_arguments, combination_binding, combination_arguments
 from lang.py.defaults import literal_default
 from lang.py.named_callbacks import callback_bindings_valid, callback_signature
@@ -315,6 +316,7 @@ def library_functions(module):
                 if alias.name == 'math':
                     for name in ('isqrt', 'gcd', 'comb', 'factorial'):
                         functions[f'{alias.asname or alias.name}.{name}'] = ('math', name, node)
+    functions.update(heapq_functions(module))
     return functions
 
 
@@ -540,6 +542,8 @@ def uses_heap_calls(module, function):
                            and len(node.targets[0].elts) == len(node.value.elts)
                            and all(isinstance(target, ast.Name) for target in node.targets[0].elts)}
         for node in parts:
+            if heapq_binding(node, module) is not None:
+                return True
             if (isinstance(node, ast.Call) and any(isinstance(argument, ast.Starred) for argument in node.args)
                     or isinstance(node, (ast.List, ast.Set, ast.ListComp, ast.SetComp, ast.Dict, ast.DictComp)) or reversed_list(node) is not None
                     or sequence_extremum(node) is not None or sequence_sort(node) is not None
@@ -1096,17 +1100,26 @@ def check_calls(module, function, reject, *, heap=False):
                 visit(target)
             elif isinstance(node, ast.Call) and library_name(node.func) in libraries:
                 target = library_name(node.func)
+                library, primitive, _ = libraries[target]
                 binding = target.split('.')[0]
                 if binding in scope or bindings(module, binding) != [libraries[target][2]]:
                     reject(node, 'standard-library call targets must not be rebound or shadowed')
                 # A write through any alias changes the shared module, including
                 # writes in other functions that may run before this call.
-                aliases = {name.split('.')[0] for name in libraries if '.' in name}
+                aliases = {name.split('.')[0] for name, imported in libraries.items()
+                           if '.' in name and imported[0] == library}
                 if any(isinstance(part, ast.Attribute) and isinstance(part.ctx, (ast.Store, ast.Del))
                        and isinstance(part.value, ast.Name) and part.value.id in aliases
                        for part in ast.walk(module)):
                     reject(node, 'modeled standard-library modules must not be mutated')
-                primitive = libraries[target][1]
+                if library == 'heapq':
+                    if not heap or heapq_binding(node, module) is None:
+                        reject(node, 'heapq calls require heap execution and unmodified, unescaped imports')
+                    if node.keywords or any(isinstance(item, ast.Starred) for item in node.args):
+                        reject(node, 'heapq calls require plain positional arguments')
+                    for item in node.args:
+                        recurse(item)
+                    return
                 if primitive in ('isqrt', 'factorial') and (node.keywords or len(node.args) != 1):
                     reject(node, f'math.{primitive} requires exactly one positional argument')
                 elif primitive == 'comb' and (node.keywords or len(node.args) != 2):
