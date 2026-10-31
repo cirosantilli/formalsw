@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""
+Check tuple heap contracts compositionally, including duplicate references and caller frames.
+"""
+from pathlib import Path
+import re
+import subprocess
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+PROOF = r'''
+import FormalSW
+open FormalSW.PyAst Heapq
+namespace HeapqTupleExamples
+set_option Elab.async false
+
+theorem push_then_pop (heap : Heap) (address : Nat) (values : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list values))
+    (typed : ∀ value ∈ values, IntegerTuple heap value) (itemTyped : IntegerTuple heap item) :
+    ∃ middle after returned,
+      heappush [.ref address, item] heap = some (.ok (.scalar .none), middle) ∧
+      heappop [.ref address] middle = some (.ok returned, after) ∧
+      (∀ other, other ≠ address → after[other]? = heap[other]?) := by
+  obtain ⟨middle, pushed, changed⟩ := heappush_int_tuples heap address values item found typed itemTyped
+  have stable := TupleFrame.replace_list heap address values found
+  have kept := stable.reorders (TupleFrame.refl heap) changed
+  obtain ⟨current, currentFound, permutation⟩ := changed.contents heap address (values ++ [item]) middle
+    (List.getElem?_eq_some_iff.mp found).1
+  have currentTyped : ∀ value ∈ current, IntegerTuple middle value := by
+    intro value member
+    have original : IntegerTuple heap value := by
+      rcases List.mem_append.mp (permutation.mem_iff.mp member) with old | added
+      · exact typed value old
+      · simpa only [List.mem_singleton.mp added] using itemTyped
+    obtain ⟨a, fields, rfl, read⟩ := original
+    exact ⟨a, fields, rfl, kept a fields read⟩
+  cases current with
+  | nil => have length := permutation.length_eq; simp at length
+  | cons root rest =>
+      obtain ⟨after, popped, remaining⟩ := heappop_int_tuples middle address root rest currentFound currentTyped
+      refine ⟨middle, after, root, pushed, popped, ?_⟩
+      intro other different
+      exact (remaining.frame middle address rest after).2 other different |>.trans
+        ((changed.frame heap address (values ++ [item]) middle).2 other different)
+
+def fixture (a b : Int) : Heap :=
+  [.tuple [.scalar (.int a), .scalar (.int 0)],
+   .tuple [.scalar (.int b), .scalar (.int 1)],
+   .list [.ref 0, .ref 0, .ref 1], .list [.ref 2, .ref 0]]
+
+theorem shared_tuples (a b : Int) :
+    ∃ middle after returned,
+      heappush [.ref 2, .ref 1] (fixture a b) = some (.ok (.scalar .none), middle) ∧
+      heappop [.ref 2] middle = some (.ok returned, after) ∧
+      (∀ other, other ≠ 2 → after[other]? = (fixture a b)[other]?) := by
+  apply push_then_pop (fixture a b) 2 [.ref 0, .ref 0, .ref 1] (.ref 1) rfl
+  · intro value member
+    by_cases first : value = .ref 0
+    · subst value
+      exact ⟨0, [a, 0], rfl, rfl⟩
+    · have second : value = .ref 1 := by simpa [first] using member
+      subst value
+      exact ⟨1, [b, 1], rfl, rfl⟩
+  · exact ⟨1, [b, 1], rfl, rfl⟩
+
+theorem tied_priority (distance left right : Int) :
+    less (.ref 0) (.ref 1)
+      [.tuple [.scalar (.int distance), .scalar (.int left)],
+       .tuple [.scalar (.int distance), .scalar (.int right)]] =
+      some (.ok (decide (left < right)),
+        [.tuple [.scalar (.int distance), .scalar (.int left)],
+         .tuple [.scalar (.int distance), .scalar (.int right)]]) := by
+  simpa using less_int_pair _ 0 1 distance left distance right rfl rfl
+
+end HeapqTupleExamples
+'''
+AUDITS = ["FormalSW.PyAst.Heapq." + name for name in (
+    "siftDown_succeeds_under", "siftChildren_succeeds_under", "siftUp_succeeds_under",
+    "siftAll_succeeds_under", "heapify_succeeds_under", "heappush_succeeds_under", "heappop_succeeds_under",
+    "heapify_succeeds", "heappush_succeeds", "heappop_succeeds", "less_int_tuples", "less_int_pair",
+    "TupleFrame.comparable", "heapify_int_tuples", "heappush_int_tuples", "heappop_int_tuples",
+)] + ["HeapqTupleExamples." + name for name in ("push_then_pop", "shared_tuples", "tied_priority")]
+
+with project_temporary_directory(prefix="heapq-tuples-") as temporary:
+    source = Path(temporary) / "Checks.lean"
+    source.write_text(PROOF + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"tuple heaps: composed push/pop, shared references and ties; {len(AUDITS)} axiom audits passed")

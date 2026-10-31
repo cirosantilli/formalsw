@@ -14,6 +14,7 @@ import lang.py.FormalSW.HeapCalls
 import lang.py.FormalSW.HeapqCalls
 import lang.py.FormalSW.HeapqContents
 import lang.py.FormalSW.HeapqTotal
+import lang.py.FormalSW.HeapqTuples
 import lang.py.FormalSW.CallDefaults
 import lang.py.FormalSW.HeapSortingCalls
 import lang.py.FormalSW.ReverseSortingCalls

@@ -1,4 +1,4 @@
-import lang.py.FormalSW.HeapqContents
+import lang.py.FormalSW.HeapqFramedTotal
 
 /-! Successful execution of the concrete heap operations on comparison domains.
 The domain condition applies at every caller heap; strings and integers satisfy it
@@ -25,223 +25,65 @@ theorem TotalComparison.integers :
   obtain ⟨right, rfl⟩ := rightTyped
   exact ⟨decide (left < right), less_int heap left right⟩
 
+/-- Scalar comparison domains are the invariant-free special case. -/
+theorem TotalComparison.under_true {domain : Value → Prop} (comparable : TotalComparison domain) :
+    ComparisonUnder (fun _ => True) domain := by
+  intro heap _
+  exact comparable heap
+
 theorem siftDown_succeeds (domain : Value → Prop) (comparable : TotalComparison domain)
     (heap : Heap) (address start position : Nat) (values : List Value)
     (typed : ∀ value ∈ values, domain value) (found : heap[address]? = some (.list values))
     (inside : position < values.length) :
     ∃ after, siftDown address start position heap = some (.ok (), after) := by
-  by_cases moving : start < position
-  · let parent := (position - 1) / 2
-    have smaller : parent < position := by
-      have := Nat.div_le_self (position - 1) 2
-      dsimp [parent]
-      omega
-    have parentInside : parent < values.length := Nat.lt_trans smaller inside
-    obtain ⟨answer, compared⟩ := comparable heap values[position] values[parent]
-      (typed _ (List.getElem_mem inside)) (typed _ (List.getElem_mem parentInside))
-    cases answer with
-    | false =>
-        refine ⟨heap, ?_⟩
-        rw [siftDown]
-        simp [moving, atIndex_list heap address position values found inside,
-          atIndex_list heap address parent values found parentInside, compared, parent]
-    | true =>
-        let changed := (values.set position values[parent]).set parent values[position]
-        have permutation : changed.Perm values := swap_contents_perm values position parent inside
-          parentInside
-        have valid := (List.getElem?_eq_some_iff.mp found).1
-        have changedFound :
-            (heap.set address (.list changed))[address]? = some (.list changed) := by
-          simp [valid]
-        obtain ⟨after, finished⟩ := siftDown_succeeds domain comparable
-          (heap.set address (.list changed)) address start parent changed
-          (fun value member => typed value (permutation.mem_iff.mp member)) changedFound
-          (by rw [permutation.length_eq]; exact parentInside)
-        refine ⟨after, ?_⟩
-        rw [siftDown]
-        simp [moving, atIndex_list heap address position values found inside,
-          atIndex_list heap address parent values found parentInside, compared,
-          swap_list heap address position parent values found inside parentInside,
-          finished, parent, changed]
-  · exact ⟨heap, siftDown_stop heap address start position (Nat.le_of_not_gt moving)⟩
-termination_by position
-decreasing_by exact smaller
+  exact siftDown_succeeds_under domain (fun _ => True) comparable.under_true
+    heap address start position values (fun _ _ _ => True.intro) trivial typed found inside
 
 theorem siftChildren_succeeds (domain : Value → Prop) (comparable : TotalComparison domain)
     (heap : Heap) (address size start position : Nat) (values : List Value)
     (typed : ∀ value ∈ values, domain value) (found : heap[address]? = some (.list values))
     (sized : size ≤ values.length) (inside : position < size) :
     ∃ after, siftChildren address size start position heap = some (.ok (), after) := by
-  have descend (child : Nat) (childInside : child < size) (progress : position < child) :
-      ∃ after, (do swap address position child
-                   siftChildren address size start child) heap = some (.ok (), after) := by
-    have positionValid := Nat.lt_of_lt_of_le inside sized
-    have childValid := Nat.lt_of_lt_of_le childInside sized
-    let changed := (values.set position values[child]).set child values[position]
-    have permutation : changed.Perm values :=
-      swap_contents_perm values position child positionValid childValid
-    have valid := (List.getElem?_eq_some_iff.mp found).1
-    have changedFound : (heap.set address (.list changed))[address]? = some (.list changed) := by
-      simp [valid]
-    obtain ⟨after, finished⟩ := siftChildren_succeeds domain comparable
-      (heap.set address (.list changed)) address size start child changed
-      (fun value member => typed value (permutation.mem_iff.mp member)) changedFound
-      (by rw [permutation.length_eq]; exact sized) childInside
-    exact ⟨after, by
-      simp [swap_list heap address position child values found positionValid childValid,
-        changed, finished]⟩
-  by_cases leftInside : 2 * position + 1 < size
-  · by_cases rightInside : 2 * position + 1 + 1 < size
-    · have leftValid := Nat.lt_of_lt_of_le leftInside sized
-      have rightValid := Nat.lt_of_lt_of_le rightInside sized
-      obtain ⟨answer, compared⟩ := comparable heap values[2 * position + 1]
-        values[2 * position + 1 + 1] (typed _ (List.getElem_mem leftValid))
-        (typed _ (List.getElem_mem rightValid))
-      cases answer with
-      | false =>
-          obtain ⟨after, finished⟩ := descend (2 * position + 1 + 1) rightInside (by omega)
-          refine ⟨after, ?_⟩
-          rw [siftChildren]
-          simpa [leftInside, rightInside,
-            atIndex_list heap address (2 * position + 1) values found leftValid,
-            atIndex_list heap address (2 * position + 1 + 1) values found rightValid,
-            compared] using finished
-      | true =>
-          obtain ⟨after, finished⟩ := descend (2 * position + 1) leftInside (by omega)
-          refine ⟨after, ?_⟩
-          rw [siftChildren]
-          simpa [leftInside, rightInside,
-            atIndex_list heap address (2 * position + 1) values found leftValid,
-            atIndex_list heap address (2 * position + 1 + 1) values found rightValid,
-            compared] using finished
-    · obtain ⟨after, finished⟩ := descend (2 * position + 1) leftInside (by omega)
-      refine ⟨after, ?_⟩
-      rw [siftChildren]
-      simpa [leftInside, rightInside] using finished
-  · obtain ⟨after, finished⟩ := siftDown_succeeds domain comparable heap
-      address start position values typed found (Nat.lt_of_lt_of_le inside sized)
-    refine ⟨after, ?_⟩
-    rw [siftChildren]
-    simpa [leftInside] using finished
-termination_by size - position
-decreasing_by omega
+  exact siftChildren_succeeds_under domain (fun _ => True) comparable.under_true
+    heap address size start position values (fun _ _ _ => True.intro) trivial typed found sized inside
 
 theorem siftUp_succeeds (domain : Value → Prop) (comparable : TotalComparison domain)
     (heap : Heap) (address position : Nat) (values : List Value)
     (typed : ∀ value ∈ values, domain value) (found : heap[address]? = some (.list values))
     (inside : position < values.length) :
     ∃ after, siftUp address position heap = some (.ok (), after) := by
-  obtain ⟨after, finished⟩ := siftChildren_succeeds domain comparable heap address values.length
-    position position values typed found (Nat.le_refl _) inside
-  exact ⟨after, by simp [siftUp, items_list heap address values found, inside, finished]⟩
+  exact siftUp_succeeds_under domain (fun _ => True) comparable.under_true
+    heap address position values (fun _ _ _ => True.intro) trivial typed found inside
 
 theorem siftAll_succeeds (domain : Value → Prop) (comparable : TotalComparison domain)
     (heap : Heap) (address : Nat) (values : List Value) (positions : List Nat)
     (typed : ∀ value ∈ values, domain value) (found : heap[address]? = some (.list values))
     (inside : ∀ position ∈ positions, position < values.length) :
     ∃ after, siftAll address positions heap = some (.ok (), after) := by
-  induction positions generalizing heap values with
-  | nil => exact ⟨heap, rfl⟩
-  | cons position rest ih =>
-      obtain ⟨middle, first⟩ := siftUp_succeeds domain comparable heap address position values typed
-        found (inside position (by simp))
-      obtain ⟨changed, changedFound, permutation⟩ := Reorders.contents heap address values middle
-        (List.getElem?_eq_some_iff.mp found).1
-        (siftUp_reorders heap middle address position values (.ok ()) found first)
-      obtain ⟨after, finished⟩ := ih middle changed
-        (fun value member => typed value (permutation.mem_iff.mp member)) changedFound
-        (fun index member => by rw [permutation.length_eq]; exact inside index (by simp [member]))
-      exact ⟨after, by simp [siftAll, first, finished]⟩
-
-theorem mem_parentPath_le (position index : Nat) (member : index ∈ parentPath position) :
-    index ≤ position := by
-  rw [parentPath] at member
-  rcases List.mem_cons.mp member with same | tail
-  · omega
-  · by_cases odd : position % 2 = 1
-    · rw [if_pos odd] at tail
-      exact Nat.le_trans (mem_parentPath_le (position / 2) index tail)
-        (Nat.div_le_self position 2)
-    · simp [odd] at tail
-termination_by position
-decreasing_by apply Nat.div_lt_self <;> omega
-
-theorem mem_descending_bounds (start count index : Nat) (member : index ∈ descending start count) :
-    start ≤ index ∧ index < start + count := by
-  simp only [descending, List.mem_map, List.mem_reverse, List.mem_range] at member
-  obtain ⟨offset, smaller, rfl⟩ := member
-  omega
-
-/-- Both cache strategies visit only actual internal nodes of the list. -/
-theorem heapifyOrder_internal (size position : Nat) (member : position ∈ heapifyOrder size) :
-    position < size / 2 := by
-  by_cases cached : size > 2500
-  · rw [heapifyOrder, if_pos cached] at member
-    dsimp only at member
-    obtain ⟨ancestor, visited, path⟩ := List.mem_flatMap.mp member
-    have below := mem_parentPath_le ancestor position path
-    have leftBound : 2 ^ Nat.log2 (size / 2 + 1) - 1 ≤ size / 2 := by
-      have : 2 ^ Nat.log2 (size / 2 + 1) ≤ size / 2 + 1 :=
-        Nat.log2_self_le (by omega)
-      omega
-    have halfBound := Nat.div_le_self (size / 2) 2
-    rcases List.mem_append.mp visited with left | right
-    · have bounds := mem_descending_bounds _ _ _ left
-      omega
-    · have bounds := mem_descending_bounds _ _ _ right
-      omega
-  · simpa [heapifyOrder, cached] using member
-
-theorem heapifyOrder_valid (size position : Nat) (member : position ∈ heapifyOrder size) :
-    position < size := by
-  have := heapifyOrder_internal size position member
-  have := Nat.div_le_self size 2
-  omega
+  exact siftAll_succeeds_under domain (fun _ => True) comparable.under_true
+    heap address values positions (fun _ _ _ => True.intro) trivial typed found inside
 
 theorem heapify_succeeds (domain : Value → Prop) (comparable : TotalComparison domain)
     (heap : Heap) (address : Nat) (values : List Value)
     (typed : ∀ value ∈ values, domain value) (found : heap[address]? = some (.list values)) :
     ∃ after, heapify [.ref address] heap = some (.ok (.scalar .none), after) := by
-  obtain ⟨after, finished⟩ := siftAll_succeeds domain comparable heap address values
-    (heapifyOrder values.length) typed found (heapifyOrder_valid values.length)
-  exact ⟨after, heapify_result heap after address values (.ok ()) found finished⟩
+  exact heapify_succeeds_under domain (fun _ => True) comparable.under_true
+    heap address values (fun _ _ _ => True.intro) trivial typed found
 
 theorem heappush_succeeds (domain : Value → Prop) (comparable : TotalComparison domain)
     (heap : Heap) (address : Nat) (values : List Value) (item : Value)
     (typed : ∀ value ∈ values, domain value) (itemTyped : domain item)
     (found : heap[address]? = some (.list values)) :
     ∃ after, heappush [.ref address, item] heap = some (.ok (.scalar .none), after) := by
-  have valid := (List.getElem?_eq_some_iff.mp found).1
-  have appended : ∀ value ∈ values ++ [item], domain value := by
-    intro value member
-    rcases List.mem_append.mp member with old | new
-    · exact typed value old
-    · simpa using (List.mem_singleton.mp new) ▸ itemTyped
-  obtain ⟨after, finished⟩ := siftDown_succeeds domain comparable
-    (heap.set address (.list (values ++ [item]))) address 0 values.length (values ++ [item])
-    appended (by simp [valid]) (by simp)
-  exact ⟨after, heappush_result heap after address values item (.ok ()) found finished⟩
+  exact heappush_succeeds_under domain (fun _ => True) comparable.under_true
+    heap address values item (fun _ _ _ => True.intro) trivial typed itemTyped found
 
 theorem heappop_succeeds (domain : Value → Prop) (comparable : TotalComparison domain)
     (heap : Heap) (address : Nat) (root : Value) (rest : List Value)
     (typed : ∀ value ∈ root :: rest, domain value)
     (found : heap[address]? = some (.list (root :: rest))) :
     ∃ after, heappop [.ref address] heap = some (.ok root, after) := by
-  rcases List.eq_nil_or_concat rest with empty | ⟨middle, last, equation⟩
-  · subst rest
-    exact ⟨_, heappop_singleton heap address root found⟩
-  · have tail : rest = middle ++ [last] := by simpa only [List.concat_eq_append] using equation
-    clear equation
-    subst rest
-    have valid := (List.getElem?_eq_some_iff.mp found).1
-    have permutation : (last :: middle).Perm (middle ++ [last]) :=
-      List.perm_append_comm (l₁ := [last]) (l₂ := middle)
-    obtain ⟨after, finished⟩ := siftUp_succeeds domain comparable
-      (heap.set address (.list (last :: middle))) address 0 (last :: middle)
-      (fun value member => typed value (List.mem_cons_of_mem root (permutation.mem_iff.mp member)))
-      (by simp [valid]) (by simp)
-    refine ⟨after, ?_⟩
-    rw [heappop_nontrivial heap address root last middle found]
-    simp [finished]
+  exact heappop_succeeds_under domain (fun _ => True) comparable.under_true
+    heap address root rest (fun _ _ _ => True.intro) trivial typed found
 
 end FormalSW.PyAst.Heapq
