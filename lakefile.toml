@@ -181,6 +181,8 @@ roots = [
   "lang.py.FormalSW.MachineDictionaryConstruction",
   "lang.py.FormalSW.NumericBuiltinRelocation",
   "lang.py.FormalSW.MachineNumericBuiltins",
+  "lang.py.FormalSW.ExtremumBuiltinRelocation",
+  "lang.py.FormalSW.MachineExtremumBuiltins",
   "lang.py.FormalSW.MachineLoopInvariant",
   "lang.py.FormalSW.MachineLoopAcquisition",
   "lang.py.FormalSW.MachineExpressionInvariant",

@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""
+Check extremum acquisition, argument mutations, exact ties and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(items, value):
+    items.append(value)
+    return items
+
+
+def min_nested(items, value):
+    return min(touch(items, value))
+
+
+def min_explicit(items, value):
+    items.append(value)
+    return min(items)
+
+
+def max_nested(items, value):
+    return max(touch(items, value))
+
+
+def max_explicit(items, value):
+    items.append(value)
+    return max(items)
+'''
+PROOF = r'''
+
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineExtremumBuiltinExamples
+set_option Elab.async false
+
+def ints (items : List Int) : List Mutable.Value := (items.map Constant.int).map Mutable.Value.scalar
+
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [item]))
+
+def foldWinner (maximum : Bool) (first : Int) (rest : List Int) : Int :=
+  rest.foldl (if maximum then max else min) first
+
+def winner (maximum : Bool) (items : List Int) (value : Int) : Int :=
+  match items with
+  | [] => value
+  | first :: rest => foldWinner maximum first (rest ++ [value])
+
+theorem minimumFrom_ints (items : List Int) (best : Int) :
+    Calls.minimumFrom (.int best) (items.map Constant.int) = .ok (.int (items.foldl min best)) := by
+  induction items generalizing best with
+  | nil => rfl
+  | cons head tail ih =>
+    by_cases smaller : head < best
+    · simp [Calls.minimumFrom, scalarCompare, evalCmpOp, smaller, ih,
+        Int.min_eq_right (Int.le_of_lt smaller)]
+    · simp [Calls.minimumFrom, scalarCompare, evalCmpOp, smaller, ih,
+        Int.min_eq_left (Int.le_of_not_gt smaller)]
+
+theorem extremum_ints (maximum : Bool) (first : Int) (rest : List Int) :
+    extremumSequence maximum ((first :: rest).map Constant.int) = some (.ok (.int (foldWinner maximum first rest))) := by
+  cases maximum with
+  | false => simp only [extremumSequence, Bool.false_eq_true, if_false, ScalarSet.minimum, List.map_cons, minimumFrom_ints, foldWinner]
+  | true => simp only [extremumSequence, if_true, ScalarSet.maximum, List.map_cons, ScalarSet.maximumFrom_ints, foldWinner]
+
+theorem primitive_extremum_ints (maximum : Bool) (heap : Mutable.Heap) (address : Nat) (first : Int) (rest : List Int)
+    (found : heap[address]? = some (.list (ints (first :: rest)))) :
+    primitive (.builtin (if maximum then .max else .min)) [.ref address] heap =
+      some (.ok (.scalar (.int (foldWinner maximum first rest))), heap) := by
+  rw [primitive_extremum_eq]
+  have read : extremumPool (.ref address) heap = some (.ok (ints (first :: rest)), heap) := by
+    simp [extremumPool, found, Mutable.sequence]
+  simp only [extremumPrimitive, Mutable.eval_bind, read]
+  dsimp only [bind, Option.bind]
+  rw [scalarArgumentCall_result]
+  simp only [ints, exceptionArguments_scalars, Option.bind_some, extremum_ints]
+  rfl
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, item] heap (.ref address) (inserted heap address items item) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem calls_equiv (left right : String) (arguments : List Mutable.Value) (heap after : Mutable.Heap) (answer : Mutable.Value)
+    (leftReturns : ReturnsValue Probe.module left arguments heap answer after)
+    (rightReturns : ReturnsValue Probe.module right arguments heap answer after) :
+    (IteratorCalls.call Probe.module left arguments heap).Equiv (IteratorCalls.call Probe.module right arguments heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule) (returned : ReturnsValue Probe.module name arguments heap answer after) :
+      ((IteratorCalls.call Probe.module name arguments heap).run choices).Finishes ⟨.ok answer, [], after, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (finishes left leftChoices leftReturns) (finishes right rightChoices rightReturns) (Or.inl rfl)
+
+theorem min_nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    ReturnsValue Probe.module "min_nested" [.ref address, .scalar (.int value)] heap
+      (.scalar (.int (winner false items value))) (inserted heap address (ints items) (.scalar (.int value))) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address (ints items) (.scalar (.int value)))[address]? = some (.list (ints (items ++ [value]))) := by
+    simp [inserted, ints, inside]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (touch_returns heap address (ints items) (.scalar (.int value)) found)) .nil)
+  cases items with
+  | nil => exact primitive_extremum_ints false _ address value [] retained
+  | cons first rest => exact primitive_extremum_ints false _ address first (rest ++ [value]) retained
+
+theorem min_explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    ReturnsValue Probe.module "min_explicit" [.ref address, .scalar (.int value)] heap
+      (.scalar (.int (winner false items value))) (inserted heap address (ints items) (.scalar (.int value))) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address (ints items) (.scalar (.int value)))[address]? = some (.list (ints (items ++ [value]))) := by
+    simp [inserted, ints, inside]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+  cases items with
+  | nil => exact primitive_extremum_ints false _ address value [] retained
+  | cons first rest => exact primitive_extremum_ints false _ address first (rest ++ [value]) retained
+
+theorem min_equiv (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    (IteratorCalls.call Probe.module "min_nested" [.ref address, .scalar (.int value)] heap).Equiv
+      (IteratorCalls.call Probe.module "min_explicit" [.ref address, .scalar (.int value)] heap) :=
+  calls_equiv _ _ _ _ _ _ (min_nested_returns heap address items value found) (min_explicit_returns heap address items value found)
+
+theorem max_nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    ReturnsValue Probe.module "max_nested" [.ref address, .scalar (.int value)] heap
+      (.scalar (.int (winner true items value))) (inserted heap address (ints items) (.scalar (.int value))) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address (ints items) (.scalar (.int value)))[address]? = some (.list (ints (items ++ [value]))) := by
+    simp [inserted, ints, inside]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (touch_returns heap address (ints items) (.scalar (.int value)) found)) .nil)
+  cases items with
+  | nil => exact primitive_extremum_ints true _ address value [] retained
+  | cons first rest => exact primitive_extremum_ints true _ address first (rest ++ [value]) retained
+
+theorem max_explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    ReturnsValue Probe.module "max_explicit" [.ref address, .scalar (.int value)] heap
+      (.scalar (.int (winner true items value))) (inserted heap address (ints items) (.scalar (.int value))) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address (ints items) (.scalar (.int value)))[address]? = some (.list (ints (items ++ [value]))) := by
+    simp [inserted, ints, inside]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+  cases items with
+  | nil => exact primitive_extremum_ints true _ address value [] retained
+  | cons first rest => exact primitive_extremum_ints true _ address first (rest ++ [value]) retained
+
+theorem max_equiv (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    (IteratorCalls.call Probe.module "max_nested" [.ref address, .scalar (.int value)] heap).Equiv
+      (IteratorCalls.call Probe.module "max_explicit" [.ref address, .scalar (.int value)] heap) :=
+  calls_equiv _ _ _ _ _ _ (max_nested_returns heap address items value found) (max_explicit_returns heap address items value found)
+
+theorem primitive_incomparable (maximum : Bool) (heap : Mutable.Heap) (address : Nat) (first : Int) (text : String)
+    (found : heap[address]? = some (.list [.scalar (.int first), .scalar (.string text)])) :
+    primitive (.builtin (if maximum then .max else .min)) [.ref address] heap = some (.error ⟨"TypeError", []⟩, heap) := by
+  cases maximum <;> simp [primitive, found, Mutable.sequence, Mutable.eval_bind, ScalarSet.maximum, ScalarSet.minimum,
+    Calls.maximumFrom, Calls.minimumFrom, scalarCompare, scalarResult]
+  all_goals rfl
+
+theorem min_failure_retains_mutation (heap : Mutable.Heap) (address : Nat) (first : Int) (text : String)
+    (found : heap[address]? = some (.list [.scalar (.int first)])) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "min_nested") [.ref address, .scalar (.string text)], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], inserted heap address [.scalar (.int first)] (.scalar (.string text)), heap.length⟩) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address [.scalar (.int first)] (.scalar (.string text)))[address]? =
+      some (.list [.scalar (.int first), .scalar (.string text)]) := by simp [inserted, inside]
+  repeat first
+    | apply (Evaluates.arguments_reach (.cons
+        (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+          (touch_returns heap address [.scalar (.int first)] (.scalar (.string text)) found)) .nil)
+        (.builtin .min) [] heap.length []).finishes
+    | refine .next rfl ?_
+  apply Finishes.done
+  change protectGenerator [] (result heap.length _ (primitive (.builtin .min) [.ref address]) []) = _
+  have failed : primitive (.builtin .min) [.ref address]
+      (inserted heap address [.scalar (.int first)] (.scalar (.string text))) =
+      some (.error ⟨"TypeError", []⟩, inserted heap address [.scalar (.int first)] (.scalar (.string text))) :=
+    primitive_incomparable false _ address first text retained
+  simp only [result, run, failed]
+  rfl
+
+theorem max_failure_retains_mutation (heap : Mutable.Heap) (address : Nat) (first : Int) (text : String)
+    (found : heap[address]? = some (.list [.scalar (.int first)])) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "max_nested") [.ref address, .scalar (.string text)], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], inserted heap address [.scalar (.int first)] (.scalar (.string text)), heap.length⟩) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address [.scalar (.int first)] (.scalar (.string text)))[address]? =
+      some (.list [.scalar (.int first), .scalar (.string text)]) := by simp [inserted, inside]
+  repeat first
+    | apply (Evaluates.arguments_reach (.cons
+        (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+          (touch_returns heap address [.scalar (.int first)] (.scalar (.string text)) found)) .nil)
+        (.builtin .max) [] heap.length []).finishes
+    | refine .next rfl ?_
+  apply Finishes.done
+  change protectGenerator [] (result heap.length _ (primitive (.builtin .max) [.ref address]) []) = _
+  have failed : primitive (.builtin .max) [.ref address]
+      (inserted heap address [.scalar (.int first)] (.scalar (.string text))) =
+      some (.error ⟨"TypeError", []⟩, inserted heap address [.scalar (.int first)] (.scalar (.string text))) :=
+    primitive_incomparable true _ address first text retained
+  simp only [result, run, failed]
+  rfl
+
+/-- Extremum selection uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_extremum (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (maximum : Bool) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation (.builtin (if maximum then .max else .min)) values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation (.builtin (if maximum then .max else .min)) values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation (.builtin (if maximum then .max else .min)) values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_extremumBuiltin_preserves Probe.module maximum choices _ other nextMap
+    logical.length physical.length used values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineExtremumBuiltinExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "extremumPool_relocates",
+    "extremumPool_heap",
+    "primitive_extremum_eq",
+    "result_scalarArgumentCall_preserves",
+    "result_extremumBuiltin_preserves",
+    "step_extremumBuiltin_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation." + name for name in (
+    "step_extremumBuiltin_preserves",
+)] + ["MachineExtremumBuiltinExamples." + name for name in (
+    "minimumFrom_ints",
+    "extremum_ints",
+    "primitive_extremum_ints",
+    "touch_returns",
+    "calls_equiv",
+    "min_nested_returns",
+    "min_explicit_returns",
+    "min_equiv",
+    "max_nested_returns",
+    "max_explicit_returns",
+    "max_equiv",
+    "primitive_incomparable",
+    "min_failure_retains_mutation",
+    "max_failure_retains_mutation",
+    "append_then_extremum",
+)]
+with project_temporary_directory(prefix="machine-extremum-builtin-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name, select in (("min", min), ("max", max)):
+        for form in ("nested", "explicit"):
+            run = namespace[f"{name}_{form}"]
+            for values in ([], [1], [2, 2, -1], [-10**100, 10**100], list(range(-30, 31))):
+                for item in (-10**100, 0, 10**100):
+                    items = list(values)
+                    assert run(items, item) == select(values + [item])
+                    assert items == values + [item]
+            for values, item, expected in (([True], 1, True), ([1], True, 1), ([False], 0, False), ([0], False, 0)):
+                assert run(values, item) is expected
+            for initial in (-10**100, 0, 10**100):
+                items = [initial]
+                try:
+                    run(items, "bad")
+                except TypeError:
+                    assert items == [initial, "bad"]
+                else:
+                    raise AssertionError("incomparable elements must fail after appending")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineExtremumBuiltins\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"extremum builtins: arbitrary integer lists, first ties, argument effects, errors and saved consumers; {len(AUDITS)} axiom audits passed")
