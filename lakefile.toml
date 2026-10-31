@@ -212,6 +212,7 @@ roots = [
   "lang.py.FormalSW.IteratorOperationRelocation",
   "lang.py.FormalSW.IteratorExecutionIsolation",
   "lang.py.FormalSW.IteratorTraversal",
+  "lang.py.FormalSW.IteratorPrefix",
   "lang.py.FormalSW.HeapFrame",
   "lang.py.FormalSW.MachineFrame",
   "lang.py.FormalSW.CompositeHeapFrame",

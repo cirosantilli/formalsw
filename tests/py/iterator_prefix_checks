@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""
+Check finite prefixes and early rejection of an iterator that keeps yielding.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Forever:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = self
+        return "bad"
+
+def reject(iterator):
+    for value in iterator:
+        raise ValueError(value)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace IteratorPrefixExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Forever").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def writeSelf : List Stmt := [.assign [.attribute (.name "self") "link"] (.name "self")]
+def body : List Stmt := writeSelf ++ [.return (.constant (.string "bad"))]
+def rejection : List Stmt := [.raise (some (.call (.name "ValueError") [.name "value"]))]
+def rejectArgs : List Arg := [{name := "iterator", annotation := none}]
+def rejectBody : List Stmt := [.forIn (.name "value") (.name "iterator") rejection []]
+def loop (env : HeapCalls.Env) (following : List Stmt) (stack : List HeapCalls.Frame) : Loop :=
+  ⟨"value", rejection, [], following, env, stack⟩
+def text (s : String) : Mutable.Value := .scalar (.string s)
+def nextFields (fields : List (String × Mutable.Value)) (address : Nat) :=
+  Mutable.putField fields "link" (.ref address)
+def nextHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :=
+  heap.set address (.instance classInfo.1 "Forever" (nextFields fields address))
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class : Probe.module.findClass "Forever" = some classInfo := rfl
+theorem source_next : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+theorem source_reject : findFunctionIn Probe.module.body "reject" = some (rejectArgs, rejectBody) := rfl
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Forever" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args body)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Forever"
+    "__next__" fields classInfo.2 found source_class
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem method_returns (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Forever" fields)) :
+    MethodReturns Probe.module (.ref address) args body [] heap (text "bad") (nextHeap heap address fields) := by
+  let env := functionEnv args body [.ref address] []
+  have self : env "self" = some (.ref address) := rfl
+  have written : BlockContinues Probe.module env writeSelf heap env (nextHeap heap address fields) :=
+    BlockContinues.setAttribute (Evaluates.lookup self) (Evaluates.lookup self)
+      (Mutable.writeField_result found (by simp))
+  apply MethodReturns.of_body (completed := [.ref address]) rfl
+  exact written.returns (BlockReturns.return_value Evaluates.constant)
+
+theorem next_run (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Forever" fields)) :
+    NextRun Probe.module choices (.ref address) heap used (.ok (text "bad")) (nextHeap heap address fields) used := by
+  refine ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found],
+    next_bound heap address fields found, ?_⟩
+  apply (IteratorCalls.Reaches.of_heap (method_returns heap address fields found heap.length []) []).trans
+  exact .next (core_done rfl rfl) .refl
+
+/-- Every finite prefix exists, with no eventual-exhaustion premise or choice consumption. -/
+theorem prefixes (n : Nat) (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Forever" fields)) :
+    ∃ after, YieldPrefix Probe.module choices (.ref address) text heap used (List.replicate n "bad") after used ∧
+      after.length = heap.length := by
+  induction n generalizing heap fields with
+  | zero => exact ⟨heap, .nil, rfl⟩
+  | succ n ih =>
+      obtain ⟨after, later, size⟩ := ih (nextHeap heap address fields) (nextFields fields address)
+        (by simp [nextHeap, (List.getElem?_eq_some_iff.mp found).1])
+      exact ⟨after, by simpa only [List.replicate_succ] using YieldPrefix.cons (next_run choices used heap address fields found) later,
+        by simpa only [nextHeap, List.length_set] using size⟩
+
+theorem reject_body (env : HeapCalls.Env) (heap : Mutable.Heap) (s : String)
+    (following : List Stmt) (anchors : Nat) (stack : List HeapCalls.Frame) :
+    Finishes (HeapCalls.step Probe.module anchors)
+      ⟨.block (rejection ++ following) (setLocal env "value" (text s)), stack, heap⟩
+      (.ok ⟨.error ⟨"ValueError", [.string s]⟩, [], heap, anchors⟩) := by
+  exact .next rfl (.next rfl (.next rfl (.done (by
+    simp [HeapCalls.step, argumentsState, result, run, primitive, done, protectGenerator,
+      Calls.generatorException, text]))))
+
+/-- Rejection keeps the iterator's cyclic mutation and the consumer's disjoint object, with an exact counter. -/
+theorem rejects_first (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address : Nat)
+    (fields : List (String × Mutable.Value)) (privateAddress : Nat) (object : Mutable.Object)
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance classInfo.1 "Forever" fields))
+    (env : HeapCalls.Env) (following : List Stmt) (stack : List HeapCalls.Frame) (resumes : List Resume) :
+    ∃ after, PrivateLayout (nextHeap logical address fields) after rename privateAddress object ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode (loop env following stack) (.ref (rename address)) :: following)
+          env, stack, physical⟩, used⟩ resumes)
+        (.completed (.ok ⟨.error ⟨"ValueError", [.string "bad"]⟩, [], after, anchors⟩) used resumes) := by
+  obtain ⟨after, _, kept, advanced⟩ := (next_run choices used logical address fields found).scalar_isolated
+    source physical rename layout.layout (by simp [nextHeap]) anchors
+  have rejected := completion_of_heap (choices := choices) (used := used)
+    (reject_body env after "bad" (loopCode (loop env following stack) (.ref (rename address)) :: following) anchors stack)
+    (by intro completion same; cases same; simp) resumes
+  refine ⟨after, kept privateAddress object layout, (advanced (loop env following stack) resumes).trans ?_⟩
+  simpa only [loop, Calls.loopContinuation, show Calls.loopControl rejection = false from rfl,
+    Bool.false_eq_true, ↓reduceIte, relocateValue, List.append_assoc, List.singleton_append] using rejected
+
+end IteratorPrefixExamples
+'''
+AUDITS = ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "YieldPrefix.effects", "YieldPrefix.then_traversal", "Traversal.split", "Traversal.decompose",
+    "completion_of_heap", "NextRun.scalar_isolated",
+)] + ["IteratorPrefixExamples." + name for name in (
+    "source", "source_class", "source_next", "source_reject", "next_bound", "method_returns",
+    "next_run", "prefixes", "reject_body", "rejects_first",
+)]
+with project_temporary_directory(prefix="iterator-prefix-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    iterator = namespace["Forever"]()
+    for _ in range(10):
+        assert next(iterator) == "bad" and iterator.link is iterator
+    iterator = namespace["Forever"]()
+    try:
+        namespace["reject"](iterator)
+    except ValueError as error:
+        assert error.args == ("bad",) and iterator.link is iterator
+    else:
+        raise AssertionError("expected immediate rejection")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorPrefix\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"iterator prefixes: arbitrary yielding prefixes and early rejection retain mutations and choice counters; {len(AUDITS)} axiom audits passed")
