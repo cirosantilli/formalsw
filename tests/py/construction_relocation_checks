@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+Prove set construction retains shared results and partial state on failures.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def build(first, second):
+    result = {first, second}
+    return [result, result, first, second]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace ConstructionRelocationExamples
+set_option Elab.async false
+
+/-- Both returned slots retain the same newly allocated set. -/
+theorem source_success (heap middle : Mutable.Heap) (first second result : Mutable.Value)
+    (allocated : Mutable.allocateSetValues [first, second] heap = some (.ok result, middle)) :
+    ReturnsValue Probe.module "build" [first, second] heap (.ref middle.length)
+      (middle ++ [.list [result, result, first, second]]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.builtin (name := .setDisplay)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) allocated)
+  exact BlockReturns.return_value (Evaluates.list
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl)
+      (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))))
+
+/-- A constructor's new address can be stored twice in a later allocation. -/
+theorem paired_success (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (first second result : Mutable.Value)
+    (firstInside : first.edge.Within logical.length) (secondInside : second.edge.Within logical.length)
+    (middle : Mutable.Heap)
+    (allocated : Mutable.allocateSetValues [first, second] logical = some (.ok result, middle)) :
+    ∃ other nextMap,
+      ReturnsValue Probe.module "build" [first, second] logical (.ref middle.length)
+        (middle ++ [.list [result, result, first, second]]) ∧
+      ReturnsValue Probe.module "build" [relocateValue rename first, relocateValue rename second]
+        physical (relocateValue nextMap (.ref middle.length)) other ∧
+      ExecutionLayout (middle ++ [.list [result, result, first, second]]) other nextMap ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  have inputs : ∀ value ∈ [first, second], value.edge.Within logical.length := by
+    simpa using And.intro firstInside secondInside
+  obtain ⟨otherMiddle, otherAllocated, middleLayout, sameLength, resultInside⟩ :=
+    layout.allocateSetValues [first, second] inputs _ _ allocated
+  let middleMap := extendMap rename logical.length physical.length
+  let nextMap := extendMap middleMap middle.length otherMiddle.length
+  have firstNow : first.edge.Within middle.length := by
+    cases first with
+    | scalar value => trivial
+    | ref address => simpa only [Mutable.Value.edge, Graph.Edge.Within, sameLength]
+        using Nat.lt_succ_of_lt firstInside
+  have secondNow : second.edge.Within middle.length := by
+    cases second with
+    | scalar value => trivial
+    | ref address => simpa only [Mutable.Value.edge, Graph.Edge.Within, sameLength]
+        using Nat.lt_succ_of_lt secondInside
+  have resultNow := resultInside result rfl
+  have stored : ∀ value ∈ [result, result, first, second], value.edge.Within middle.length := by
+    simpa using And.intro resultNow (And.intro firstNow secondNow)
+  have firstSame : relocateValue middleMap first = relocateValue rename first :=
+    relocateValue_congr _ _ logical.length first (fun _ bound => extendMap_old _ _ _ _ bound) firstInside
+  have secondSame : relocateValue middleMap second = relocateValue rename second :=
+    relocateValue_congr _ _ logical.length second (fun _ bound => extendMap_old _ _ _ _ bound) secondInside
+  have retained := (middleLayout.allocate_list [result, result, first, second] stored).2.2
+  let other := otherMiddle ++ [.list (([result, result, first, second]).map (relocateValue middleMap))]
+  refine ⟨other, nextMap, source_success logical middle first second result allocated, ?_, retained, ?_⟩
+  · simp only [relocateValue, nextMap, extendMap_new]
+    have finished := source_success physical otherMiddle (relocateValue rename first)
+      (relocateValue rename second) (relocateValue middleMap result) otherAllocated
+    simpa only [other, List.map_cons, List.map_nil, firstSame, secondSame] using finished
+  · intro index bound
+    have later : index < middle.length := by rw [sameLength]; omega
+    simp only [nextMap, extendMap_old _ _ _ _ later, middleMap, extendMap_old _ _ _ _ bound]
+
+/-- A failed constructor exits before allocating the return list. -/
+theorem source_failed (heap after : Mutable.Heap) (first second : Mutable.Value)
+    (exception : ExceptionObject)
+    (failed : Mutable.allocateSetValues [first, second] heap = some (.error exception, after)) :
+    (HeapCalls.call Probe.module "build" [first, second] heap).Finishes
+      ⟨.error exception, [], after, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.argumentsState, HeapCalls.primitive,
+    HeapCalls.result, HeapCalls.run, failed, HeapCalls.done, HeapCalls.protectGenerator,
+    Frame.inGenerator, Calls.generatorException])
+
+theorem paired_failures (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (first second : Mutable.Value)
+    (firstInside : first.edge.Within logical.length) (secondInside : second.edge.Within logical.length)
+    (exception : ExceptionObject) (after : Mutable.Heap)
+    (failed : Mutable.allocateSetValues [first, second] logical = some (.error exception, after)) :
+    ∃ other,
+      (HeapCalls.call Probe.module "build" [first, second] logical).Finishes
+        ⟨.error exception, [], after, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "build" [relocateValue rename first, relocateValue rename second]
+        physical).Finishes ⟨.error exception, [], other, physical.length⟩ ∧
+      ExecutionLayout after other (extendMap rename logical.length physical.length) ∧
+      after.length = logical.length + 1 := by
+  obtain ⟨other, otherFailed, retained, size, _⟩ :=
+    layout.allocateSetValues [first, second] (by simpa using And.intro firstInside secondInside) _ _ failed
+  exact ⟨other, source_failed logical after first second exception failed,
+    source_failed physical other (relocateValue rename first) (relocateValue rename second)
+      exception otherFailed, retained, size⟩
+
+/-- Tuple insertion succeeds before the later list key raises; its heap cell is retained. -/
+theorem tuple_then_list (heap : Mutable.Heap) (tupleAddress listAddress : Nat)
+    (contents : List Constant) (items : List Mutable.Value)
+    (tupleFound : heap[tupleAddress]? = some (.tuple (contents.map Mutable.Value.scalar)))
+    (listFound : heap[listAddress]? = some (.list items)) :
+    Mutable.allocateSetValues [.ref tupleAddress, .ref listAddress] heap =
+      some (.error {typeName := "TypeError", args := []},
+        heap ++ [.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]]) := by
+  let allocated := heap ++ [Mutable.Object.set []]
+  let inserted := heap ++ [Mutable.Object.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]]
+  have tupleInside := (List.getElem?_eq_some_iff.mp tupleFound).1
+  have listInside := (List.getElem?_eq_some_iff.mp listFound).1
+  have tupleNow : allocated[tupleAddress]? = some (.tuple (contents.map Mutable.Value.scalar)) := by
+    simpa only [allocated, List.getElem?_append_left tupleInside] using tupleFound
+  have listNow : inserted[listAddress]? = some (.list items) := by
+    simpa only [inserted, List.getElem?_append_left listInside] using listFound
+  have hashed := Mutable.hashKey_tuple_scalars allocated tupleAddress contents tupleNow
+  have first : Mutable.addItem heap.length (.ref tupleAddress) allocated = some (.ok (.scalar .none), inserted) := by
+    simp [Mutable.addItem, hashed, Mutable.eval_bind, Except.map, Mutable.insertKey,
+      Mutable.keyContains, allocated, inserted]
+  have setAfter : inserted[heap.length]? =
+      some (.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]) := by simp [inserted]
+  have second : Mutable.addItem heap.length (.ref listAddress) inserted =
+      some (.error {typeName := "TypeError", args := []}, inserted) := by
+    simp [Mutable.addItem, setAfter, Mutable.hashKey, Mutable.keyOf, Mutable.keyOfFuel,
+      listNow, Mutable.eval_bind]
+  simp [allocateSetValues_eq, scalarValues, Mutable.allocateSet, List.mapM_cons, List.mapM_nil,
+    Mutable.eval_bind, show heap ++ [.set []] = allocated from rfl, first, second]
+  simp [Except.map, inserted]
+
+/-- The partial-construction example reaches matching source exceptions on both layouts. -/
+theorem paired_tuple_then_list (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (tupleAddress listAddress : Nat)
+    (contents : List Constant) (items : List Mutable.Value)
+    (tupleFound : logical[tupleAddress]? = some (.tuple (contents.map Mutable.Value.scalar)))
+    (listFound : logical[listAddress]? = some (.list items)) :
+    let after := logical ++ [.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]]
+    ∃ other,
+      (HeapCalls.call Probe.module "build" [.ref tupleAddress, .ref listAddress] logical).Finishes
+        ⟨.error {typeName := "TypeError", args := []}, [], after, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "build" [.ref (rename tupleAddress), .ref (rename listAddress)]
+        physical).Finishes ⟨.error {typeName := "TypeError", args := []}, [], other, physical.length⟩ ∧
+      ExecutionLayout after other (extendMap rename logical.length physical.length) := by
+  obtain ⟨other, left, right, related, _⟩ := paired_failures logical physical rename layout
+    (.ref tupleAddress) (.ref listAddress) (List.getElem?_eq_some_iff.mp tupleFound).1
+    (List.getElem?_eq_some_iff.mp listFound).1 _ _
+    (tuple_then_list logical tupleAddress listAddress contents items tupleFound listFound)
+  exact ⟨other, left, right, related⟩
+
+#print axioms source_success
+#print axioms paired_success
+#print axioms source_failed
+#print axioms paired_failures
+#print axioms tuple_then_list
+#print axioms paired_tuple_then_list
+#print axioms ExecutionLayout.append_object
+#print axioms ExecutionLayout.append_existing
+#print axioms ExecutionLayout.allocateSet
+#print axioms ExecutionLayout.allocateBuffer
+#print axioms ExecutionLayout.allocateDict
+#print axioms ExecutionLayout.addItems
+#print axioms ExecutionLayout.addItems_unsupported
+#print axioms allocateSetValues_eq
+#print axioms ExecutionLayout.allocateSetValues
+#print axioms ExecutionLayout.allocateSetValues_unsupported
+end ConstructionRelocationExamples
+'''
+
+with project_temporary_directory(prefix="construction-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    build = namespace["build"]
+    first = (False, "x")
+    second = tuple(list(first))
+    result = build(first, second)
+    assert result[0] is result[1]
+    assert result[2] is first and result[3] is second
+    assert next(iter(result[0])) is first
+    result[0].add("later")
+    assert "later" in result[1]
+    numeric = build(True, 1)
+    assert next(iter(numeric[0])) is True
+    for unhashable in ([], ([],)):
+        try:
+            build(first, unhashable)
+        except TypeError:
+            assert first == (False, "x")
+        else:
+            raise AssertionError(unhashable)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.ConstructionRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 16, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("construction relocation: shared source results and partial failures; sixteen axiom audits passed")
