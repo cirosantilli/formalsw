@@ -167,6 +167,7 @@ roots = [
   "lang.py.FormalSW.MachineSequenceMethods",
   "lang.py.FormalSW.SetConstructionEffects",
   "lang.py.FormalSW.MachineSetConstruction",
+  "lang.py.FormalSW.MachineSequenceConstruction",
   "lang.py.FormalSW.MachineLoopInvariant",
   "lang.py.FormalSW.MachineLoopAcquisition",
   "lang.py.FormalSW.MachineExpressionInvariant",

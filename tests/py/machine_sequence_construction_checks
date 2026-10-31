@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""
+Check shallow sequence copies, tuple identity, mutations and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(source, item):
+    source.append(item)
+    return source
+
+
+def nested(source, item):
+    return list(touch(source, item))
+
+
+def explicit(source, item):
+    source.append(item)
+    return list(source)
+
+
+def tuple_copy(source):
+    return tuple(source)
+
+
+def identity(source):
+    return source
+
+
+def reverse_copy(source):
+    return list(reversed(source))
+'''
+PROOF = r'''
+
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineSequenceConstructionExamples
+set_option Elab.async false
+
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [item]))
+
+def copied (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value) : Mutable.Heap :=
+  inserted heap address items item ++ [.list (items ++ [item])]
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, item] heap (.ref address) (inserted heap address items item) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "nested" [.ref address, item] heap (.ref heap.length) (copied heap address items item) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address items item)[address]? = some (.list (items ++ [item])) := by
+    simp [inserted, inside]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+    (touch_returns heap address items item found)) .nil)
+  simpa [copied, inserted] using primitive_list_list (inserted heap address items item) address (items ++ [item]) retained
+
+theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "explicit" [.ref address, item] heap (.ref heap.length) (copied heap address items item) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address items item)[address]? = some (.list (items ++ [item])) := by
+    simp [inserted, inside]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+  simpa [copied, inserted] using primitive_list_list (inserted heap address items item) address (items ++ [item]) retained
+
+theorem inline_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "nested" [.ref address, item] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, item] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, item] heap (.ref heap.length) (copied heap address items item)) :
+      ((IteratorCalls.call Probe.module name [.ref address, item] heap).run choices).Finishes
+        ⟨.ok (.ref heap.length), [], copied heap address items item, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "nested" leftChoices (nested_returns heap address items item found))
+    (finishes "explicit" rightChoices (explicit_returns heap address items item found)) (Or.inl rfl)
+
+theorem tuple_copy_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.tuple items)) :
+    ReturnsValue Probe.module "tuple_copy" [.ref address] heap (.ref address) heap := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+  exact primitive_tuple_tuple heap address items found
+
+theorem identity_returns (heap : Mutable.Heap) (address : Nat) :
+    ReturnsValue Probe.module "identity" [.ref address] heap (.ref address) heap := by
+  apply BlockReturns.function rfl rfl
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem tuple_identity_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.tuple items)) :
+    (IteratorCalls.call Probe.module "tuple_copy" [.ref address] heap).Equiv
+      (IteratorCalls.call Probe.module "identity" [.ref address] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address] heap (.ref address) heap) :
+      ((IteratorCalls.call Probe.module name [.ref address] heap).run choices).Finishes
+        ⟨.ok (.ref address), [], heap, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "tuple_copy" leftChoices (tuple_copy_returns heap address items found))
+    (finishes "identity" rightChoices (identity_returns heap address)) (Or.inl rfl)
+
+theorem reverse_copy_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "reverse_copy" [.ref address] heap (.ref heap.length)
+      (heap ++ [.list items.reverse]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.reversed_list (Evaluates.lookup rfl) found
+
+/-- Sequence construction uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_sequence (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (operation : Operation) (covered : SequenceConstructionOperation operation) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation operation values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_sequenceConstruction_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used operation values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained covered
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineSequenceConstructionExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "result_allocateList_preserves", "result_allocateTuple_preserves", "result_sequenceCopy_preserves",
+    "primitive_list_copy", "primitive_tuple_copy", "result_listCopy_preserves", "result_tupleCopy_preserves",
+    "result_reversedList_preserves", "step_sequenceConstruction_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_sequenceConstruction_preserves"] + ["MachineSequenceConstructionExamples." + name for name in (
+    "touch_returns", "nested_returns", "explicit_returns", "inline_equiv",
+    "tuple_copy_returns", "identity_returns", "tuple_identity_equiv", "reverse_copy_returns", "append_then_sequence",
+)]
+with project_temporary_directory(prefix="machine-sequence-construction-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("nested", "explicit"):
+        for size in (0, 1, 17):
+            for value in (None, True, -10**100, "key", [], [1, 2]):
+                source = list(range(size))
+                result = namespace[name](source, value)
+                assert result == source and result is not source
+                assert result[-1] is value
+        source = []
+        source.append(source)
+        result = namespace[name](source, source)
+        assert result is not source and len(result) == 2
+        assert all(value is source for value in result)
+        source.append(9)
+        assert len(result) == 2 and result[0][-1] == 9
+    for source in ((), (1,), ([],), (1, [], [2])):
+        assert namespace["tuple_copy"](source) is source
+    shared = []
+    source = (shared,)
+    shared.append(source)
+    assert namespace["tuple_copy"](source) is source
+    for source in ([], [1], [shared, 2, shared]):
+        result = namespace["reverse_copy"](source)
+        assert result is not source and len(result) == len(source)
+        assert all(actual is expected for actual, expected in zip(result, reversed(source)))
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineSequenceConstruction\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"sequence construction: prior mutations, shallow copies, tuple identity and suspended callers; {len(AUDITS)} axiom audits passed")
