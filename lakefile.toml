@@ -103,6 +103,7 @@ roots = [
   "lang.py.FormalSW.ConstructionRelocation",
   "lang.py.FormalSW.SetFromRelocation",
   "lang.py.FormalSW.SetOperationsRelocation",
+  "lang.py.FormalSW.ComparisonRelocation",
   "lang.py.FormalSW.HeapRelocation",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
