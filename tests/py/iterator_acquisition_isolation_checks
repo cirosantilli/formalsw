@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""
+Transport mutating acquisition that returns a distinct iterator, preserving private storage.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Source:
+    def __iter__(self):
+        self.link = self
+        return self.iterator
+
+class Cursor:
+    def __next__(self):
+        return "bad"
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace AcquisitionIsolationExamples
+set_option Elab.async false
+
+def sourceClass := (Probe.module.findClass "Source").getD ("", [])
+def cursorClass := (Probe.module.findClass "Cursor").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def writeSelf : List Stmt := [.assign [.attribute (.name "self") "link"] (.name "self")]
+def iterBody : List Stmt := writeSelf ++ [.return (.attribute (.name "self") "iterator")]
+def nextBody : List Stmt := [.return (.constant (.string "bad"))]
+def after (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :=
+  heap.set address (.instance sourceClass.1 "Source" (Mutable.putField fields "link" (.ref address)))
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class : Probe.module.findClass "Source" = some sourceClass := rfl
+theorem cursor_class : Probe.module.findClass "Cursor" = some cursorClass := rfl
+theorem source_iter : findFunctionIn sourceClass.2 "__iter__" = some (args, iterBody) := rfl
+theorem source_next : findFunctionIn cursorClass.2 "__next__" = some (args, nextBody) := rfl
+
+theorem iter_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance sourceClass.1 "Source" fields)) :
+    ProtocolCalls.iterMethod Probe.module (.ref address) heap =
+      some (.ok (.method (.ref address) args iterBody), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address sourceClass.1 "Source"
+    "__iter__" fields sourceClass.2 found source_class
+  simp only [source_iter, Option.map_some] at lookup
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+
+theorem iter_returns (heap : Mutable.Heap) (address cursor : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance sourceClass.1 "Source" fields))
+    (field : fields.lookup "iterator" = some (.ref cursor)) :
+    MethodReturns Probe.module (.ref address) args iterBody [] heap (.ref cursor) (after heap address fields) := by
+  let env := functionEnv args iterBody [.ref address] []
+  have self : env "self" = some (.ref address) := rfl
+  have written : BlockContinues Probe.module env writeSelf heap env (after heap address fields) :=
+    BlockContinues.setAttribute (Evaluates.lookup self) (Evaluates.lookup self)
+      (Mutable.writeField_result found (by simp))
+  have read : Evaluates Probe.module env (.attribute (.name "self") "iterator")
+      (after heap address fields) (.ref cursor) (after heap address fields) := by
+    apply Evaluates.field (Evaluates.lookup self)
+    simp [getAttribute, Mutable.eval_bind, after, (List.getElem?_eq_some_iff.mp found).1,
+      instanceClass, source_class, Mutable.putField_lookup_other, field]
+  apply MethodReturns.of_body (completed := [.ref address]) rfl
+  exact written.returns (BlockReturns.return_value read)
+
+theorem cursor_retained (heap : Mutable.Heap) (address cursor : Nat)
+    (fields cursorFields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance sourceClass.1 "Source" fields))
+    (cursorFound : heap[cursor]? = some (.instance cursorClass.1 "Cursor" cursorFields)) :
+    (after heap address fields)[cursor]? = some (.instance cursorClass.1 "Cursor" cursorFields) := by
+  have distinct : address ≠ cursor := by
+    intro same
+    subst cursor
+    rw [found] at cursorFound
+    simp at cursorFound
+  simpa only [after, List.getElem?_set_ne distinct] using cursorFound
+
+theorem acquisition (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (address cursor : Nat)
+    (fields cursorFields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance sourceClass.1 "Source" fields))
+    (field : fields.lookup "iterator" = some (.ref cursor))
+    (cursorFound : heap[cursor]? = some (.instance cursorClass.1 "Cursor" cursorFields)) :
+    AcquireRun Probe.module choices (.ref address) heap used (.ref cursor) (after heap address fields) used := by
+  refine ⟨.method (.ref address) args iterBody, .method (.ref cursor) args nextBody,
+    (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], iter_bound heap address fields found, ?_, ?_⟩
+  · apply (IteratorCalls.Reaches.of_heap (iter_returns heap address cursor fields found field heap.length []) []).trans
+    exact .next (core_done rfl rfl) .refl
+  · have retained := cursor_retained heap address cursor fields cursorFields found cursorFound
+    have lookup := ProtocolCalls.lookup_instance Probe.module (after heap address fields) cursor cursorClass.1 "Cursor"
+      "__next__" cursorFields cursorClass.2 retained cursor_class
+    simp only [source_next, Option.map_some] at lookup
+    simpa [ProtocolCalls.nextMethod, retained] using lookup
+
+/-- The returned iterator can differ from the iterable; both aliases and acquisition writes are retained. -/
+theorem isolated_acquisition (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address cursor : Nat)
+    (fields cursorFields : List (String × Mutable.Value)) (privateAddress : Nat) (object : Mutable.Object)
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance sourceClass.1 "Source" fields))
+    (field : fields.lookup "iterator" = some (.ref cursor))
+    (cursorFound : logical[cursor]? = some (.instance cursorClass.1 "Cursor" cursorFields))
+    (loop : Loop) (resumes : List Resume) (inputName : String)
+    (getInput : loop.env inputName = some (.ref (rename address))) :
+    ∃ other, PrivateLayout (after logical address fields) other rename privateAddress object ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (.forIn (.name loop.name) (.name inputName) loop.body loop.otherwise :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (loopCode loop (.ref (rename cursor)) :: loop.following)
+          loop.env, loop.stack, other⟩, used⟩ resumes) := by
+  have ran := acquisition choices used logical address cursor fields cursorFields found field cursorFound
+  obtain ⟨other, _, kept, entered⟩ := ran.for_name_isolated source physical rename layout.layout (by simp [after]) anchors
+  exact ⟨other, kept privateAddress object layout, entered loop resumes inputName getInput⟩
+
+end AcquisitionIsolationExamples
+'''
+AUDITS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
+    "ExecutionLayout.append_private_nonempty", "ExecutionLayout.new_private_cell",
+    "graphNodes_closed_of_closed", "ExecutionLayout.equivalent_exceptions",
+)] + ["FormalSW.PyAst.IteratorCalls." + name for name in ("AcquireRun.effects", "AcquireRun.for_name_isolated")]
+AUDITS += ["AcquisitionIsolationExamples." + name for name in (
+    "source", "source_class", "cursor_class", "source_iter", "source_next", "iter_bound", "iter_returns",
+    "cursor_retained", "acquisition", "isolated_acquisition",
+)]
+with project_temporary_directory(prefix="acquisition-isolation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    receiver = namespace["Source"]()
+    cursor = namespace["Cursor"]()
+    receiver.iterator = cursor
+    assert iter(receiver) is cursor and receiver.link is receiver
+    assert next(cursor) == "bad"
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAcquisitionIsolation\n"
+                     "import lang.py.FormalSW.RuntimeExceptionObservation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"iterator acquisition: cyclic mutation, distinct returned iterator and private storage retained; {len(AUDITS)} axiom audits passed")
