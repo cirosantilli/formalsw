@@ -137,6 +137,7 @@ roots = [
   "lang.py.FormalSW.PositionalRelocation",
   "lang.py.FormalSW.MachinePositional",
   "lang.py.FormalSW.MachineForDispatch",
+  "lang.py.FormalSW.IteratorRelocation",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",

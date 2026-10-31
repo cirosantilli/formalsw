@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+Check saved custom-loop consumers across heap layouts and exception boundaries.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def first(iterator, fallback):
+    for value in iterator:
+        return value
+    else:
+        return fallback
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+open IteratorCalls IteratorCalls.Relocation
+namespace IteratorRelocationExamples
+set_option Elab.async false
+
+def args : List Arg := [{name := "iterator", annotation := none}, {name := "fallback", annotation := none}]
+def body : List Stmt := [.return (.name "value")]
+def otherwise : List Stmt := [.return (.name "fallback")]
+def source : List Stmt := [.forIn (.name "value") (.name "iterator") body otherwise]
+def consumer (env : HeapCalls.Env) (stack : List HeapCalls.Frame) : Loop :=
+  ⟨"value", body, otherwise, [], env, stack⟩
+
+theorem source_function : findFunctionIn Probe.module.body "first" = some (args, source) := rfl
+
+theorem yielded_alias (heap : Mutable.Heap) (env : HeapCalls.Env) (stack : List HeapCalls.Frame)
+    (iterator : Mutable.Value) (address anchors used : Nat) (choices : ChoiceSchedule)
+    (globals : Mutable.Globals) (rest : List Resume) :
+    IteratorCalls.step Probe.module anchors choices
+      (.completed (.ok ⟨.ok (.ref address), globals, heap, anchors⟩) used
+        (.advance (consumer env stack) iterator :: rest)) =
+      .next (.running ⟨⟨.block
+        (body ++ [Calls.loopContinuation body (loopCode (consumer env stack) iterator)])
+        (setLocal env "value" (.ref address)), stack, heap⟩, used⟩ rest) := by
+  simp only [IteratorCalls.step, resume, consumer, List.append_nil]
+
+theorem exhaustion_runs_else (heap : Mutable.Heap) (env : HeapCalls.Env)
+    (stack : List HeapCalls.Frame) (iterator : Mutable.Value) (anchors used : Nat)
+    (choices : ChoiceSchedule) (globals : Mutable.Globals) (payload : List Constant) (rest : List Resume) :
+    IteratorCalls.step Probe.module anchors choices
+      (.completed (.ok ⟨.error ⟨"StopIteration", payload⟩, globals, heap, anchors⟩) used
+        (.advance (consumer env stack) iterator :: rest)) =
+      .next (.running ⟨⟨.block otherwise env, stack, heap⟩, used⟩ rest) := rfl
+
+theorem acquisition_stop_propagates (heap : Mutable.Heap) (env : HeapCalls.Env)
+    (anchors used : Nat) (choices : ChoiceSchedule) (globals : Mutable.Globals)
+    (payload : List Constant) (rest : List Resume) :
+    IteratorCalls.step Probe.module anchors choices
+      (.completed (.ok ⟨.error ⟨"StopIteration", payload⟩, globals, heap, anchors⟩) used
+        (.acquire (consumer env []) :: rest)) =
+      .next (.completed (.ok ⟨.error ⟨"StopIteration", payload⟩, globals, heap, anchors⟩) used rest) := rfl
+
+theorem body_stop_propagates (heap : Mutable.Heap) (anchors used : Nat)
+    (choices : ChoiceSchedule) (globals : Mutable.Globals) (payload : List Constant) :
+    IteratorCalls.step Probe.module anchors choices
+      (.completed (.ok ⟨.error ⟨"StopIteration", payload⟩, globals, heap, anchors⟩) used []) =
+      .done (.ok ⟨.error ⟨"StopIteration", payload⟩, globals, heap, anchors⟩) := rfl
+
+theorem invalid_iterator_rejected (heap : Mutable.Heap) (env : HeapCalls.Env)
+    (anchors used : Nat) (choices : ChoiceSchedule) (globals : Mutable.Globals)
+    (value : Constant) (rest : List Resume) :
+    IteratorCalls.step Probe.module anchors choices
+      (.completed (.ok ⟨.ok (.scalar value), globals, heap, anchors⟩) used
+        (.acquire (consumer env []) :: rest)) =
+      .next (.completed (.ok ⟨.error ⟨"TypeError", []⟩, globals, heap, anchors⟩) used rest) := rfl
+
+theorem pending_alias_relocated (rename : Nat → Nat) (env : HeapCalls.Env)
+    (stack : List HeapCalls.Frame) (address : Nat) :
+    relocateResume rename (.advance (consumer env stack) (.ref address)) =
+      .advance (consumer (relocateEnv rename env) (stack.map (relocateFrame rename)))
+        (.ref (rename address)) := by
+  simp [relocateResume, relocateLoop, consumer, body, otherwise, relocateStmt, relocateValue]
+
+theorem completed_source_relocates (completion : Mutable.Completion) (physical : Mutable.Heap)
+    (rename : Nat → Nat) (logicalAnchors physicalAnchors used : Nat) (choices : ChoiceSchedule)
+    (env : HeapCalls.Env) (stack : List HeapCalls.Frame) (iterator : Mutable.Value)
+    (rest : List Resume) (layout : RuntimeLayout completion.heap physical rename)
+    (inside : ∀ value, completion.outcome = .ok value → value.edge.Within completion.heap.length) :
+    IteratorCalls.step Probe.module physicalAnchors choices
+      (IteratorCalls.Relocation.relocateState rename physical physicalAnchors
+        (.completed (.ok completion) used (.advance (consumer env stack) iterator :: rest))) =
+      relocateStep rename physical physicalAnchors
+        (IteratorCalls.step Probe.module logicalAnchors choices
+          (.completed (.ok completion) used (.advance (consumer env stack) iterator :: rest))) :=
+  step_completed_relocates Probe.module choices completion physical rename logicalAnchors physicalAnchors
+    used _ layout inside
+
+end IteratorRelocationExamples
+'''
+AUDITS = ["IteratorRelocationExamples." + name for name in (
+    "source_function", "yielded_alias", "exhaustion_runs_else", "acquisition_stop_propagates",
+    "body_stop_propagates", "invalid_iterator_rejected", "pending_alias_relocated", "completed_source_relocates",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation." + name for name in (
+    "loopCode_relocates", "loopCode_within", "relocateLoop_congr", "relocateResume_congr",
+    "LoopWithin.mono", "ResumeWithin.mono", "propagate_relocates", "nextMethod_keeps_heap",
+    "iterFinish_relocates", "iterFinish_effect", "resume_relocates", "step_completed_relocates",
+    "step_completed_error_relocates", "propagate_within", "resume_within", "step_completed_within",
+    "step_completed_error_within", "relocateCompletion_congr", "relocateState_congr", "StateWithin.mono",
+)]
+
+with project_temporary_directory(prefix="iterator-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    first = namespace["first"]
+    value, fallback = [], []
+    assert first(iter([value]), fallback) is value
+    assert first(iter([]), fallback) is fallback
+
+    class AcquisitionStopped:
+        def __iter__(self):
+            raise StopIteration("acquire")
+
+    class InvalidIterator:
+        def __iter__(self):
+            return 0
+
+    for iterator, expected, payload in (
+        (AcquisitionStopped(), StopIteration, ("acquire",)),
+        (InvalidIterator(), TypeError, None),
+    ):
+        try:
+            first(iterator, fallback)
+        except expected as error:
+            if payload is not None:
+                assert error.args == payload
+        else:
+            raise AssertionError("invalid acquisition returned")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"iterator relocation: saved aliases, return validation and exception boundaries; {len(AUDITS)} axiom audits passed")
