@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""
+Check combined primitive effects through parsed calls, shared reads and missing keys.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def lookup(items, value, table, key):
+    items.append(value)
+    return table[key]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation HeapCalls.Framing
+namespace PrimitiveFrameExamples
+set_option Elab.async false
+
+def appended (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [value]))
+
+theorem table_after (heap : Mutable.Heap) (address table : Nat) (items : List Mutable.Value)
+    (value : Mutable.Value) (entries : List (Constant × Mutable.Value))
+    (found : heap[address]? = some (.list items)) (dictionary : heap[table]? = some (.dict entries)) :
+    (appended heap address items value)[table]? = some (.dict entries) := by
+  have separate : address ≠ table := by
+    intro same
+    subst table
+    rw [found] at dictionary
+    cases dictionary
+  simpa only [appended, List.getElem?_set_ne separate] using dictionary
+
+theorem lookup_returns (heap : Mutable.Heap) (address table : Nat) (items : List Mutable.Value)
+    (value answer : Mutable.Value) (entries : List (Constant × Mutable.Value)) (key : Constant)
+    (found : heap[address]? = some (.list items)) (dictionary : heap[table]? = some (.dict entries))
+    (present : ScalarDict.lookup entries key = some answer) :
+    ReturnsValue Probe.module "lookup" [.ref address, value, .ref table, .scalar key] heap answer
+      (appended heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.subscript (by intros; simp) (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+  exact Mutable.getItem_dictionary _ table entries (table_after heap address table items value entries found dictionary) key present
+
+theorem append_keeps_private (heap : Mutable.Heap) (address privateAddress : Nat) (items : List Mutable.Value)
+    (value : Mutable.Value) (privateObject : Mutable.Object) (found : heap[address]? = some (.list items))
+    (saved : SavedCell privateAddress privateObject heap) (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (appended heap address items value) := by
+  apply primitive_preserves_cell privateAddress privateObject (.append address) [value]
+    (by simpa [Heapq.primitiveTargets] using separate) heap (.ok (.scalar .none)) _ saved
+  simp [primitive, Mutable.appendItem, found, appended, Except.map]
+
+theorem lookup_private_cell (choices : ChoiceSchedule) (heap : Mutable.Heap) (address table privateAddress : Nat)
+    (items : List Mutable.Value) (value answer : Mutable.Value) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (privateObject : Mutable.Object) (found : heap[address]? = some (.list items))
+    (dictionary : heap[table]? = some (.dict entries)) (present : ScalarDict.lookup entries key = some answer)
+    (saved : SavedCell privateAddress privateObject heap) (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (appended heap address items value) ∧
+    ((IteratorCalls.call Probe.module "lookup" [.ref address, value, .ref table, .scalar key] heap).run choices).Finishes
+      ⟨.ok answer, [], appended heap address items value, heap.length⟩ := by
+  have kept := append_keeps_private heap address privateAddress items value privateObject found saved separate
+  have read := Mutable.getItem_dictionary _ table entries (table_after heap address table items value entries found dictionary) key present
+  have preserved := primitive_preserves_cell privateAddress privateObject .subscript [.ref table, .scalar key]
+    (by simp [Heapq.primitiveTargets]) (appended heap address items value) (.ok answer) _ kept read
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0)
+    (lookup_returns heap address table items value answer entries key found dictionary present heap.length []) []
+  exact ⟨preserved, reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))⟩
+
+def args : List Arg := [{name := "items", annotation := none}, {name := "value", annotation := none},
+  {name := "table", annotation := none}, {name := "key", annotation := none}]
+def appendStmt : Stmt := .expr (.call (.attribute (.name "items") "append") [.name "value"])
+def lookupStmt : Stmt := .return (.subscript (.name "table") (.name "key"))
+def body : List Stmt := [appendStmt, lookupStmt]
+
+theorem lookup_failure_private_cell (heap : Mutable.Heap) (address table privateAddress : Nat)
+    (items : List Mutable.Value) (value : Mutable.Value) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (privateObject : Mutable.Object) (found : heap[address]? = some (.list items))
+    (dictionary : heap[table]? = some (.dict entries)) (missing : ScalarDict.lookup entries key = none)
+    (saved : SavedCell privateAddress privateObject heap) (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (appended heap address items value) ∧
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "lookup") [.ref address, value, .ref table, .scalar key], [], heap⟩
+      (.ok ⟨.error ⟨"KeyError", [key]⟩, [], appended heap address items value, heap.length⟩) := by
+  have retained := table_after heap address table items value entries found dictionary
+  have read : Mutable.getItem (.ref table) (.scalar key) (appended heap address items value) =
+      some (.error ⟨"KeyError", [key]⟩, appended heap address items value) := by
+    simp [Mutable.getItem, retained, missing]
+  have kept := append_keeps_private heap address privateAddress items value privateObject found saved separate
+  refine ⟨primitive_preserves_cell privateAddress privateObject .subscript [.ref table, .scalar key]
+    (by simp [Heapq.primitiveTargets]) (appended heap address items value) (.error ⟨"KeyError", [key]⟩) _ kept read, ?_⟩
+  let env := functionEnv args body [.ref address, value, .ref table, .scalar key] []
+  have entry : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.call "lookup") [.ref address, value, .ref table, .scalar key], [], heap⟩
+      ⟨.block body env, [], heap⟩ := .next rfl .refl
+  have written : BlockContinues Probe.module env [appendStmt] heap env (appended heap address items value) :=
+    BlockContinues.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  have failed : Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.block [lookupStmt] env, [], appended heap address items value⟩
+      (.ok ⟨.error ⟨"KeyError", [key]⟩, [], appended heap address items value, heap.length⟩) := by
+    repeat (refine .next rfl ?_)
+    apply Finishes.done
+    change protectGenerator [] (result heap.length (appended heap address items value)
+      (Mutable.getItem (.ref table) (.scalar key)) []) = _
+    simp [result, run, read]
+    rfl
+  exact entry.finishes ((written [lookupStmt] heap.length []).finishes failed)
+
+/-- The separation condition cannot be dropped: appending changes the protected receiver. -/
+theorem append_changes_receiver (value : Mutable.Value) :
+    ¬ Heapq.Preserves (SavedCell 0 (.list [])) (primitive (.append 0) [value]) := by
+  intro kept
+  have changed := kept [.list []] (.ok (.scalar .none)) [.list [value]] rfl rfl
+  simp [SavedCell] at changed
+
+end PrimitiveFrameExamples
+'''
+AUDITS = [
+    'FormalSW.PyAst.Heapq.preserves_identity',
+    'FormalSW.PyAst.Heapq.preserves_unary',
+    'FormalSW.PyAst.Heapq.preserves_compareScalars',
+    'FormalSW.PyAst.Heapq.preserves_compareDifferent',
+    'FormalSW.PyAst.Heapq.preserves_sequenceCompare',
+    'FormalSW.PyAst.Heapq.preserves_compare',
+    'FormalSW.PyAst.Heapq.preserves_sequenceContains',
+    'FormalSW.PyAst.Heapq.preserves_membershipKey',
+    'FormalSW.PyAst.Heapq.preserves_bytesContainsInteger',
+    'FormalSW.PyAst.Heapq.preserves_bytesContains',
+    'FormalSW.PyAst.Heapq.preserves_membership',
+    'FormalSW.PyAst.Heapq.preserves_length',
+    'FormalSW.PyAst.Heapq.preserves_dictionaryGet',
+    'FormalSW.PyAst.Heapq.preserves_getItem',
+    'FormalSW.PyAst.Heapq.preserves_readSliceObject',
+    'FormalSW.PyAst.Heapq.preserves_getSlice',
+    'FormalSW.PyAst.Heapq.preserves_divmod',
+    'FormalSW.PyAst.Heapq.preserves_heapify_values',
+    'FormalSW.PyAst.Heapq.preserves_heappush_values',
+    'FormalSW.PyAst.Heapq.preserves_heappop_values',
+    'FormalSW.PyAst.Heapq.preserves_scalarRepresentation',
+    'FormalSW.PyAst.Heapq.preserves_builtin',
+    'FormalSW.PyAst.Heapq.preserves_writeField_scalar',
+    'FormalSW.PyAst.Heapq.preserves_isDigit',
+    'FormalSW.PyAst.Heapq.preserves_replace',
+    'FormalSW.PyAst.Heapq.preserves_primitive',
+    'FormalSW.PyAst.HeapCalls.Framing.primitive_dispatch',
+    'FormalSW.PyAst.HeapCalls.Framing.primitive_preserves_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_primitive_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_unary_cell',
+    'FormalSW.PyAst.HeapCalls.Framing.step_compare_cell',
+    'PrimitiveFrameExamples.table_after',
+    'PrimitiveFrameExamples.lookup_returns',
+    'PrimitiveFrameExamples.append_keeps_private',
+    'PrimitiveFrameExamples.lookup_private_cell',
+    'PrimitiveFrameExamples.lookup_failure_private_cell',
+    'PrimitiveFrameExamples.append_changes_receiver',
+]
+
+with project_temporary_directory(prefix="primitive-frame-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    private = []
+    private.append(private)
+    items = [private]
+    table = {"saved": private, 1: items}
+    assert namespace["lookup"](items, items, table, "saved") is private
+    assert items[-1] is items
+    for key in (0, -10**100, "absent", None):
+        before = len(items)
+        try:
+            namespace["lookup"](items, private, table, key)
+        except KeyError as error:
+            assert error.args == (key,)
+        else:
+            raise AssertionError("missing dictionary key did not raise")
+        assert len(items) == before + 1 and items[-1] is private
+        assert len(private) == 1 and private[0] is private
+        assert table["saved"] is private and table[1] is items
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.PrimitiveMachineFrame\n"
+        "import lang.py.FormalSW.DictionaryCalls\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"primitive frames: designated writes, retained aliases and failed lookups; {len(AUDITS)} axiom audits passed")
