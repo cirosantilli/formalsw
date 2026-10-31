@@ -140,12 +140,13 @@ theorem store_then_compare (logical physical : Mutable.Heap) (rename : Nat → N
     (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
     ⟨comparisonInside.1, comparisonInside.2, by simpa [stored] using saved⟩ rfl wrapped
 
-/-- Dataclass field lookup errors remain errors even when both operands are the same object. -/
-theorem missing_dataclass_field (heap : Mutable.Heap) (address : Nat) (origin name field : String)
-    (found : heap[address]? = some (.dataInstance origin name false [field] [])) :
-    HeapCalls.compare .eq (.ref address) (.ref address) heap = some (.error ⟨"AttributeError", []⟩, heap) := by
-  rw [compare_dataInstances_eq heap .eq address address _ _ _ _ _ _ _ _ _ _ found found]
-  simp [dataEqualityAnswer, declaredValues, comparisonEval, bind, Except.bind, Except.map]
+/-- Distinct dataclasses still read declared fields and preserve lookup errors. -/
+theorem missing_dataclass_field (heap : Mutable.Heap) (left right : Nat) (origin name field : String)
+    (first : heap[left]? = some (.dataInstance origin name false [field] []))
+    (second : heap[right]? = some (.dataInstance origin name false [field] [])) (different : left ≠ right) :
+    HeapCalls.compare .eq (.ref left) (.ref right) heap = some (.error ⟨"AttributeError", []⟩, heap) := by
+  rw [compare_dataInstances_eq heap .eq left right _ _ _ _ _ _ _ _ _ _ first second]
+  simp [different, dataEqualityAnswer, declaredValues, comparisonEval, bind, Except.bind, Except.map]
 
 /-- Unequal stored reference identities stay unsupported rather than becoming a false result. -/
 theorem dictionary_unknown_values (heap : Mutable.Heap) (left right a b : Nat)
@@ -217,6 +218,7 @@ theorem shared_prefix_preserves (logical physical : Mutable.Heap) (rename : Nat 
 end MachineComparisonExamples
 '''
 AUDITS = [
+    "compare_dataInstance_self",
     "MachineComparisonExamples.shared_prefix_preserves",
     "RuntimeLayout.compare_shallow_sequences",
     "RuntimeLayout.compare_sequences_nonrecursive",

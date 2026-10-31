@@ -102,14 +102,14 @@ theorem branch (evaluated : Evaluates module env condition value)
     (executed : BlockContinues module env (if scalarTruth value then yes else no) finalEnv) :
     BlockContinues module env [.ifThen condition yes no] finalEnv := by
   intro following stack
-  exact .next rfl ((evaluated _).trans (.next (by simp [step, List.append_assoc]) (executed following stack)))
+  exact .next rfl ((evaluated _).trans (.next (by simp [step]) (executed following stack)))
 
 theorem while_loop (evaluated : Evaluates module env condition value)
     (executed : BlockContinues module env
       (if scalarTruth value then body ++ [loopContinuation body (.whileDo condition body otherwise)] else otherwise) finalEnv) :
     BlockContinues module env [.whileDo condition body otherwise] finalEnv := by
   intro following stack
-  exact .next rfl ((evaluated _).trans (.next (by simp [step, List.append_assoc]) (executed following stack)))
+  exact .next rfl ((evaluated _).trans (.next (by simp [step]) (executed following stack)))
 
 theorem returns (first : BlockContinues module env body finalEnv)
     (rest : BlockReturns module finalEnv following value) : BlockReturns module env (body ++ following) value :=

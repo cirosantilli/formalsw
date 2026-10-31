@@ -322,26 +322,41 @@ theorem compare_dataInstances_eq (heap : Heap) (op : CmpOp) (a b : Nat)
     HeapCalls.compare op (.ref a) (.ref b) heap =
       if origin ≠ otherOrigin ∨ name ≠ otherName then HeapCalls.compareDifferent op heap
       else if frozen ≠ otherFrozen ∨ declared ≠ otherDeclared then none
-      else comparisonEval (dataEqualityAnswer op declared fields otherFields) heap := by
+      else comparisonEval (if a = b then equalityAnswer op (some true)
+        else dataEqualityAnswer op declared fields otherFields) heap := by
   by_cases different : origin ≠ otherOrigin ∨ name ≠ otherName
   · simp [HeapCalls.compare, first, second, different]
   · by_cases mismatch : frozen ≠ otherFrozen ∨ declared ≠ otherDeclared
     · simp [HeapCalls.compare, first, second, different, mismatch, unsupported]
-    · cases op <;>
-        simp [HeapCalls.compare, first, second, different, mismatch, dataEqualityAnswer,
-          comparisonEval, HeapSort.typeError, error, eval_bind]
-      all_goals erw [declaredValues_eval heap fields declared]
-      all_goals
-        cases leftValues : declaredValues fields declared with
-        | error exception => simp
-        | ok xs =>
-          simp only [Option.bind_some]
-          erw [declaredValues_eval heap otherFields declared]
-          cases rightValues : declaredValues otherFields declared with
+    · by_cases same : a = b
+      · cases op <;>
+          simp [HeapCalls.compare, second, different, mismatch, same,
+            equalityAnswer, comparisonEval, HeapSort.typeError, error, Except.map] <;> rfl
+      · cases op <;>
+          simp [HeapCalls.compare, first, second, different, mismatch, same, dataEqualityAnswer,
+            comparisonEval, HeapSort.typeError, error, eval_bind]
+        all_goals erw [declaredValues_eval heap fields declared]
+        all_goals
+          cases leftValues : declaredValues fields declared with
           | error exception => simp
-          | ok ys =>
-            cases equal : HeapCalls.equalLists xs ys <;>
-              simp [equal, equalityAnswer, unsupported] <;> rfl
+          | ok xs =>
+            simp only [Option.bind_some]
+            erw [declaredValues_eval heap otherFields declared]
+            cases rightValues : declaredValues otherFields declared with
+            | error exception => simp
+            | ok ys =>
+              cases equal : HeapCalls.equalLists xs ys <;>
+                simp [equal, equalityAnswer, unsupported] <;> rfl
+
+/-- Python 3.14's generated equality checks identity before reading declared fields. -/
+theorem compare_dataInstance_self (heap : Heap) (address : Nat) (origin name : String) (frozen : Bool)
+    (declared : List String) (fields : List (String × Value)) (negated : Bool)
+    (found : heap[address]? = some (.dataInstance origin name frozen declared fields)) :
+    HeapCalls.compare (if negated then .notEq else .eq) (.ref address) (.ref address) heap =
+      some (.ok (.scalar (.bool (!negated))), heap) := by
+  rw [compare_dataInstances_eq heap _ address address origin name frozen declared fields
+    origin name frozen declared fields found found]
+  cases negated <;> simp [equalityAnswer, comparisonEval, Except.map]
 
 theorem RuntimeLayout.compare_dataInstances {logical physical : Heap} {rename : Nat → Nat}
     (layout : RuntimeLayout logical physical rename) (closed : Closed logical) (op : CmpOp) (a b : Nat)
@@ -358,6 +373,10 @@ theorem RuntimeLayout.compare_dataInstances {logical physical : Heap} {rename : 
   simp only [relocateObject] at movedFirst movedSecond
   rw [compare_dataInstances_eq logical op a b _ _ _ _ _ _ _ _ _ _ first second,
     compare_dataInstances_eq physical op (rename a) (rename b) _ _ _ _ _ _ _ _ _ _ movedFirst movedSecond]
+  have same : rename a = rename b ↔ a = b :=
+    ⟨layout.injective a (List.getElem?_eq_some_iff.mp first).1 b (List.getElem?_eq_some_iff.mp second).1,
+      congrArg rename⟩
+  simp only [same]
   have leftInside : ∀ field ∈ fields, field.2.edge.Within logical.length := by
     intro field member
     exact closed _ (List.mem_of_getElem? first) field.2 (List.mem_map.mpr ⟨field, member, rfl⟩)

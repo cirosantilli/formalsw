@@ -205,6 +205,7 @@ def compare (op : CmpOp) (left right : Value) : Eval Value := do
           else if frozen ≠ otherFrozen ∨ declared ≠ otherDeclared then Mutable.unsupported
           else match op with
           | .eq | .notEq =>
+              if a = b then return .scalar (.bool (op == .eq))
               let left ← declared.mapM fun field => match fields.lookup field with
                 | some value => pure value
                 | none => Mutable.error "AttributeError"

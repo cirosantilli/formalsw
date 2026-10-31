@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""
+Check membership short-circuiting, private allocations, errors, and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def identity_first(value, tail):
+    return value in [value, tail]
+
+def direct_true(value, tail):
+    return True
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineMembershipExamples
+set_option Elab.async false
+
+theorem identity_first_returns (heap : Mutable.Heap) (value tail : Mutable.Value) :
+    ReturnsValue Probe.module "identity_first" [value, tail] heap (.scalar (.bool true))
+      (heap ++ [.list [value, tail]]) := by
+  have tested : HeapCalls.membership value (.ref heap.length) false (heap ++ [.list [value, tail]]) =
+      some (.ok (.scalar (.bool true)), heap ++ [.list [value, tail]]) := by
+    simp [HeapCalls.membership, HeapCalls.sequenceContains, Except.map]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.membership
+    (.cons (Evaluates.lookup rfl)
+      (.cons (Evaluates.list (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))) .nil)) tested
+
+theorem direct_true_returns (heap : Mutable.Heap) (value tail : Mutable.Value) :
+    ReturnsValue Probe.module "direct_true" [value, tail] heap (.scalar (.bool true)) heap := by
+  apply BlockReturns.function rfl rfl
+  exact BlockReturns.return_value Evaluates.constant
+
+/-- The identity shortcut skips an arbitrary tail; the temporary search list is unobservable. -/
+theorem identity_first_equiv (heap : Mutable.Heap) (value tail : Mutable.Value) (valid : heap.Valid) :
+    (IteratorCalls.call Probe.module "identity_first" [value, tail] heap).Equiv
+      (IteratorCalls.call Probe.module "direct_true" [value, tail] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule) (after : Mutable.Heap)
+      (returned : ReturnsValue Probe.module name [value, tail] heap (.scalar (.bool true)) after) :
+      ((IteratorCalls.call Probe.module name [value, tail] heap).run choices).Finishes
+        ⟨.ok (.scalar (.bool true)), [], after, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  apply Mutable.Call.equiv_of_finishes
+    (finishes "identity_first" leftChoices _ (identity_first_returns heap value tail))
+    (finishes "direct_true" rightChoices _ (direct_true_returns heap value tail))
+  simpa only [List.append_nil] using Mutable.Completion.equivalent_allocations
+    heap [.list [value, tail]] [] (.scalar (.bool true)) [] valid (by trivial) (by simp)
+
+/-- Membership receives the allocation's actual output invariant under arbitrary saved consumers. -/
+theorem allocation_then_membership (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (value tail : Mutable.Value) (negated : Bool)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (valueInside : value.edge.Within logical.length) (tailInside : tail.edge.Within logical.length)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (logical ++ [.list [value, tail]]) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation .list [value, tail], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.ref logical.length), [], logical ++ [.list [value, tail]]⟩) ∧
+      IteratorCalls.Relocation.Preserves (logical ++ [.list [value, tail]]) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.operation (.membership negated) [value, .ref logical.length], [], logical ++ [.list [value, tail]]⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.operation (.membership negated) [value, .ref logical.length], [], logical ++ [.list [value, tail]]⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have inside : StateWithin ⟨.operation .list [value, tail], [], logical⟩ := by
+    refine ⟨⟨by trivial, ?_⟩, by simp⟩
+    intro selected member
+    rcases List.mem_cons.mp member with rfl | member
+    · exact valueInside
+    · have same : selected = tail := by simpa using member
+      subst selected
+      exact tailInside
+  have preserved := step_list_preserves Probe.module logical physical rename logical.length physical.length
+    [value, tail] [] [] layout inside globalsInside
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation .list [value, tail], [], logical⟩ =
+      .next ⟨.value (.ref logical.length), [], logical ++ [.list [value, tail]]⟩ := by
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, Mutable.allocate, Except.map]
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, nextInside, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have membershipInside : StateWithin
+      ⟨.operation (.membership negated) [value, .ref logical.length], [], logical ++ [.list [value, tail]]⟩ := by
+    refine ⟨⟨by trivial, ?_⟩, by simp⟩
+    intro selected member
+    rcases List.mem_cons.mp member with rfl | member
+    · exact valueWithin_mono logical.length _ _ larger valueInside
+    · have same : selected = .ref logical.length := by simpa using member
+      subst selected
+      exact nextInside.1
+  have nonrecursive : NonrecursiveMembership (logical ++ [.list [value, tail]]) value (.ref logical.length) := by
+    simp [NonrecursiveMembership, NonrecursiveSearch]
+  have raw := step_membership_preserves Probe.module (logical ++ [.list [value, tail]]) other nextMap
+    logical.length physical.length value (.ref logical.length) negated [] [] retained membershipInside nextGlobals nonrecursive
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.operation (.membership negated) [value, .ref logical.length], [], logical ++ [.list [value, tail]]⟩, used⟩ other nextMap
+    logical.length physical.length [] retained membershipInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨membershipInside.1, membershipInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
+/-- A later identical object does not suppress an earlier missing-field error. -/
+theorem late_identity_error (heap : Mutable.Heap) (container left right : Nat) (origin name field : String)
+    (negated : Bool) (different : left ≠ right)
+    (found : heap[container]? = some (.list [.ref left, .ref right]))
+    (first : heap[left]? = some (.dataInstance origin name false [field] []))
+    (second : heap[right]? = some (.dataInstance origin name false [field] [(field, .scalar .none)])) :
+    HeapCalls.membership (.ref right) (.ref container) negated heap = some (.error ⟨"AttributeError", []⟩, heap) := by
+  have failed : HeapCalls.compare .eq (.ref left) (.ref right) heap = some (.error ⟨"AttributeError", []⟩, heap) := by
+    rw [compare_dataInstances_eq heap .eq left right _ _ _ _ _ _ _ _ _ _ first second]
+    simp [different, dataEqualityAnswer, declaredValues, comparisonEval, bind, Except.bind, Except.map]
+  simp [HeapCalls.membership, HeapCalls.sequenceContains, found, different, failed, Mutable.eval_bind, Except.map]
+
+/-- Integer range validation precedes inspecting even an empty byte container. -/
+theorem bytes_invalid_integer (heap : Mutable.Heap) (bytes : List UInt8) (needle : Int) (negated : Bool)
+    (invalid : needle < 0 ∨ 255 < needle) :
+    HeapCalls.membership (.scalar (.int needle)) (.scalar (.bytes bytes)) negated heap =
+      some (.error ⟨"ValueError", []⟩, heap) := by
+  simp [HeapCalls.membership, HeapCalls.bytesContains, HeapCalls.bytesContainsInteger, invalid, Mutable.error]
+
+end MachineMembershipExamples
+'''
+AUDITS = [
+    "NonrecursiveSearch.of_comparisons",
+    "NonrecursiveSearch.scalar",
+    "NonrecursiveMembership.scalar",
+    "RuntimeLayout.sequenceContains_nonrecursive",
+    "RuntimeLayout.membership_sequences_nonrecursive",
+    "RuntimeLayout.membership_nonrecursive",
+    "result_membership_preserves",
+    "step_membership_preserves",
+    "step_membership_scalar_preserves",
+    "step_membership_expression_preserves",
+    "MachineMembershipExamples.identity_first_returns",
+    "MachineMembershipExamples.direct_true_returns",
+    "MachineMembershipExamples.identity_first_equiv",
+    "MachineMembershipExamples.allocation_then_membership",
+    "MachineMembershipExamples.late_identity_error",
+    "MachineMembershipExamples.bytes_invalid_integer",
+]
+
+with project_temporary_directory(prefix="machine-membership-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    class Poison:
+        def __eq__(self, other):
+            raise AssertionError("unvisited equality was called")
+    cycle = []
+    cycle.append(cycle)
+    for value in (None, 1, "value", cycle, Poison()):
+        assert namespace["identity_first"](value, Poison()) is True
+    from dataclasses import make_dataclass
+    Record = make_dataclass("Record", ["field"])
+    missing, intact = Record(1), Record(1)
+    del missing.field
+    assert namespace["identity_first"](missing, intact) is True
+    for negated in (False, True):
+        try:
+            result = intact not in [missing, intact] if negated else intact in [missing, intact]
+        except AttributeError:
+            pass
+        else:
+            raise AssertionError("an identity later in the list must not suppress earlier errors")
+        for needle in (-1, 256, 10**100):
+            try:
+                result = needle not in b"" if negated else needle in b""
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid byte needle must raise even in an empty container")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineMembershipInvariant\nimport lang.py.FormalSW.IteratorRules\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine membership: short-circuiting, private allocation, errors and saved consumers; {len(AUDITS)} axiom audits passed")

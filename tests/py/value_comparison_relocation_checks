@@ -136,6 +136,16 @@ theorem same_dictionary (heap : Mutable.Heap) (address : Nat) (entries : List (C
   · rw [compare_dicts_eq heap .notEq address address entries entries found found]
     simp [comparisonEval, equalityAnswer, Except.map]
 
+/-- Self-equality does not read fields, including missing or recursively linked fields. -/
+theorem same_dataclass (heap : Mutable.Heap) (address : Nat) (origin name : String)
+    (frozen : Bool) (declared : List String) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.dataInstance origin name frozen declared fields)) :
+    ReturnsValue Probe.module "equal" [.ref address, .ref address] heap (.ref heap.length)
+      (resultHeap heap address address true false) :=
+  source_returns heap address address true false
+    (compare_dataInstance_self heap address origin name frozen declared fields false found)
+    (compare_dataInstance_self heap address origin name frozen declared fields true found)
+
 theorem source_failed (heap : Mutable.Heap) (left right : Nat) (exception : ExceptionObject)
     (failed : HeapCalls.compare .eq (.ref left) (.ref right) heap = some (.error exception, heap)) :
     (HeapCalls.call Probe.module "equal" [.ref left, .ref right] heap).Finishes
@@ -149,12 +159,12 @@ theorem missing_field (heap : Mutable.Heap) (left right : Nat) (origin name fiel
     (frozen : Bool) (fields otherFields : List (String × Mutable.Value))
     (first : heap[left]? = some (.dataInstance origin name frozen [field] fields))
     (second : heap[right]? = some (.dataInstance origin name frozen [field] otherFields))
-    (missing : fields.lookup field = none) :
+    (missing : fields.lookup field = none) (different : left ≠ right) :
     HeapCalls.compare .eq (.ref left) (.ref right) heap =
       some (.error { typeName := "AttributeError", args := [] }, heap) := by
   rw [compare_dataInstances_eq heap .eq left right origin name frozen [field] fields
     origin name frozen [field] otherFields first second]
-  simp [comparisonEval, dataEqualityAnswer, declaredValues, missing, bind, Except.bind, Except.map]
+  simp [different, comparisonEval, dataEqualityAnswer, declaredValues, missing, bind, Except.bind, Except.map]
 
 /-- Both full source calls fail before constructing the return list; there is no counterpart-execution premise. -/
 theorem paired_missing_field (logical physical : Mutable.Heap) (rename : Nat → Nat)
@@ -162,13 +172,13 @@ theorem paired_missing_field (logical physical : Mutable.Heap) (rename : Nat →
     (frozen : Bool) (fields otherFields : List (String × Mutable.Value))
     (first : logical[left]? = some (.dataInstance origin name frozen [field] fields))
     (second : logical[right]? = some (.dataInstance origin name frozen [field] otherFields))
-    (missing : fields.lookup field = none) :
+    (missing : fields.lookup field = none) (different : left ≠ right) :
     (HeapCalls.call Probe.module "equal" [.ref left, .ref right] logical).Finishes
         ⟨.error { typeName := "AttributeError", args := [] }, [], logical, logical.length⟩ ∧
       (HeapCalls.call Probe.module "equal" [.ref (rename left), .ref (rename right)] physical).Finishes
         ⟨.error { typeName := "AttributeError", args := [] }, [], physical, physical.length⟩ ∧
       ExecutionLayout logical physical rename := by
-  have failed := missing_field logical left right origin name field frozen fields otherFields first second missing
+  have failed := missing_field logical left right origin name field frozen fields otherFields first second missing different
   have other := layout.runtime.compare_dataInstances layout.closed .eq left right
     origin name frozen [field] fields origin name frozen [field] otherFields first second
   rw [failed] at other
@@ -181,6 +191,7 @@ theorem paired_missing_field (logical physical : Mutable.Heap) (rename : Nat →
 #print axioms paired_keyDicts
 #print axioms paired_dataInstances
 #print axioms same_dictionary
+#print axioms same_dataclass
 #print axioms source_failed
 #print axioms missing_field
 #print axioms paired_missing_field
@@ -205,6 +216,7 @@ theorem paired_missing_field (logical physical : Mutable.Heap) (rename : Nat →
 #print axioms RuntimeLayout.compare_keyDict
 #print axioms dataEqualityAnswer_relocates
 #print axioms compare_dataInstances_eq
+#print axioms compare_dataInstance_self
 #print axioms RuntimeLayout.compare_dataInstances
 end ValueComparisonExamples
 '''
@@ -241,6 +253,7 @@ with project_temporary_directory(prefix="value-comparison-relocation-") as tempo
         assert result[:2] == [same, not same] and result[2] is left and result[3] is right
     missing = Record(cycle, 0)
     del missing.head
+    assert equal(missing, missing)[:2] == [True, False]
     intact = Record(cycle, 0)
     try:
         equal(missing, intact)
@@ -261,9 +274,9 @@ with project_temporary_directory(prefix="value-comparison-relocation-") as tempo
     assert checked.returncode == 0, checked.stdout + checked.stderr
     audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
     independent = checked.stdout.count("does not depend on any axioms")
-    assert len(audits) + independent == 32, checked.stdout
+    assert len(audits) + independent == 34, checked.stdout
     for audit in audits:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print("value comparison relocation: dictionary representations, dataclass fields, aliases, and errors; 32 axiom audits passed")
+print("value comparison relocation: dictionary representations, dataclass fields, aliases, and errors; 34 axiom audits passed")

@@ -170,7 +170,7 @@ theorem missing_field_source (heap : Mutable.Heap) (isTuple : Bool) (needle item
       some (.error { typeName := "AttributeError", args := [] }, heap) := by
     rw [compare_dataInstances_eq heap .eq item needle origin name frozen [field] fields
       origin name frozen [field] otherFields first second]
-    simp [comparisonEval, dataEqualityAnswer, declaredValues, missing, bind, Except.bind, Except.map]
+    simp [different, comparisonEval, dataEqualityAnswer, declaredValues, missing, bind, Except.bind, Except.map]
   apply source_failed
   rw [membership_sequence_eq heap isTuple (.ref needle) address _ false container,
     failure_before_match heap (.ref needle) (.ref item) rest (by simpa using different) _ comparison]
