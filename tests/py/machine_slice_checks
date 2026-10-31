@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""
+Check slicing after argument mutations, aliased assignment and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(source, item):
+    source.append(item)
+    return source
+
+
+def nested(source, item, stop):
+    return touch(source, item)[:stop]
+
+
+def explicit(source, item, stop):
+    source.append(item)
+    return source[:stop]
+
+
+def tuple_copy(source):
+    return source[:]
+
+
+def identity(source):
+    return source
+
+
+def assign(source, item):
+    source[:] = touch(source, item)
+    return source
+
+
+def appended(source, item):
+    source.append(item)
+    return source
+
+
+def bad_assign(source, item):
+    source[::0] = touch(source, item)
+    return source
+'''
+PROOF = r'''
+
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineSliceExamples
+set_option Elab.async false
+
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [item]))
+
+def copied (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value) (stop : Int) : Mutable.Heap :=
+  inserted heap address items item ++ [.list ((items ++ [item]).take (FormalSW.Py.Builtin.Slice.prefixLength (items ++ [item]).length stop))]
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, item] heap (.ref address) (inserted heap address items item) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value) (stop : Int)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "nested" [.ref address, item, .scalar (.int stop)] heap (.ref heap.length) (copied heap address items item stop) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address items item)[address]? = some (.list (items ++ [item])) := by
+    simp [inserted, inside]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.slice (.cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+    (touch_returns heap address items item found))
+      (.cons Evaluates.constant (.cons (Evaluates.lookup rfl) (.cons Evaluates.constant .nil))))
+  simpa [copied, inserted] using Mutable.getSlice_list_prefix (inserted heap address items item) address (items ++ [item]) stop retained
+
+theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value) (stop : Int)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "explicit" [.ref address, item, .scalar (.int stop)] heap (.ref heap.length) (copied heap address items item stop) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address items item)[address]? = some (.list (items ++ [item])) := by
+    simp [inserted, inside]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.slice (.cons (Evaluates.lookup rfl) (.cons Evaluates.constant (.cons (Evaluates.lookup rfl) (.cons Evaluates.constant .nil))))
+  simpa [copied, inserted] using Mutable.getSlice_list_prefix (inserted heap address items item) address (items ++ [item]) stop retained
+
+theorem inline_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value) (stop : Int)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "nested" [.ref address, item, .scalar (.int stop)] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, item, .scalar (.int stop)] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, item, .scalar (.int stop)] heap (.ref heap.length) (copied heap address items item stop)) :
+      ((IteratorCalls.call Probe.module name [.ref address, item, .scalar (.int stop)] heap).run choices).Finishes
+        ⟨.ok (.ref heap.length), [], copied heap address items item stop, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "nested" leftChoices (nested_returns heap address items item stop found))
+    (finishes "explicit" rightChoices (explicit_returns heap address items item stop found)) (Or.inl rfl)
+
+theorem tuple_copy_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.tuple items)) :
+    ReturnsValue Probe.module "tuple_copy" [.ref address] heap (.ref address) heap := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.slice (.cons (Evaluates.lookup rfl) (.cons Evaluates.constant (.cons Evaluates.constant (.cons Evaluates.constant .nil))))
+  exact Mutable.getSlice_tuple_full heap address items found
+
+theorem identity_returns (heap : Mutable.Heap) (address : Nat) :
+    ReturnsValue Probe.module "identity" [.ref address] heap (.ref address) heap := by
+  apply BlockReturns.function rfl rfl
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem tuple_identity_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.tuple items)) :
+    (IteratorCalls.call Probe.module "tuple_copy" [.ref address] heap).Equiv
+      (IteratorCalls.call Probe.module "identity" [.ref address] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address] heap (.ref address) heap) :
+      ((IteratorCalls.call Probe.module name [.ref address] heap).run choices).Finishes
+        ⟨.ok (.ref address), [], heap, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "tuple_copy" leftChoices (tuple_copy_returns heap address items found))
+    (finishes "identity" rightChoices (identity_returns heap address)) (Or.inl rfl)
+
+theorem self_assignment (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    Mutable.setSlice (.ref address) (.scalar .none) (.scalar .none) (.scalar .none) (.ref address) heap =
+      some (.ok (.scalar .none), heap) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have original := (List.getElem?_eq_some_iff.mp found).2
+  have full : FormalSW.Py.Builtin.List.setSlice items {} items = .ok items := by
+    change Except.ok (items.take 0 ++ items ++ items.drop (max (0 : Int) items.length).toNat) = _
+    simp
+  rw [setSlice_ref heap address (.list items) _ _ _ _ found]
+  simp [writeSliceObject, sliceBounds_result, sliceCoordinates, sliceCoordinate, Mutable.eval_bind,
+    Mutable.sequence, found, full,
+    sliceResult, storeSliceObject, Except.map]
+  rw [← original, List.set_getElem_self valid]
+
+theorem assign_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "assign" [.ref address, item] heap (.ref address) (inserted heap address items item) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address items item)[address]? = some (.list (items ++ [item])) := by simp [inserted, valid]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.setSlice
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) (touch_returns heap address items item found))
+    (.cons (Evaluates.lookup rfl) (.cons Evaluates.constant (.cons Evaluates.constant (.cons Evaluates.constant .nil))))
+    (self_assignment _ address (items ++ [item]) retained)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem appended_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "appended" [.ref address, item] heap (.ref address) (inserted heap address items item) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem assignment_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "assign" [.ref address, item] heap).Equiv
+      (IteratorCalls.call Probe.module "appended" [.ref address, item] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, item] heap (.ref address) (inserted heap address items item)) :
+      ((IteratorCalls.call Probe.module name [.ref address, item] heap).run choices).Finishes
+        ⟨.ok (.ref address), [], inserted heap address items item, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "assign" leftChoices (assign_returns heap address items item found))
+    (finishes "appended" rightChoices (appended_returns heap address items item found)) (Or.inl rfl)
+
+/-- Slice execution uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_slice (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (operation : Operation) (covered : SliceOperation operation) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation operation values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_slice_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used operation values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained covered
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineSliceExamples
+'''
+AUDITS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
+    "sliceCoordinate_relocates", "sliceCoordinates_relocates", "sliceBounds_result", "sliceBounds_relocates", "sliceBounds_heap",
+    "slice_map", "slice_mem", "sliceResult_relocates", "sliceResult_heap", "sliceResult_ok",
+    "setMany_map", "setSlice_map", "setMany_within", "setSlice_within",
+    "bytes_mapM_pair", "RuntimeLayout.byteValues", "byteValues_heap",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "result_allocateBuffer_preserves", "result_sliceBounds_bind_preserves", "result_sliceResult_bind_preserves",
+    "result_readSliceObject_preserves", "getSlice_ref", "result_getSlice_preserves",
+    "result_storeSliceObject_preserves", "result_writeSliceObject_preserves", "setSlice_ref", "result_setSlice_preserves", "step_slice_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_slice_preserves"] + ["MachineSliceExamples." + name for name in (
+    "touch_returns", "nested_returns", "explicit_returns", "inline_equiv",
+    "tuple_copy_returns", "identity_returns", "tuple_identity_equiv", "self_assignment", "assign_returns", "appended_returns", "assignment_equiv", "append_then_slice",
+)]
+with project_temporary_directory(prefix="machine-slice-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("nested", "explicit"):
+        for size in (0, 1, 17):
+            for stop in (-10**100, -1, 0, 1, 7, 10**100):
+                for value in (None, True, -10**100, "key", []):
+                    source = list(range(size))
+                    expected = (source + [value])[:stop]
+                    result = namespace[name](source, value, stop)
+                    assert result == expected and result is not source
+                    assert source[-1] is value
+        source = []
+        source.append(source)
+        result = namespace[name](source, source, 10**100)
+        assert result is not source and len(result) == 2
+        assert all(value is source for value in result)
+    for source in ((), (1,), ([],), (1, [], [2])):
+        assert namespace["tuple_copy"](source) is source
+    for name in ("assign", "appended", "bad_assign"):
+        source = []
+        source.append(source)
+        if name == "bad_assign":
+            try:
+                namespace[name](source, source)
+            except ValueError:
+                assert len(source) == 2 and all(value is source for value in source)
+            else:
+                raise AssertionError("zero step must fail after RHS effects")
+        else:
+            result = namespace[name](source, source)
+            assert result is source and len(source) == 2
+            assert all(value is source for value in source)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineSliceInvariant\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"slice execution: signed bounds, shallow aliases, self assignment and suspended callers; {len(AUDITS)} axiom audits passed")
