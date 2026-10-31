@@ -184,20 +184,6 @@ theorem step_empty_block_preserves (env : Env) (stack : List Frame) (globals : M
   · exact ⟨by trivial, inside.2⟩
   · rfl
 
-theorem step_return_statement_preserves (expression : Expr) (following : List Stmt)
-    (env : Env) (stack : List Frame) (globals : Mutable.Globals)
-    (layout : ExecutionLayout logical physical rename)
-    (inside : StateWithin ⟨.block (.return expression :: following) env, stack, logical⟩) :
-    Preserves logical physical rename physicalAnchors
-      (step module logicalAnchors ⟨.block (.return expression :: following) env, stack, logical⟩ globals)
-      (step module physicalAnchors
-        (relocateState rename physical ⟨.block (.return expression :: following) env, stack, logical⟩)
-        (relocateGlobals rename globals)) := by
-  apply Preserves.unchanged layout
-  · rfl
-  · exact ⟨inside.1.1, inside.2⟩
-  · simp only [step, relocateState, relocateWork, List.map_cons, relocateStmt, protectGenerator_next, relocateStep]
-
 theorem step_expression_statement_preserves (expression : Expr) (following : List Stmt)
     (env : Env) (stack : List Frame) (globals : Mutable.Globals)
     (layout : ExecutionLayout logical physical rename)

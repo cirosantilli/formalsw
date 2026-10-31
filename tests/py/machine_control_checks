@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""
+Check lazy Boolean selection against conditional expressions and explicit branches.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def fallback(items, value):
+    items.append(value)
+    return value
+
+
+def choose_or(test, items, value):
+    return test or fallback(items, value)
+
+
+def choose_and(test, items, value):
+    return test and fallback(items, value)
+
+
+def conditional_or(test, items, value):
+    return test if test else fallback(items, value)
+
+
+def conditional_and(test, items, value):
+    return fallback(items, value) if test else test
+
+
+def branch_or(test, items, value):
+    if test:
+        return test
+    return fallback(items, value)
+
+
+def branch_and(test, items, value):
+    if test:
+        return fallback(items, value)
+    return test
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineControlExamples
+set_option Elab.async false
+
+def chooseName (conjunction : Bool) := if conjunction then "choose_and" else "choose_or"
+def conditionalName (conjunction : Bool) := if conjunction then "conditional_and" else "conditional_or"
+def branchName (conjunction : Bool) := if conjunction then "branch_and" else "branch_or"
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) :=
+  heap.set address (.list (items ++ [value]))
+def answer (conjunction flag : Bool) (test value : Mutable.Value) := if flag = conjunction then value else test
+def finalHeap (conjunction flag : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) :=
+  if flag = conjunction then after heap address items value else heap
+
+theorem fallback_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "fallback" [.ref address, value] heap value (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem choose_returns (conjunction flag : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (test value : Mutable.Value) (found : heap[address]? = some (.list items))
+    (valueInside : value.edge.Within heap.length) (tested : Mutable.truth test heap = some (.ok flag, heap)) :
+    ReturnsValue Probe.module (chooseName conjunction) [test, .ref address, value] heap
+      (answer conjunction flag test value) (finalHeap conjunction flag heap address items value) := by
+  obtain ⟨lastFlag, lastTested⟩ := truth_total (after heap address items value) value
+    (by simpa [after] using valueInside)
+  cases conjunction <;> cases flag
+  all_goals apply BlockReturns.function rfl rfl
+  all_goals apply BlockReturns.return_value
+  all_goals first
+    | exact Evaluates.boolean_stop (Evaluates.lookup rfl) tested rfl
+    | exact Evaluates.boolean_next (Evaluates.lookup rfl) tested rfl
+        (Evaluates.boolean_last
+          (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+            (fallback_returns heap address items value found)) lastTested)
+
+theorem conditional_returns (conjunction flag : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (test value : Mutable.Value) (found : heap[address]? = some (.list items))
+    (tested : Mutable.truth test heap = some (.ok flag, heap)) :
+    ReturnsValue Probe.module (conditionalName conjunction) [test, .ref address, value] heap
+      (answer conjunction flag test value) (finalHeap conjunction flag heap address items value) := by
+  cases conjunction <;> cases flag
+  all_goals apply BlockReturns.function rfl rfl
+  all_goals apply BlockReturns.return_value
+  all_goals apply Evaluates.conditional (Evaluates.lookup rfl) tested
+  all_goals first
+    | exact Evaluates.lookup rfl
+    | exact Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+        (fallback_returns heap address items value found)
+
+theorem branch_returns (conjunction flag : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (test value : Mutable.Value) (found : heap[address]? = some (.list items))
+    (tested : Mutable.truth test heap = some (.ok flag, heap)) :
+    ReturnsValue Probe.module (branchName conjunction) [test, .ref address, value] heap
+      (answer conjunction flag test value) (finalHeap conjunction flag heap address items value) := by
+  cases conjunction <;> cases flag
+  all_goals apply BlockReturns.function rfl rfl
+  all_goals apply BlockReturns.branch (Evaluates.lookup rfl) tested
+  all_goals apply BlockReturns.return_value
+  all_goals first
+    | exact Evaluates.lookup rfl
+    | exact Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+        (fallback_returns heap address items value found)
+
+/-- Boolean operators, conditional expressions and explicit branches preserve the same lazy effects and aliases. -/
+theorem control_equiv (conjunction : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (test value : Mutable.Value) (found : heap[address]? = some (.list items))
+    (testInside : test.edge.Within heap.length) (valueInside : value.edge.Within heap.length) :
+    (IteratorCalls.call Probe.module (chooseName conjunction) [test, .ref address, value] heap).Equiv
+        (IteratorCalls.call Probe.module (conditionalName conjunction) [test, .ref address, value] heap) ∧
+      (IteratorCalls.call Probe.module (chooseName conjunction) [test, .ref address, value] heap).Equiv
+        (IteratorCalls.call Probe.module (branchName conjunction) [test, .ref address, value] heap) := by
+  obtain ⟨flag, tested⟩ := truth_total heap test testInside
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [test, .ref address, value] heap
+        (answer conjunction flag test value) (finalHeap conjunction flag heap address items value)) :
+      ((IteratorCalls.call Probe.module name [test, .ref address, value] heap).run choices).Finishes
+        ⟨.ok (answer conjunction flag test value), [], finalHeap conjunction flag heap address items value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  constructor
+  · intro leftChoices rightChoices
+    exact Mutable.Call.equiv_of_finishes
+      (finishes _ leftChoices (choose_returns conjunction flag heap address items test value found valueInside tested))
+      (finishes _ rightChoices (conditional_returns conjunction flag heap address items test value found tested)) (Or.inl rfl)
+  · intro leftChoices rightChoices
+    exact Mutable.Call.equiv_of_finishes
+      (finishes _ leftChoices (choose_returns conjunction flag heap address items test value found valueInside tested))
+      (finishes _ rightChoices (branch_returns conjunction flag heap address items test value found tested)) (Or.inl rfl)
+
+/-- Boolean entry consumes the append's actual output invariant under saved iterator consumers. -/
+theorem append_then_boolean (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (op : BoolOp) (expressions : List Expr) (env : HeapCalls.Env)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (envInside : EnvWithin logical.length env)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (after logical address items item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.expr (.boolOp op expressions) env, [], after logical address items item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.expr (.boolOp op expressions) env, [], after logical address items item⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have booleanInside : StateWithin ⟨.expr (.boolOp op expressions) env, [], after logical address items item⟩ := by
+    exact ⟨envInside.mono larger, by simp⟩
+  have raw := step_boolean_expression_preserves Probe.module _ other nextMap logical.length physical.length
+    op expressions env [] [] retained booleanInside
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.expr (.boolOp op expressions) env, [], after logical address items item⟩, used⟩ other nextMap
+    logical.length physical.length [] retained booleanInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨booleanInside.1, booleanInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
+end MachineControlExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "step_boolean_expression_preserves", "step_conditional_expression_preserves",
+    "step_boolean_preserves", "step_conditional_preserves", "step_branch_preserves", "step_if_statement_preserves",
+)] + ["MachineControlExamples." + name for name in (
+    "fallback_returns", "choose_returns", "conditional_returns", "branch_returns", "control_equiv", "append_then_boolean",
+)]
+with project_temporary_directory(prefix="machine-control-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for conjunction in (False, True):
+        suffix = "and" if conjunction else "or"
+        for prefix in ("choose", "conditional", "branch"):
+            for test in (None, False, True, 0, -10**100, "", "x", b"", b"x", [], [1]):
+                items = []
+                expected = items if bool(test) == conjunction else test
+                assert namespace[f"{prefix}_{suffix}"](test, items, items) is expected
+                assert len(items) == int(bool(test) == conjunction)
+                if items:
+                    assert items[0] is items
+            for populated in (False, True):
+                items = []
+                if populated:
+                    items.append(items)
+                assert namespace[f"{prefix}_{suffix}"](items, items, items) is items
+                assert len(items) == int(populated) + int(populated == conjunction)
+                assert all(value is items for value in items)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineControlInvariant\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"control entry: lazy Boolean selection, branch effects, shared results; {len(AUDITS)} axiom audits passed")

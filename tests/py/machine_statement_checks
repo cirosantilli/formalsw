@@ -139,7 +139,7 @@ end MachineStatementExamples
 '''
 AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
     "step_annotation", "step_annotation_preserves", "step_augmented_assignment", "step_augmented_assignment_preserves",
-    "step_empty_block_preserves", "step_return_statement_preserves", "step_expression_statement_preserves", "step_if_statement_preserves",
+    "step_empty_block_preserves", "step_return_preserves", "step_expression_statement_preserves", "step_if_statement_preserves",
 )] + ["FormalSW.PyAst.HeapCalls.BlockContinues.annotationAttribute"] + ["MachineStatementExamples." + name for name in (
     "touch_returns", "annotated_returns", "explicit_returns", "annotation_equiv", "append_then_annotation",
 )]
