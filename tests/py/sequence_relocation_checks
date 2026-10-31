@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""
+Prove source list mutations compose across different allocation layouts.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def replace(xs, i):
+    xs.append(xs)
+    xs[i] = xs
+    return xs[i]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace SequenceRelocationExamples
+set_option Elab.async false
+
+def appended (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) :=
+  heap.set address (.list (items ++ [Mutable.Value.ref address]))
+
+def replaced (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (position : Nat) :=
+  (appended heap address items).set address (.list ((items ++ [Mutable.Value.ref address]).set position (.ref address)))
+
+/-- Execute the parsed body, with each primitive acting on the preceding operation's heap. -/
+theorem source_returns (heap after : Mutable.Heap) (address : Nat)
+    (items : List Mutable.Value) (subscript answer : Mutable.Value)
+    (found : heap[address]? = some (.list items))
+    (written : Mutable.setItem (.ref address) subscript (.ref address)
+      (appended heap address items) = some (.ok (.scalar .none), after))
+    (read : Mutable.getItem (.ref address) subscript after = some (.ok answer, after)) :
+    ReturnsValue Probe.module "replace" [.ref address, subscript] heap answer after := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.setItem (by intros; simp) (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) written
+  exact BlockReturns.return_value
+    (Evaluates.subscript (by intros; simp) (Evaluates.lookup rfl) (Evaluates.lookup rfl) read)
+
+/-- Any successful index, including a negative integer or Boolean, updates and reads the same cell. -/
+theorem primitive_results (heap : Mutable.Heap) (address : Nat)
+    (items : List Mutable.Value) (subscript : Mutable.Value) (position : Nat)
+    (found : heap[address]? = some (.list items))
+    (indexed : Mutable.index (items ++ [Mutable.Value.ref address]) subscript heap = some (.ok position, heap))
+    (inBounds : position < (items ++ [Mutable.Value.ref address]).length) :
+    Mutable.setItem (.ref address) subscript (.ref address) (appended heap address items) =
+        some (.ok (.scalar .none), replaced heap address items position) ∧
+      Mutable.getItem (.ref address) subscript (replaced heap address items position) =
+        some (.ok (.ref address), replaced heap address items position) := by
+  have addressBound := (List.getElem?_eq_some_iff.mp found).1
+  have writeIndex := index_relocates (items ++ [Mutable.Value.ref address]) (items ++ [Mutable.Value.ref address])
+    rfl subscript id heap (appended heap address items)
+  have readIndex := index_relocates (items ++ [Mutable.Value.ref address])
+    ((items ++ [Mutable.Value.ref address]).set position (.ref address)) (by simp)
+    subscript id heap (replaced heap address items position)
+  simp only [relocateValue_id, indexed, Option.map_some] at writeIndex readIndex
+  simp [appended, replaced] at writeIndex readIndex
+  simp only [List.length_append, List.length_singleton] at inBounds
+  constructor
+  · simp [Mutable.setItem, appended, replaced, addressBound,
+      writeIndex, Mutable.eval_bind, Except.map]
+  · simp [Mutable.getItem, replaced, appended, List.getElem?_set, addressBound,
+      readIndex, Mutable.eval_bind, Except.map, inBounds]
+
+/-- The paired source calls retain the full execution invariant, even with cycles and private cells. -/
+theorem paired_sources (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat)
+    (items : List Mutable.Value) (subscript : Mutable.Value) (position : Nat)
+    (found : logical[address]? = some (.list items))
+    (indexed : Mutable.index (items ++ [Mutable.Value.ref address]) subscript logical = some (.ok position, logical))
+    (inBounds : position < (items ++ [Mutable.Value.ref address]).length) :
+    ∃ other,
+      ReturnsValue Probe.module "replace" [.ref address, subscript] logical
+        (.ref address) (replaced logical address items position) ∧
+      ReturnsValue Probe.module "replace" [.ref (rename address), relocateValue rename subscript]
+        physical (.ref (rename address)) other ∧
+      ExecutionLayout (replaced logical address items position) other rename := by
+  have addressBound := (List.getElem?_eq_some_iff.mp found).1
+  have appendedLayout := (layout.appendItem_list address items (.ref address) found addressBound).2.2
+  have appendedFound : (appended logical address items)[address]? =
+      some (.list (items ++ [Mutable.Value.ref address])) := by
+    simp [appended, addressBound]
+  obtain ⟨written, read⟩ := primitive_results logical address items subscript position found indexed inBounds
+  obtain ⟨other, otherWrite, afterLayout, _, _⟩ := appendedLayout.setItem_list address
+    (items ++ [Mutable.Value.ref address]) subscript (.ref address) appendedFound
+    (by simpa using addressBound) _ _ written
+  have replacedFound : (replaced logical address items position)[address]? =
+      some (.list ((items ++ [Mutable.Value.ref address]).set position (.ref address))) := by
+    simp [replaced, appended, addressBound]
+  have otherRead := (afterLayout.getItem_list address _ subscript replacedFound _ _ read).1
+  refine ⟨other, source_returns logical _ address items subscript _ found written read, ?_, afterLayout⟩
+  apply source_returns physical other (rename address) (items.map (relocateValue rename))
+    (relocateValue rename subscript) (.ref (rename address)) (layout.runtime.lookup address _ found)
+  · simpa [appended, Except.map, relocateValue] using otherWrite
+  · exact otherRead
+
+/-- An index failure follows the successful append and retains its mutation. -/
+theorem source_raises (heap : Mutable.Heap) (address : Nat)
+    (items : List Mutable.Value) (subscript : Mutable.Value) (exception : ExceptionObject)
+    (found : heap[address]? = some (.list items))
+    (failed : Mutable.setItem (.ref address) subscript (.ref address)
+      (appended heap address items) = some (.error exception, appended heap address items)) :
+    (HeapCalls.call Probe.module "replace" [.ref address, subscript] heap).Finishes
+      ⟨.error exception, [], appended heap address items, heap.length⟩ := by
+  let args : List Arg := [{name := "xs", annotation := none}, {name := "i", annotation := none}]
+  let env := HeapCalls.argumentEnv args [.ref address, subscript]
+  let rest : List Stmt := [.assign [.subscript (.name "xs") (.name "i")] (.name "xs"),
+    .return (.subscript (.name "xs") (.name "i"))]
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.block
+    (.expr (.call (.attribute (.name "xs") "append") [.name "xs"]) :: rest) env, [], heap⟩) rfl
+  have appendedTrace := BlockContinues.discard (globals := [])
+    (Evaluates.append (module := Probe.module) (env := env)
+      (Evaluates.lookup (name := "xs") (by rfl)) found
+      (Evaluates.lookup (name := "xs") (by rfl)) found)
+  apply (appendedTrace rest heap.length []).finishes
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  simp only [appended] at failed
+  exact .done (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run,
+    HeapCalls.primitive, HeapCalls.argumentsState, failed, HeapCalls.done, HeapCalls.protectGenerator,
+    Frame.inGenerator, Calls.generatorException, appended])
+
+/-- The error branch transports the completed append as well as the exact exception. -/
+theorem paired_failures (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat)
+    (items : List Mutable.Value) (subscript : Mutable.Value) (exception : ExceptionObject)
+    (found : logical[address]? = some (.list items))
+    (indexed : Mutable.index (items ++ [Mutable.Value.ref address]) subscript logical =
+      some (.error exception, logical)) :
+    let other := appended physical (rename address) (items.map (relocateValue rename))
+    (HeapCalls.call Probe.module "replace" [.ref address, subscript] logical).Finishes
+        ⟨.error exception, [], appended logical address items, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "replace" [.ref (rename address), relocateValue rename subscript]
+        physical).Finishes ⟨.error exception, [], other, physical.length⟩ ∧
+      ExecutionLayout (appended logical address items) other rename := by
+  dsimp only
+  have addressBound := (List.getElem?_eq_some_iff.mp found).1
+  have appendResult := layout.appendItem_list address items (.ref address) found addressBound
+  have appendedLayout := appendResult.2.2
+  have appendedFound : (appended logical address items)[address]? =
+      some (.list (items ++ [Mutable.Value.ref address])) := by simp [appended, addressBound]
+  have nextIndex := index_relocates (items ++ [Mutable.Value.ref address])
+    (items ++ [Mutable.Value.ref address]) rfl subscript id logical (appended logical address items)
+  simp only [relocateValue_id, indexed, Option.map_some] at nextIndex
+  have failed : Mutable.setItem (.ref address) subscript (.ref address)
+      (appended logical address items) = some (.error exception, appended logical address items) := by
+    simp [Mutable.setItem, appendedFound, nextIndex, Mutable.eval_bind]
+  obtain ⟨other, otherFailed, afterLayout, _, _⟩ := appendedLayout.setItem_list address
+    (items ++ [Mutable.Value.ref address]) subscript (.ref address) appendedFound
+    (by simpa using addressBound) _ _ failed
+  have mappedFound := layout.runtime.lookup address _ found
+  have mappedIndex := index_relocates (items ++ [Mutable.Value.ref address])
+    ((items ++ [Mutable.Value.ref address]).map (relocateValue rename)) (by simp)
+    subscript rename logical (appended physical (rename address) (items.map (relocateValue rename)))
+  simp only [indexed, Option.map_some] at mappedIndex
+  have physicalBound := layout.runtime.bound address addressBound
+  have sameHeap : other = appended physical (rename address) (items.map (relocateValue rename)) := by
+    simp [appended, relocateValue] at mappedIndex
+    simp [Mutable.setItem, physicalBound, mappedIndex, Mutable.eval_bind,
+      Except.map, relocateValue] at otherFailed
+    exact otherFailed.symm
+  subst other
+  refine ⟨source_raises logical address items subscript exception found failed, ?_, afterLayout⟩
+  apply source_raises physical (rename address) (items.map (relocateValue rename))
+    (relocateValue rename subscript) exception mappedFound
+  simpa [appended, Except.map, relocateValue] using otherFailed
+
+/-- Every modeled index value terminates on both layouts with matching results or exceptions. -/
+theorem paired_complete (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat)
+    (items : List Mutable.Value) (subscript : Mutable.Value)
+    (found : logical[address]? = some (.list items)) :
+    ∃ outcome after other,
+      (HeapCalls.call Probe.module "replace" [.ref address, subscript] logical).Finishes
+        ⟨outcome, [], after, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "replace" [.ref (rename address), relocateValue rename subscript]
+        physical).Finishes ⟨outcome.map (relocateValue rename), [], other, physical.length⟩ ∧
+      ExecutionLayout after other rename := by
+  obtain ⟨outcome, indexed, bounded⟩ := index_total (items ++ [Mutable.Value.ref address]) subscript logical
+  cases outcome with
+  | ok position =>
+    obtain ⟨other, left, right, afterLayout⟩ := paired_sources logical physical rename layout
+      address items subscript position found indexed (bounded position rfl)
+    exact ⟨.ok (.ref address), replaced logical address items position, other,
+      left.finishes, right.finishes, afterLayout⟩
+  | error exception =>
+    obtain ⟨left, right, afterLayout⟩ := paired_failures logical physical rename layout
+      address items subscript exception found indexed
+    exact ⟨.error exception, appended logical address items,
+      appended physical (rename address) (items.map (relocateValue rename)), left, right, afterLayout⟩
+
+#print axioms paired_complete
+#print axioms index_total
+#print axioms source_raises
+#print axioms paired_failures
+#print axioms primitive_results
+#print axioms source_returns
+#print axioms paired_sources
+#print axioms index_relocates
+#print axioms RuntimeLayout.getItem_list
+#print axioms RuntimeLayout.getItem_tuple
+#print axioms ExecutionLayout.getItem_list
+#print axioms ExecutionLayout.getItem_tuple
+#print axioms ExecutionLayout.setItem_list
+#print axioms ExecutionLayout.appendItem_list
+end SequenceRelocationExamples
+'''
+
+with project_temporary_directory(prefix="sequence-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    replace = namespace["replace"]
+    for index in (-3, -2, -1, 0, 1, 2, False, True):
+        items = [7, 8]
+        alias = items
+        assert replace(items, index) is alias
+        assert items[index] is alias and items[-1] is alias
+    for index, expected in ((-4, IndexError), (3, IndexError), (None, TypeError), ([], TypeError)):
+        items = [7, 8]
+        try:
+            replace(items, index)
+        except expected:
+            assert len(items) == 3 and items[-1] is items
+        else:
+            raise AssertionError((index, expected))
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.SequenceRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 14, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("sequence relocation: composed source mutations and reads; fourteen axiom audits passed")
