@@ -177,6 +177,8 @@ roots = [
   "lang.py.FormalSW.MachineStringMethods",
   "lang.py.FormalSW.BytesElementRelocation",
   "lang.py.FormalSW.MachineBufferConstruction",
+  "lang.py.FormalSW.DictionaryConstructionRelocation",
+  "lang.py.FormalSW.MachineDictionaryConstruction",
   "lang.py.FormalSW.MachineLoopInvariant",
   "lang.py.FormalSW.MachineLoopAcquisition",
   "lang.py.FormalSW.MachineExpressionInvariant",

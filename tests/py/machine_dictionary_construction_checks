@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""
+Check dictionary copies, partial insertion, argument effects and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def recorded(log, value, data):
+    log.append(value)
+    return data
+
+
+def nested(log, value, data):
+    return dict(recorded(log, value, data))
+
+
+def explicit(log, value, data):
+    log.append(value)
+    return dict(data)
+
+
+def build(data):
+    return dict(data)
+'''
+PROOF = r'''
+
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineDictionaryConstructionExamples
+set_option Elab.async false
+
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [value]))
+
+theorem calls_equiv (left right : String) (arguments : List Mutable.Value) (heap after : Mutable.Heap) (answer : Mutable.Value)
+    (leftReturns : ReturnsValue Probe.module left arguments heap answer after)
+    (rightReturns : ReturnsValue Probe.module right arguments heap answer after) :
+    (IteratorCalls.call Probe.module left arguments heap).Equiv (IteratorCalls.call Probe.module right arguments heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule) (returned : ReturnsValue Probe.module name arguments heap answer after) :
+      ((IteratorCalls.call Probe.module name arguments heap).run choices).Finishes ⟨.ok answer, [], after, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (finishes left leftChoices leftReturns) (finishes right rightChoices rightReturns) (Or.inl rfl)
+
+theorem recorded_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) (data : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "recorded" [.ref address, value, data] heap (data)
+      (inserted heap address items value) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem dict_nested_returns (heap : Mutable.Heap) (address source : Nat) (items : List Mutable.Value)
+    (value : Mutable.Value) (entries : List (Constant × Mutable.Value))
+    (found : heap[address]? = some (.list items)) (dataFound : heap[source]? = some (.dict entries)) :
+    ReturnsValue Probe.module "nested" [.ref address, value, .ref source] heap
+      (.ref (inserted heap address items value).length) (inserted heap address items value ++ [.dict entries]) := by
+  have different : address ≠ source := by
+    intro same
+    subst source
+    rw [found] at dataFound
+    cases dataFound
+  have retained : (inserted heap address items value)[source]? = some (.dict entries) := by
+    simpa only [inserted, List.getElem?_set_ne different] using dataFound
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))
+      (recorded_returns heap address items value (.ref source) found)) .nil)
+  exact primitive_dict_copy _ source entries retained
+
+theorem dict_explicit_returns (heap : Mutable.Heap) (address source : Nat) (items : List Mutable.Value)
+    (value : Mutable.Value) (entries : List (Constant × Mutable.Value))
+    (found : heap[address]? = some (.list items)) (dataFound : heap[source]? = some (.dict entries)) :
+    ReturnsValue Probe.module "explicit" [.ref address, value, .ref source] heap
+      (.ref (inserted heap address items value).length) (inserted heap address items value ++ [.dict entries]) := by
+  have different : address ≠ source := by
+    intro same
+    subst source
+    rw [found] at dataFound
+    cases dataFound
+  have retained : (inserted heap address items value)[source]? = some (.dict entries) := by
+    simpa only [inserted, List.getElem?_set_ne different] using dataFound
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+  exact primitive_dict_copy _ source entries retained
+
+theorem dict_equiv (heap : Mutable.Heap) (address source : Nat) (items : List Mutable.Value)
+    (value : Mutable.Value) (entries : List (Constant × Mutable.Value))
+    (found : heap[address]? = some (.list items)) (dataFound : heap[source]? = some (.dict entries)) :
+    (IteratorCalls.call Probe.module "nested" [.ref address, value, .ref source] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, value, .ref source] heap) :=
+  calls_equiv _ _ _ _ _ _ (dict_nested_returns heap address source items value entries found dataFound)
+    (dict_explicit_returns heap address source items value entries found dataFound)
+
+theorem keyDict_nested_returns (heap : Mutable.Heap) (address source : Nat) (items : List Mutable.Value)
+    (value : Mutable.Value) (entries : List (HashDict.Entry Mutable.Value))
+    (found : heap[address]? = some (.list items)) (dataFound : heap[source]? = some (.keyDict entries)) :
+    ReturnsValue Probe.module "nested" [.ref address, value, .ref source] heap
+      (.ref (inserted heap address items value).length) (inserted heap address items value ++ [.keyDict entries]) := by
+  have different : address ≠ source := by
+    intro same
+    subst source
+    rw [found] at dataFound
+    cases dataFound
+  have retained : (inserted heap address items value)[source]? = some (.keyDict entries) := by
+    simpa only [inserted, List.getElem?_set_ne different] using dataFound
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))
+      (recorded_returns heap address items value (.ref source) found)) .nil)
+  exact primitive_keydict_copy _ source entries retained
+
+theorem keyDict_explicit_returns (heap : Mutable.Heap) (address source : Nat) (items : List Mutable.Value)
+    (value : Mutable.Value) (entries : List (HashDict.Entry Mutable.Value))
+    (found : heap[address]? = some (.list items)) (dataFound : heap[source]? = some (.keyDict entries)) :
+    ReturnsValue Probe.module "explicit" [.ref address, value, .ref source] heap
+      (.ref (inserted heap address items value).length) (inserted heap address items value ++ [.keyDict entries]) := by
+  have different : address ≠ source := by
+    intro same
+    subst source
+    rw [found] at dataFound
+    cases dataFound
+  have retained : (inserted heap address items value)[source]? = some (.keyDict entries) := by
+    simpa only [inserted, List.getElem?_set_ne different] using dataFound
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+  exact primitive_keydict_copy _ source entries retained
+
+theorem keyDict_equiv (heap : Mutable.Heap) (address source : Nat) (items : List Mutable.Value)
+    (value : Mutable.Value) (entries : List (HashDict.Entry Mutable.Value))
+    (found : heap[address]? = some (.list items)) (dataFound : heap[source]? = some (.keyDict entries)) :
+    (IteratorCalls.call Probe.module "nested" [.ref address, value, .ref source] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, value, .ref source] heap) :=
+  calls_equiv _ _ _ _ _ _ (keyDict_nested_returns heap address source items value entries found dataFound)
+    (keyDict_explicit_returns heap address source items value entries found dataFound)
+
+theorem failure_retains_mutation_and_allocation (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (value : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "nested") [.ref address, value, .scalar .none], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], inserted heap address items value ++ [.dict []], heap.length⟩) := by
+  repeat first
+    | apply (Evaluates.arguments_reach (.cons
+        (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))
+          (recorded_returns heap address items value (.scalar .none) found)) .nil)
+        (.builtin .dict) [] heap.length []).finishes
+    | exact .done rfl
+    | refine .next rfl ?_
+
+theorem partial_insertion (heap : Mutable.Heap) (source row : Nat) (key : Constant) (value : Mutable.Value) (invalid : Int)
+    (found : heap[source]? = some (.list [.ref row, .scalar (.int invalid)]))
+    (rowFound : heap[row]? = some (.tuple [.scalar key, value])) :
+    primitive (.builtin .dict) [.ref source] heap =
+      some (.error ⟨"TypeError", []⟩, (heap ++ [Mutable.Object.dict []]).set heap.length (.dict [(key, value)])) := by
+  have sourceInside := (List.getElem?_eq_some_iff.mp found).1
+  have rowInside := (List.getElem?_eq_some_iff.mp rowFound).1
+  have sourceAfter : (heap ++ [.dict []])[source]? = some (.list [.ref row, .scalar (.int invalid)]) := by
+    rw [List.getElem?_append_left sourceInside]
+    exact found
+  have rowAfter : (heap ++ [.dict []])[row]? = some (.tuple [.scalar key, value]) := by
+    rw [List.getElem?_append_left rowInside]
+    exact rowFound
+  rw [primitive_dict_constructor, dictionaryConstruct_ref heap source _ found]
+  change DictionaryConstructor.fromIterable (.ref source) heap = _
+  apply DictionaryConstructor.fromIterable_result _ _ _ [.ref row, .scalar (.int invalid)] (.error ⟨"TypeError", []⟩)
+  · simp [DictionaryConstructor.iterable, sourceAfter, Mutable.sequence]
+  · simp [DictionaryConstructor.insertRows, DictionaryConstructor.insertRow, DictionaryConstructor.iterable,
+      rowAfter, Mutable.sequence, Mutable.setItem, ScalarDict.insert, Mutable.eval_bind, Mutable.error, Except.map]
+
+theorem partial_failure_source (heap : Mutable.Heap) (source row : Nat) (key : Constant) (value : Mutable.Value) (invalid : Int)
+    (found : heap[source]? = some (.list [.ref row, .scalar (.int invalid)]))
+    (rowFound : heap[row]? = some (.tuple [.scalar key, value])) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "build") [.ref source], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], (heap ++ [Mutable.Object.dict []]).set heap.length (.dict [(key, value)]), heap.length⟩) := by
+  repeat (refine .next rfl ?_)
+  apply Finishes.done
+  change protectGenerator [] (result heap.length heap (primitive (.builtin .dict) [.ref source]) []) = _
+  simp [result, run, partial_insertion heap source row key value invalid found rowFound]
+  rfl
+
+/-- Dictionary construction uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_dictionary (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation (.builtin .dict) values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation (.builtin .dict) values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation (.builtin .dict) values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_dictionaryConstruct_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineDictionaryConstructionExamples
+'''
+AUDITS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
+    "RuntimeLayout.dictionaryIterable",
+    "dictionaryIterable_heap",
+    "dictionaryIterable_bounded",
+    "ExecutionLayout.dictionaryInsertRow",
+    "ExecutionLayout.dictionaryInsertRows",
+    "dictionaryFromIterable_eq",
+    "ExecutionLayout.dictionaryFromIterable",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "result_appendObject_preserves",
+    "result_dictionaryFromIterable_preserves",
+    "dictionaryConstruct_ref",
+    "result_dictionaryConstruct_preserves",
+    "step_dictionaryConstruct_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation." + name for name in (
+    "step_dictionaryConstruct_preserves",
+)] + ["MachineDictionaryConstructionExamples." + name for name in (
+    "calls_equiv",
+    "recorded_returns",
+    "dict_nested_returns",
+    "dict_explicit_returns",
+    "dict_equiv",
+    "keyDict_nested_returns",
+    "keyDict_explicit_returns",
+    "keyDict_equiv",
+    "failure_retains_mutation_and_allocation",
+    "partial_insertion",
+    "partial_failure_source",
+    "append_then_dictionary",
+)]
+with project_temporary_directory(prefix="machine-dictionary-construction-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for form in ("nested", "explicit"):
+        run = namespace[form]
+        for key in (None, True, -10**100, "shared", (1, "tuple")):
+            log = []
+            data = {key: log}
+            result = run(log, data, data)
+            assert result is not data and result[key] is log and log[0] is data
+            assert next(iter(result)) is next(iter(data))
+            data["later"] = data
+            assert "later" not in result
+        log = []
+        result = run(log, log, [("a", log), ("b", log), ("a", 9)])
+        assert list(result) == ["a", "b"] and result["a"] == 9 and result["b"] is log
+        assert log[0] is log
+        for data, expected in ((None, TypeError), ([(1, 2), 3], TypeError), ([(1, 2), ()], ValueError), ([(1, 2), ([], 3)], TypeError)):
+            log = []
+            try:
+                run(log, log, data)
+            except expected:
+                assert len(log) == 1 and log[0] is log
+            else:
+                raise AssertionError((form, data))
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineDictionaryConstruction\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        "import lang.py.FormalSW.DictionaryConstructorCalls\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"dictionary construction: shallow aliases, allocation before failure, partial insertion and saved consumers; {len(AUDITS)} axiom audits passed")
