@@ -22,16 +22,25 @@ theorem protectGenerator_retains_cell (address : Nat) (object : Object) (stack :
       rcases completion with ⟨outcome, globals, heap, anchors⟩
       cases outcome <;> exact retained
 
-theorem result_retains_cell (address : Nat) (object : Object) (anchors : Nat) (heap : Heap)
-    (action : Eval Value) (stack : List Frame) (globals : Globals)
-    (saved : SavedCell address object heap) (preserved : Heapq.Preserves (SavedCell address object) action) :
-    RetainsCell address object (result anchors heap action stack globals) := by
+theorem run_retains_cell {α : Type} (address : Nat) (object : Object) (anchors : Nat) (heap : Heap)
+    (action : Eval α) (next : α → Heap → Step State Completion) (globals : Globals)
+    (saved : SavedCell address object heap) (preserved : Heapq.Preserves (SavedCell address object) action)
+    (continues : ∀ value after, SavedCell address object after → RetainsCell address object (next value after)) :
+    RetainsCell address object (run anchors heap action next globals) := by
   cases executed : action heap with
-  | none => simp only [result, run, executed, RetainsCell]
+  | none => simp only [run, executed, RetainsCell]
   | some pair =>
     rcases pair with ⟨outcome, after⟩
     have retained := preserved heap outcome after saved executed
-    cases outcome <;> simpa only [result, run, executed, done, RetainsCell] using retained
+    cases outcome with
+    | error error => simpa only [run, executed, done, RetainsCell] using retained
+    | ok value => simpa only [run, executed] using continues value after retained
+
+theorem result_retains_cell (address : Nat) (object : Object) (anchors : Nat) (heap : Heap)
+    (action : Eval Value) (stack : List Frame) (globals : Globals)
+    (saved : SavedCell address object heap) (preserved : Heapq.Preserves (SavedCell address object) action) :
+    RetainsCell address object (result anchors heap action stack globals) :=
+  run_retains_cell address object anchors heap action _ globals saved preserved (fun _ _ retained => retained)
 
 theorem step_append_cell (module : Module) (address receiver anchors : Nat) (object : Object)
     (heap : Heap) (value : Value) (stack : List Frame) (globals : Globals)

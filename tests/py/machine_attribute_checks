@@ -33,7 +33,7 @@ def missing_method(reader):
     return reader.absent(shadow(reader))
 '''
 PROOF = r'''
-open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation HeapCalls.Framing
 namespace MachineAttributeExamples
 set_option Elab.async false
 
@@ -300,9 +300,63 @@ theorem write_then_bind (logical physical : Mutable.Heap) (rename : Nat → Nat)
     ⟨bindingInside.1, bindingInside.2,
       fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
 
+/-- A suspended write may target the receiver: method capture itself still cannot change it. -/
+theorem binding_keeps_receiver (heap : Mutable.Heap) (receiver anchors : Nat)
+    (object : Mutable.Object) (name : String) (expressions : List Expr) (env : HeapCalls.Env)
+    (stack : List Frame) (globals : Mutable.Globals) (found : SavedCell receiver object heap) :
+    RetainsCell receiver object (HeapCalls.step Probe.module anchors
+      ⟨.value (.ref receiver), .methodReceiver name expressions env ::
+        .writeAttribute (.ref receiver) "read" [] env :: stack, heap⟩ globals) :=
+  step_value_cell Probe.module receiver anchors object heap (.ref receiver) _ globals
+    (by simp [FrameSeparate]) found
+
+/-- Preserve a separate object through a write and subsequent method capture, even if capture fails. -/
+theorem shadow_then_bind_private (heap : Mutable.Heap) (receiver privateAddress anchors : Nat)
+    (fields : List (String × Mutable.Value)) (object : Mutable.Object) (name : String)
+    (expressions : List Expr) (env : HeapCalls.Env) (stack : List Frame) (globals : Mutable.Globals)
+    (saved : SavedCell privateAddress object heap) (separate : receiver ≠ privateAddress) :
+    SavedCell privateAddress object (afterShadow heap receiver fields) ∧
+    RetainsCell privateAddress object (HeapCalls.step Probe.module anchors
+      ⟨.value (.ref receiver), .methodReceiver name expressions env :: stack,
+        afterShadow heap receiver fields⟩ globals) := by
+  have retained : SavedCell privateAddress object (afterShadow heap receiver fields) :=
+    SavedCell.update privateAddress receiver object separate heap _ saved
+  exact ⟨retained, step_value_cell Probe.module privateAddress anchors object _ (.ref receiver) _ globals
+    (by simp [FrameSeparate]) retained⟩
+
+/-- Both nested reads in enumerate preserve the source itself, for every signed start. -/
+theorem enumerate_keeps_source (heap : Mutable.Heap) (receiver anchors : Nat) (object : Mutable.Object)
+    (start : Int) (env : HeapCalls.Env) (stack : List Frame) (globals : Mutable.Globals)
+    (saved : SavedCell receiver object heap) :
+    RetainsCell receiver object (HeapCalls.step Probe.module anchors
+      ⟨.value (.scalar (.int start)), .enumerateStart "index" "item" (.ref receiver) [] [] [] env :: stack,
+        heap⟩ globals) :=
+  step_value_cell Probe.module receiver anchors object heap (.scalar (.int start)) _ globals
+    (by simp [FrameSeparate]) saved
+
 end MachineAttributeExamples
 '''
 AUDITS = [
+    "HeapCalls.Framing.run_retains_cell",
+    "Heapq.preserves_instanceClass",
+    "Heapq.preserves_getAttribute",
+    "Heapq.preserves_bindMethod",
+    "Heapq.preserves_starItems",
+    "Heapq.preserves_sortedItems",
+    "Heapq.preserves_sortedStart",
+    "Heapq.preserves_extremumItem",
+    "Heapq.preserves_extremumChoose",
+    "Heapq.preserves_sumInitial",
+    "Heapq.preserves_enumerateStart",
+    "Heapq.preserves_addReceiver",
+    "Heapq.preserves_appendReceiver",
+    "Heapq.preserves_reversibleSequence",
+    "HeapCalls.Framing.argumentsState_heap",
+    "HeapCalls.Framing.expandedArgumentsState_heap",
+    "HeapCalls.Framing.step_value_cell",
+    "MachineAttributeExamples.binding_keeps_receiver",
+    "MachineAttributeExamples.shadow_then_bind_private",
+    "MachineAttributeExamples.enumerate_keeps_source",
     "BoundMethodWithin.method", "bindMethod_scalar_within", "bindMethod_builtin_within", "bindMethod_ordinary_within",
     "bindMethod_within", "step_methodReceiver_preserves", "step_attribute_expression_preserves", "step_augmentAttribute_preserves",
     "step_appendReceiver_eq", "step_appendReceiver_preserves", "step_addReceiver_preserves", "step_notCallable_preserves",
@@ -362,7 +416,7 @@ with project_temporary_directory(prefix="machine-attribute-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineMethodInvariant\nimport lang.py.FormalSW.ClassCalls\nimport lang.py.FormalSW.IteratorRules\n"
+    proof.write_text("import lang.py.FormalSW.ContinuationFrame\nimport lang.py.FormalSW.MachineMethodInvariant\nimport lang.py.FormalSW.ClassCalls\nimport lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
