@@ -17,6 +17,10 @@ SOURCE = '''
 def build(first, second):
     result = {first, second}
     return [result, result, first, second]
+
+def build_all(source):
+    result = set(source)
+    return [result, result, source]
 '''
 PROOF = r'''
 open FormalSW.PyAst HeapCalls Mutable.Relocation
@@ -161,6 +165,90 @@ theorem paired_tuple_then_list (logical physical : Mutable.Heap) (rename : Nat �
     (tuple_then_list logical tupleAddress listAddress contents items tupleFound listFound)
   exact ⟨other, left, right, related⟩
 
+theorem source_all_success (heap middle : Mutable.Heap) (source result : Mutable.Value)
+    (built : Mutable.setFrom source heap = some (.ok result, middle)) :
+    ReturnsValue Probe.module "build_all" [source] heap (.ref middle.length)
+      (middle ++ [.list [result, result, source]]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.builtin (name := .set)
+    (.cons (Evaluates.lookup rfl) .nil) built)
+  exact BlockReturns.return_value (Evaluates.list
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))))
+
+/-- Builtin-source construction composes with later allocation for every supported input shape. -/
+theorem paired_all_success (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (source result : Mutable.Value)
+    (inside : source.edge.Within logical.length) (middle : Mutable.Heap)
+    (built : Mutable.setFrom source logical = some (.ok result, middle)) :
+    ∃ other nextMap,
+      ReturnsValue Probe.module "build_all" [source] logical (.ref middle.length)
+        (middle ++ [.list [result, result, source]]) ∧
+      ReturnsValue Probe.module "build_all" [relocateValue rename source] physical
+        (relocateValue nextMap (.ref middle.length)) other ∧
+      ExecutionLayout (middle ++ [.list [result, result, source]]) other nextMap ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  obtain ⟨otherMiddle, middleMap, otherBuilt, middleLayout, oldMap, grows, returnedInside⟩ :=
+    layout.setFrom source inside _ _ built
+  let nextMap := extendMap middleMap middle.length otherMiddle.length
+  have sourceNow : source.edge.Within middle.length := by
+    cases source with
+    | scalar value => trivial
+    | ref address => exact Nat.lt_of_lt_of_le inside grows
+  have resultNow := returnedInside result rfl
+  have stored : ∀ value ∈ [result, result, source], value.edge.Within middle.length := by
+    simpa using And.intro resultNow sourceNow
+  have sourceSame : relocateValue middleMap source = relocateValue rename source :=
+    relocateValue_congr _ _ logical.length source oldMap inside
+  have retained := (middleLayout.allocate_list [result, result, source] stored).2.2
+  let other := otherMiddle ++ [.list ([result, result, source].map (relocateValue middleMap))]
+  refine ⟨other, nextMap, source_all_success logical middle source result built, ?_, retained, ?_⟩
+  · simp only [relocateValue, nextMap, extendMap_new]
+    have finished := source_all_success physical otherMiddle (relocateValue rename source)
+      (relocateValue middleMap result) otherBuilt
+    simpa only [other, List.map_cons, List.map_nil, sourceSame] using finished
+  · intro index bound
+    have later := Nat.lt_of_lt_of_le bound grows
+    simpa only [nextMap, extendMap_old _ _ _ _ later] using oldMap index bound
+
+theorem source_all_failed (heap after : Mutable.Heap) (source : Mutable.Value)
+    (exception : ExceptionObject)
+    (failed : Mutable.setFrom source heap = some (.error exception, after)) :
+    (HeapCalls.call Probe.module "build_all" [source] heap).Finishes
+      ⟨.error exception, [], after, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.argumentsState, HeapCalls.primitive,
+    HeapCalls.result, HeapCalls.run, failed, HeapCalls.done, HeapCalls.protectGenerator,
+    Frame.inGenerator, Calls.generatorException])
+
+theorem paired_all_failures (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (source : Mutable.Value)
+    (inside : source.edge.Within logical.length) (exception : ExceptionObject) (after : Mutable.Heap)
+    (failed : Mutable.setFrom source logical = some (.error exception, after)) :
+    ∃ other nextMap,
+      (HeapCalls.call Probe.module "build_all" [source] logical).Finishes
+        ⟨.error exception, [], after, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "build_all" [relocateValue rename source] physical).Finishes
+        ⟨.error exception, [], other, physical.length⟩ ∧ ExecutionLayout after other nextMap ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  obtain ⟨other, nextMap, otherFailed, retained, oldMap, _, _⟩ := layout.setFrom source inside _ _ failed
+  exact ⟨other, nextMap, source_all_failed logical after source exception failed,
+    source_all_failed physical other (relocateValue rename source) exception otherFailed, retained, oldMap⟩
+
+/-- Every scalar list reaches a shared fresh result, without a length or value cutoff. -/
+theorem paired_all_scalars (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Constant)
+    (found : logical[address]? = some (.list (items.map Mutable.Value.scalar))) :
+    let middle := logical ++ [.set (items.foldl ScalarSet.insert [])]
+    let after := middle ++ [.list [.ref logical.length, .ref logical.length, .ref address]]
+    ∃ other nextMap,
+      ReturnsValue Probe.module "build_all" [.ref address] logical (.ref middle.length) after ∧
+      ReturnsValue Probe.module "build_all" [.ref (rename address)] physical
+        (relocateValue nextMap (.ref middle.length)) other ∧ ExecutionLayout after other nextMap ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  exact paired_all_success logical physical rename layout (.ref address) (.ref logical.length)
+    (List.getElem?_eq_some_iff.mp found).1 _ (Mutable.setFrom_list logical address items found)
+
 #print axioms source_success
 #print axioms paired_success
 #print axioms source_failed
@@ -177,6 +265,17 @@ theorem paired_tuple_then_list (logical physical : Mutable.Heap) (rename : Nat �
 #print axioms allocateSetValues_eq
 #print axioms ExecutionLayout.allocateSetValues
 #print axioms ExecutionLayout.allocateSetValues_unsupported
+#print axioms source_all_success
+#print axioms paired_all_success
+#print axioms source_all_failed
+#print axioms paired_all_failures
+#print axioms paired_all_scalars
+#print axioms setFrom_eq
+#print axioms RuntimeLayout.setSourceItems
+#print axioms setSourceItems_keeps_heap
+#print axioms setSourceItems_bounded
+#print axioms ExecutionLayout.setFrom
+#print axioms ExecutionLayout.setFrom_unsupported
 end ConstructionRelocationExamples
 '''
 
@@ -198,6 +297,16 @@ with project_temporary_directory(prefix="construction-relocation-") as temporary
     assert "later" in result[1]
     numeric = build(True, 1)
     assert next(iter(numeric[0])) is True
+    build_all = namespace["build_all"]
+    for source in ([], [True, 1, first, second], (first, second), {first, 3},
+                   {first: [], 3: None}, b"aba", bytearray(b"aba"), "aλa"):
+        copied = build_all(source)
+        assert copied[0] is copied[1] and copied[2] is source
+        assert copied[0] is not source and copied[0] == set(source)
+        copied[0].add("later")
+        assert "later" in copied[1]
+    assert next(iter(build_all([True, 1])[0])) is True
+    assert next(iter(build_all([first, second])[0])) is first
     for unhashable in ([], ([],)):
         try:
             build(first, unhashable)
@@ -208,7 +317,7 @@ with project_temporary_directory(prefix="construction-relocation-") as temporary
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.ConstructionRelocation\n"
+    proof.write_text("import lang.py.FormalSW.SetFromRelocation\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
     checked = subprocess.run(
         ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
@@ -218,9 +327,9 @@ with project_temporary_directory(prefix="construction-relocation-") as temporary
     assert checked.returncode == 0, checked.stdout + checked.stderr
     audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
     independent = checked.stdout.count("does not depend on any axioms")
-    assert len(audits) + independent == 16, checked.stdout
+    assert len(audits) + independent == 27, checked.stdout
     for audit in audits:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print("construction relocation: shared source results and partial failures; sixteen axiom audits passed")
+print("construction relocation: shared source results and partial failures; twenty-seven axiom audits passed")

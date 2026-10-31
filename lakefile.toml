@@ -101,6 +101,7 @@ roots = [
   "lang.py.FormalSW.DictionaryRelocation",
   "lang.py.FormalSW.SetRelocation",
   "lang.py.FormalSW.ConstructionRelocation",
+  "lang.py.FormalSW.SetFromRelocation",
   "lang.py.FormalSW.HeapRelocation",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
