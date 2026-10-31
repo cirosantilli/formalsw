@@ -30,6 +30,18 @@ SOURCE = "\n".join(
     "    return [before, right, left]\n"
     for name, symbol, _ in OPERATORS
 )
+SOURCE += '''
+def repeat_direct(items, count, value):
+    items *= count
+    items.append(value)
+    return items
+
+def repeat_alias(items, count, value):
+    before = items
+    items *= count
+    before.append(value)
+    return before
+'''
 PROOF = r'''
 open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
 namespace BinaryDispatchExamples
@@ -153,6 +165,104 @@ theorem tuple_false (heap : Mutable.Heap) (address : Nat) (items : List Mutable.
   rw [binary_mult_tuple_eval heap address items 0 found]
   simp [nonempty]
 
+def repeated (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (count : Int) :=
+  heap.set address (.list (List.replicate count.toNat items).flatten)
+def appendedRepeat (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (count : Int) (value : Mutable.Value) :=
+  (repeated heap address items count).set address (.list ((List.replicate count.toNat items).flatten ++ [value]))
+
+theorem repeat_direct_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (count : Int) (value : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "repeat_direct" [.ref address, .scalar (.int count), value] heap (.ref address)
+      (appendedRepeat heap address items count value) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have after : (repeated heap address items count)[address]? = some (.list (List.replicate count.toNat items).flatten) := by
+    simp [repeated, valid]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.augAssign rfl (Evaluates.lookup rfl) (inplace_mult_list_eval heap address items count found)
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) after (Evaluates.lookup rfl) after)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem repeat_alias_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (count : Int) (value : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "repeat_alias" [.ref address, .scalar (.int count), value] heap (.ref address)
+      (appendedRepeat heap address items count value) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have after : (repeated heap address items count)[address]? = some (.list (List.replicate count.toNat items).flatten) := by
+    simp [repeated, valid]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.lookup rfl)
+  apply BlockReturns.augAssign rfl (Evaluates.lookup rfl) (inplace_mult_list_eval heap address items count found)
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) after (Evaluates.lookup rfl) after)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+/-- Repetition preserves the alias used by the subsequent append, for every signed count. -/
+theorem repeat_alias_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (count : Int) (value : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "repeat_direct" [.ref address, .scalar (.int count), value] heap).Equiv
+      (IteratorCalls.call Probe.module "repeat_alias" [.ref address, .scalar (.int count), value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, .scalar (.int count), value] heap (.ref address)
+        (appendedRepeat heap address items count value)) :
+      ((IteratorCalls.call Probe.module name [.ref address, .scalar (.int count), value] heap).run choices).Finishes
+        ⟨.ok (.ref address), [], appendedRepeat heap address items count value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "repeat_direct" leftChoices (repeat_direct_returns heap address items count value found))
+    (finishes "repeat_alias" rightChoices (repeat_alias_returns heap address items count value found)) (Or.inl rfl)
+
+/-- The next indexed read uses the binary step's actual output layout, even after allocation. -/
+theorem binary_then_read (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (op : BinOp) (left right answer index : Mutable.Value)
+    (augmented : Bool) (after : Mutable.Heap) (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length)
+    (indexInside : index.edge.Within logical.length)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending)
+    (executed : operation op left right augmented logical = some (.ok answer, after)) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧ ExecutionLayout after other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.value right, [.binaryRight op left augmented], logical⟩) [] =
+        .next (relocateState nextMap other ⟨.value answer, [], after⟩) ∧
+      IteratorCalls.Relocation.Preserves after other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.operation .subscript [answer, index], [], after⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.operation .subscript [answer, index], [], after⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have inside : StateWithin ⟨.value right, [.binaryRight op left augmented], logical⟩ := by
+    exact ⟨rightInside, by simpa [FrameWithin] using leftInside⟩
+  have preserved := step_binary_preserves Probe.module logical physical rename logical.length physical.length
+    op left right augmented [] [] layout inside globalsInside
+  have actual : HeapCalls.step Probe.module logical.length ⟨.value right, [.binaryRight op left augmented], logical⟩ [] =
+      .next ⟨.value answer, [], after⟩ := by
+    change (if augmented then HeapCalls.inplace op left right else Mutable.binary op left right) logical =
+      some (.ok answer, after) at executed
+    simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, executed, HeapCalls.protectGenerator]
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, nextInside, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have readInside : StateWithin ⟨.operation .subscript [answer, index], [], after⟩ := by
+    refine ⟨⟨by simp [OperationWithin], ?_⟩, by simp⟩
+    intro value member
+    rcases List.mem_cons.mp member with rfl | member
+    · exact nextInside.1
+    · have same : value = index := by simpa using member
+      subst value
+      exact valueWithin_mono logical.length after.length index larger indexInside
+  have raw := step_subscript_preserves Probe.module after other nextMap logical.length physical.length
+    answer index [] [] retained readInside nextGlobals
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.operation .subscript [answer, index], [], after⟩, used⟩ other nextMap
+    logical.length physical.length [] retained readInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨readInside.1, readInside.2, fun pending member =>
+      IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
 end BinaryDispatchExamples
 '''
 AUDITS = [
@@ -165,6 +275,49 @@ AUDITS = [
     "ExecutionLayout.binary_ref_scalar", "ExecutionLayout.binary_scalar_ref", "ExecutionLayout.binary",
     "ExecutionLayout.inplace_binary", "inplace_list_fallback", "inplace_buffer_fallback", "ExecutionLayout.inplace",
     "ExecutionLayout.binary_operation", "step_binary_operation_relocates",
+    "HeapGrows.pure",
+    "HeapGrows.throw",
+    "HeapGrows.error",
+    "HeapGrows.unsupported",
+    "HeapGrows.get",
+    "HeapGrows.modify",
+    "HeapGrows.bind",
+    "HeapGrows.allocate",
+    "HeapGrows.allocateBuffer",
+    "HeapGrows.allocateSet",
+    "HeapGrows.allocateTuple",
+    "HeapGrows.array",
+    "HeapGrows.invalidBinary",
+    "HeapGrows.setUnion",
+    "HeapGrows.setDifference",
+    "HeapGrows.binary_scalar_ref",
+    "HeapGrows.binary_ref_scalar",
+    "HeapGrows.binary_refs",
+    "HeapGrows.binary",
+    "HeapGrows.sequence",
+    "HeapGrows.integer",
+    "HeapGrows.bufferOperand",
+    "HeapGrows.storeBufferResult",
+    "HeapGrows.inplaceBinary",
+    "HeapGrows.inplace",
+    "HeapGrows.binary_operation",
+    "allocateTuple_supported",
+    "RuntimeLayout.binary_ref_scalar_unsupported",
+    "RuntimeLayout.binary_scalar_ref_unsupported",
+    "RuntimeLayout.binary_refs_unsupported",
+    "RuntimeLayout.binary_unsupported",
+    "inplace_mult_list_supported",
+    "inplace_mult_buffer_supported",
+    "RuntimeLayout.inplace_add_buffer_unsupported",
+    "RuntimeLayout.inplaceBinary_unsupported",
+    "RuntimeLayout.inplace_unsupported",
+    "RuntimeLayout.binary_operation_unsupported",
+    "result_binary_preserves",
+    "step_binary_preserves",
+    "BinaryDispatchExamples.repeat_direct_returns",
+    "BinaryDispatchExamples.repeat_alias_returns",
+    "BinaryDispatchExamples.repeat_alias_equiv",
+    "BinaryDispatchExamples.binary_then_read",
 ]
 
 with project_temporary_directory(prefix="binary-dispatch-") as temporary:
@@ -215,10 +368,19 @@ with project_temporary_directory(prefix="binary-dispatch-") as temporary:
         raise AssertionError("mixed sequence concatenation accepted")
     left = [1]
     assert namespace["aug_add"](left, (2,))[2] is left and left == [1, 2]
+    for count in (-3, 0, 1, 4):
+        for name in ("repeat_direct", "repeat_alias"):
+            items = []
+            items.append(items)
+            returned = namespace[name](items, count, items)
+            assert returned is items
+            assert len(items) == max(0, count) + 1 and all(item is items for item in items)
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.BinaryDispatchRelocation\n"
+    proof.write_text("import lang.py.FormalSW.MachineBinaryInvariant\n"
+                     "import lang.py.FormalSW.MachineItemInvariant\n"
+                     "import lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
@@ -234,4 +396,4 @@ with project_temporary_directory(prefix="binary-dispatch-") as temporary:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print(f"binary dispatch: 22 parsed operator forms, paired results and errors; {len(AUDITS)} axiom audits passed")
+print(f"binary dispatch: 22 operator forms, full invariants, saved consumers, repetition alias equivalence; {len(AUDITS)} axiom audits passed")
