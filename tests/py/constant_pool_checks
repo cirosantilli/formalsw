@@ -267,6 +267,27 @@ def bases_loop(n: int) -> int:
         total += value
     return total
 
+def append_rotation(values: list[int]) -> list[int]:
+    out = list(values)
+    if 6 in out or 9 in out:
+        for label in (6, 9):
+            if label not in out:
+                out.append(label)
+    return out
+
+def input_loop(n: int) -> int:
+    values = [n, n]
+    first = append_rotation(values)
+    second = append_rotation(first)
+    return len(first) * 100 + len(second) * 10 + len(values)
+
+def private_comprehension(values: list[int]) -> int:
+    out = [label + len(values) for label in (6, 9)]
+    return out[0] + out[1]
+
+def input_comprehension(n: int) -> int:
+    return private_comprehension([n, n])
+
 def mixed_pair(n: int) -> tuple[int, int]:
     return 3, 2
 
@@ -289,7 +310,7 @@ if __name__ == '__main__':
     exec(compile(context_source, str(context_path), 'exec'), context_world)
     private_entries = ('private_unpack', 'private_index', 'literal_membership', 'literal_nonmembership',
                        'unpacked_display', 'starred_display', 'zipped_display', 'reversed_display', 'permuted_display')
-    pooled_entries = ('bases_loop', 'mixed_unpack', 'mixed_observed')
+    pooled_entries = ('bases_loop', 'mixed_unpack', 'mixed_observed', 'input_loop', 'input_comprehension')
     context_checker = SupportChecker(contexts)
     for name in (*private_entries, *pooled_entries):
         assert not context_checker.check(name), (name, context_checker.check(name))
@@ -300,10 +321,43 @@ if __name__ == '__main__':
             assert context_checker.requirement(name,
                 f'theorem invalid : (HeapCalls.scalarFunction Probe.module "{name}" []).Returns'), name
         runtime = 'HeapMemoCalls' if pooled else 'HeapCalls'
-        for n in (-3, 0, 1, 7):
+        for n in (-3, 0, 1, 6, 7, 9):
             result = context_world[name](n)
             lines.append(f'example : ({runtime}.scalarFunction contextSource "{name}" [.int ({n})]).observe 5000 = .done (.ok (.int ({result}))) := by native_decide')
             checks += 1
+    for name in ('append_rotation', 'private_comprehension'):
+        assert not context_checker.check(name), (name, context_checker.check(name))
+        function = next(node for node in contexts.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        assert uses_heap_memoized(contexts, function), name
+        assert not call_support.needs_pool_origins(contexts, function), name
+    # Iteration can expose nested tuple constants. Their identity may match an
+    # incoming reference, so private outer wrappers do not remove this barrier.
+    exposed_sources = [
+        """def exposed(values: list[tuple[int, int]]) -> int:
+    for value in ((3, 2), (4, 5)):
+        if value is values[0]:
+            return 1
+    return 0
+""",
+        """def exposed(values: list[tuple[int, int]]) -> int:
+    out = [int(value is values[0]) for value in ((3, 2), (4, 5))]
+    return out[0] + out[1]
+""",
+        """def shared(n: int) -> tuple[int, int]:
+    return 6, 9
+
+def exposed(values: list[tuple[int, int]]) -> int:
+    for label in (6, 9):
+        if shared(label) is values[0]:
+            return 1
+    return 0
+""",
+    ]
+    for text in exposed_sources:
+        candidate = ast.parse(text)
+        identify_constant_pools(candidate, context_path, text)
+        issues = SupportChecker(candidate).check('exposed')
+        assert any('origin metadata' in issue.reason for issue in issues), issues
     raw_contexts = ast.parse(context_source)
     assert not SupportChecker(raw_contexts).check('private_unpack')
     assert not SupportChecker(raw_contexts).check('private_index')

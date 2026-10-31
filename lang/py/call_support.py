@@ -627,17 +627,24 @@ def heap_pool_functions(module):
             if any(node.elts for node in observable_pool_tuples(module, function))}
 
 
-def uses_pooled_tuples(module, function):
-    """Find source constants that require this invocation's private tuple pool."""
+def needs_pool_origins(module, function):
+    """
+    Require incoming origins only when a reachable pooled tuple can escape.
+
+    A literal used directly as a loop iterable exposes its elements, not the
+    outer tuple. Nested tuple constants remain observable and need origins.
+    The runtime still pools the private wrapper exactly as compiled.
+    """
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
-    pools = heap_pool_functions(module)
     pending, seen = [function], set()
     while pending:
         current = pending.pop()
         if current.name in seen:
             continue
         seen.add(current.name)
-        if current.name in pools:
+        private_iterables = {node.iter for statement in current.body for node in ast.walk(statement)
+                             if isinstance(node, (ast.For, ast.comprehension)) and isinstance(node.iter, ast.Tuple)}
+        if any(node.elts for node in observable_pool_tuples(module, current) - private_iterables):
             return True
         for node in (part for statement in current.body for part in ast.walk(statement)):
             pending.extend(functions[target] for target in call_targets(node) if target in functions)
@@ -710,8 +717,8 @@ def check_calls(module, function, reject, *, heap=False):
     memoized_execution = uses_memoized(module, function)
     heap_memoized_execution = uses_heap_memoized(module, function)
     pool_functions = heap_pool_functions(module)
-    pool_execution = uses_pooled_tuples(module, function)
-    if pool_execution:
+    pool_origins = needs_pool_origins(module, function)
+    if pool_origins:
         for arg in function.args.args:
             kind = annotation_kind(arg.annotation)
             if (kind and (kind.startswith(('list[', 'tuple[', 'set[', 'dict[')) or kind in ('bytearray', 'record'))
@@ -800,7 +807,7 @@ def check_calls(module, function, reject, *, heap=False):
                 reject(function, 'global inputs require heap call execution')
             if global_inputs and function.name in cached_dependencies:
                 reject(function, 'heap-memoized functions and their callees must be independent of global inputs')
-            if pool_execution and any(item.kind.startswith(('list[', 'tuple[', 'set[', 'dict['))
+            if pool_origins and any(item.kind.startswith(('list[', 'tuple[', 'set[', 'dict['))
                                       or item.kind in ('bytearray', 'record') for item in global_inputs):
                 reject(function, 'compiler tuple pools do not support incoming reference globals without origin metadata')
             globals_.update(item.name for item in global_inputs)
