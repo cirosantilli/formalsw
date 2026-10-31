@@ -181,6 +181,17 @@ theorem paired_behavior (logical physical : Mutable.Heap) (rename : Nat → Nat)
   | error exception => rfl
   | ok token => cases token; exact equivalent
 
+theorem paired_full_behavior (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (value : Mutable.Value) (n : Int)
+    (equivalent : (completion logical value ()).Equivalent (completion physical (relocateValue rename value) ())) :
+    (HeapCalls.call Probe.module "countdown" [.scalar (.int n), value] logical).BehaviorEquiv
+      (HeapCalls.call Probe.module "countdown" [.scalar (.int n), relocateValue rename value] physical) := by
+  apply Mutable.Call.BehaviorEquiv.of_bisimulation (paired_executions logical physical rename value n)
+  rintro a b ⟨outcome, rfl, rfl⟩
+  cases outcome with
+  | error exception => rfl
+  | ok token => cases token; exact equivalent
+
 theorem direct_returns (heap : Mutable.Heap) (value : Mutable.Value) (n : Int) :
     (HeapCalls.call Probe.module "direct" [.scalar (.int n), value] heap).Finishes
       ⟨.ok value, [], heap, heap.length⟩ := by
@@ -263,7 +274,7 @@ end ExecutionSimulationExamples
 '''
 AUDITS = ["ExecutionSimulationExamples." + name for name in (
     "step_encode", "source_bisimulation", "iteration", "trace_finishes", "trace_diverges",
-    "source_returns", "source_diverges", "paired_executions", "paired_supported", "paired_behavior",
+    "source_returns", "source_diverges", "paired_executions", "paired_supported", "paired_behavior", "paired_full_behavior",
     "direct_returns", "remove_loop_equiv", "negative_not_equiv",
     "reject_step_encode", "reject_bisimulation", "source_throws", "reference_payload_unsupported", "reference_payload_not_divergent",
 )] + ["FormalSW.PyAst.Execution.Bisimulation." + name for name in (
@@ -295,7 +306,7 @@ with project_temporary_directory(prefix="execution-simulation-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MutableSimulation\nimport lang.py.FormalSW.MachineLoops\n"
+    proof.write_text("import lang.py.FormalSW.PossibleChoices\nimport lang.py.FormalSW.MachineLoops\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

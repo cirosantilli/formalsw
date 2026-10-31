@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""
+Check schedule matching and distinguish unsupported runs, divergence and interpreter errors.
+"""
+from pathlib import Path
+import re
+import subprocess
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+PROOF = r'''
+import lang.py.FormalSW.PossibleChoices
+
+open FormalSW.PyAst Mutable
+namespace PossibleChoiceExamples
+set_option Elab.async false
+
+def answer : Completion := ⟨.ok (.scalar (.int 7)), [], [], 0⟩
+def failure : Completion := ⟨.error ⟨"ValueError", []⟩, [], [], 0⟩
+def returning : Call := ⟨Execution.pure answer⟩
+def raising : Call := ⟨Execution.pure failure⟩
+def looping : Call := ⟨⟨Unit, (), fun _ => .next ()⟩⟩
+def missing : Call := ⟨Execution.unsupported⟩
+def outer (name : String) : Call := ⟨Execution.raise ⟨name, []⟩⟩
+
+theorem loops : looping.Diverges :=
+  ⟨fun _ => True, trivial, fun _ _ => ⟨(), rfl, trivial⟩⟩
+
+theorem missing_unsupported : ¬ missing.execution.Supported := by
+  intro supported
+  exact supported 1 rfl
+
+/-- Both runs lack a returned completion, but one leaves the interpreter's supported domain. -/
+theorem divergence_is_not_unsupported : ¬ looping.BehaviorEquiv missing := by
+  intro same
+  exact missing_unsupported (same.supported.mp loops.supported)
+
+theorem outer_errors_distinct : ¬ (outer "first").BehaviorEquiv (outer "second") := by
+  intro same
+  have first : Finishes (outer "first").execution.step (outer "first").execution.initial
+      (.error ⟨"first", []⟩) := .done rfl
+  have second : Finishes (outer "second").execution.step (outer "second").execution.initial
+      (.error ⟨"second", []⟩) := .done rfl
+  have equal := ((same.outerErrors ⟨"first", []⟩).mp first).unique second
+  have names := congrArg ExceptionObject.typeName (Except.error.inj equal)
+  simp at names
+
+def mode (n : Nat) : Call :=
+  if n = 0 then returning else if n = 1 then raising else if n = 2 then looping else missing
+
+def left : CallFamily := ⟨fun choices => mode (choices 0)⟩
+def right : CallFamily := ⟨fun choices => mode (choices 1)⟩
+def swap (choices : ChoiceSchedule) : ChoiceSchedule :=
+  fun position => if position = 0 then choices 1 else if position = 1 then choices 0 else choices position
+
+theorem swap_swap (choices : ChoiceSchedule) : swap (swap choices) = choices := by
+  funext position
+  by_cases zero : position = 0
+  · simp [swap, zero]
+  · by_cases one : position = 1 <;> simp [swap, zero, one]
+
+/-- The same possible outcomes need not occupy the same choice positions. -/
+theorem reindexed_possible : left.PossibleEquiv right := by
+  apply CallFamily.PossibleEquiv.of_reindex swap (fun choices => ⟨swap choices, swap_swap choices⟩)
+  intro choices
+  change (mode (choices 0)).BehaviorEquiv (mode (swap choices 1))
+  simpa only [swap, Nat.reduceEqDiff, ↓reduceIte] using Call.BehaviorEquiv.refl (mode (choices 0))
+
+theorem not_guaranteed : ¬ left.Equiv right := by
+  have first : (left.run (fun _ => 0)).Finishes answer := .done rfl
+  have second : (right.run (fun _ => 1)).Finishes failure := .done rfl
+  exact CallFamily.not_equiv_of_finishes first second (by simp [Completion.Equivalent, answer, failure])
+
+theorem divergent_families : (CallFamily.deterministic looping).PossibleEquiv (CallFamily.deterministic looping) :=
+  CallFamily.PossibleEquiv.of_pointwise (fun _ => Call.BehaviorEquiv.of_diverges loops loops)
+
+theorem cannot_erase_divergence : ¬ left.PossibleEquiv (CallFamily.deterministic returning) := by
+  intro same
+  obtain ⟨choices, divergent⟩ := same.possible_diverges_iff.mp ⟨fun _ => 2, loops⟩
+  exact Call.diverges_not_halts divergent ⟨answer, .done rfl⟩
+
+end PossibleChoiceExamples
+'''
+AUDITS = [f"FormalSW.PyAst.Mutable.Call.BehaviorEquiv.{name}" for name in (
+    "refl", "of_finishes", "of_diverges", "of_bisimulation",
+)] + [f"FormalSW.PyAst.Mutable.CallFamily.PossibleEquiv.{name}" for name in (
+    "refl", "of_pointwise", "of_reindex", "supported_iff", "possible_diverges_iff", "possible_halts_iff",
+)] + [f"PossibleChoiceExamples.{name}" for name in (
+    "loops", "missing_unsupported", "divergence_is_not_unsupported", "outer_errors_distinct", "swap_swap",
+    "reindexed_possible", "not_guaranteed", "divergent_families", "cannot_erase_divergence",
+)]
+with project_temporary_directory(prefix="possible-choices-") as temporary:
+    proof = Path(temporary) / "Checks.lean"
+    proof.write_text(PROOF + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"possible choices: reindexing, errors, divergence and unsupported paths; {len(AUDITS)} axiom audits passed")
