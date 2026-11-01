@@ -55,6 +55,8 @@ roots = [
   "lang.py.FormalSW.Instances",
   "lang.py.FormalSW.HeapCalls",
   "lang.py.FormalSW.HeapqCalls",
+  "lang.py.FormalSW.HeapqPreservation",
+  "lang.py.FormalSW.HeapqContents",
   "lang.py.FormalSW.HeapSortingCalls",
   "lang.py.FormalSW.Choices",
   "lang.py.FormalSW.SetCalls",
