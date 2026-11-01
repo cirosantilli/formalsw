@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""
+Check digit methods after receiver effects for text, bytes and bytearrays.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(items, value):
+    items.append(value)
+    return value
+
+
+def nested(items, value):
+    return touch(items, value).isdigit()
+
+
+def explicit(items, value):
+    items.append(value)
+    return value.isdigit()
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineDigitExamples
+set_option Elab.async false
+
+inductive Input where
+  | text (text : String)
+  | bytes (bytes : List UInt8)
+  | buffer (address : Nat) (bytes : List UInt8)
+
+def Input.value : Input → Mutable.Value
+  | .text contents => .scalar (.string contents)
+  | .bytes contents => .scalar (.bytes contents)
+  | .buffer address _ => .ref address
+
+def Input.answer : Input → Bool
+  | .text contents => Strings.isDigit contents
+  | .bytes contents | .buffer _ contents => FormalSW.Py.Builtin.Bytes.isDigit contents
+
+def Input.Valid (heap : Mutable.Heap) : Input → Prop
+  | .text _ | .bytes _ => True
+  | .buffer address contents => heap[address]? = some (.bytearray contents)
+
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) :=
+  heap.set address (.list (items ++ [value]))
+
+theorem Input.after_append (input : Input) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) (valid : input.Valid heap) :
+    input.Valid (after heap address items input.value) := by
+  cases input with
+  | text | bytes => trivial
+  | buffer buffer bytes =>
+    have different : buffer ≠ address := by
+      intro equal
+      subst buffer
+      simp [Input.Valid, found] at valid
+    simp only [Input.Valid] at valid ⊢
+    simpa [after, List.getElem?_set, Ne.symm different] using valid
+
+theorem Input.bind (input : Input) (heap : Mutable.Heap) (valid : input.Valid heap) :
+    bindMethod Probe.module input.value "isdigit" heap = some (.ok (.isDigit input.value), heap) := by
+  cases input with
+  | text | bytes => rfl
+  | buffer address bytes =>
+    simp only [Input.Valid] at valid
+    simp [Input.value, bindMethod, valid]
+
+theorem Input.execute (input : Input) (heap : Mutable.Heap) (valid : input.Valid heap) :
+    primitive (.isDigit input.value) [] heap = some (.ok (.scalar (.bool input.answer)), heap) := by
+  cases input with
+  | text | bytes => rfl
+  | buffer address bytes =>
+    simp only [Input.Valid] at valid
+    simp [Input.value, Input.answer, primitive, valid]
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, value] heap value (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem nested_returns (input : Input) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) (valid : input.Valid heap) :
+    ReturnsValue Probe.module "nested" [.ref address, input.value] heap
+      (.scalar (.bool input.answer)) (after heap address items input.value) := by
+  have retained := input.after_append heap address items found valid
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.isDigit
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (touch_returns heap address items input.value found))
+    (input.bind _ retained) .nil (input.execute _ retained)
+
+theorem explicit_returns (input : Input) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) (valid : input.Valid heap) :
+    ReturnsValue Probe.module "explicit" [.ref address, input.value] heap
+      (.scalar (.bool input.answer)) (after heap address items input.value) := by
+  have retained := input.after_append heap address items found valid
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value
+    (Evaluates.isDigit (Evaluates.lookup rfl) (input.bind _ retained) .nil (input.execute _ retained))
+
+/-- Inlining an effectful digit-method receiver retains its log and shared buffer references. -/
+theorem digit_equiv (input : Input) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) (valid : input.Valid heap) :
+    (IteratorCalls.call Probe.module "nested" [.ref address, input.value] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, input.value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, input.value] heap
+        (.scalar (.bool input.answer)) (after heap address items input.value)) :
+      ((IteratorCalls.call Probe.module name [.ref address, input.value] heap).run choices).Finishes
+        ⟨.ok (.scalar (.bool input.answer)), [], after heap address items input.value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "nested" leftChoices (nested_returns input heap address items found valid))
+    (finishes "explicit" rightChoices (explicit_returns input heap address items found valid)) (Or.inl rfl)
+
+/-- Digit execution consumes the append's actual output invariant, including exceptional outcomes. -/
+theorem append_then_digit (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item receiver : Mutable.Value) (values : List Mutable.Value)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (receiverInside : receiver.edge.Within logical.length)
+    (valuesInside : ∀ value ∈ values, value.edge.Within logical.length)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (after logical address items item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.operation (.isDigit receiver) values, [], after logical address items item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.operation (.isDigit receiver) values, [], after logical address items item⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have digitInside : StateWithin ⟨.operation (.isDigit receiver) values, [], after logical address items item⟩ := by
+    exact ⟨⟨by simpa [after] using receiverInside, by simpa [after] using valuesInside⟩, by simp⟩
+  have raw := step_isDigit_preserves Probe.module _ other nextMap logical.length physical.length
+    receiver values [] [] retained digitInside nextGlobals
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.operation (.isDigit receiver) values, [], after logical address items item⟩, used⟩ other nextMap
+    logical.length physical.length [] retained digitInside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨digitInside.1, digitInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+
+end MachineDigitExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "isDigit_scalar_result", "isDigit_relocates", "step_isDigit_preserves",
+)] + ["FormalSW.PyAst.HeapCalls.Evaluates.isDigit"] + ["MachineDigitExamples." + name for name in (
+    "Input.after_append", "Input.bind", "Input.execute", "touch_returns", "nested_returns", "explicit_returns",
+    "digit_equiv", "append_then_digit",
+)]
+with project_temporary_directory(prefix="machine-digit-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("nested", "explicit"):
+        for value in ("", "123", "٢²0", "12a", "１２", "Ⅻ", b"", b"123", b"12a", b"\xb2", bytearray(), bytearray(b"123"), bytearray(b"12a")):
+            items = []
+            items.append(items)
+            assert namespace[name](items, value) == value.isdigit()
+            assert len(items) == 2 and items[0] is items and items[1] is value
+            if isinstance(value, bytearray):
+                value[:] = b"9"
+                assert namespace[name](items, value)
+                value[:] = b"x"
+                assert not namespace[name](items, value)
+                assert items[1] is value and items[2] is value and items[3] is value
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineBuiltinInvariant\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"digit methods: receiver effects, Unicode, bytes, shared buffers; {len(AUDITS)} axiom audits passed")
