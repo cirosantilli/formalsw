@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""
+Prove an allocating custom-iterator call equivalent to direct construction.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Allocating:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return [self]
+
+def first(iterator):
+    for value in iterator:
+        return value
+
+def direct(iterator):
+    return [iterator]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+open IteratorCalls IteratorCalls.Relocation
+namespace IteratorCoreExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Allocating").getD ("", [])
+def methodArgs : List Arg := [{name := "self", annotation := none}]
+def iterBody : List Stmt := [.return (.name "self")]
+def nextBody : List Stmt := [.return (.list [.name "self"])]
+def args : List Arg := [{name := "iterator", annotation := none}]
+def loopBody : List Stmt := [.return (.name "value")]
+def firstBody : List Stmt := [.forIn (.name "value") (.name "iterator") loopBody []]
+def directBody : List Stmt := [.return (.list [.name "iterator"])]
+def env (address : Nat) : HeapCalls.Env := HeapCalls.argumentEnv args [.ref address]
+def consumer (address : Nat) : Loop := ⟨"value", loopBody, [], [], env address, []⟩
+def after (heap : Mutable.Heap) (address : Nat) := heap ++ [.list [.ref address]]
+def completion (heap : Mutable.Heap) (address : Nat) : Mutable.Completion :=
+  ⟨.ok (.ref heap.length), [], after heap address, heap.length⟩
+
+theorem source_module : ModuleSource Probe.module := by simp [ModuleSource, Probe.module, StmtWithin]
+theorem source_class : Probe.module.findClass "Allocating" = some classInfo := rfl
+theorem source_iter : findFunctionIn classInfo.2 "__iter__" = some (methodArgs, iterBody) := rfl
+theorem source_next : findFunctionIn classInfo.2 "__next__" = some (methodArgs, nextBody) := rfl
+theorem source_first : findFunctionIn Probe.module.body "first" = some (args, firstBody) := rfl
+theorem source_direct : findFunctionIn Probe.module.body "direct" = some (args, directBody) := rfl
+
+theorem iter_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Allocating" fields)) :
+    ProtocolCalls.iterMethod Probe.module (.ref address) heap =
+      some (.ok (.method (.ref address) methodArgs iterBody), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Allocating"
+    "__iter__" fields classInfo.2 found source_class
+  simp only [source_iter, Option.map_some] at lookup
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Allocating" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) methodArgs nextBody)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Allocating"
+    "__next__" fields classInfo.2 found source_class
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem iter_returns (heap : Mutable.Heap) (address : Nat) :
+    MethodReturns Probe.module (.ref address) methodArgs iterBody [] heap (.ref address) heap := by
+  apply MethodReturns.of_body (completed := [.ref address]) (by rfl)
+  exact BlockReturns.return_value (Evaluates.lookup (by simp [functionEnv, HeapCalls.argumentEnv, methodArgs]))
+
+theorem next_returns (heap : Mutable.Heap) (address : Nat) :
+    MethodReturns Probe.module (.ref address) methodArgs nextBody [] heap (.ref heap.length) (after heap address) := by
+  apply MethodReturns.of_body (completed := [.ref address]) (by rfl)
+  exact BlockReturns.return_value (Evaluates.list (.cons
+    (Evaluates.lookup (by simp [functionEnv, HeapCalls.argumentEnv, methodArgs])) .nil))
+
+theorem first_finishes (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Allocating" fields)) (choices : ChoiceSchedule) :
+    ((IteratorCalls.call Probe.module "first" [.ref address] heap).run choices).Finishes (completion heap address) := by
+  have instanceFound : isInstance heap (.ref address) = true := by simp [isInstance, found]
+  have looked : env address "iterator" = some (.ref address) := by simp [env, HeapCalls.argumentEnv, args]
+  obtain ⟨acquiredUsed, acquired⟩ := for_instance (loop := consumer address) (resumes := [])
+    (anchors := heap.length) (choices := choices) (used := 0) (globals := [])
+    (source := .name "iterator") (by intros; intro impossible; cases impossible)
+    (Evaluates.lookup looked) instanceFound (iter_bound heap address fields found)
+    (OperationCompletes.of_method (iter_returns heap address)) (next_bound heap address fields found)
+  obtain ⟨advancedUsed, advanced⟩ := advance_returns (loop := consumer address) (resumes := [])
+    (anchors := heap.length) (choices := choices) (used := acquiredUsed) (globals := []) instanceFound
+    (next_bound heap address fields found) (OperationCompletes.of_method (next_returns heap address))
+  have returned : BlockReturns Probe.module (setLocal (env address) "value" (.ref heap.length))
+      (loopBody ++ [Calls.loopContinuation loopBody (loopCode (consumer address) (.ref address))])
+      (after heap address) (.ref heap.length) (after heap address) :=
+    BlockReturns.return_value (Evaluates.lookup (by simp [setLocal]))
+  have doneBody := IteratorCalls.Reaches.of_heap (choices := choices) (used := advancedUsed)
+    (returned heap.length []) []
+  have entry : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.call "first") [.ref address], [], heap⟩ ⟨.block firstBody (env address), [], heap⟩ :=
+    .next (by simp [HeapCalls.step, source_first, completeArguments, args, functionEnv, env, firstBody, executableBody]) .refl
+  change Finishes (IteratorCalls.step Probe.module heap.length choices)
+    (.running ⟨⟨.operation (.call "first") [.ref address], [], heap⟩, 0⟩ []) (.ok (completion heap address))
+  apply (IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) entry []).finishes
+  apply acquired.finishes
+  apply advanced.finishes
+  apply doneBody.finishes
+  exact .next (core_done rfl rfl) (.done rfl)
+
+theorem direct_finishes (heap : Mutable.Heap) (address : Nat) (choices : ChoiceSchedule) :
+    ((IteratorCalls.call Probe.module "direct" [.ref address] heap).run choices).Finishes (completion heap address) := by
+  have returns : ReturnsValue Probe.module "direct" [.ref address] heap (.ref heap.length) (after heap address) := by
+    apply BlockReturns.function source_direct (completed := [.ref address]) (by rfl)
+    exact BlockReturns.return_value (Evaluates.list (.cons
+      (Evaluates.lookup (by simp [functionEnv, HeapCalls.argumentEnv, args])) .nil))
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returns heap.length []) []
+  exact reached.finishes (.next (core_done rfl rfl) (.done rfl))
+
+theorem first_equiv_direct (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Allocating" fields))
+    (leftChoices rightChoices : ChoiceSchedule) :
+    ((IteratorCalls.call Probe.module "first" [.ref address] heap).run leftChoices).Equiv
+      ((IteratorCalls.call Probe.module "direct" [.ref address] heap).run rightChoices) :=
+  Mutable.Call.equiv_of_finishes (first_finishes heap address fields found leftChoices)
+    (direct_finishes heap address rightChoices) (Or.inl rfl)
+
+theorem allocation_layout (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (logicalAnchors physicalAnchors used : Nat) (choices : ChoiceSchedule)
+    (items : List Mutable.Value) (stack : List HeapCalls.Frame) (resumes : List Resume)
+    (globals : Mutable.Globals) (layout : ExecutionLayout logical physical rename)
+    (itemsInside : ∀ value ∈ items, value.edge.Within logical.length)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (saved : ∀ pending ∈ resumes, ResumeWithin logical.length pending)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    let nextMap := extendMap rename logical.length physical.length
+    let logicalAfter := logical ++ [.list items]
+    let physicalAfter := physical ++ [.list (items.map (relocateValue rename))]
+    IteratorCalls.step Probe.module physicalAnchors choices
+      (IteratorCalls.Relocation.relocateState rename physical physicalAnchors
+        (.running ⟨⟨.operation .list items, stack, logical⟩, used⟩ resumes)) (relocateGlobals rename globals) =
+      IteratorCalls.Relocation.relocateStep nextMap physicalAfter physicalAnchors
+        (.next (.running ⟨⟨.value (.ref logical.length), stack, logicalAfter⟩, used⟩ resumes)) := by
+  dsimp only
+  let core : HeapCalls.State := ⟨.operation .list items, stack, logical⟩
+  have allocated := step_list_relocates Probe.module logical physical rename layout logicalAnchors physicalAnchors
+    items stack globals itemsInside stackInside globalsInside
+  have heapPair : HeapCalls.step Probe.module physicalAnchors (HeapCalls.Relocation.relocateState rename physical core)
+      (relocateGlobals rename globals) =
+      HeapCalls.Relocation.relocateStep (extendMap rename logical.length physical.length)
+        (physical ++ [.list (items.map (relocateValue rename))]) physicalAnchors
+        (HeapCalls.step Probe.module logicalAnchors core globals) := by
+    rw [show HeapCalls.step Probe.module logicalAnchors core globals = _ from allocated.1]
+    exact allocated.2.1
+  have setPair := set_step_relocates Probe.module core physical
+    (physical ++ [.list (items.map (relocateValue rename))]) rename (extendMap rename logical.length physical.length)
+    logicalAnchors physicalAnchors used choices globals (by rw [allocated.1]; simp) heapPair
+  have paired := step_ordinary_relocates Probe.module ⟨core, used⟩ physical
+    (physical ++ [.list (items.map (relocateValue rename))]) rename (extendMap rename logical.length physical.length)
+    logicalAnchors physicalAnchors choices resumes globals source_module layout.runtime
+    ⟨by trivial, itemsInside⟩ saved (extendMap_old rename logical.length physical.length) rfl setPair
+  simpa only [IteratorCalls.step, intercept, SetCalls.step, core, allocated.1, SetCalls.liftStep, lift] using paired
+
+end IteratorCoreExamples
+'''
+AUDITS = ["IteratorCoreExamples." + name for name in (
+    "source_module", "source_class", "source_iter", "source_next", "source_first", "source_direct",
+    "iter_bound", "next_bound", "iter_returns", "next_returns", "first_finishes", "direct_finishes", "first_equiv_direct", "allocation_layout",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation." + name for name in (
+    "relocateResumes_congr", "step_ordinary_relocates", "set_step_supported", "set_lift_relocates",
+    "set_step_relocates", "running_within_after", "completed_within_after",
+)]
+
+with project_temporary_directory(prefix="iterator-core-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    iterator = namespace["Allocating"]()
+    iterator.cycle = iterator
+    iterator.__iter__ = None
+    iterator.__next__ = None
+    left = namespace["first"](iterator)
+    right = namespace["direct"](iterator)
+    assert left == right == [iterator]
+    assert left is not right
+    assert left[0] is right[0] is iterator.cycle is iterator
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorCore\nimport lang.py.FormalSW.IteratorRules\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"iterator core: allocation under saved consumers and complete source equivalence; {len(AUDITS)} axiom audits passed")
