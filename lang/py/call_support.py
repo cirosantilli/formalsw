@@ -472,6 +472,56 @@ def has_partial_primitives(module, function):
 
 
 
+def membership_only_set_creations(module, function):
+    """
+    Find private sets used only as membership tables, never consumed or escaped.
+
+    Require a single local binding and inspect every use, including nested scopes.
+    Rebindings, aliases, returned sets, and extracted methods remain conservative.
+    """
+    nodes = list(ast.walk(function))
+    if any(isinstance(node, (ast.Global, ast.Nonlocal, ast.Import, ast.ImportFrom, ast.Lambda, ast.ClassDef))
+           or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not function for node in nodes):
+        return set()
+    parents = {id(child): parent for parent in nodes for child in ast.iter_child_nodes(parent)}
+    private = set()
+    for assignment in nodes:
+        if not (isinstance(assignment, ast.Assign) and len(assignment.targets) == 1
+                and isinstance(assignment.targets[0], ast.Name)):
+            continue
+        name = assignment.targets[0].id
+        creation = assignment.value
+        literal = isinstance(creation, ast.Set)
+        empty = (isinstance(creation, ast.Call) and isinstance(creation.func, ast.Name)
+                 and creation.func.id == 'set' and not creation.args and not creation.keywords
+                 and not bindings(module, 'set')
+                 and not any(isinstance(node, ast.Name) and node.id == 'set'
+                             and not isinstance(node.ctx, ast.Load) or
+                             isinstance(node, ast.arg) and node.arg == 'set' for node in nodes))
+        if not (literal or empty):
+            continue
+        uses = [node for node in nodes if isinstance(node, ast.Name) and node.id == name]
+        if any(not isinstance(node.ctx, ast.Load) and node is not assignment.targets[0] for node in uses):
+            continue
+        safe = True
+        for node in uses:
+            if node is assignment.targets[0]:
+                continue
+            parent = parents[id(node)]
+            membership = (isinstance(parent, ast.Compare) and len(parent.ops) == 1
+                          and isinstance(parent.ops[0], (ast.In, ast.NotIn)) and parent.comparators[0] is node)
+            call = parents.get(id(parent))
+            insertion = (isinstance(parent, ast.Attribute) and parent.value is node and parent.attr == 'add'
+                         and isinstance(call, ast.Call) and call.func is parent
+                         and len(call.args) == 1 and not call.keywords)
+            if not (membership or insertion):
+                safe = False
+                break
+        if safe:
+            private.add(id(creation))
+    return private
+
+
 def uses_set_iteration(module, function):
     """
     Select arbitrary-order execution when a reachable loop may consume a set.
@@ -482,6 +532,9 @@ def uses_set_iteration(module, function):
     """
     if module is None:
         return False
+    # Preserve established contract runtimes unless the coarse selection would
+    # reject caching. A private membership table needs no traversal choices.
+    refine_membership = uses_memoized(module, function) or uses_heap_memoized(module, function)
     functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     pending, visited = [function], set()
     sets, loops = False, False
@@ -490,12 +543,13 @@ def uses_set_iteration(module, function):
         if current.name in visited:
             continue
         visited.add(current.name)
+        private_sets = membership_only_set_creations(module, current) if refine_membership else set()
         kinds = [annotation_kind(arg.annotation) for arg in callback_signature(module, current)]
         kinds.append(annotation_kind(current.returns))
         sets |= any(kind and (kind == 'set' or kind.startswith('set[')) for kind in kinds)
         for statement in current.body:
             for node in ast.walk(statement):
-                sets |= isinstance(node, (ast.Set, ast.SetComp))
+                sets |= isinstance(node, (ast.Set, ast.SetComp)) and id(node) not in private_sets
                 if isinstance(node, ast.For):
                     loops |= not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                                   and node.iter.func.id == 'range')
@@ -507,7 +561,7 @@ def uses_set_iteration(module, function):
                 loops |= (sequence_extremum(node) is not None or sequence_sort(node) is not None
                           or sequence_sum(node) is not None or generator_extremum(node) is not None)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                    sets |= node.func.id == 'set' and not bindings(module, 'set')
+                    sets |= node.func.id == 'set' and not bindings(module, 'set') and id(node) not in private_sets
                     pending.extend(functions[target] for target in call_targets(node) if target in functions)
         if sets and loops:
             return True

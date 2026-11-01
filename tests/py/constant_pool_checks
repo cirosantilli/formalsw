@@ -24,6 +24,40 @@ from lang.py.constant_pools import identify_constant_pools
 from lang.py.support import SupportChecker
 
 api = runpy.run_path(str(ROOT / 'formalsw'))
+# A membership table does not introduce unordered execution. Any use that
+# exposes or consumes the table must retain the arbitrary-order backend.
+selection_cases = [
+    ('seen = set()\nseen.add(n)\nreturn int(n in seen)', False),
+    ('seen = {n}\nreturn int(n not in seen)', False),
+    ('seen = {n}\nreturn int(n in seen and n + 1 not in seen)', False),
+    ('seen = {n}\nreturn sum(seen)', True),
+    ('seen = {n}\nreturn sorted(seen)', True),
+    ('seen = {n}\nreturn list(seen)', True),
+    ('seen = {n}\nreturn [x for x in seen]', True),
+    ('seen = {n}\nfor x in seen:\n    return x\nreturn 0', True),
+    ('seen = {n}\nreturn seen', True),
+    ('seen = {n}\nalias = seen\nreturn list(alias)', True),
+    ('seen = {n}\nreturn consume(seen)', True),
+    ('seen = {n}\nreturn n in seen in [seen]', True),
+    ('seen = {n}\nreturn seen in seen', True),
+    ('seen = {n}\nadd = seen.add\nreturn add(n)', True),
+    ('seen = {n}\nseen = [n]\nreturn int(n in seen)', True),
+    ('seen = {n}\nseen.add(seen)\nreturn 0', True),
+    ('global seen\nseen = {n}\nreturn int(n in seen)', True),
+    ('seen = {n}\ndef get():\n    return seen\nreturn get()', True),
+    ('seen = {n}\nreturn lambda: seen', True),
+    ('seen = {n}\nbox = [seen]\nreturn box', True),
+    ('seen = {n}\nreturn len(seen)', True),
+    ('seen = set([n])\nreturn int(n in seen)', True),
+]
+for body, expected in selection_cases:
+    source = 'from functools import lru_cache\n@lru_cache(None)\ndef probe(n: int):\n    for item in [n]:\n        pass\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+    candidate = ast.parse(source)
+    assert call_support.uses_set_iteration(candidate, candidate.body[1]) == expected, body
+    candidate.body[1].decorator_list = []
+    assert call_support.uses_set_iteration(candidate, candidate.body[1]), 'keep established noncached contracts'
+
 left_source = '''from functools import lru_cache
 @lru_cache(None)
 def left(n: int) -> tuple[int, int]:
@@ -66,6 +100,7 @@ def empty_right(n: int) -> tuple[int, ...]:
     return ()
 '''
 bodies = {
+    'membership_table': 'seen = set()\nout = 0\nfor value in [n, n + 1, n]:\n    if value not in seen:\n        seen.add(value)\n        out += left(value)[0]\nreturn out',
     'across_keys': 'if left(n) is left(n + 1):\n    return 1\nreturn 0',
     'across_functions': 'if left(n) is ordinary_left(n):\n    return 1\nreturn 0',
     'nested_identity': 'if left(n) is nested_left(n)[1]:\n    return 1\nreturn 0',
