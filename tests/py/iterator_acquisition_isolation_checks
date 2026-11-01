@@ -118,15 +118,35 @@ theorem isolated_acquisition (choices : ChoiceSchedule) (used anchors : Nat)
   obtain ⟨other, _, kept, entered⟩ := ran.for_name_isolated source physical rename layout.layout (by simp [after]) anchors
   exact ⟨other, kept privateAddress object layout, entered loop resumes inputName getInput⟩
 
+
+/-- Actual acquisition mutation is retained while different private return allocations stay unobservable. -/
+theorem acquisition_scalar_observation (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address cursor : Nat) (fields cursorFields : List (String × Mutable.Value))
+    (closed : Closed heap)
+    (found : heap[address]? = some (.instance sourceClass.1 "Source" fields))
+    (field : fields.lookup "iterator" = some (.ref cursor))
+    (cursorFound : heap[cursor]? = some (.instance cursorClass.1 "Cursor" cursorFields))
+    (value : Constant) :
+    Mutable.Completion.Equivalent
+      ⟨.ok (.scalar value), [], after heap address fields ++ [.list []], heap.length⟩
+      ⟨.ok (.scalar value), [], after heap address fields ++ [.tuple [.ref address]], heap.length⟩ := by
+  have ran := acquisition choices used heap address cursor fields cursorFields found field cursorFound
+  have afterClosed := (ran.effects source closed).1
+  have left := (RuntimeLayout.refl (after heap address fields)).append_private [.list []]
+  have right := (RuntimeLayout.refl (after heap address fields)).append_private [.tuple [.ref address]]
+  exact left.equivalent_scalar_completions right afterClosed heap.length (by simp [after])
+    (by intros; rfl) (by intros; rfl) (.ok value)
+
 end AcquisitionIsolationExamples
 '''
 AUDITS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
     "ExecutionLayout.append_private_nonempty", "ExecutionLayout.new_private_cell",
     "graphNodes_closed_of_closed", "ExecutionLayout.equivalent_exceptions",
+    "RuntimeLayout.equivalent_scalar_completions",
 )] + ["FormalSW.PyAst.IteratorCalls." + name for name in ("AcquireRun.effects", "AcquireRun.for_name_isolated")]
 AUDITS += ["AcquisitionIsolationExamples." + name for name in (
     "source", "source_class", "cursor_class", "source_iter", "source_next", "iter_bound", "iter_returns",
-    "cursor_retained", "acquisition", "isolated_acquisition",
+    "cursor_retained", "acquisition", "isolated_acquisition", "acquisition_scalar_observation",
 )]
 with project_temporary_directory(prefix="acquisition-isolation-") as temporary:
     directory = Path(temporary)

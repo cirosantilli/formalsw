@@ -219,14 +219,40 @@ theorem allocation_then_cursor (choices : ChoiceSchedule) (logical physical : Mu
   rw [sameGlobals] at second
   exact second.rebase agree grows physicalGrows
 
+
+/-- Importing this parsed source preserves its allocations and every scheduled fallback step. -/
+theorem imported_filtered_finishes (context : Module) (extension : HeapCalls.Extends context Probe.module)
+    (choices : ChoiceSchedule) (heap : Mutable.Heap) (address : Nat)
+    (items : List Constant) (found : heap[address]? = some (.set items)) :
+    ((SetCalls.call context "filtered" [.ref address] heap).run choices).Finishes
+      ⟨.ok (.ref heap.length), [], heap ++ [.list []], heap.length⟩ :=
+  SetCalls.finishes_extend (filtered_finishes choices heap address items found) extension
+
+theorem imported_changed_size_fails (context : Module) (extension : HeapCalls.Extends context Probe.module)
+    (choices : ChoiceSchedule) (heap : Mutable.Heap) (address anchors used : Nat)
+    (original current remaining : List Constant) (env : HeapCalls.Env)
+    (body otherwise following : List Stmt) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
+    (found : heap[address]? = some (.set current)) (changed : current.length ≠ original.length) :
+    SetCalls.step context anchors choices
+      ⟨⟨.block (.setStepLoop "value" address original remaining body otherwise :: following) env, stack, heap⟩, used⟩ globals =
+      .done (.ok ⟨.error ⟨"RuntimeError", []⟩, globals, heap, anchors⟩) := by
+  have originalStep := changed_size_fails choices heap address anchors used original current remaining env
+    body otherwise following stack globals found changed
+  rw [SetCalls.step_extend extension _ (by simp [originalStep])]
+  exact originalStep
+
 end SetIteratorExamples
 '''
 AUDITS = ["SetIteratorExamples." + name for name in (
     "source_filtered", "source_direct", "filter_loop", "filtered_finishes", "direct_finishes",
-    "filtered_equiv_direct", "changed_size_fails", "fallback_correspondence", "filtered_entry_layout", "allocation_then_cursor",
+    "filtered_equiv_direct", "changed_size_fails", "imported_filtered_finishes", "imported_changed_size_fails", "fallback_correspondence", "filtered_entry_layout", "allocation_then_cursor",
 )] + ["FormalSW.PyAst.SetCalls.Relocation." + name for name in ('iterator_sequence_relocates', 'iterator_cursor_relocates', 'iterator_cursor_within', 'comprehensionFilters_relocates', 'comprehensionBody_relocates', 'comprehensionTargetsBody_relocates', 'comprehensionFilters_within', 'comprehensionBody_within', 'comprehensionTargetsBody_within', 'comprehensionStart_relocates', 'comprehensionStart_within', 'iterator_list_comprehension_relocates', 'iterator_targets_comprehension_relocates', 'iterator_set_comprehension_relocates', 'iterator_dict_comprehension_relocates', 'comprehensionEnv_relocates', 'comprehensionTargetsEnv_relocates', 'sumBody_source', 'extremumBody_source', 'iterator_sum_generator_relocates', 'iterator_extremum_generator_relocates', 'sumInitial_relocates', 'sumInitial_keeps_heap', 'sumEnter_relocates', 'iterator_sum_sequence_relocates', 'iteratorStep_relocates')]
 
 AUDITS += ["FormalSW.PyAst.SetCalls.Relocation." + name for name in ('Preserves.unchanged', 'Preserves.allocated', 'comprehensionStart_heap', 'iterator_sequence_invariant', 'iterator_cursor_heap', 'comprehensionEnv_within', 'comprehensionTargetsEnv_within', 'sumInitial_value', 'sumEnter_invariant', 'iterator_sum_generator_invariant', 'iterator_extremum_generator_invariant', 'iterator_sum_sequence_invariant', 'iterator_list_comprehension_preserves', 'iterator_targets_comprehension_preserves', 'iterator_set_comprehension_preserves', 'iterator_dict_comprehension_preserves', 'iteratorStep_preserves', 'Preserves.next', 'Preserves.rebase', 'step_fallback_preserves')]
+
+AUDITS += ["FormalSW.PyAst.SetCalls." + name for name in (
+    "iteratorStep_module_independent", "step_extend", "Reaches.extend", "finishes_extend",
+)]
 
 with project_temporary_directory(prefix="set-iterator-") as temporary:
     directory = Path(temporary)
@@ -254,6 +280,7 @@ with project_temporary_directory(prefix="set-iterator-") as temporary:
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
     proof.write_text("import lang.py.FormalSW.MachineInvariant\n"
+                     "import lang.py.FormalSW.SetExecutionExtension\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

@@ -64,6 +64,7 @@ roots = [
   "lang.py.FormalSW.Choices",
   "lang.py.FormalSW.PossibleChoices",
   "lang.py.FormalSW.SetCalls",
+  "lang.py.FormalSW.SetExecutionExtension",
   "lang.py.FormalSW.SetChoiceCalls",
   "lang.py.FormalSW.SetComprehensionCalls",
   "lang.py.FormalSW.SetSumCalls",
