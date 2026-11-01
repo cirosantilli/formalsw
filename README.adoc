@@ -370,6 +370,11 @@ The DSL specification is a magic custom and very simple language that allows spe
 
 The DSL gets converted to corresponding Lean code behind the scenes.
 
+Each DSL construct includes a raw Lean equivalent, e.g.:
+
+* <<halts>>
+* <<raw-lean-halts>>
+
 ==== Py
 
 `Py` executes ordinary Python to prepare the evaluation environment for subsequent annotations. The language tag describes the setup language, independently of the language of the source being specified. It is not an assertion or a proof obligation. The current source frontend is Python.
