@@ -25,8 +25,27 @@ def lex (equal less : Value → Value → Result Bool) (equality : Bool) :
       | some (.ok true) => lex equal less equality as bs
       | some (.ok false) => if equality then some (.ok false) else less a b
 
-/-- Acyclic sequence nesting uses at most one level per heap object. Exhausting this
-heap-derived bound leaves recursive comparisons unsupported. -/
+/-- Two comparison modes for each pair of heap objects, plus scalar resolution.
+`ComparisonStability` proves that this allowance captures every finite result. -/
+abbrev comparisonFuel (heap : Heap) : Nat := 2 * heap.length * heap.length + 1
+
+theorem comparisonFuel_mono (logical physical : Heap) (size : logical.length ≤ physical.length) :
+    comparisonFuel logical ≤ comparisonFuel physical := by
+  have product := Nat.mul_le_mul (Nat.mul_le_mul_left 2 size) size
+  unfold comparisonFuel
+  omega
+
+theorem comparisonFuel_ge_linear (heap : Heap) : heap.length + 1 ≤ comparisonFuel heap := by
+  cases heapSize : heap.length with
+  | zero => simp [comparisonFuel, heapSize]
+  | succ size =>
+    have factor : 1 ≤ 2 * (size + 1) := by omega
+    have product := Nat.mul_le_mul_right (size + 1) factor
+    simp only [Nat.one_mul] at product
+    simp only [comparisonFuel, heapSize]
+    omega
+
+/-- Fuel-indexed sequence comparison. Runtime callers use the proved complete allowance. -/
 def compare : Nat → Heap → Bool → Value → Value → Result Bool
   | 0, _, _, _, _ => none
   | depth + 1, heap, equality, left, right =>
@@ -53,7 +72,7 @@ def compare : Nat → Heap → Bool → Value → Value → Result Bool
 def insert (heap : Heap) (value : Value) : List Value → Result (List Value)
   | [] => some (.ok [value])
   | first :: rest =>
-      match compare (heap.length + 1) heap false first value with
+      match compare (comparisonFuel heap) heap false first value with
       | none => none
       | some (.error error) => some (.error error)
       | some (.ok true) => (insert heap value rest).map (fun result => result.map (first :: ·))
@@ -77,7 +96,7 @@ def sortWithReverse (heap : Heap) (reverse : Bool) (items : List Value) : Result
 def keyedInsert (heap : Heap) (value : Value × Value) : List (Value × Value) → Result (List (Value × Value))
   | [] => some (.ok [value])
   | first :: rest =>
-      match compare (heap.length + 1) heap false first.2 value.2 with
+      match compare (comparisonFuel heap) heap false first.2 value.2 with
       | none => none
       | some (.error error) => some (.error error)
       | some (.ok true) => (keyedInsert heap value rest).map (fun result => result.map (first :: ·))
@@ -113,7 +132,7 @@ theorem keyedInsert_intkeys (heap : Heap) (value : Value × Int) (items : List (
   induction items with
   | nil => rfl
   | cons first rest ih =>
-      have compared : compare (heap.length + 1) heap false (intKey first).2 (intKey value).2 =
+      have compared : compare (comparisonFuel heap) heap false (intKey first).2 (intKey value).2 =
           some (.ok (decide (first.2 < value.2))) := rfl
       simp only [List.map_cons, keyedInsert, compared, insertKeyInt]
       by_cases smaller : first.2 < value.2 <;> simp [smaller, ih]
@@ -219,7 +238,7 @@ theorem sortBy_perm (less : α → α → Bool) (items : List α) : (sortBy less
   | cons first rest ih => exact (insertBy_perm less first _).trans (ih.cons first)
 
 theorem insert_of_compare (heap : Heap) (less : Value → Value → Bool) (value : Value) (items : List Value)
-    (comparisons : ∀ item ∈ items, compare (heap.length + 1) heap false item value = some (.ok (less item value))) :
+    (comparisons : ∀ item ∈ items, compare (comparisonFuel heap) heap false item value = some (.ok (less item value))) :
     insert heap value items = some (.ok (insertBy less value items)) := by
   induction items with
   | nil => rfl
@@ -231,7 +250,7 @@ theorem insert_of_compare (heap : Heap) (less : Value → Value → Bool) (value
 
 theorem sort_of_compare (heap : Heap) (less : Value → Value → Bool) (items : List Value)
     (comparisons : ∀ left ∈ items, ∀ right ∈ items,
-      compare (heap.length + 1) heap false left right = some (.ok (less left right))) :
+      compare (comparisonFuel heap) heap false left right = some (.ok (less left right))) :
     sort heap items = some (.ok (sortBy less items)) := by
   induction items with
   | nil => rfl
@@ -270,8 +289,9 @@ theorem sort_int_lists (heap : Heap) (addresses : List Nat)
     · have bound : heap.length ≤ a := by omega
       rw [List.getElem?_eq_none bound] at aFound
       cases aFound
-  have depth : heap.length - 1 + 2 = heap.length + 1 := by omega
-  have compared := compare_int_lists heap a b (heap.length - 1) xs ys aFound bFound
+  have allowance := comparisonFuel_ge_linear heap
+  have depth : comparisonFuel heap - 2 + 2 = comparisonFuel heap := by omega
+  have compared := compare_int_lists heap a b (comparisonFuel heap - 2) xs ys aFound bFound
   simpa [depth, readInts, aFound, bFound, List.filterMap_map, Function.comp_def] using compared
 
 end FormalSW.PyAst.HeapSort

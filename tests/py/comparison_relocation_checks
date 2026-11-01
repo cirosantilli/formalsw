@@ -110,7 +110,9 @@ theorem shared_prefix_order (heap : Mutable.Heap) (isTuple : Bool) (left right s
     (sharedInside : shared < heap.length) :
     HeapCalls.compare .lt (.ref left) (.ref right) heap = some (.ok (.scalar (.bool (decide (x < y)))), heap) := by
   have leftInside := (List.getElem?_eq_some_iff.mp leftFound).1
-  obtain ⟨fuel, size⟩ : ∃ fuel, heap.length = fuel + 1 := ⟨heap.length - 1, by omega⟩
+  have enough := HeapSort.comparisonFuel_ge_linear heap
+  obtain ⟨fuel, size⟩ : ∃ fuel, HeapSort.comparisonFuel heap = fuel + 2 :=
+    ⟨HeapSort.comparisonFuel heap - 2, by omega⟩
   have identity := compare_identity heap fuel shared heap[shared] (List.getElem?_eq_getElem sharedInside)
   have raw : HeapSort.compare (fuel + 2) heap false (.ref left) (.ref right) =
       some (.ok (decide (x < y))) := by
@@ -130,8 +132,7 @@ theorem shared_prefix_order (heap : Mutable.Heap) (isTuple : Bool) (left right s
   have dispatch := compare_order_sequences heap isTuple false left right _ _ leftFound rightFound
   simp only [Bool.false_eq_true, ↓reduceIte] at dispatch
   rw [dispatch, sequenceCompare_eq]
-  have allowance : heap.length + 1 = fuel + 2 := by omega
-  rw [allowance, raw]
+  rw [size, raw]
   rfl
 
 theorem shared_prefix_source (heap : Mutable.Heap) (isTuple : Bool) (left right shared : Nat) (x y : Int)

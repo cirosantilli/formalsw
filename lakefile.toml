@@ -111,6 +111,8 @@ roots = [
   "lang.py.FormalSW.ComparisonStability",
   "lang.py.FormalSW.FiniteEquivalence",
   "lang.py.FormalSW.ComparisonEquality",
+  "lang.py.FormalSW.ComparisonCongruence",
+  "lang.py.FormalSW.ComparisonComplete",
   "lang.py.FormalSW.ValueComparisonRelocation",
   "lang.py.FormalSW.ComparisonDispatchRelocation",
   "lang.py.FormalSW.ComparisonUnsupported",

@@ -1,4 +1,4 @@
-import lang.py.FormalSW.ComparisonRelocation
+import lang.py.FormalSW.ComparisonStability
 import lang.py.FormalSW.FiniteEquivalence
 
 /-! Structural laws for successful equality at each recursion depth. -/
@@ -224,7 +224,7 @@ theorem EqualAt.equivalence (heap : Heap) (fuel : Nat) :
   symmetric _ _ _ _ related := EqualAt.symm _ _ _ _ related
   transitive _ _ _ _ _ _ first second := EqualAt.trans _ _ _ _ _ first second
 
-/-- Successful equalities stabilize at the runtime's linear allowance, even for cyclic heaps. -/
+/-- Successful equalities stabilize already at the smaller linear bound, even for cyclic heaps. -/
 theorem equalAt_stabilized (heap : Heap) (extra : Nat) (left right : Value) :
     EqualAt (heap.length + 1 + extra) heap left right ↔ EqualAt (heap.length + 1) heap left right := by
   have adjacent := finite_equivalence_stable heap.length
@@ -250,8 +250,8 @@ theorem compare_equal_true_stabilized (heap : Heap) (extra : Nat) (left right : 
       HeapSort.compare (heap.length + 1) heap true left right = some (.ok true) := by
   simp only [compare_equal_true_iff, equalAt_stabilized]
 
-/-- A true equality found at any depth is already found at the native runtime allowance. -/
-theorem compare_equal_true_native_iff (heap : Heap) (left right : Value) :
+/-- A true equality found at any depth is already found at the linear bound. -/
+theorem compare_equal_true_linear_iff (heap : Heap) (left right : Value) :
     HeapSort.compare (heap.length + 1) heap true left right = some (.ok true) ↔
       ∃ fuel, HeapSort.compare fuel heap true left right = some (.ok true) := by
   constructor
@@ -262,12 +262,18 @@ theorem compare_equal_true_native_iff (heap : Heap) (left right : Value) :
     rw [Nat.add_comm] at later
     exact (compare_equal_true_stabilized heap fuel left right).mp later
 
+/-- The runtime allowance captures every true equality found at any finite depth. -/
+theorem compare_equal_true_native_iff (heap : Heap) (left right : Value) :
+    HeapSort.compare (HeapSort.comparisonFuel heap) heap true left right = some (.ok true) ↔
+      ∃ fuel, HeapSort.compare fuel heap true left right = some (.ok true) :=
+  compare_stabilized_result_iff heap true left right (.ok true)
+
 /-- Extra private objects cannot turn a non-true equality into true at native runtime fuel. -/
 theorem RuntimeLayout.compare_equal_true_native {logical physical : Heap} {rename : Nat → Nat}
     (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
     (left right : Value) (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length) :
-    HeapSort.compare (physical.length + 1) physical true (relocateValue rename left) (relocateValue rename right) =
-        some (.ok true) ↔ HeapSort.compare (logical.length + 1) logical true left right = some (.ok true) := by
+    HeapSort.compare (HeapSort.comparisonFuel physical) physical true (relocateValue rename left) (relocateValue rename right) =
+        some (.ok true) ↔ HeapSort.compare (HeapSort.comparisonFuel logical) logical true left right = some (.ok true) := by
   constructor
   · intro compared
     rw [layout.compareFuel closed _ true left right leftInside rightInside] at compared

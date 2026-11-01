@@ -79,7 +79,7 @@ theorem relocated_cycles_unresolved (logical physical : Mutable.Heap) (rename : 
     (leftFound : logical[left]? = some (comparisonObject isTuple (.ref left :: xs)))
     (rightFound : logical[right]? = some (comparisonObject isTuple (.ref right :: ys)))
     (equality : Bool) :
-    HeapSort.compare (physical.length + 1) physical equality (.ref (rename left)) (.ref (rename right)) = none := by
+    HeapSort.compare (HeapSort.comparisonFuel physical) physical equality (.ref (rename left)) (.ref (rename right)) = none := by
   exact layout.compare_stabilized_unresolved closed equality (.ref left) (.ref right)
     (List.getElem?_eq_some_iff.mp leftFound).1 (List.getElem?_eq_some_iff.mp rightFound).1
     (leading_cycles_unresolved logical isTuple left right xs ys different lengths leftFound rightFound _ equality) _

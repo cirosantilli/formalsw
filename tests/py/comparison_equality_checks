@@ -57,7 +57,7 @@ theorem nested_numeric_native (heap : Mutable.Heap) (outer inner : Bool) (flag :
     (rightFound : heap[right]? = some (comparisonObject outer [.ref b]))
     (aFound : heap[a]? = some (comparisonObject inner [.scalar (.bool flag)]))
     (bFound : heap[b]? = some (comparisonObject inner [.scalar (.int (if flag then 1 else 0))])) :
-    HeapSort.compare (heap.length + 1) heap true (.ref left) (.ref right) = some (.ok true) := by
+    HeapSort.compare (HeapSort.comparisonFuel heap) heap true (.ref left) (.ref right) = some (.ok true) := by
   apply (compare_equal_true_native_iff heap (.ref left) (.ref right)).mpr
   refine ⟨3, (compare_equal_true_iff _ _ _ _).mpr ?_⟩
   exact Or.inr ⟨outer, [.ref a], [.ref b], leftFound, rightFound,
@@ -97,15 +97,15 @@ theorem nested_numeric_source (heap : Mutable.Heap) (outer inner negate : Bool) 
 /-- Cyclic objects use the same reflexivity theorem as all other valid references. -/
 theorem cyclic_identity (heap : Mutable.Heap) (address : Nat) (isTuple : Bool) (tail : List Mutable.Value)
     (found : heap[address]? = some (comparisonObject isTuple (.ref address :: tail))) :
-    HeapSort.compare (heap.length + 1) heap true (.ref address) (.ref address) = some (.ok true) :=
-  compare_equal_reflexive heap heap.length (.ref address) (List.getElem?_eq_some_iff.mp found).1
+    HeapSort.compare (HeapSort.comparisonFuel heap) heap true (.ref address) (.ref address) = some (.ok true) :=
+  compare_equal_reflexive heap _ (.ref address) (List.getElem?_eq_some_iff.mp found).1
 
 /-- A failed or unsupported logical equality cannot become true after extra allocations. -/
 theorem no_new_equality (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (layout : RuntimeLayout logical physical rename) (closed : Closed logical) (left right : Mutable.Value)
     (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length)
-    (notEqual : HeapSort.compare (logical.length + 1) logical true left right ≠ some (.ok true)) :
-    HeapSort.compare (physical.length + 1) physical true (relocateValue rename left) (relocateValue rename right) ≠
+    (notEqual : HeapSort.compare (HeapSort.comparisonFuel logical) logical true left right ≠ some (.ok true)) :
+    HeapSort.compare (HeapSort.comparisonFuel physical) physical true (relocateValue rename left) (relocateValue rename right) ≠
       some (.ok true) := by
   intro equal
   exact notEqual ((layout.compare_equal_true_native closed left right leftInside rightInside).mp equal)
@@ -140,6 +140,7 @@ THEOREMS = [
     "EqualAt.equivalence",
     "equalAt_stabilized",
     "compare_equal_true_stabilized",
+    "compare_equal_true_linear_iff",
     "compare_equal_true_native_iff",
     "RuntimeLayout.compare_equal_true_native",
     "equalityOutcome_true_iff",

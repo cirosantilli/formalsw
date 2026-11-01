@@ -176,7 +176,7 @@ abbrev keyDictionariesEqual := equalKeyDictionaries
 the heap-derived depth bound or needing unmodeled element protocols remain unsupported. -/
 def sequenceCompare (equality : Bool) (left right : Value) : Eval Value := do
   let heap ← get
-  match HeapSort.compare (heap.length+1) heap equality left right with
+  match HeapSort.compare (HeapSort.comparisonFuel heap) heap equality left right with
   | none => Mutable.unsupported
   | some (.error exception) => throw exception
   | some (.ok answer) => return .scalar (.bool answer)

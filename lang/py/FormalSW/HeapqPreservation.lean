@@ -79,7 +79,7 @@ theorem preserves_receiver (invariant : Heap → Prop) (value : Value) :
 theorem preserves_less (invariant : Heap → Prop) (left right : Value) :
     Preserves invariant (less left right) := by
   intro heap outcome after holds finished
-  cases compared : HeapSort.compare (heap.length + 1) heap false left right with
+  cases compared : HeapSort.compare (HeapSort.comparisonFuel heap) heap false left right with
   | none => simp [less, compared, Mutable.unsupported] at finished
   | some result => cases result <;> simp_all [less]
 

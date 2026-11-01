@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""
+Check complete comparison relocation, old-result preservation and cyclic dispatch.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def equal(left, right):
+    return left == right
+
+
+def ordered(left, right):
+    return left < right
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace ComparisonCompleteExamples
+set_option Elab.async false
+
+theorem source_returns (heap : Mutable.Heap) (ordering : Bool) (left right : Mutable.Value) (answer : Bool)
+    (compared : HeapCalls.compare (if ordering then .lt else .eq) left right heap =
+      some (.ok (.scalar (.bool answer)), heap)) :
+    ReturnsValue Probe.module (if ordering then "ordered" else "equal") [left, right]
+      heap (.scalar (.bool answer)) heap := by
+  cases ordering <;> apply BlockReturns.function rfl rfl <;>
+    exact BlockReturns.return_value (Evaluates.compare (Evaluates.lookup rfl) (Evaluates.lookup rfl) compared)
+
+theorem paired_source (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
+    (ordering : Bool) (left right : Mutable.Value) (answer : Bool)
+    (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length)
+    (compared : HeapCalls.compare (if ordering then .lt else .eq) left right logical =
+      some (.ok (.scalar (.bool answer)), logical)) :
+    ReturnsValue Probe.module (if ordering then "ordered" else "equal") [left, right]
+        logical (.scalar (.bool answer)) logical ∧
+      ReturnsValue Probe.module (if ordering then "ordered" else "equal")
+        [relocateValue rename left, relocateValue rename right] physical (.scalar (.bool answer)) physical := by
+  have other := layout.compare_complete closed (if ordering then .lt else .eq) left right leftInside rightInside
+  rw [compared] at other
+  exact ⟨source_returns logical ordering left right answer compared,
+    source_returns physical ordering (relocateValue rename left) (relocateValue rename right) answer other⟩
+
+/-- Unsupported results now transport without a nonrecursive-comparison restriction. -/
+theorem paired_unsupported (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
+    (op : CmpOp) (left right : Mutable.Value)
+    (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length)
+    (unsupported : HeapCalls.compare op left right logical = none) :
+    HeapCalls.compare op (relocateValue rename left) (relocateValue rename right) physical = none := by
+  rw [layout.compare_complete closed op left right leftInside rightInside, unsupported]
+  rfl
+
+/-- A cyclic leading pair remains unresolved regardless of later contents. -/
+theorem cyclic_unresolved (heap : Mutable.Heap) (isTuple : Bool) (left right : Nat)
+    (xs ys : List Mutable.Value) (different : left ≠ right) (lengths : xs.length = ys.length)
+    (leftFound : heap[left]? = some (comparisonObject isTuple (.ref left :: xs)))
+    (rightFound : heap[right]? = some (comparisonObject isTuple (.ref right :: ys)))
+    (fuel : Nat) (equality : Bool) :
+    HeapSort.compare fuel heap equality (.ref left) (.ref right) = none := by
+  induction fuel generalizing equality with
+  | zero => rfl
+  | succ fuel ih =>
+    cases isTuple <;> cases equality <;>
+      simp [comparisonObject] at leftFound rightFound <;>
+      simp [HeapSort.compare, leftFound, rightFound, different, lengths, HeapSort.lex, ih]
+
+theorem cyclic_dispatch (heap : Mutable.Heap) (isTuple negate : Bool) (left right : Nat)
+    (xs ys : List Mutable.Value) (different : left ≠ right) (lengths : xs.length = ys.length)
+    (leftFound : heap[left]? = some (comparisonObject isTuple (.ref left :: xs)))
+    (rightFound : heap[right]? = some (comparisonObject isTuple (.ref right :: ys))) :
+    HeapCalls.compare (if negate then .notEq else .eq) (.ref left) (.ref right) heap = none := by
+  rw [compare_equal_sequences heap isTuple negate left right _ _ leftFound rightFound]
+  have recursive := cyclic_unresolved heap isTuple left right xs ys different lengths leftFound rightFound
+    (HeapSort.comparisonFuel heap) true
+  simp [different, HeapCalls.equalLists, HeapCalls.equalElements, lengths, recursive]
+
+/-- The actual cyclic primitive stays unsupported after arbitrary private allocations. -/
+theorem relocated_cyclic_dispatch (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
+    (isTuple negate : Bool) (left right : Nat) (xs ys : List Mutable.Value)
+    (different : left ≠ right) (lengths : xs.length = ys.length)
+    (leftFound : logical[left]? = some (comparisonObject isTuple (.ref left :: xs)))
+    (rightFound : logical[right]? = some (comparisonObject isTuple (.ref right :: ys))) :
+    HeapCalls.compare (if negate then .notEq else .eq) (.ref (rename left)) (.ref (rename right)) physical = none :=
+  paired_unsupported logical physical rename layout closed _ (.ref left) (.ref right)
+    (List.getElem?_eq_some_iff.mp leftFound).1 (List.getElem?_eq_some_iff.mp rightFound).1
+    (cyclic_dispatch logical isTuple negate left right xs ys different lengths leftFound rightFound)
+
+/-- A proved-equal replacement preserves an unsupported comparison, not just true equalities. -/
+theorem substitute_unsupported (heap : Mutable.Heap) (left replacement right : Mutable.Value)
+    (equal : HeapSort.compare (HeapSort.comparisonFuel heap) heap true left replacement = some (.ok true))
+    (unsupported : HeapSort.compare (HeapSort.comparisonFuel heap) heap true left right = none) :
+    HeapSort.compare (HeapSort.comparisonFuel heap) heap true replacement right = none := by
+  rw [← compare_equality_native_substitute heap left replacement right equal]
+  exact unsupported
+
+end ComparisonCompleteExamples
+'''
+THEOREMS = [
+    'FormalSW.PyAst.Mutable.Relocation.compare_native_result',
+    'FormalSW.PyAst.Mutable.Relocation.compare_native_unsupported_iff',
+    'FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.compare_native',
+    'FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.sequenceCompare_complete',
+    'FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.compare_equal_sequences_complete',
+    'FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.compare_sequences_complete',
+    'FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.compare_complete',
+    'FormalSW.PyAst.Mutable.Relocation.lex_equality_symmetric',
+    'FormalSW.PyAst.Mutable.Relocation.compare_equality_symmetric',
+    'FormalSW.PyAst.Mutable.Relocation.lex_equality_substitute',
+    'FormalSW.PyAst.Mutable.Relocation.compare_equality_substitute',
+    'FormalSW.PyAst.Mutable.Relocation.compare_equality_substitute_right',
+    'FormalSW.PyAst.Mutable.Relocation.compare_equality_native_substitute',
+    'FormalSW.PyAst.HeapSort.comparisonFuel_mono',
+    'FormalSW.PyAst.HeapSort.comparisonFuel_ge_linear',
+    'ComparisonCompleteExamples.source_returns',
+    'ComparisonCompleteExamples.paired_source',
+    'ComparisonCompleteExamples.paired_unsupported',
+    'ComparisonCompleteExamples.cyclic_unresolved',
+    'ComparisonCompleteExamples.cyclic_dispatch',
+    'ComparisonCompleteExamples.relocated_cyclic_dispatch',
+    'ComparisonCompleteExamples.substitute_unsupported',
+]
+
+with project_temporary_directory(prefix="comparison-complete-") as temporary:
+    directory = Path(temporary)
+    source = directory / "source.py"
+    source.write_text(SOURCE)
+    module = api["source_module"](source)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.ComparisonComplete\nimport lang.py.FormalSW.ComparisonCongruence\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in THEOREMS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(THEOREMS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"complete comparison relocation: all outcomes, cyclic dispatch and equal substitutions; {len(THEOREMS)} axiom audits passed")

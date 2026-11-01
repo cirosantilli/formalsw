@@ -36,7 +36,7 @@ def swap (address left right : Nat) : Eval Unit := do
 
 def less (left right : Value) : Eval Bool := do
   let heap ← get
-  match HeapSort.compare (heap.length + 1) heap false left right with
+  match HeapSort.compare (HeapSort.comparisonFuel heap) heap false left right with
   | some (.ok answer) => return answer
   | some (.error exception) => throw exception
   | none => Mutable.unsupported

@@ -1,6 +1,6 @@
 import lang.py.FormalSW.ComparisonRelocation
 
-/-! Finite stabilization of recursive comparisons, without changing runtime fuel. -/
+/-! A complete runtime allowance for recursive comparisons on arbitrary finite heaps. -/
 namespace FormalSW.PyAst.Mutable.Relocation
 set_option Elab.async false
 
@@ -110,8 +110,7 @@ theorem length_comparisonCoordinates (size : Nat) :
   simp [comparisonCoordinates, List.length_flatMap, List.map_const', List.sum_replicate_nat,
     Nat.two_mul, Nat.add_mul]
 
-/-- This is a proof bound, not the interpreter's native heap-length allowance.
-It covers cycles, unsupported comparisons, exceptions, and even dangling references. -/
+/-- The runtime allowance reaches a fixed point. This covers cycles, unsupported comparisons, exceptions, and even dangling references. -/
 theorem compare_stabilized (heap : Heap) (extra : Nat) (equality : Bool) (left right : Value) :
     HeapSort.compare (2 * heap.length * heap.length + 1 + extra) heap equality left right =
       HeapSort.compare (2 * heap.length * heap.length + 1) heap equality left right := by
@@ -169,8 +168,7 @@ theorem compare_stabilized_result_iff (heap : Heap) (equality : Bool) (left righ
       equality left right outcome completed
     simpa only [Nat.add_comm fuel, compare_stabilized] using later
 
-/-- Stabilized comparisons agree across layouts, including unsupported results.
-The separate claim at each heap's native linear allowance is not assumed here. -/
+/-- Runtime comparisons agree across layouts, including unsupported results. -/
 theorem RuntimeLayout.compare_stabilized {logical physical : Heap} {rename : Nat → Nat}
     (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
     (equality : Bool) (left right : Value)

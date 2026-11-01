@@ -185,7 +185,7 @@ theorem compare_sequences_readonly (heap : Heap) (isTuple : Bool) (op : CmpOp)
     rw [source]
     cases shallow : (if a = b then some true else HeapCalls.equalLists xs ys) with
     | some answer => exact ⟨some (.ok answer), rfl⟩
-    | none => exact ⟨HeapSort.compare (heap.length + 1) heap true (.ref a) (.ref b), rfl⟩
+    | none => exact ⟨HeapSort.compare (HeapSort.comparisonFuel heap) heap true (.ref a) (.ref b), rfl⟩
   | notEq =>
     have source := compare_equal_sequences heap isTuple true a b xs ys first second
     simp only [↓reduceIte] at source
@@ -193,8 +193,8 @@ theorem compare_sequences_readonly (heap : Heap) (isTuple : Bool) (op : CmpOp)
     cases shallow : (if a = b then some true else HeapCalls.equalLists xs ys) with
     | some answer => exact ⟨some (.ok (!answer)), rfl⟩
     | none =>
-      refine ⟨(HeapSort.compare (heap.length + 1) heap true (.ref a) (.ref b)).map (Except.map Bool.not), ?_⟩
-      cases HeapSort.compare (heap.length + 1) heap true (.ref a) (.ref b) with
+      refine ⟨(HeapSort.compare (HeapSort.comparisonFuel heap) heap true (.ref a) (.ref b)).map (Except.map Bool.not), ?_⟩
+      cases HeapSort.compare (HeapSort.comparisonFuel heap) heap true (.ref a) (.ref b) with
       | none => rfl
       | some outcome => cases outcome <;> rfl
   | lt =>

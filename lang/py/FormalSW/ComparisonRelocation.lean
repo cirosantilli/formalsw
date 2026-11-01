@@ -210,22 +210,24 @@ theorem RuntimeLayout.compare_result {logical physical : Heap} {rename : Nat →
     (equality : Bool) (left right : Value)
     (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length)
     (outcome : Except ExceptionObject Bool)
-    (executed : HeapSort.compare (logical.length + 1) logical equality left right = some outcome) :
-    HeapSort.compare (physical.length + 1) physical equality
+    (executed : HeapSort.compare (HeapSort.comparisonFuel logical) logical equality left right = some outcome) :
+    HeapSort.compare (HeapSort.comparisonFuel physical) physical equality
       (relocateValue rename left) (relocateValue rename right) = some outcome := by
-  have same := layout.compareFuel closed (logical.length + 1) equality left right leftInside rightInside
+  have same := layout.compareFuel closed (HeapSort.comparisonFuel logical) equality left right leftInside rightInside
   rw [executed] at same
-  have retained := compare_extends physical (logical.length + 1) (physical.length - logical.length)
+  have retained := compare_extends physical (HeapSort.comparisonFuel logical)
+    (HeapSort.comparisonFuel physical - HeapSort.comparisonFuel logical)
     equality (relocateValue rename left) (relocateValue rename right) outcome same
-  have size := layout.length_le
-  have allowance : logical.length + 1 + (physical.length - logical.length) = physical.length + 1 := by omega
+  have size := HeapSort.comparisonFuel_mono logical physical layout.length_le
+  have allowance : HeapSort.comparisonFuel logical +
+      (HeapSort.comparisonFuel physical - HeapSort.comparisonFuel logical) = HeapSort.comparisonFuel physical := by omega
   simpa only [allowance] using retained
 
 theorem sequenceCompare_eq (heap : Heap) (equality : Bool) (left right : Value) :
     HeapCalls.sequenceCompare equality left right heap =
-      (HeapSort.compare (heap.length + 1) heap equality left right).map
+      (HeapSort.compare (HeapSort.comparisonFuel heap) heap equality left right).map
         (fun result => (result.map (fun answer => Value.scalar (.bool answer)), heap)) := by
-  cases compared : HeapSort.compare (heap.length + 1) heap equality left right with
+  cases compared : HeapSort.compare (HeapSort.comparisonFuel heap) heap equality left right with
   | none => simp [HeapCalls.sequenceCompare, eval_bind, compared, unsupported]
   | some outcome => cases outcome <;> simp [HeapCalls.sequenceCompare, eval_bind, compared, Except.map]
 
@@ -234,7 +236,7 @@ theorem sequenceCompare_keeps_heap (heap after : Heap) (equality : Bool) (left r
     (outcome : Except ExceptionObject Value)
     (executed : HeapCalls.sequenceCompare equality left right heap = some (outcome, after)) : after = heap := by
   rw [sequenceCompare_eq] at executed
-  cases compared : HeapSort.compare (heap.length + 1) heap equality left right with
+  cases compared : HeapSort.compare (HeapSort.comparisonFuel heap) heap equality left right with
   | none => simp [compared] at executed
   | some result =>
     simp only [compared, Option.map_some, Option.some.injEq, Prod.mk.injEq] at executed
@@ -249,7 +251,7 @@ theorem RuntimeLayout.sequenceCompare {logical physical : Heap} {rename : Nat �
     HeapCalls.sequenceCompare equality (relocateValue rename left) (relocateValue rename right) physical =
       some (outcome.map (relocateValue rename), physical) := by
   rw [sequenceCompare_eq] at executed ⊢
-  cases compared : HeapSort.compare (logical.length + 1) logical equality left right with
+  cases compared : HeapSort.compare (HeapSort.comparisonFuel logical) logical equality left right with
   | none => simp [compared] at executed
   | some result =>
     have other := layout.compare_result closed equality left right leftInside rightInside result compared
@@ -356,14 +358,14 @@ theorem compare_equal_sequences (heap : Heap) (isTuple negate : Bool)
     HeapCalls.compare (if negate then .notEq else .eq) (.ref left) (.ref right) heap =
       match (if left = right then some true else HeapCalls.equalLists xs ys) with
       | some equal => some (.ok (.scalar (.bool (if negate then !equal else equal))), heap)
-      | none => (HeapSort.compare (heap.length + 1) heap true (.ref left) (.ref right)).map
+      | none => (HeapSort.compare (HeapSort.comparisonFuel heap) heap true (.ref left) (.ref right)).map
           (fun outcome => (outcome.map (fun equal => Value.scalar (.bool (if negate then !equal else equal))), heap)) := by
   cases shallow : (if left = right then some true else HeapCalls.equalLists xs ys) with
   | some equal =>
     cases isTuple <;> cases negate <;>
       simp [HeapCalls.compare, comparisonObject, Mutable.array, leftFound, rightFound, eval_bind, shallow] <;> rfl
   | none =>
-    cases recursive : HeapSort.compare (heap.length + 1) heap true (.ref left) (.ref right) with
+    cases recursive : HeapSort.compare (HeapSort.comparisonFuel heap) heap true (.ref left) (.ref right) with
     | none =>
       cases isTuple <;> cases negate <;>
         simp [HeapCalls.compare, comparisonObject, Mutable.array, leftFound, rightFound, eval_bind,
@@ -407,7 +409,7 @@ theorem RuntimeLayout.compare_equal_sequences {logical physical : Heap} {rename 
     rw [← executed.1]
     rfl
   | none =>
-    cases recursive : HeapSort.compare (logical.length + 1) logical true (.ref left) (.ref right) with
+    cases recursive : HeapSort.compare (HeapSort.comparisonFuel logical) logical true (.ref left) (.ref right) with
     | none => simp [shallow, recursive] at executed
     | some result =>
       have other := layout.compare_result closed true (.ref left) (.ref right) leftInside rightInside result recursive
