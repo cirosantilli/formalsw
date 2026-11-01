@@ -1,4 +1,4 @@
-import lang.py.FormalSW.IteratorExecutionIsolation
+import lang.py.FormalSW.IteratorAllocatingOutcome
 
 /-! Composable source traces with explicit allocations preserve private consumer objects. -/
 namespace FormalSW.PyAst.IteratorCalls
@@ -41,6 +41,13 @@ inductive AllocatingTrace (module : Module) (anchors : Nat) (choices : ChoiceSch
         (.running ⟨⟨.operation .list items, stack, heap⟩, used⟩ resumes)
         (heap ++ [.list items])
         (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [.list items]⟩, used⟩ resumes)
+  | setAllocation (heap after : Mutable.Heap) (builtin : Builtin) (values items : List Mutable.Value)
+      (stack : List Frame) (used : Nat) (resumes : List Resume) (outcome : Except ExceptionObject Mutable.Value)
+      (input : SetAllocationInput heap builtin values items)
+      (allocated : Mutable.allocateSetValues items heap = some (outcome, after)) :
+      AllocatingTrace module anchors choices globals heap
+        (.running ⟨⟨.operation (.builtin builtin) values, stack, heap⟩, used⟩ resumes)
+        after (allocationResult anchors used globals after stack resumes outcome)
   | dictionary (heap : Mutable.Heap) (entries : List (Constant × Mutable.Value)) (env : HeapCalls.Env)
       (stack : List Frame) (used : Nat) (resumes : List Resume) :
       AllocatingTrace module anchors choices globals heap
@@ -103,6 +110,7 @@ theorem AllocatingTrace.heaps {module : Module} {anchors : Nat} {choices : Choic
   induction trace with
   | stable firstHeap finalHeap => exact ⟨firstHeap, finalHeap⟩
   | list | dictionary | tuple | newInstance | initializedInstance | dataInstance => exact ⟨rfl, rfl⟩
+  | setAllocation _ _ _ _ _ _ _ _ outcome _ _ => cases outcome <;> exact ⟨rfl, rfl⟩
   | trans _ _ left right => exact ⟨left.1, right.2⟩
 
 theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : ChoiceSchedule}
@@ -112,6 +120,8 @@ theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : Cho
   induction trace with
   | stable _ _ _ ran => exact ran
   | list | dictionary => exact .next (core_next rfl rfl) .refl
+  | setAllocation heap after builtin values items stack used resumes outcome input allocated =>
+    exact .next (setAllocation_step module anchors used choices globals heap after builtin values items stack resumes outcome input allocated) .refl
   | tuple heap after items address stack used resumes allocated =>
     apply Reaches.next (core_next rfl ?_) .refl
     simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, primitive, result, run, allocated]

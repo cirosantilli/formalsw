@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""
+Check iterator set construction, shared keys, partial failures and private consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Collector:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = {self.first, self.second}
+        return "123"
+
+def copy(items):
+    return set(items)
+
+
+def empty():
+    return set()
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace SetIteratorExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Collector").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def fieldExpr (name : String) : Expr := .attribute (.name "self") name
+def tail : List Stmt := [.return (.constant (.string "123"))]
+def body : List Stmt := .assign [fieldExpr "link"] (.builtinCall .setDisplay [fieldExpr "first", fieldExpr "second"]) :: tail
+def env (address : Nat) := functionEnv args body [.ref address] []
+def methodHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :
+    Except ExceptionObject Mutable.Value → Mutable.Heap
+  | .ok result => heap.set address (.instance classInfo.1 "Collector" (Mutable.putField fields "link" result))
+  | .error _ => heap
+def text (s : String) : Mutable.Value := .scalar (.string s)
+def methodOutcome (outcome : Except ExceptionObject Mutable.Value) := outcome.map (fun _ => text "123")
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class : Probe.module.findClass "Collector" = some classInfo := rfl
+theorem source_next : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args body)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Collector"
+    "__next__" fields classInfo.2 found source_class
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem field_read (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (name : String) (ordinary : name ≠ "__class__" ∧ name ≠ "__dict__" ∧ name ≠ "__weakref__") (value : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (field : fields.lookup name = some value) :
+    Evaluates Probe.module (env address) (fieldExpr name) heap value heap := by
+  apply Evaluates.field (Evaluates.lookup rfl)
+  simp [getAttribute, Mutable.eval_bind, found, instanceClass, source_class, field, ordinary.1, ordinary.2.1, ordinary.2.2]
+
+theorem method_trace (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (first second : Mutable.Value)
+    (outcome : Except ExceptionObject Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getFirst : fields.lookup "first" = some first) (getSecond : fields.lookup "second" = some second)
+    (allocated : Mutable.allocateSetValues [first, second] heap = some (outcome, after)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.method (.ref address) args body) [], [], heap⟩, used⟩ [])
+      (methodHeap after address fields outcome)
+      (.completed (.ok ⟨methodOutcome outcome, [], methodHeap after address fields outcome, heap.length⟩) used []) := by
+  let frame := Frame.assignAttribute (.name "self") "link" tail (env address)
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.method (.ref address) args body) [], [], heap⟩
+      ⟨.operation (.builtin .setDisplay) [first, second], [frame], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl
+      (Evaluates.arguments_reach (.cons (field_read heap address fields "first" (by decide) first found getFirst)
+        (.cons (field_read heap address fields "second" (by decide) second found getSecond) .nil))
+        (.builtin .setDisplay) [] heap.length [frame])))
+  have retained : after[address]? = some (.instance classInfo.1 "Collector" fields) := by
+    obtain ⟨extra, rfl⟩ := Heapq.allocateSetValues_prefix [first, second] heap outcome after allocated
+    rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+    exact found
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.builtin .setDisplay) [first, second], [frame], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · have built := AllocatingTrace.setAllocation (module := Probe.module) (anchors := heap.length) (choices := choices) (globals := [])
+      heap after .setDisplay [first, second] [first, second] [frame] used [] outcome (.display _) allocated
+    cases outcome with
+    | error error => exact built
+    | ok result =>
+      have write := Mutable.writeField_result (name := "link") (value := result) retained (by simp)
+      have assigned : HeapCalls.Reaches Probe.module heap.length
+          ⟨.value result, [frame], after⟩
+          ⟨.block tail (env address), [], methodHeap after address fields (.ok result)⟩ := by
+        apply HeapCalls.Reaches.next rfl
+        apply (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) .nil)
+          (.setField "link" result) [] heap.length _).trans
+        exact .next (following := ⟨.value (.scalar .none), [.discard tail (env address)], methodHeap after address fields (.ok result)⟩)
+          (by simp [HeapCalls.step, primitive, HeapCalls.result, run, write, methodHeap]) (.next rfl .refl)
+      have returned : BlockReturns Probe.module (env address) tail (methodHeap after address fields (.ok result))
+          (text "123") (methodHeap after address fields (.ok result)) := BlockReturns.return_value Evaluates.constant
+      exact built.trans (.stable rfl rfl (by simp [methodHeap])
+        ((IteratorCalls.Reaches.of_heap (assigned.trans (returned heap.length [])) []).trans (.next (core_done rfl rfl) .refl)))
+
+theorem next_run (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (first second : Mutable.Value)
+    (outcome : Except ExceptionObject Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getFirst : fields.lookup "first" = some first) (getSecond : fields.lookup "second" = some second)
+    (allocated : Mutable.allocateSetValues [first, second] heap = some (outcome, after)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (methodOutcome outcome)
+      (methodHeap after address fields outcome) used :=
+  ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], next_bound heap address fields found,
+    method_trace choices used heap after address fields first second outcome found getFirst getSecond allocated⟩
+
+theorem scalar_prefix (n : Nat) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (first second : Constant)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getFirst : fields.lookup "first" = some (.scalar first)) (getSecond : fields.lookup "second" = some (.scalar second)) :
+    ∃ after, AllocatingYieldPrefix Probe.module choices (.ref address) text heap used (List.replicate n "123") after used ∧
+      after.length = heap.length + n := by
+  induction n generalizing heap fields with
+  | zero => exact ⟨heap, .nil, by simp⟩
+  | succ n ih =>
+      let middle := heap ++ [Mutable.Object.set ([first, second].foldl ScalarSet.insert [])]
+      let nextFields := Mutable.putField fields "link" (.ref heap.length)
+      let nextHeap := methodHeap middle address fields (.ok (.ref heap.length))
+      have ran := next_run choices used heap middle address fields (.scalar first) (.scalar second) (.ok (.ref heap.length))
+        found getFirst getSecond (Mutable.allocateSetValues_scalars heap [first, second])
+      have bounded := (List.getElem?_eq_some_iff.mp found).1
+      obtain ⟨after, later, size⟩ := ih nextHeap nextFields
+        (by simp [nextHeap, methodHeap, middle, nextFields, show address < heap.length + 1 by omega])
+        (by simpa [nextFields, Mutable.putField_lookup_other] using getFirst)
+        (by simpa [nextFields, Mutable.putField_lookup_other] using getSecond)
+      refine ⟨after, .cons ran later, ?_⟩
+      simp only [nextHeap, methodHeap, middle, List.length_set, List.length_append, List.length_singleton] at size
+      omega
+
+theorem tuple_then_list (heap : Mutable.Heap) (tupleAddress listAddress : Nat)
+    (contents : List Constant) (items : List Mutable.Value)
+    (tupleFound : heap[tupleAddress]? = some (.tuple (contents.map Mutable.Value.scalar)))
+    (listFound : heap[listAddress]? = some (.list items)) :
+    Mutable.allocateSetValues [.ref tupleAddress, .ref listAddress] heap =
+      some (.error {typeName := "TypeError", args := []},
+        heap ++ [.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]]) := by
+  let allocated := heap ++ [Mutable.Object.set []]
+  let inserted := heap ++ [Mutable.Object.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]]
+  have tupleInside := (List.getElem?_eq_some_iff.mp tupleFound).1
+  have listInside := (List.getElem?_eq_some_iff.mp listFound).1
+  have tupleNow : allocated[tupleAddress]? = some (.tuple (contents.map Mutable.Value.scalar)) := by
+    simpa only [allocated, List.getElem?_append_left tupleInside] using tupleFound
+  have listNow : inserted[listAddress]? = some (.list items) := by
+    simpa only [inserted, List.getElem?_append_left listInside] using listFound
+  have hashed := Mutable.hashKey_tuple_scalars allocated tupleAddress contents tupleNow
+  have first : Mutable.addItem heap.length (.ref tupleAddress) allocated = some (.ok (.scalar .none), inserted) := by
+    simp [Mutable.addItem, hashed, Mutable.eval_bind, Except.map, Mutable.insertKey,
+      Mutable.keyContains, allocated, inserted]
+  have setAfter : inserted[heap.length]? =
+      some (.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]) := by simp [inserted]
+  have second : Mutable.addItem heap.length (.ref listAddress) inserted =
+      some (.error {typeName := "TypeError", args := []}, inserted) := by
+    simp [Mutable.addItem, setAfter, Mutable.hashKey, Mutable.keyOf, Mutable.keyOfFuel,
+      listNow, Mutable.eval_bind]
+  simp [allocateSetValues_eq, scalarValues, Mutable.allocateSet, List.mapM_cons, List.mapM_nil,
+    Mutable.eval_bind, show heap ++ [.set []] = allocated from rfl, first, second]
+  simp [Except.map, inserted]
+
+
+theorem partial_next (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (address tupleAddress listAddress : Nat) (fields : List (String × Mutable.Value))
+    (contents : List Constant) (items : List Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getFirst : fields.lookup "first" = some (.ref tupleAddress)) (getSecond : fields.lookup "second" = some (.ref listAddress))
+    (tupleFound : heap[tupleAddress]? = some (.tuple (contents.map Mutable.Value.scalar)))
+    (listFound : heap[listAddress]? = some (.list items)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (.error ⟨"TypeError", []⟩)
+      (heap ++ [.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]]) used :=
+  next_run choices used heap _ address fields (.ref tupleAddress) (.ref listAddress) (.error ⟨"TypeError", []⟩)
+    found getFirst getSecond (tuple_then_list heap tupleAddress listAddress contents items tupleFound listFound)
+
+theorem isolated_partial (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address privateAddress tupleAddress listAddress : Nat)
+    (fields : List (String × Mutable.Value)) (contents : List Constant) (items : List Mutable.Value)
+    (object : Mutable.Object) (nonempty : object ≠ .tuple [])
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getFirst : fields.lookup "first" = some (.ref tupleAddress)) (getSecond : fields.lookup "second" = some (.ref listAddress))
+    (tupleFound : logical[tupleAddress]? = some (.tuple (contents.map Mutable.Value.scalar)))
+    (listFound : logical[listAddress]? = some (.list items)) :
+    ∃ other nextMap,
+      PrivateLayout (logical ++ [.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]]) other nextMap privateAddress object ∧
+      other[nextMap logical.length]? = some (.keySet [(.tuple (contents.map HashKey.scalar), .ref (rename tupleAddress))]) ∧
+      ∀ loop resumes, ExitResult Probe.module choices anchors
+        (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        loop resumes other used (.error ⟨"TypeError", []⟩) := by
+  obtain ⟨other, nextMap, extended, kept, exited⟩ :=
+    (partial_next choices used logical address tupleAddress listAddress fields contents items found getFirst getSecond tupleFound listFound).exit_isolated
+      source physical rename layout.layout anchors
+  have stored := extended.layout.runtime.lookup logical.length
+    (.keySet [(.tuple (contents.map HashKey.scalar), .ref tupleAddress)]) (by simp)
+  refine ⟨other, nextMap, kept privateAddress object nonempty layout, ?_, fun loop resumes => exited loop resumes⟩
+  simpa [relocateObject, relocateValue, extended.agrees tupleAddress (List.getElem?_eq_some_iff.mp tupleFound).1] using stored
+
+theorem copy_trace (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (input : Mutable.Value) (items : List Mutable.Value) (outcome : Except ExceptionObject Mutable.Value)
+    (read : setSourceItems input heap = some (.ok items, heap))
+    (allocated : Mutable.allocateSetValues items heap = some (outcome, after)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "copy") [input], [], heap⟩, used⟩ []) after
+      (.completed (.ok ⟨outcome, [], after, heap.length⟩) used []) := by
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.call "copy") [input], [], heap⟩
+      ⟨.operation (.builtin .set) [input], [], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl
+      (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) .nil) (.builtin .set) [] heap.length [])))
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.builtin .set) [input], [], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · have built := AllocatingTrace.setAllocation (module := Probe.module) (anchors := heap.length) (choices := choices) (globals := [])
+      heap after .set [input] items [] used [] outcome (.source input items read) allocated
+    cases outcome with
+    | error error => exact built
+    | ok value => exact built.trans (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+theorem empty_trace (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "empty") [], [], heap⟩, used⟩ []) (heap ++ [.set []])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.set []], heap.length⟩) used []) := by
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.builtin .set) [], [], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (.next (core_next rfl rfl) (.next (core_next rfl rfl) (.next (core_next rfl rfl) .refl)))
+  · exact (AllocatingTrace.setAllocation heap (heap ++ [.set []]) .set [] [] [] used [] (.ok (.ref heap.length)) .empty rfl).trans
+      (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+end SetIteratorExamples
+'''
+AUDITS = ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "allocationResult_within", "allocationResult_relocates", "setDisplay_step", "setAllocation_step",
+    "SetAllocationInput.within", "SetAllocationInput.relocates", "AllocatingTrace.reaches", "AllocatingTrace.isolated",
+)] + ["SetIteratorExamples." + name for name in (
+    "source", "source_class", "source_next", "next_bound", "field_read", "method_trace", "next_run",
+    "scalar_prefix", "tuple_then_list", "partial_next", "isolated_partial", "copy_trace", "empty_trace",
+)]
+
+with project_temporary_directory(prefix="iterator-set-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    first_tuple, second_tuple = tuple([1, 2]), tuple([1, 2])
+    assert first_tuple is not second_tuple
+    for first, second in ((True, 1), (1, True), ("123", "123"), ("123", "234"), (first_tuple, second_tuple)):
+        collector = namespace["Collector"]()
+        collector.first, collector.second = first, second
+        assert iter(collector) is collector
+        previous = []
+        for _ in range(4):
+            assert next(collector) == "123"
+            assert collector.link == {first, second}
+            assert all(collector.link is not item for item in previous)
+            previous.append(collector.link)
+        if first == second:
+            assert next(iter(collector.link)) is first
+    for unhashable in ([], ([],)):
+        collector = namespace["Collector"]()
+        collector.first, collector.second = (1, 2), unhashable
+        original = object()
+        collector.link = original
+        try:
+            next(collector)
+        except TypeError:
+            assert collector.link is original and collector.second is unhashable
+        else:
+            raise AssertionError("expected the second key to fail")
+    for value in ([True, 1], (first_tuple, second_tuple), {"123", "234"}, {"123": 1}, b"123", "1123"):
+        result = namespace["copy"](value)
+        assert result == set(value) and result is not value
+    assert namespace["empty"]() == set()
+    assert namespace["empty"]() is not namespace["empty"]()
+    try:
+        namespace["copy"]([first_tuple, []])
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("expected a constructor error after partial insertion")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAllocatingAcquisition\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"set iterators: arbitrary scalar prefixes, shared tuple keys, retained partial failures and private cells; {len(AUDITS)} axiom audits passed")

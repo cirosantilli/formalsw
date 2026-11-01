@@ -60,6 +60,31 @@ theorem AllocatingTrace.isolated {module : Module} {logicalAnchors : Nat} {choic
         relocateWork, relocateRuntimeOperation, relocateOperation, relocateValue, nextMap, extendMap_new,
         stackSame, resumesSame]
       exact core_next rfl rfl
+  | setAllocation heap after builtin values items stack used resumes outcome input allocated =>
+    let nextMap := extendMap rename heap.length physical.length
+    have agree : ∀ index < heap.length, nextMap index = rename index := extendMap_old _ _ _
+    obtain ⟨other, paired, retained, size, returned⟩ := layout.allocateSetValues items (input.within layout.closed inside.1.2) outcome after allocated
+    have grows : heap.length ≤ after.length := by omega
+    have physicalGrows := HeapGrows.allocateSetValues _ physical _ other paired
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree inside.2.1
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    have globalsSame := relocateGlobals_congr nextMap rename heap.length globals agree globalsInside
+    refine ⟨other, nextMap, ⟨retained, grows, physicalGrows, agree⟩,
+      allocationResult_within _ _ _ _ _ _ _ returned (globalsInside.mono grows)
+        (fun frame member => (inside.2.1 frame member).mono grows)
+        (fun pending member => (inside.2.2 pending member).mono grows), ?_, ?_⟩
+    · intro address object _ saved
+      refine ⟨retained, Heapq.preserves_allocateSetValues (SavedCell address object)
+        (SavedCell.allocates address object) _ physical _ other saved.saved paired, ?_⟩
+      rw [size]
+      exact extendMap_excludes rename heap.length physical.length address saved.excludes
+        (List.getElem?_eq_some_iff.mp saved.saved).1
+    · apply Reaches.next ?_ .refl
+      rw [allocationResult_relocates, stackSame, resumesSame, globalsSame]
+      exact setAllocation_step module physicalAnchors used choices (relocateGlobals rename globals)
+        physical other builtin (values.map (relocateValue rename)) (items.map (relocateValue rename)) (stack.map (relocateFrame rename))
+        (resumes.map (Relocation.relocateResume rename)) (outcome.map (relocateValue nextMap))
+        (input.relocates layout inside.1.2) paired
   | dictionary heap entries env stack used resumes =>
     let nextMap := extendMap rename heap.length physical.length
     let other := physical ++ [Mutable.Object.dict (entries.map fun entry => (entry.1, relocateValue rename entry.2))]

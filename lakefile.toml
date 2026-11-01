@@ -212,6 +212,7 @@ roots = [
   "lang.py.FormalSW.IteratorContinuation",
   "lang.py.FormalSW.IteratorOperationRelocation",
   "lang.py.FormalSW.IteratorExecutionIsolation",
+  "lang.py.FormalSW.IteratorAllocatingOutcome",
   "lang.py.FormalSW.IteratorAllocatingTrace",
   "lang.py.FormalSW.IteratorAllocatingIsolation",
   "lang.py.FormalSW.IteratorAllocatingRun",
