@@ -1,4 +1,5 @@
 import lang.py.FormalSW.IteratorExecutionIsolation
+import lang.py.FormalSW.DictionaryAllocation
 
 /-! Allocating operations retain their heap on success and on ordinary exceptions. -/
 namespace FormalSW.PyAst.IteratorCalls
@@ -89,5 +90,14 @@ theorem setAllocation_step (module : Module) (anchors used : Nat) (choices : Cho
         simpa [setFrom_eq, read, Mutable.eval_bind] using allocated
       cases outcome <;> simp [step, intercept, SetCalls.step, HeapCalls.step, primitive,
         result, run, ran, protectGenerator, done, SetCalls.liftStep, lift, allocationResult]
+
+theorem dictionaryConstruct_step (module : Module) (anchors used : Nat) (choices : ChoiceSchedule)
+    (globals : Mutable.Globals) (heap after : Mutable.Heap) (values : List Mutable.Value)
+    (stack : List Frame) (resumes : List Resume) (outcome : Except ExceptionObject Mutable.Value)
+    (allocated : DictionaryConstructor.construct values heap = some (outcome, after)) :
+    step module anchors choices (.running ⟨⟨.operation (.builtin .dict) values, stack, heap⟩, used⟩ resumes) globals =
+      .next (allocationResult anchors used globals after stack resumes outcome) := by
+  cases outcome <;> simp [step, intercept, SetCalls.step, HeapCalls.step, primitive,
+    result, run, allocated, protectGenerator, done, SetCalls.liftStep, lift, allocationResult]
 
 end FormalSW.PyAst.IteratorCalls

@@ -48,6 +48,13 @@ inductive AllocatingTrace (module : Module) (anchors : Nat) (choices : ChoiceSch
       AllocatingTrace module anchors choices globals heap
         (.running ⟨⟨.operation (.builtin builtin) values, stack, heap⟩, used⟩ resumes)
         after (allocationResult anchors used globals after stack resumes outcome)
+  | dictionaryConstruct (heap after : Mutable.Heap) (values : List Mutable.Value)
+      (stack : List Frame) (used : Nat) (resumes : List Resume) (outcome : Except ExceptionObject Mutable.Value)
+      (arity : values.length ≤ 1)
+      (allocated : DictionaryConstructor.construct values heap = some (outcome, after)) :
+      AllocatingTrace module anchors choices globals heap
+        (.running ⟨⟨.operation (.builtin .dict) values, stack, heap⟩, used⟩ resumes)
+        after (allocationResult anchors used globals after stack resumes outcome)
   | dictionary (heap : Mutable.Heap) (entries : List (Constant × Mutable.Value)) (env : HeapCalls.Env)
       (stack : List Frame) (used : Nat) (resumes : List Resume) :
       AllocatingTrace module anchors choices globals heap
@@ -111,6 +118,7 @@ theorem AllocatingTrace.heaps {module : Module} {anchors : Nat} {choices : Choic
   | stable firstHeap finalHeap => exact ⟨firstHeap, finalHeap⟩
   | list | dictionary | tuple | newInstance | initializedInstance | dataInstance => exact ⟨rfl, rfl⟩
   | setAllocation _ _ _ _ _ _ _ _ outcome _ _ => cases outcome <;> exact ⟨rfl, rfl⟩
+  | dictionaryConstruct _ _ _ _ _ _ outcome _ _ => cases outcome <;> exact ⟨rfl, rfl⟩
   | trans _ _ left right => exact ⟨left.1, right.2⟩
 
 theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : ChoiceSchedule}
@@ -122,6 +130,8 @@ theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : Cho
   | list | dictionary => exact .next (core_next rfl rfl) .refl
   | setAllocation heap after builtin values items stack used resumes outcome input allocated =>
     exact .next (setAllocation_step module anchors used choices globals heap after builtin values items stack resumes outcome input allocated) .refl
+  | dictionaryConstruct heap after values stack used resumes outcome _ allocated =>
+    exact .next (dictionaryConstruct_step module anchors used choices globals heap after values stack resumes outcome allocated) .refl
   | tuple heap after items address stack used resumes allocated =>
     apply Reaches.next (core_next rfl ?_) .refl
     simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, primitive, result, run, allocated]

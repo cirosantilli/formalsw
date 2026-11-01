@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""
+Check iterator dictionary construction, shallow copies, partial failures and private consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Collector:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = dict(self.data)
+        return "123"
+
+
+def copy(items):
+    return dict(items)
+
+
+def empty():
+    return dict()
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace DictionaryIteratorExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Collector").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def fieldExpr (name : String) : Expr := .attribute (.name "self") name
+def tail : List Stmt := [.return (.constant (.string "123"))]
+def body : List Stmt := .assign [fieldExpr "link"] (.builtinCall .dict [fieldExpr "data"]) :: tail
+def env (address : Nat) := functionEnv args body [.ref address] []
+def methodHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :
+    Except ExceptionObject Mutable.Value → Mutable.Heap
+  | .ok result => heap.set address (.instance classInfo.1 "Collector" (Mutable.putField fields "link" result))
+  | .error _ => heap
+def text (s : String) : Mutable.Value := .scalar (.string s)
+def methodOutcome (outcome : Except ExceptionObject Mutable.Value) := outcome.map (fun _ => text "123")
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class : Probe.module.findClass "Collector" = some classInfo := rfl
+theorem source_next : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args body)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Collector"
+    "__next__" fields classInfo.2 found source_class
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem field_read (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (name : String) (ordinary : name ≠ "__class__" ∧ name ≠ "__dict__" ∧ name ≠ "__weakref__") (value : Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (field : fields.lookup name = some value) :
+    Evaluates Probe.module (env address) (fieldExpr name) heap value heap := by
+  apply Evaluates.field (Evaluates.lookup rfl)
+  simp [getAttribute, Mutable.eval_bind, found, instanceClass, source_class, field, ordinary.1, ordinary.2.1, ordinary.2.2]
+
+theorem method_trace (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (data : Mutable.Value)
+    (outcome : Except ExceptionObject Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some data)
+    (allocated : DictionaryConstructor.construct [data] heap = some (outcome, after)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.method (.ref address) args body) [], [], heap⟩, used⟩ [])
+      (methodHeap after address fields outcome)
+      (.completed (.ok ⟨methodOutcome outcome, [], methodHeap after address fields outcome, heap.length⟩) used []) := by
+  let frame := Frame.assignAttribute (.name "self") "link" tail (env address)
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.method (.ref address) args body) [], [], heap⟩
+      ⟨.operation (.builtin .dict) [data], [frame], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl
+      (Evaluates.arguments_reach (.cons (field_read heap address fields "data" (by decide) data found getData) .nil)
+        (.builtin .dict) [] heap.length [frame])))
+  have retained : after[address]? = some (.instance classInfo.1 "Collector" fields) := by
+    obtain ⟨extra, rfl⟩ := Heapq.dictionaryConstruct_prefix [data] heap outcome after allocated
+    rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+    exact found
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.builtin .dict) [data], [frame], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · have built := AllocatingTrace.dictionaryConstruct (module := Probe.module) (anchors := heap.length) (choices := choices) (globals := [])
+      heap after [data] [frame] used [] outcome (by simp) allocated
+    cases outcome with
+    | error error => exact built
+    | ok result =>
+      have write := Mutable.writeField_result (name := "link") (value := result) retained (by simp)
+      have assigned : HeapCalls.Reaches Probe.module heap.length
+          ⟨.value result, [frame], after⟩
+          ⟨.block tail (env address), [], methodHeap after address fields (.ok result)⟩ := by
+        apply HeapCalls.Reaches.next rfl
+        apply (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) .nil)
+          (.setField "link" result) [] heap.length _).trans
+        exact .next (following := ⟨.value (.scalar .none), [.discard tail (env address)], methodHeap after address fields (.ok result)⟩)
+          (by simp [HeapCalls.step, primitive, HeapCalls.result, run, write, methodHeap]) (.next rfl .refl)
+      have returned : BlockReturns Probe.module (env address) tail (methodHeap after address fields (.ok result))
+          (text "123") (methodHeap after address fields (.ok result)) := BlockReturns.return_value Evaluates.constant
+      exact built.trans (.stable rfl rfl (by simp [methodHeap])
+        ((IteratorCalls.Reaches.of_heap (assigned.trans (returned heap.length [])) []).trans (.next (core_done rfl rfl) .refl)))
+
+theorem next_run (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (address : Nat) (fields : List (String × Mutable.Value)) (data : Mutable.Value)
+    (outcome : Except ExceptionObject Mutable.Value)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some data)
+    (allocated : DictionaryConstructor.construct [data] heap = some (outcome, after)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (methodOutcome outcome)
+      (methodHeap after address fields outcome) used :=
+  ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], next_bound heap address fields found,
+    method_trace choices used heap after address fields data outcome found getData allocated⟩
+
+theorem partial_insertion (heap : Mutable.Heap) (source row : Nat) (key : Constant) (value : Mutable.Value) (invalid : Int)
+    (found : heap[source]? = some (.list [.ref row, .scalar (.int invalid)]))
+    (rowFound : heap[row]? = some (.tuple [.scalar key, value])) :
+    DictionaryConstructor.construct [.ref source] heap =
+      some (.error ⟨"TypeError", []⟩, (heap ++ [Mutable.Object.dict []]).set heap.length (.dict [(key, value)])) := by
+  have sourceInside := (List.getElem?_eq_some_iff.mp found).1
+  have rowInside := (List.getElem?_eq_some_iff.mp rowFound).1
+  have sourceAfter : (heap ++ [.dict []])[source]? = some (.list [.ref row, .scalar (.int invalid)]) := by
+    rw [List.getElem?_append_left sourceInside]
+    exact found
+  have rowAfter : (heap ++ [.dict []])[row]? = some (.tuple [.scalar key, value]) := by
+    rw [List.getElem?_append_left rowInside]
+    exact rowFound
+  rw [HeapCalls.Relocation.dictionaryConstruct_ref heap source _ found]
+  change DictionaryConstructor.fromIterable (.ref source) heap = _
+  apply DictionaryConstructor.fromIterable_result _ _ _ [.ref row, .scalar (.int invalid)] (.error ⟨"TypeError", []⟩)
+  · simp [DictionaryConstructor.iterable, sourceAfter, Mutable.sequence]
+  · simp [DictionaryConstructor.insertRows, DictionaryConstructor.insertRow, DictionaryConstructor.iterable,
+      rowAfter, Mutable.sequence, Mutable.setItem, ScalarDict.insert, Mutable.eval_bind, Mutable.error, Except.map]
+
+theorem partial_next (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (address source row : Nat) (fields : List (String × Mutable.Value))
+    (key : Constant) (value : Mutable.Value) (invalid : Int)
+    (found : heap[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some (.ref source))
+    (sourceFound : heap[source]? = some (.list [.ref row, .scalar (.int invalid)]))
+    (rowFound : heap[row]? = some (.tuple [.scalar key, value])) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (.error ⟨"TypeError", []⟩)
+      ((heap ++ [Mutable.Object.dict []]).set heap.length (.dict [(key, value)])) used :=
+  next_run choices used heap _ address fields (.ref source) (.error ⟨"TypeError", []⟩)
+    found getData (partial_insertion heap source row key value invalid sourceFound rowFound)
+
+theorem isolated_partial (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address source row : Nat)
+    (fields : List (String × Mutable.Value)) (key : Constant) (value : Mutable.Value) (invalid : Int)
+    (layout : ExecutionLayout logical physical rename)
+    (found : logical[address]? = some (.instance classInfo.1 "Collector" fields))
+    (getData : fields.lookup "data" = some (.ref source))
+    (sourceFound : logical[source]? = some (.list [.ref row, .scalar (.int invalid)]))
+    (rowFound : logical[row]? = some (.tuple [.scalar key, value])) :
+    let after := (logical ++ [Mutable.Object.dict []]).set logical.length (.dict [(key, value)])
+    ∃ other nextMap,
+      ExecutionLayout after other nextMap ∧
+      (∀ privateAddress object, object ≠ .tuple [] → PrivateLayout logical physical rename privateAddress object →
+        PrivateLayout after other nextMap privateAddress object) ∧
+      ∀ loop resumes, ExitResult Probe.module choices anchors
+        (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        loop resumes other used (.error ⟨"TypeError", []⟩) := by
+  obtain ⟨other, nextMap, extended, kept, exited⟩ :=
+    (partial_next choices used logical address source row fields key value invalid found getData sourceFound rowFound).exit_isolated
+      DictionaryIteratorExamples.source physical rename layout anchors
+  exact ⟨other, nextMap, extended.layout, kept, exited⟩
+
+theorem copy_trace (choices : ChoiceSchedule) (used : Nat) (heap after : Mutable.Heap)
+    (input : Mutable.Value) (outcome : Except ExceptionObject Mutable.Value)
+    (allocated : DictionaryConstructor.construct [input] heap = some (outcome, after)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "copy") [input], [], heap⟩, used⟩ []) after
+      (.completed (.ok ⟨outcome, [], after, heap.length⟩) used []) := by
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.call "copy") [input], [], heap⟩
+      ⟨.operation (.builtin .dict) [input], [], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl
+      (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) .nil) (.builtin .dict) [] heap.length [])))
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.builtin .dict) [input], [], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · have built := AllocatingTrace.dictionaryConstruct (module := Probe.module) (anchors := heap.length) (choices := choices) (globals := [])
+      heap after [input] [] used [] outcome (by simp) allocated
+    cases outcome with
+    | error error => exact built
+    | ok value => exact built.trans (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+theorem empty_trace (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "empty") [], [], heap⟩, used⟩ []) (heap ++ [.dict []])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.dict []], heap.length⟩) used []) := by
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.builtin .dict) [], [], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (.next (core_next rfl rfl) (.next (core_next rfl rfl) (.next (core_next rfl rfl) .refl)))
+  · exact (AllocatingTrace.dictionaryConstruct heap (heap ++ [.dict []]) [] [] used [] (.ok (.ref heap.length)) (by simp) rfl).trans
+      (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+theorem copy_keydict (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap)
+    (address : Nat) (entries : List (HashDict.Entry Mutable.Value))
+    (found : heap[address]? = some (.keyDict entries)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "copy") [.ref address], [], heap⟩, used⟩ []) (heap ++ [.keyDict entries])
+      (.completed (.ok ⟨.ok (.ref heap.length), [], heap ++ [.keyDict entries], heap.length⟩) used []) := by
+  apply copy_trace
+  simp [DictionaryConstructor.construct, Mutable.eval_bind, found, Except.map]
+
+theorem invalid_source (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.call "copy") [.scalar .none], [], heap⟩, used⟩ []) (heap ++ [.dict []])
+      (.completed (.ok ⟨.error ⟨"TypeError", []⟩, [], heap ++ [.dict []], heap.length⟩) used []) :=
+  copy_trace choices used heap _ (.scalar .none) (.error ⟨"TypeError", []⟩) rfl
+
+end DictionaryIteratorExamples
+'''
+AUDITS = ["FormalSW.PyAst.Mutable.Relocation.ExecutionLayout." + name for name in (
+    "appendObject_result", "dictionaryFromIterable_result", "dictionaryConstructAllocating",
+)] + ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "dictionaryConstruct_step", "AllocatingTrace.reaches", "AllocatingTrace.isolated",
+)] + ["DictionaryIteratorExamples." + name for name in (
+    "source", "source_class", "source_next", "next_bound", "field_read", "method_trace", "next_run",
+    "partial_insertion", "partial_next", "isolated_partial", "copy_trace", "empty_trace", "copy_keydict", "invalid_source",
+)]
+
+with project_temporary_directory(prefix="iterator-dictionary-construction-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    shared = []
+    shared.append(shared)
+    key = tuple([1, 2])
+    for data in ({key: shared}, {"self": shared}, [(True, shared), (1, 9), ("last", shared)]):
+        collector = namespace["Collector"]()
+        collector.data = data
+        assert iter(collector) is collector
+        previous = []
+        for _ in range(4):
+            assert next(collector) == "123"
+            assert collector.link == dict(data)
+            assert collector.link is not data and all(collector.link is not item for item in previous)
+            previous.append(collector.link)
+        if isinstance(data, dict):
+            assert next(iter(collector.link)) is next(iter(data))
+            assert next(iter(collector.link.values())) is shared
+        else:
+            assert list(collector.link) == [True, "last"]
+            assert next(iter(collector.link)) is True
+            assert collector.link[1] == 9 and collector.link["last"] is shared
+        assert namespace["copy"](data) == dict(data)
+    for data, expected in ((None, TypeError), ([(1, 2), 3], TypeError),
+                           ([(1, 2), ()], ValueError), ([(1, 2), ([], 3)], TypeError)):
+        collector = namespace["Collector"]()
+        collector.data = data
+        original = object()
+        collector.link = original
+        try:
+            next(collector)
+        except expected:
+            assert collector.link is original and collector.data is data
+        else:
+            raise AssertionError("expected dictionary construction to fail")
+    assert namespace["empty"]() == {}
+    assert namespace["empty"]() is not namespace["empty"]()
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAllocatingAcquisition\n"
+                     "import lang.py.FormalSW.DictionaryConstructorCalls\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"dictionary iterators: shallow copies, allocation before failure, partial insertion and private cells; {len(AUDITS)} axiom audits passed")
