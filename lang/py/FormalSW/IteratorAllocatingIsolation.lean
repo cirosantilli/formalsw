@@ -1,0 +1,102 @@
+import lang.py.FormalSW.IteratorAllocatingTrace
+
+namespace FormalSW.PyAst.IteratorCalls
+open HeapCalls HeapCalls.Relocation Mutable.Relocation
+set_option Elab.async false
+
+/-- Transport the source trace and preserve every private nonempty-tuple object together.
+The empty tuple may be interned and become shared, so it cannot remain excluded. -/
+theorem AllocatingTrace.isolated {module : Module} {logicalAnchors : Nat} {choices : ChoiceSchedule}
+    {globals : Mutable.Globals} {before after : Mutable.Heap} {first final : State}
+    (trace : AllocatingTrace module logicalAnchors choices globals before first after final)
+    (source : Relocation.ModuleSource module) (physical : Mutable.Heap) (rename : Nat → Nat)
+    (physicalAnchors : Nat) (layout : ExecutionLayout before physical rename)
+    (inside : Relocation.StateWithin before.length first)
+    (globalsInside : GlobalsWithin before.length globals) :
+    ∃ other nextMap, Relocation.ExtendedLayout before.length physical.length rename after other nextMap ∧
+      Relocation.StateWithin after.length final ∧
+      (∀ address object, object ≠ .tuple [] → PrivateLayout before physical rename address object →
+        PrivateLayout after other nextMap address object) ∧
+      Reaches module physicalAnchors choices (relocateGlobals rename globals)
+        (Relocation.relocateState rename physical physicalAnchors first)
+        (Relocation.relocateState nextMap other physicalAnchors final) := by
+  induction trace generalizing physical rename with
+  | @stable before after first final firstHeap finalHeap sameSize ran =>
+    obtain ⟨finalHeap', other, nextMap, agree, grows, physicalGrows, finalLayout,
+      heap, finalInside, _, _, reached, separated⟩ :=
+      Relocation.reaches_isolated module choices logicalAnchors physicalAnchors globals source ran
+        before physical rename layout firstHeap.stateHeap inside globalsInside
+    have equal := finalHeap.unique heap
+    subst finalHeap'
+    refine ⟨other, nextMap, ⟨finalLayout, grows, physicalGrows, agree⟩, finalInside, ?_, reached⟩
+    intro address object _ saved
+    refine ⟨finalLayout, ?_, ?_⟩
+    · have retained := (separated sameSize address saved.excludes).retains_cell object
+        (Framing.relocateState_cell rename physical address physicalAnchors object _ saved.saved)
+      cases final with
+      | running => exact retained
+      | completed outcome =>
+        cases outcome with
+        | ok => exact retained
+        | error => exact False.elim finalHeap
+    · intro index bounded
+      rw [agree index (by omega)]
+      exact saved.excludes index (by omega)
+  | list heap items stack used resumes =>
+    let nextMap := extendMap rename heap.length physical.length
+    let other := physical ++ [Mutable.Object.list (items.map (relocateValue rename))]
+    have agree : ∀ index < heap.length, nextMap index = rename index := extendMap_old _ _ _
+    have retained := (layout.allocate_list items inside.1.2).2.2
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree inside.2.1
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    refine ⟨other, nextMap, ⟨retained, by simp, by simp [other], agree⟩, ?_, ?_, ?_⟩
+    · exact ⟨by simp [WorkWithin, Mutable.Value.edge, Graph.Edge.Within],
+        fun frame member => (inside.2.1 frame member).mono (by simp),
+        fun pending member => (inside.2.2 pending member).mono (by simp)⟩
+    · intro address object _ saved
+      exact (saved.allocate_list items inside.1.2).2.2
+    · apply Reaches.next ?_ .refl
+      simp only [Relocation.relocateState, Relocation.relocateCore, HeapCalls.Relocation.relocateState,
+        relocateWork, relocateRuntimeOperation, relocateOperation, relocateValue, nextMap, extendMap_new,
+        stackSame, resumesSame]
+      exact core_next rfl rfl
+  | tuple heap after items address stack used resumes allocated =>
+    obtain ⟨left, right, logicalAfter, other, nextMap, leftRun, rightRun, retained, bounded, same, agree⟩ :=
+      layout.allocateTuple items inside.1.2
+    have equal : left = address ∧ logicalAfter = after := by simpa using leftRun.symm.trans allocated
+    obtain ⟨equalAddress, equalHeap⟩ := equal
+    subst left
+    subst logicalAfter
+    have grows := allocateTuple_length heap after items (.ref address) leftRun
+    have physicalGrows := allocateTuple_length physical other (items.map (relocateValue rename)) (.ref right) rightRun
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree inside.2.1
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    refine ⟨other, nextMap, ⟨retained, grows, physicalGrows, agree⟩, ?_, ?_, ?_⟩
+    · exact ⟨bounded, fun frame member => (inside.2.1 frame member).mono grows,
+        fun pending member => (inside.2.2 pending member).mono grows⟩
+    · intro privateAddress object nonempty saved
+      refine ⟨retained, ?_, ?_⟩
+      · exact Heapq.preserves_allocateTuple (SavedCell privateAddress object) (SavedCell.allocates privateAddress object)
+          (items.map (relocateValue rename)) physical (.ok (.ref right)) other saved.saved rightRun
+      · exact allocateTuple_map_excludes heap physical after other rename nextMap items address right privateAddress object
+          leftRun rightRun same agree saved.excludes saved.saved nonempty
+    · apply Reaches.next ?_ .refl
+      simp only [Relocation.relocateState, Relocation.relocateCore, HeapCalls.Relocation.relocateState,
+        relocateWork, relocateRuntimeOperation, relocateOperation, relocateValue, same, stackSame, resumesSame]
+      apply core_next rfl
+      simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, primitive, result, run, rightRun]
+  | @trans before middle after first next final left right leftIH rightIH =>
+    obtain ⟨middlePhysical, middleMap, middleLayout, middleInside, firstKept, firstRan⟩ :=
+      leftIH physical rename layout inside globalsInside
+    obtain ⟨other, nextMap, finalLayout, finalInside, secondKept, secondRan⟩ :=
+      rightIH middlePhysical middleMap middleLayout.layout middleInside (globalsInside.mono middleLayout.logicalGrows)
+    refine ⟨other, nextMap, ⟨finalLayout.layout, Nat.le_trans middleLayout.logicalGrows finalLayout.logicalGrows,
+      Nat.le_trans middleLayout.physicalGrows finalLayout.physicalGrows, ?_⟩, finalInside,
+      fun address object nonempty saved => secondKept address object nonempty (firstKept address object nonempty saved), ?_⟩
+    · intro index bounded
+      exact (finalLayout.agrees index (Nat.lt_of_lt_of_le bounded middleLayout.logicalGrows)).trans
+        (middleLayout.agrees index bounded)
+    · have sameGlobals := relocateGlobals_congr middleMap rename before.length globals middleLayout.agrees globalsInside
+      exact firstRan.trans (by simpa only [sameGlobals] using secondRan)
+
+end FormalSW.PyAst.IteratorCalls

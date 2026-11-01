@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""
+Check repeated allocating method traces, retained private cells and tuple interning.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Yielding:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = [self]
+        return "123"
+
+class Stopped:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = [self]
+        raise StopIteration("next")
+
+def reject(iterator):
+    for value in iterator:
+        raise ValueError(value)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace IteratorAllocatingExamples
+set_option Elab.async false
+
+def className (fails : Bool) := if fails then "Stopped" else "Yielding"
+def classInfo (fails : Bool) := (Probe.module.findClass (className fails)).getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def writeSelf : List Stmt := [.assign [.attribute (.name "self") "link"] (.list [.name "self"])]
+def tail (fails : Bool) : List Stmt :=
+  if fails then [.raise (some (.call (.name "StopIteration") [.constant (.string "next")]))]
+  else [.return (.constant (.string "123"))]
+def body (fails : Bool) := writeSelf ++ tail fails
+def outcome (fails : Bool) : Except ExceptionObject Mutable.Value :=
+  if fails then .error ⟨"StopIteration", [.string "next"]⟩ else .ok (.scalar (.string "123"))
+def after (fails : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value)) : Mutable.Heap :=
+  (heap ++ [Mutable.Object.list [.ref address]]).set address
+    (.instance (classInfo fails).1 (className fails) (Mutable.putField fields "link" (.ref heap.length)))
+def rejection : List Stmt := [.raise (some (.call (.name "ValueError") [.name "value"]))]
+def loop (env : HeapCalls.Env) (following : List Stmt) (stack : List HeapCalls.Frame) : Loop :=
+  ⟨"value", rejection, [], following, env, stack⟩
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class (fails : Bool) : Probe.module.findClass (className fails) = some (classInfo fails) := by
+  cases fails <;> rfl
+theorem source_next (fails : Bool) : findFunctionIn (classInfo fails).2 "__next__" = some (args, body fails) := by
+  cases fails <;> rfl
+theorem source_reject : findFunctionIn Probe.module.body "reject" =
+    some ([{name := "iterator", annotation := none}],
+      [.forIn (.name "value") (.name "iterator") rejection []]) := rfl
+
+theorem next_bound (fails : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo fails).1 (className fails) fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args (body fails))), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address (classInfo fails).1
+    (className fails) "__next__" fields (classInfo fails).2 found (source_class fails)
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+
+theorem method_allocating (fails : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo fails).1 (className fails) fields)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.method (.ref address) args (body fails)) [], [], heap⟩, used⟩ [])
+      (after fails heap address fields)
+      (.completed (.ok ⟨outcome fails, [], after fails heap address fields, heap.length⟩) used []) := by
+  let env := functionEnv args (body fails) [.ref address] []
+  let frame := Frame.assignAttribute (.name "self") "link" (tail fails) env
+  have self : env "self" = some (.ref address) := rfl
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.method (.ref address) args (body fails)) [], [], heap⟩
+      ⟨.operation .list [.ref address], [frame], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl (.next rfl (.next rfl .refl))))
+  have retained : (heap ++ [.list [.ref address]])[address]? =
+      some (.instance (classInfo fails).1 (className fails) fields) := by
+    rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+    exact found
+  have write := Mutable.writeField_result (name := "link") (value := Mutable.Value.ref heap.length) retained (by simp)
+  have assigned : HeapCalls.Reaches Probe.module heap.length
+      ⟨.value (.ref heap.length), [frame], heap ++ [.list [.ref address]]⟩
+      ⟨.block (tail fails) env, [], after fails heap address fields⟩ := by
+    apply HeapCalls.Reaches.next rfl
+    apply (Evaluates.arguments_reach (.cons (Evaluates.lookup self) .nil)
+      (.setField "link" (.ref heap.length)) [] heap.length _).trans
+    exact .next (following := ⟨.value (.scalar .none), [.discard (tail fails) env], after fails heap address fields⟩)
+      (by simp [HeapCalls.step, result, run, primitive, write, after]) (.next rfl .refl)
+  have finished : Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.block (tail fails) env, [], after fails heap address fields⟩
+      (.ok ⟨outcome fails, [], after fails heap address fields, heap.length⟩) := by
+    cases fails with
+    | false => exact .next rfl (.next rfl (.done rfl))
+    | true => exact .next rfl (.next rfl (.next rfl (.done rfl)))
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation .list [.ref address], [frame], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · refine AllocatingTrace.trans (AllocatingTrace.list heap [.ref address] [frame] used []) ?_
+    exact .stable rfl rfl (by simp [after]) ((IteratorCalls.Reaches.of_heap assigned []).trans
+      (completion_of_heap finished (by intro completion same; cases same; cases fails <;> simp [outcome]) []))
+
+theorem allocating_next (fails : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo fails).1 (className fails) fields)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (outcome fails) (after fails heap address fields) used := by
+  exact ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found],
+    next_bound fails heap address fields found, method_allocating fails choices used heap address fields found⟩
+
+/-- Every requested prefix allocates once per yield, with no eventual-exhaustion assumption. -/
+theorem prefixes (n : Nat) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo false).1 (className false) fields)) :
+    ∃ finalHeap, AllocatingYieldPrefix Probe.module choices (.ref address) (fun s => .scalar (.string s))
+      heap used (List.replicate n "123") finalHeap used ∧ finalHeap.length = heap.length + n := by
+  induction n generalizing heap fields with
+  | zero => exact ⟨heap, .nil, by simp⟩
+  | succ n ih =>
+    obtain ⟨finalHeap, later, size⟩ := ih (after false heap address fields)
+      (Mutable.putField fields "link" (.ref heap.length)) (by
+        have bounded := (List.getElem?_eq_some_iff.mp found).1
+        simp [after, show address < heap.length + 1 by omega])
+    exact ⟨finalHeap, by simpa only [List.replicate_succ] using
+      AllocatingYieldPrefix.cons (encode := fun s => .scalar (.string s)) (value := "123") (allocating_next false choices used heap address fields found) later,
+      by simp only [after, List.length_set, List.length_append, List.length_singleton] at size; omega⟩
+
+/-- All private cells are preserved by the same transported method, including its newly allocated cycle. -/
+theorem preserves_private (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address privateAddress : Nat)
+    (object : Mutable.Object) (nonempty : object ≠ .tuple []) (fields : List (String × Mutable.Value))
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance (classInfo false).1 (className false) fields))
+    (consumer : Loop) (resumes : List Resume) :
+    ∃ other nextMap, PrivateLayout (after false logical address fields) other nextMap privateAddress object ∧
+      Relocation.ExtendedLayout logical.length physical.length rename (after false logical address fields) other nextMap ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode consumer (.ref (rename address)) :: consumer.following)
+          consumer.env, consumer.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (consumer.body ++ [Calls.loopContinuation consumer.body (loopCode consumer (.ref (rename address)))]
+          ++ consumer.following) (setLocal consumer.env consumer.name (.scalar (.string "123"))),
+          consumer.stack, other⟩, used⟩ resumes) := by
+  obtain ⟨other, nextMap, extended, kept, ran⟩ :=
+    (allocating_next false choices used logical address fields found).scalar_isolated source physical rename layout.layout anchors
+  exact ⟨other, nextMap, kept privateAddress object nonempty layout, extended, ran consumer resumes⟩
+
+/-- Tuple allocation and interning use the same trace rule and retain an arbitrary distinct private object. -/
+theorem tuple_private (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical finalHeap : Mutable.Heap) (rename : Nat → Nat) (privateAddress returned : Nat)
+    (object : Mutable.Object) (nonempty : object ≠ .tuple []) (items : List Mutable.Value)
+    (inside : ∀ item ∈ items, item.edge.Within logical.length)
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (allocated : Mutable.allocateTuple items logical = some (.ok (.ref returned), finalHeap)) :
+    ∃ other nextMap, PrivateLayout finalHeap other nextMap privateAddress object ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (Relocation.relocateState rename physical anchors
+          (.running ⟨⟨.operation .tuple items, [], logical⟩, used⟩ []))
+        (Relocation.relocateState nextMap other anchors
+          (.running ⟨⟨.value (.ref returned), [], finalHeap⟩, used⟩ [])) := by
+  obtain ⟨other, nextMap, _, _, kept, ran⟩ :=
+    (AllocatingTrace.tuple (module := Probe.module) (anchors := logical.length) (choices := choices) (globals := [])
+      logical finalHeap items returned [] used [] allocated).isolated source physical rename anchors layout.layout
+        ⟨⟨trivial, inside⟩, by simp, by simp⟩ (by simp [HeapCalls.Relocation.GlobalsWithin])
+  exact ⟨other, nextMap, kept privateAddress object nonempty layout, ran⟩
+
+
+theorem exhausts_private (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address privateAddress : Nat)
+    (object : Mutable.Object) (nonempty : object ≠ .tuple []) (fields : List (String × Mutable.Value))
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance (classInfo true).1 (className true) fields))
+    (consumer : Loop) (resumes : List Resume) :
+    ∃ other nextMap, PrivateLayout (after true logical address fields) other nextMap privateAddress object ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode consumer (.ref (rename address)) :: consumer.following)
+          consumer.env, consumer.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (consumer.otherwise ++ consumer.following) consumer.env,
+          consumer.stack, other⟩, used⟩ resumes) := by
+  obtain ⟨other, nextMap, _, kept, exited⟩ :=
+    (allocating_next true choices used logical address fields found).exit_isolated source physical rename layout.layout anchors
+  exact ⟨other, nextMap, kept privateAddress object nonempty layout, exited consumer resumes⟩
+
+end IteratorAllocatingExamples
+'''
+AUDITS = ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "HeapAt.stateHeap", "HeapAt.unique", "AllocatingTrace.heaps", "AllocatingTrace.reaches", "AllocatingTrace.isolated",
+    "AllocatingNextRun.nextRun", "NextRun.allocating_of_noGrowth", "AllocatingNextRun.advance_isolated",
+    "AllocatingNextRun.scalar_isolated", "AllocatingNextRun.exit_isolated", "AllocatingYieldPrefix.yieldPrefix",
+)] + ["IteratorAllocatingExamples." + name for name in (
+    "source", "source_class", "source_next", "source_reject", "next_bound", "method_allocating", "allocating_next",
+    "prefixes", "preserves_private", "exhausts_private", "tuple_private",
+)]
+with project_temporary_directory(prefix="iterator-allocating-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name, message in (("Yielding", "123"),):
+        receiver = namespace[name]()
+        try:
+            namespace["reject"](receiver)
+        except ValueError as error:
+            assert error.args == (message,) and receiver.link[0] is receiver
+        else:
+            raise AssertionError("expected terminal failure")
+    stopped = namespace["Stopped"]()
+    assert list(stopped) == [] and stopped.link[0] is stopped
+    try:
+        next(stopped)
+    except StopIteration as error:
+        assert error.args == ("next",) and stopped.link[0] is stopped
+    else:
+        raise AssertionError("expected exhaustion after allocation")
+    iterator = namespace["Yielding"]()
+    old_links = []
+    for _ in range(10):
+        assert next(iterator) == "123" and iterator.link[0] is iterator
+        assert all(iterator.link is not link for link in old_links)
+        old_links.append(iterator.link)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAllocatingRun\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"allocating iterator traces: arbitrary prefixes, cyclic allocations, private cells and tuples; {len(AUDITS)} axiom audits passed")
