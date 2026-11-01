@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""
+Check native equality stabilization and parsed comparisons of nested numeric aliases.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def equal(left, right):
+    return left == right
+
+
+def unequal(left, right):
+    return left != right
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace ComparisonEqualityExamples
+set_option Elab.async false
+
+theorem source_equal_result (heap : Mutable.Heap) (left right : Nat) (negate : Bool)
+    (compared : HeapCalls.compare (if negate then .notEq else .eq) (.ref left) (.ref right) heap =
+      some (.ok (.scalar (.bool (!negate))), heap)) :
+    ReturnsValue Probe.module (if negate then "unequal" else "equal") [.ref left, .ref right]
+      heap (.scalar (.bool (!negate))) heap := by
+  cases negate <;> apply BlockReturns.function rfl rfl <;>
+    exact BlockReturns.return_value (Evaluates.compare (Evaluates.lookup rfl) (Evaluates.lookup rfl) compared)
+
+/-- The completed physical comparison derives the logical execution at its smaller native allowance. -/
+theorem paired_source_equal (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
+    (isTuple negate : Bool) (left right : Nat) (xs ys : List Mutable.Value)
+    (leftFound : logical[left]? = some (comparisonObject isTuple xs))
+    (rightFound : logical[right]? = some (comparisonObject isTuple ys))
+    (compared : HeapCalls.compare (if negate then .notEq else .eq) (.ref (rename left)) (.ref (rename right)) physical =
+      some (.ok (.scalar (.bool (!negate))), physical)) :
+    ReturnsValue Probe.module (if negate then "unequal" else "equal") [.ref left, .ref right]
+        logical (.scalar (.bool (!negate))) logical ∧
+      ReturnsValue Probe.module (if negate then "unequal" else "equal") [.ref (rename left), .ref (rename right)]
+        physical (.scalar (.bool (!negate))) physical := by
+  exact ⟨source_equal_result logical left right negate
+    ((layout.compare_equal_sequences_true closed isTuple negate left right xs ys leftFound rightFound).mp compared),
+    source_equal_result physical (rename left) (rename right) negate compared⟩
+
+/-- Boolean/integer coercion remains valid through two independently allocated sequence levels. -/
+theorem nested_numeric_native (heap : Mutable.Heap) (outer inner : Bool) (flag : Bool)
+    (left right a b : Nat)
+    (leftFound : heap[left]? = some (comparisonObject outer [.ref a]))
+    (rightFound : heap[right]? = some (comparisonObject outer [.ref b]))
+    (aFound : heap[a]? = some (comparisonObject inner [.scalar (.bool flag)]))
+    (bFound : heap[b]? = some (comparisonObject inner [.scalar (.int (if flag then 1 else 0))])) :
+    HeapSort.compare (heap.length + 1) heap true (.ref left) (.ref right) = some (.ok true) := by
+  apply (compare_equal_true_native_iff heap (.ref left) (.ref right)).mpr
+  refine ⟨3, (compare_equal_true_iff _ _ _ _).mpr ?_⟩
+  exact Or.inr ⟨outer, [.ref a], [.ref b], leftFound, rightFound,
+    ⟨Or.inr ⟨inner, [.scalar (.bool flag)], [.scalar (.int (if flag then 1 else 0))],
+      aFound, bFound, ⟨rfl, trivial⟩⟩, trivial⟩⟩
+
+theorem nested_numeric_dispatch (heap : Mutable.Heap) (outer inner negate : Bool) (flag : Bool)
+    (left right a b : Nat)
+    (leftFound : heap[left]? = some (comparisonObject outer [.ref a]))
+    (rightFound : heap[right]? = some (comparisonObject outer [.ref b]))
+    (aFound : heap[a]? = some (comparisonObject inner [.scalar (.bool flag)]))
+    (bFound : heap[b]? = some (comparisonObject inner [.scalar (.int (if flag then 1 else 0))])) :
+    HeapCalls.compare (if negate then .notEq else .eq) (.ref left) (.ref right) heap =
+      some (.ok (.scalar (.bool (!negate))), heap) := by
+  have different : a ≠ b := by
+    intro same
+    subst b
+    have impossible := aFound.symm.trans bFound
+    cases inner <;> simp [comparisonObject] at impossible
+  have native := nested_numeric_native heap outer inner flag left right a b leftFound rightFound aFound bFound
+  rw [compare_equal_sequences heap outer negate left right [.ref a] [.ref b] leftFound rightFound]
+  by_cases same : left = right
+  · cases negate <;> simp [same]
+  · cases negate <;> simp [same, HeapCalls.equalLists, HeapCalls.equalElements, different, native, Except.map]
+
+theorem nested_numeric_source (heap : Mutable.Heap) (outer inner negate : Bool) (flag : Bool)
+    (left right a b : Nat)
+    (leftFound : heap[left]? = some (comparisonObject outer [.ref a]))
+    (rightFound : heap[right]? = some (comparisonObject outer [.ref b]))
+    (aFound : heap[a]? = some (comparisonObject inner [.scalar (.bool flag)]))
+    (bFound : heap[b]? = some (comparisonObject inner [.scalar (.int (if flag then 1 else 0))])) :
+    ReturnsValue Probe.module (if negate then "unequal" else "equal") [.ref left, .ref right]
+      heap (.scalar (.bool (!negate))) heap :=
+  source_equal_result heap left right negate
+    (nested_numeric_dispatch heap outer inner negate flag left right a b leftFound rightFound aFound bFound)
+
+/-- Cyclic objects use the same reflexivity theorem as all other valid references. -/
+theorem cyclic_identity (heap : Mutable.Heap) (address : Nat) (isTuple : Bool) (tail : List Mutable.Value)
+    (found : heap[address]? = some (comparisonObject isTuple (.ref address :: tail))) :
+    HeapSort.compare (heap.length + 1) heap true (.ref address) (.ref address) = some (.ok true) :=
+  compare_equal_reflexive heap heap.length (.ref address) (List.getElem?_eq_some_iff.mp found).1
+
+/-- A failed or unsupported logical equality cannot become true after extra allocations. -/
+theorem no_new_equality (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical) (left right : Mutable.Value)
+    (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length)
+    (notEqual : HeapSort.compare (logical.length + 1) logical true left right ≠ some (.ok true)) :
+    HeapSort.compare (physical.length + 1) physical true (relocateValue rename left) (relocateValue rename right) ≠
+      some (.ok true) := by
+  intro equal
+  exact notEqual ((layout.compare_equal_true_native closed left right leftInside rightInside).mp equal)
+
+/-- Structural traversal never identifies a list with a tuple, regardless of fuel. -/
+theorem different_kinds (heap : Mutable.Heap) (left right fuel : Nat) (xs ys : List Mutable.Value)
+    (leftFound : heap[left]? = some (.list xs)) (rightFound : heap[right]? = some (.tuple ys)) :
+    HeapSort.compare fuel heap true (.ref left) (.ref right) ≠ some (.ok true) := by
+  cases fuel <;> simp [HeapSort.compare, leftFound, rightFound]
+
+end ComparisonEqualityExamples
+'''
+THEOREMS = [
+    "EquivalenceBelow.representative",
+    "EquivalenceBelow.eq_of_preserved_representatives",
+    "finite_equivalence_stable",
+    "scalarCompare_equal",
+    "RelatedItems.length_eq",
+    "RelatedItems.symm",
+    "RelatedItems.trans",
+    "lex_equality_true_iff",
+    "guarded_lex_equality_true_iff",
+    "compare_equal_true_iff",
+    "EqualAt.symm",
+    "EqualAt.trans",
+    "compare_equal_reflexive",
+    "compare_equal_symmetric",
+    "compare_equal_transitive",
+    "EqualAt.refs_inside",
+    "EqualAt.positive_congr",
+    "EqualAt.step_congr",
+    "EqualAt.equivalence",
+    "equalAt_stabilized",
+    "compare_equal_true_stabilized",
+    "compare_equal_true_native_iff",
+    "RuntimeLayout.compare_equal_true_native",
+    "equalityOutcome_true_iff",
+    "RuntimeLayout.compare_equal_sequences_true",
+]
+THEOREMS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in THEOREMS] + [
+    "ComparisonEqualityExamples.source_equal_result",
+    "ComparisonEqualityExamples.paired_source_equal",
+    "ComparisonEqualityExamples.nested_numeric_native",
+    "ComparisonEqualityExamples.nested_numeric_dispatch",
+    "ComparisonEqualityExamples.nested_numeric_source",
+    "ComparisonEqualityExamples.cyclic_identity",
+    "ComparisonEqualityExamples.no_new_equality",
+    "ComparisonEqualityExamples.different_kinds",
+]
+
+with project_temporary_directory(prefix="comparison-equality-") as temporary:
+    directory = Path(temporary)
+    source = directory / "source.py"
+    source.write_text(SOURCE)
+    module = api["source_module"](source)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.ComparisonEquality\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in THEOREMS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(THEOREMS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+    namespace = {}
+    exec(compile(SOURCE, str(source), "exec"), namespace)
+    for outer in (list, tuple):
+        for inner in (list, tuple):
+            for flag in (False, True):
+                left, right = outer([inner([flag])]), outer([inner([int(flag)])])
+                assert namespace["equal"](left, right) is True
+                assert namespace["unequal"](left, right) is False
+    cycle = []
+    cycle.append(cycle)
+    assert namespace["equal"](cycle, cycle) is True
+    assert namespace["unequal"](cycle, cycle) is False
+    assert namespace["equal"]([cycle], (cycle,)) is False
+print(f"native equality: finite classes, nested numeric aliases, cyclic identity and reverse transport; {len(THEOREMS)} axiom audits passed")

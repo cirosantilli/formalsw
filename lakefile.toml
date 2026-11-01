@@ -109,6 +109,8 @@ roots = [
   "lang.py.FormalSW.SetOperationsRelocation",
   "lang.py.FormalSW.ComparisonRelocation",
   "lang.py.FormalSW.ComparisonStability",
+  "lang.py.FormalSW.FiniteEquivalence",
+  "lang.py.FormalSW.ComparisonEquality",
   "lang.py.FormalSW.ValueComparisonRelocation",
   "lang.py.FormalSW.ComparisonDispatchRelocation",
   "lang.py.FormalSW.ComparisonUnsupported",
