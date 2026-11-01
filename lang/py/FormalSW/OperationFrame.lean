@@ -59,7 +59,7 @@ theorem step_operation_cell (module : Module) (address anchors : Nat) (object : 
   all_goals try simp only [extremumGeneratorStart, nextGeneratorStart,
     truthGeneratorStart, sumSequenceStart, sumEnter, sumGeneratorStart, comprehensionStart,
     comprehensionTargetsStart, dictionaryValuesCollectionStart, dictionaryValuesStart,
-    sumGeneratorTargetsStart]
+    sumGeneratorTargetsStart, dictionaryItemsSumStart]
   all_goals with_reducible repeat' first
     | exact saved
     | trivial

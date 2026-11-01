@@ -212,7 +212,7 @@ theorem Evaluates.sum_generator_targets_range
       (comprehensionTargetBody target (comprehensionFilters filters
           (comprehensionTargetsBody (sumBody element []) generators))) [])
       (comprehensionTargetsEnv env ((target, .call (.name "range") expressions, filters) :: generators)) :: stack,
-    middle⟩) (by simp [step, sumGeneratorTargetsStart, bounds])
+    middle⟩) (by simp [step, sumGeneratorTargetsStart, itemsReceiver, bounds])
   apply (started anchors _).trans
   exact .next (by simp [step, sumEnter, run, accepted])
     ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))
@@ -222,6 +222,7 @@ theorem Evaluates.sum_generator_targets_sequence
     (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
     (notEnumerate : ∀ expressions, iterable ≠ .call (.name "enumerate") expressions)
     (notZip : ∀ expressions, iterable ≠ .zipIterable expressions)
+    (notItems : itemsReceiver iterable = none)
     (evaluated : Evaluates (globals := globals) module env iterable heap source middle)
     (sequence : Mutable.sequence source middle = some (.ok items, middle))
     (started : Evaluates (globals := globals) module env start middle initial afterStart)
@@ -285,7 +286,7 @@ theorem Evaluates.sum_generator_targets_enumerate
       (comprehensionFilters filters (comprehensionTargetsBody (sumBody element []) generators)) [])
       (comprehensionTargetsEnv env
         ((target, .call (.name "enumerate") [iterable, counterExpression], filters) :: generators)) :: stack,
-    middle⟩) (by simp [step, sumGeneratorTargetsStart, pair, run, counter, sequence])
+    middle⟩) (by simp [step, sumGeneratorTargetsStart, itemsReceiver, pair, run, counter, sequence])
   apply (started anchors _).trans
   exact .next (by simp [step, sumEnter, run, accepted])
     ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))

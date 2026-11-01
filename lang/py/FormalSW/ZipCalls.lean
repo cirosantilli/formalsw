@@ -124,7 +124,7 @@ theorem Evaluates.sum_generator_targets_zip
       (comprehensionTargetBody target (comprehensionFilters filters
         (comprehensionTargetsBody (sumBody element []) generators))) [])
       (comprehensionTargetsEnv env ((target, .zipIterable expressions, filters) :: generators)) :: stack,
-    middle⟩) (by simp [step, sumGeneratorTargetsStart, run, captured])
+    middle⟩) (by simp [step, sumGeneratorTargetsStart, itemsReceiver, run, captured])
   apply (started anchors _).trans
   exact .next (by simp [step, sumEnter, run, accepted])
     ((executed anchors (.generatorEnd :: stack)).trans (.next rfl .refl))

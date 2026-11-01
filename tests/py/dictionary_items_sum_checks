@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""
+Compare live items sums, acquisition order, lazy clauses, and custom methods with Python.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def touch(xs: list[int], n: int) -> int:
+    xs.append(n)
+    return n
+
+def receiver(d: dict[str, int], xs: list[int]):
+    xs.append(10)
+    return d
+
+def replace(d: dict[str, int], xs: list[int], n: int) -> int:
+    xs.append(20)
+    d["later"] = n + 10
+    return n
+
+def resize(d: dict[str, int], xs: list[int], n: int) -> int:
+    xs.append(30)
+    d["extra"] = n
+    return n
+
+def clear(d: dict[str, int], xs: list[int]) -> int:
+    xs.append(40)
+    d.clear()
+    return 0
+
+def fail(xs: list[int]) -> int:
+    xs.append(50)
+    return 1 // 0
+
+def bad_receiver(xs: list[int]) -> int:
+    xs.append(60)
+    return 1
+
+class Rows:
+    def __init__(self, xs: list[int], n: int):
+        self.xs = xs
+        self.n = n
+    def items(self):
+        self.xs.append(70)
+        return [[self.n, 2], [3, 4]]
+
+class BadRows:
+    def __init__(self, xs: list[int]):
+        self.xs = xs
+    def items(self):
+        self.xs.append(80)
+        return 1
+
+class FailingRows:
+    def __init__(self, xs: list[int]):
+        self.xs = xs
+    def items(self):
+        return fail(self.xs)
+'''
+bodies = {
+    'nested_list': 'return [value + i for i in range(2) for key, value in d.items()]',
+    'nested_set': 'return {value + i for i in range(2) for key, value in d.items()}',
+    'nested_dictionary': 'return {key: value + i for i in range(2) for key, value in d.items()}',
+    'tuple_identity': 'key = (n, True)\nd = {key: 3}\nreturn sum(pair[0] is key for pair in d.items())',
+    'last_resize': 'd = {"first": n}\nreturn sum(resize(d, xs, value) for key, value in d.items())',
+    'plain': 'return sum(value for key, value in d.items())',
+    'pair_target': 'return sum(pair[1] for pair in d.items())',
+    'list_target': 'return sum(value for [key, value] in d.items())',
+    'repeated_target': 'return sum(value for value, value in d.items())',
+    'filtered': 'return sum(touch(xs, value) for key, value in d.items() if value > 0)',
+    'filter_effects': 'return sum(value for key, value in d.items() if replace(d, xs, value))',
+    'element_effects': 'return sum(replace(d, xs, value) for key, value in d.items())',
+    'receiver_once': 'return sum((touch(xs, value) for key, value in receiver(d, xs).items()), touch(xs, 90))',
+    'start_replaces': 'return sum((value for key, value in d.items()), replace(d, xs, n))',
+    'start_resizes': 'return sum((value for key, value in d.items()), resize(d, xs, n))',
+    'start_clears': 'return sum((value for key, value in d.items()), clear(d, xs))',
+    'start_failure': 'return sum((touch(xs, value) for key, value in d.items()), fail(xs))',
+    'empty': 'd = {}\nreturn sum((a for a, b, c in d.items()), touch(xs, n))',
+    'empty_none': 'd = {}\nreturn sum((value for key, value in d.items()), None)',
+    'empty_resizes': 'd = {}\nreturn sum((value for key, value in d.items()), resize(d, xs, n))',
+    'bad_receiver_order': 'return sum((value for key, value in bad_receiver(xs).items()), touch(xs, 90))',
+    'list_receiver': 'return sum((value for key, value in xs.items()), touch(xs, 90))',
+    'unpack_after_start': 'return sum((a for a, b, c in d.items()), touch(xs, 90))',
+    'start_before_unpack': 'return sum((a for a, b, c in d.items()), "")',
+    'inner_range': 'return sum(value + i for key, value in d.items() for i in range(2))',
+    'inner_items': 'return sum(value + i for i in range(2) for key, value in d.items())',
+    'inner_pair': 'return sum(pair[1] + i for i in range(2) for pair in d.items())',
+    'inner_laziness': 'return sum(value for i in range(0) for key, value in bad_receiver(xs).items())',
+    'filter_skips_inner': 'return sum(value for key, value in d.items() if False for a, b in bad_receiver(xs).items())',
+    'two_items': 'return sum(value * other for key, value in d.items() for name, other in d.items())',
+    'no_leak': 'key = 7\nvalue = 8\nanswer = sum(value for key, value in d.items())\nreturn [answer, key, value]',
+    'first_scope': 'return sum(d for key, d in d.items())',
+    'later_local': 'i = 7\nreturn sum(value for key, value in d.items() if i for i in range(1))',
+    'tuple_keys': 'd = {}\nd[(n, True)] = 3\nd[(n + 1, False)] = 4\nreturn sum(ways for (total, tight), ways in d.items() if tight)',
+    'nested_unpack_error': 'd = {n: 3}\nreturn sum((ways for (total, tight), ways in d.items()), touch(xs, 90))',
+    'shared_values': 'd = {"first": xs, "later": xs}\nreturn sum((value for key, value in d.items()), [])',
+    'custom': 'return sum((touch(xs, value) for key, value in Rows(xs, n).items()), touch(xs, 90))',
+    'custom_pair': 'return sum(pair[1] for pair in Rows(xs, n).items())',
+    'custom_inner': 'return sum(value for i in range(2) for key, value in Rows(xs, n).items())',
+    'custom_bad_sequence': 'return sum((value for key, value in BadRows(xs).items()), touch(xs, 90))',
+    'custom_failure': 'return sum((value for key, value in FailingRows(xs).items()), touch(xs, 90))',
+    'custom_shadow': 'obj = Rows(xs, n)\nobj.items = n\nreturn sum((value for key, value in obj.items()), touch(xs, 90))',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(xs: list[int], n: int):\n    d = {{"first": n, "later": n + 1}}\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+api['identify_classes'](program, Path(__file__).resolve())
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+for name, initial, n in itertools.product(bodies, ([], [0, 2]), (-2, 0, 3)):
+    value = initial.copy()
+    try:
+        result = world[name](value, n)
+        error = None
+    except (AttributeError, TypeError, ValueError, RuntimeError, ZeroDivisionError, UnboundLocalError) as exception:
+        result, error = None, type(exception).__name__
+    snapshot = data(snapshot_roots([value] + ([result] if error is None else [])))
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    call = f'HeapCalls.call source "{name}" [.ref 0, .scalar (.int ({n}))] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, n={n}',
+        f'example : (match ({call}).execution.observe 5000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({snapshot})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+with project_temporary_directory(prefix='dictionary-items-sum-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} live dictionary items sum comparisons passed')

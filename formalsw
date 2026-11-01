@@ -1573,6 +1573,13 @@ class AstJsonEmitter:
             iterable, start = summed
             if isinstance(iterable, ast.GeneratorExp):
                 encoded = self.generator_comprehension(iterable)
+                if encoded["type"] == "ListComp" and any(
+                        isinstance(loop.iter, ast.Call) and isinstance(loop.iter.func, ast.Attribute)
+                        and loop.iter.func.attr == 'items' and not loop.iter.args and not loop.iter.keywords
+                        for loop in iterable.generators):
+                    encoded = {**encoded, "type": "ListCompTargets", "generators": [
+                        {"target": {"type": "Name", "id": item["name"]},
+                         "iter": item["iter"], "ifs": item["ifs"]} for item in encoded["generators"]]}
                 kind = "SumGeneratorTargets" if encoded["type"] == "ListCompTargets" else "SumGenerator"
                 return {**encoded, "type": kind, "start": self.expr(start)}
             return {"type": "SumSequence", "iter": self.expr(iterable), "start": self.expr(start)}

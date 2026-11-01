@@ -1,4 +1,4 @@
-import lang.py.FormalSW.MachineGeneratorAcquisition
+import lang.py.FormalSW.MachineDictionaryItemsSum
 
 /-! Generator consumers acquire the first iterator before defaults and retain lazy bodies. -/
 namespace FormalSW.PyAst.HeapCalls.Relocation
@@ -49,12 +49,14 @@ theorem extremumGeneratorStart_acquire (anchors : Nat) (maximum : Bool) (fallbac
 
 theorem sumGeneratorTargetsStart_acquire (anchors : Nat) (start : Expr) (element target iterable : Expr)
     (filters : List Expr) (rest : List (Expr × Expr × List Expr)) (env : Env)
-    (values : List Value) (stack : List Frame) (heap : Mutable.Heap) (globals : Mutable.Globals) :
+    (values : List Value) (stack : List Frame) (heap : Mutable.Heap) (globals : Mutable.Globals)
+    (ordinary : itemsReceiver iterable = none) :
     sumGeneratorTargetsStart anchors element ((target, iterable, filters) :: rest) env start values stack heap globals =
       generatorAcquire anchors (generatorSource false iterable) false target
         (comprehensionFilters filters (comprehensionTargetsBody (sumBody element []) rest)) values heap globals
         (fun loop heap => .next ⟨.expr start env,
         .sumStart loop (comprehensionTargetsEnv env ((target, iterable, filters) :: rest)) :: stack, heap⟩) := by
+  simp only [sumGeneratorTargetsStart, ordinary]
   cases iterable with
   | call function expressions =>
     cases function with
@@ -63,7 +65,7 @@ theorem sumGeneratorTargetsStart_acquire (anchors : Nat) (start : Expr) (element
       · subst name; rfl
       by_cases rangeName : name = "range"
       · subst name; rfl
-      simp [sumGeneratorTargetsStart, generatorAcquire, generatorSource, generatorSequence, enumerateName, rangeName]
+      simp [generatorAcquire, generatorSource, generatorSequence, enumerateName, rangeName]
       rfl
     | _ => rfl
   | _ => rfl
@@ -184,29 +186,36 @@ theorem sumGeneratorTargetsStart_preserves (start : Expr) (element : Expr)
   | nil => exact Preserves.unchanged layout (by trivial) (by trivial) rfl
   | cons generator rest =>
     rcases generator with ⟨target, iterable, filters⟩
-    let body := comprehensionFilters filters (comprehensionTargetsBody (sumBody element []) rest)
-    have bodySource : ∀ statement ∈ body, StmtWithin 0 statement :=
-      SetCalls.Relocation.comprehensionFilters_within 0 filters _
-        (SetCalls.Relocation.comprehensionTargetsBody_within 0 (sumBody element []) rest (SetCalls.Relocation.sumBody_source element []))
-    have preserved := generatorAcquire_preserves (generatorSource false iterable) false target
-      logical physical rename logicalAnchors physicalAnchors body values globals
-      (fun loop heap => .next ⟨.expr start env, .sumStart loop
-          (comprehensionTargetsEnv env ((target, iterable, filters) :: rest)) :: stack, heap⟩)
-      (fun loop heap => .next ⟨.expr start (relocateEnv rename env), .sumStart loop
-          (comprehensionTargetsEnv (relocateEnv rename env) ((target, iterable, filters) :: rest)) :: (stack.map (relocateFrame rename)), heap⟩)
-      layout (fun statement member => (bodySource statement member).mono (Nat.zero_le _)) valuesInside globalsInside (by
-      intro loop loopInside
-      apply Preserves.unchanged layout
-      · rfl
-      · refine ⟨envInside, ?_⟩
-        intro frame member
-        rcases List.mem_cons.mp member with rfl | member
-        · simp only [FrameWithin]
-          exact ⟨SetCalls.Relocation.comprehensionTargetsEnv_within logical.length env _ envInside, loopInside⟩
-        · exact stackInside frame member
-      · simp only [relocateStep, relocateState, relocateWork, List.map_cons,
-          relocateFrame, SetCalls.Relocation.comprehensionTargetsEnv_relocates])
-    simpa only [sumGeneratorTargetsStart_acquire, relocateBody_source rename body bodySource] using preserved
+    cases ordinary : itemsReceiver iterable with
+    | some receiver =>
+      simpa only [sumGeneratorTargetsStart, ordinary] using
+        dictionaryItemsSumStart_preserves element target iterable filters rest start
+          logical physical rename logicalAnchors physicalAnchors env values stack globals
+          layout envInside valuesInside stackInside globalsInside
+    | none =>
+      let body := comprehensionFilters filters (comprehensionTargetsBody (sumBody element []) rest)
+      have bodySource : ∀ statement ∈ body, StmtWithin 0 statement :=
+        SetCalls.Relocation.comprehensionFilters_within 0 filters _
+          (SetCalls.Relocation.comprehensionTargetsBody_within 0 (sumBody element []) rest (SetCalls.Relocation.sumBody_source element []))
+      have preserved := generatorAcquire_preserves (generatorSource false iterable) false target
+        logical physical rename logicalAnchors physicalAnchors body values globals
+        (fun loop heap => .next ⟨.expr start env, .sumStart loop
+            (comprehensionTargetsEnv env ((target, iterable, filters) :: rest)) :: stack, heap⟩)
+        (fun loop heap => .next ⟨.expr start (relocateEnv rename env), .sumStart loop
+            (comprehensionTargetsEnv (relocateEnv rename env) ((target, iterable, filters) :: rest)) :: (stack.map (relocateFrame rename)), heap⟩)
+        layout (fun statement member => (bodySource statement member).mono (Nat.zero_le _)) valuesInside globalsInside (by
+        intro loop loopInside
+        apply Preserves.unchanged layout
+        · rfl
+        · refine ⟨envInside, ?_⟩
+          intro frame member
+          rcases List.mem_cons.mp member with rfl | member
+          · simp only [FrameWithin]
+            exact ⟨SetCalls.Relocation.comprehensionTargetsEnv_within logical.length env _ envInside, loopInside⟩
+          · exact stackInside frame member
+        · simp only [relocateStep, relocateState, relocateWork, List.map_cons,
+            relocateFrame, SetCalls.Relocation.comprehensionTargetsEnv_relocates])
+      simpa only [sumGeneratorTargetsStart_acquire (ordinary := ordinary), relocateBody_source rename body bodySource] using preserved
 
 theorem truthGeneratorStart_preserves (universal : Bool) (element : Expr)
     (generators : List (Expr × Expr × List Expr)) (env : Env)

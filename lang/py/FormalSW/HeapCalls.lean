@@ -895,6 +895,11 @@ def comprehensionTargetBody (target : Expr) (body : List Stmt) : List Stmt :=
       .assign [.tuple targets] (.name "$formalsw.unpack") :: body
   | _ => [.unsupported "unsupported comprehension target"]
 
+/-- An immediate items consumer evaluates the receiver once before acquiring its live cursor. -/
+def itemsReceiver : Expr → Option Expr
+  | .call (.attribute receiver "items") [] => some receiver
+  | _ => none
+
 /-- Subsequent iterables use the existing for-loop and unpacking semantics. -/
 def comprehensionTargetsBody (terminal : List Stmt) : List (Expr × Expr × List Expr) → List Stmt
   | [] => terminal
@@ -903,6 +908,8 @@ def comprehensionTargetsBody (terminal : List Stmt) : List (Expr × Expr × List
         (comprehensionFilters filters (comprehensionTargetsBody terminal rest))
       match iterable with
       | .zipIterable expressions => [.forZip (.name (comprehensionTargetName target)) expressions body []]
+      | .call (.attribute receiver "items") [] => [.forDictionaryItems target receiver
+          (comprehensionFilters filters (comprehensionTargetsBody terminal rest)) []]
       | .call (.name "enumerate") _ => [.forIn target iterable
           (comprehensionFilters filters (comprehensionTargetsBody terminal rest)) []]
       | _ => [.forIn (.name (comprehensionTargetName target)) iterable body []]
@@ -1080,6 +1087,33 @@ def sumGeneratorStart (anchors : Nat) (element : Expr)
               enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
           | _ => .unsupported
 
+/-- Capture builtin items before evaluating the sum start; custom methods keep ordinary dispatch. -/
+def dictionaryItemsSumStart (anchors : Nat) (element target iterable : Expr) (filters : List Expr)
+    (rest : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
+    (values : List Value) (stack : List Frame) (heap : Heap) (globals : Mutable.Globals := []) : Step State Completion :=
+  match values with
+  | [receiver] =>
+      let generators := (target, iterable, filters) :: rest
+      let body := comprehensionTargetBody target
+        (comprehensionFilters filters (comprehensionTargetsBody (sumBody element []) rest))
+      let custom := fun () => Step.next ⟨.value receiver,
+        .methodReceiver "items" [] env :: .arguments
+          (.sumGeneratorTargets element ((target, .name "$formalsw.items.iterator", filters) :: rest) env start)
+          [] [] env :: stack, heap⟩
+      match receiver with
+      | .ref address => match heap[address]? with
+          | some object => match dictionaryItemFields object with
+              | some entries => .next ⟨.expr start env,
+                  .sumStart (.dictionaryItemsStepLoop (comprehensionTargetName target) address
+                    (entries.map fun entry => sequenceSource entry.1) 0 body [])
+                    (comprehensionTargetsEnv env generators) :: stack, heap⟩
+              | none => match object with
+                  | .instance _ _ _ | .dataInstance _ _ _ _ _ => custom ()
+                  | _ => done anchors heap (.error { typeName := "AttributeError", args := [] }) globals
+          | none => .unsupported
+      | .scalar _ => done anchors heap (.error { typeName := "AttributeError", args := [] }) globals
+  | _ => .unsupported
+
 /-- Generator sums bind unpacked targets only when iteration begins, after the start argument. -/
 def sumGeneratorTargetsStart (anchors : Nat) (element : Expr)
     (generators : List (Expr × Expr × List Expr)) (env : Env) (start : Expr)
@@ -1092,27 +1126,29 @@ def sumGeneratorTargetsStart (anchors : Nat) (element : Expr)
       let name := comprehensionTargetName target
       let enter := fun loop heap => Step.next
         ⟨.expr start env, .sumStart loop (comprehensionTargetsEnv env generators) :: stack, heap⟩
-      match iterable with
-      | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
-          enter (.permutationStepLoop name rows body []) heap
-      | .combinationsIterable _ => run (globals := globals) anchors heap (combinationRows values) fun rows heap =>
-          enter (.permutationStepLoop name rows body []) heap
-      | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
-          enter (.zipStepLoop name sources 0 body []) heap
-      | .call (.name "enumerate") _ => match enumerateTarget target, values with
-          | some (index, name), [source, start] =>
-              run (globals := globals) anchors heap (enumerateStart start) fun counter heap =>
-                run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
-                  enter (.enumerateStepLoop index name (sequenceSource source) 0 counter
-                    (comprehensionFilters filters (comprehensionTargetsBody (sumBody element []) rest)) []) heap
-          | _, _ => .unsupported
-      | .call (.name "range") _ => match rangeBounds values with
-          | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
-          | .error error => done (globals := globals) anchors heap (.error error)
-      | _ => match values with
-          | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
-              enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
-          | _ => .unsupported
+      match itemsReceiver iterable with
+      | some _ => dictionaryItemsSumStart anchors element target iterable filters rest env start values stack heap globals
+      | none => match iterable with
+        | .permutationsIterable _ => run (globals := globals) anchors heap (permutationRows values) fun rows heap =>
+            enter (.permutationStepLoop name rows body []) heap
+        | .combinationsIterable _ => run (globals := globals) anchors heap (combinationRows values) fun rows heap =>
+            enter (.permutationStepLoop name rows body []) heap
+        | .zipIterable _ => run (globals := globals) anchors heap (zipSources values) fun sources heap =>
+            enter (.zipStepLoop name sources 0 body []) heap
+        | .call (.name "enumerate") _ => match enumerateTarget target, values with
+            | some (index, name), [source, start] =>
+                run (globals := globals) anchors heap (enumerateStart start) fun counter heap =>
+                  run (globals := globals) anchors heap (Mutable.sequence source) fun _ heap =>
+                    enter (.enumerateStepLoop index name (sequenceSource source) 0 counter
+                      (comprehensionFilters filters (comprehensionTargetsBody (sumBody element []) rest)) []) heap
+            | _, _ => .unsupported
+        | .call (.name "range") _ => match rangeBounds values with
+            | .ok (first, stop, stride) => enter (.rangeStepLoop name first stop stride body []) heap
+            | .error error => done (globals := globals) anchors heap (.error error)
+        | _ => match values with
+            | [value] => run (globals := globals) anchors heap (Mutable.sequence value) fun _ heap =>
+                enter (.sequenceStepLoop name (sequenceSource value) 0 body []) heap
+            | _ => .unsupported
 
 /-- Stop on the first decisive truth value; otherwise keep requesting items. -/
 def truthBody (universal : Bool) (element : Expr) : List Stmt :=
@@ -2023,9 +2059,11 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
           .next (argumentsState (.dictionaryComprehension key value generators (comprehensionTargetsEnv env generators))
             env [] expressions stack heap)
       | .sumGeneratorTargets element (generators@((_, iterable, _) :: _)) start =>
-          let expressions := match iterable with
-            | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions | .combinationsIterable expressions => expressions
-            | _ => [iterable]
+          let expressions := match itemsReceiver iterable with
+            | some receiver => [receiver]
+            | none => match iterable with
+              | .call (.name "range") expressions | .call (.name "enumerate") expressions | .zipIterable expressions | .permutationsIterable expressions | .combinationsIterable expressions => expressions
+              | _ => [iterable]
           .next (argumentsState (.sumGeneratorTargets element generators env start) env [] expressions stack heap)
       | .consumeGenerator (.call (.name "$formalsw.extremum.compare") []) expression [] =>
           .next ⟨.expr expression env, .extremumResume stack :: withoutGenerator stack, heap⟩

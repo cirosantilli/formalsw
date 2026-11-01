@@ -75,6 +75,8 @@ bodies = {
     'enumerated_first_scope': 'return sum(xs for i, xs in enumerate(xs))',
     'enumerated_no_leak': 'i = 40\nx = 50\nout = sum(i + x for i, x in enumerate(xs))\nreturn [out, i, x]',
     'enumerated_later_local': 'i = 40\nreturn sum(x for x in xs if i for i, x in enumerate([n]))',
+    'nested_unpacked': 'return sum(x + y + z for x, (y, z) in [[n, [2, 3]]])',
+    'nested_bad_item': 'return sum(x for x, (y, z) in xs)',
     'unpacked': 'return sum(x + y for x, y in [[n, n + 1], [2, 3]])',
     'unpacked_lists': 'return sum(x - y for [x, y] in [[n, n + 1]])',
     'unpacked_start': 'return sum((touch(xs, x + y) for x, y in [[n, n + 1]]), touch(xs, 50))',
@@ -164,7 +166,7 @@ for name, initial, n in itertools.product((name for name in bodies if name != 'u
     count += 1
 lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
 for expression in ('sum()', 'sum(xs, n, n)', 'sum(xs, other=n)', 'sum(xs, n, start=n)',
-                   'sum(x for x, (y, z) in xs)', 'sum(x async for x in xs)',
+                   'sum(x for x, *ys in xs)', 'sum(x async for x in xs)',
                    'sum(x for x in xs for range in range(n))',
                    'sum(len(xs) for len in xs)', '(x for x in xs)',
                    'sum(x for x in xs) + x', 'sum(range(), n)'):

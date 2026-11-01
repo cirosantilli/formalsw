@@ -27,7 +27,7 @@ import lang.py.FormalSW.SetDifferenceCalls
 import lang.py.FormalSW.DictionaryCalls
 import lang.py.FormalSW.NaturalDictionaryCalls
 import lang.py.FormalSW.DictionaryConstructorCalls
-import lang.py.FormalSW.DictionaryItemsCalls
+import lang.py.FormalSW.DictionaryItemsSumCalls
 import lang.py.FormalSW.KeyDictionaryCalls
 import lang.py.FormalSW.SumCalls
 import lang.py.FormalSW.TruthCalls

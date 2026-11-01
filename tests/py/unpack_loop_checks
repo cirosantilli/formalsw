@@ -139,9 +139,9 @@ for name, body in bodies.items():
     source += f'\ndef {name}(xs: list[int], n: int):\n    out = []\n'
     source += ''.join('    ' + line + '\n' for line in body.splitlines())
     source += '    return out\n'
-# Dictionary item views inside generator expressions need their own live cursor.
+# The live dictionary cursor also supports nested sum-generator targets.
 source += '''
-def unsupported_items_sum(n: int):
+def items_sum(n: int):
     table = {}
     table[(n, True)] = 3
     return sum(ways for (total, tight), ways in table.items() if tight)
@@ -178,7 +178,7 @@ for name, initial, n in itertools.product(bodies, ([], [0, 2]), (-2, 3)):
     count += 1
 for n in (-3, 0, 10 ** 30):
     lines.append(f'example : (Calls.function source "scalar_annotation" [.int ({n})]).observe 100 = .done (.ok (.int ({n + 1}))) := by decide')
-lines.append('example : (HeapCalls.call source "unsupported_items_sum" [.scalar (.int 3)] []).execution.observe 3000 = .unsupported := by native_decide')
+lines.append('example : (match (HeapCalls.call source "items_sum" [.scalar (.int 3)] []).execution.observe 3000 with | .done (.ok c) => c.outcome == .ok (.scalar (.int 3)) | _ => false) = true := by native_decide')
 lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
 
 # Do not permit constant tuple pooling to become observable through the table.
