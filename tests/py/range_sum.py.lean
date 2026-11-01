@@ -278,10 +278,9 @@ private theorem sum.result (n : Int) :
       scalarTruth, argumentEnv, evalCmpOp, RangeSumAst.module, nonpositive]
 
 /-- The closed form finishes with an integer of its annotated return type. -/
-theorem sum.«ReturnType» :
-    FormalSW.Property.Function.ReturnType RangeSumAst.module "sum" := by
-  intro n
-  exact Or.inl ⟨_, sum.result n⟩
+theorem sum.«ReturnType» (n : Int) :
+    (scalarFunction RangeSumAst.module "sum" [.int n]).ReturnType "int" :=
+  .inr ⟨_, sum.result n, rfl⟩
 
 /-- Actual execution outcomes agree, so termination contracts transfer too. -/
 theorem sum.«Equiv(sum_naive)» :
