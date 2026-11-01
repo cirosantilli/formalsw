@@ -47,6 +47,23 @@ theorem step_unpack_start_preserves (value : Value) (names : List String) (body 
   · exact step_unpack_start_relocates module logical physical rename logicalAnchors physicalAnchors layout.runtime
       value names body otherwise following env stack globals inside.1
 
+theorem unpacking_assignment_within (bound : Nat) (targets : List Expr) (value : Expr) :
+    ∀ statement ∈ UnpackingTargets.assignment targets value, StmtWithin bound statement :=
+  UnpackingTargets.lower_forall (StmtWithin bound)
+    (fun _ _ => by simp [StmtWithin]) (fun _ => by simp [StmtWithin]) _ _ _
+
+theorem relocate_unpacking_assignment (targets : List Expr) (value : Expr) :
+    (UnpackingTargets.assignment targets value).map (relocateStmt rename) =
+      UnpackingTargets.assignment targets value := by
+  have fixed : ∀ statement ∈ UnpackingTargets.assignment targets value,
+      relocateStmt rename statement = statement :=
+    UnpackingTargets.lower_forall (fun statement => relocateStmt rename statement = statement)
+      (fun _ _ => by simp [relocateStmt]) (fun _ => by simp [relocateStmt]) _ _ _
+  calc
+    (UnpackingTargets.assignment targets value).map (relocateStmt rename) =
+        (UnpackingTargets.assignment targets value).map id := List.map_congr_left fixed
+    _ = _ := List.map_id _
+
 /-- Ordinary assignment evaluates its right-hand side before its supported targets. -/
 theorem step_assignment (heap : Mutable.Heap) (anchors : Nat) (targets : List Expr) (value : Expr)
     (following : List Stmt) (env : Env) (stack : List Frame) (globals : Mutable.Globals) :
@@ -61,7 +78,7 @@ theorem step_assignment (heap : Mutable.Heap) (anchors : Nat) (targets : List Ex
         | .subscript base index => .next ⟨.expr value env, .assignItem base index following env :: stack, heap⟩
         | .tuple fields | .list fields => match Calls.targetNames fields with
           | some names => .next ⟨.expr value env, .unpack names following env :: stack, heap⟩
-          | none => .unsupported
+          | none => .next ⟨.block (UnpackingTargets.assignment fields value ++ following) env, stack, heap⟩
         | _ => .unsupported
       | _ => .unsupported := by
   cases targets with
@@ -98,7 +115,12 @@ theorem step_assignment_preserves (targets : List Expr) (value : Expr) (followin
     | rfl
     | trivial
     | (simp [StepWithin, StateWithin, WorkWithin, FrameWithin, envInside] <;> exact ⟨bodyInside, stackInside⟩)
-    | simp [relocateStep, relocateState, relocateWork, relocateFrame]
+    | (refine ⟨⟨envInside, ?_⟩, stackInside⟩
+       intro statement member
+       rcases List.mem_append.mp member with member | member
+       · exact unpacking_assignment_within _ _ _ statement member
+       · exact bodyInside statement member)
+    | simp [relocateStep, relocateState, relocateWork, relocateFrame, relocate_unpacking_assignment]
 
 /-- Function-local annotations do not evaluate their annotation expressions. -/
 theorem step_annotation (heap : Mutable.Heap) (anchors : Nat) (target annotation : Expr) (value : Option Expr)

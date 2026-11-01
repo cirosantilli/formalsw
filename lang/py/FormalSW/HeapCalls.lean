@@ -7,6 +7,7 @@ import lang.py.FormalSW.DictionaryConstructor
 import lang.py.FormalSW.DictionaryDisplay
 import lang.py.FormalSW.Permutations
 import lang.py.FormalSW.Combinations
+import lang.py.FormalSW.UnpackingTargets
 import lang.py.FormalSW.StringReplace
 
 /-! Function calls with shared lists. Locals and continuations carry references;
@@ -927,7 +928,9 @@ def dictionaryValuesStart (anchors : Nat) (target : Expr) (body otherwise follow
     | .tuple targets | .list targets => match Calls.targetNames targets with
         | some names => .next ⟨.value receiver,
             .methodReceiver "values" [] env :: .unpackSequence names body otherwise following env :: stack, heap⟩
-        | none => .unsupported
+        | none => .next ⟨.value receiver,
+            .methodReceiver "values" [] env :: .sequence "$formalsw.unpack"
+              (comprehensionTargetBody (.tuple targets) body) otherwise following env :: stack, heap⟩
     | _ => .unsupported
   match receiver with
   | .ref address => match heap[address]? with
@@ -1855,7 +1858,9 @@ def dictionaryItemsStart (anchors : Nat) (target : Expr) (body otherwise followi
     | .tuple targets | .list targets => match Calls.targetNames targets with
         | some names => .next ⟨.value receiver,
             .methodReceiver "items" [] env :: .unpackSequence names body otherwise following env :: stack, heap⟩
-        | none => .unsupported
+        | none => .next ⟨.value receiver,
+            .methodReceiver "items" [] env :: .sequence "$formalsw.unpack"
+              (comprehensionTargetBody (.tuple targets) body) otherwise following env :: stack, heap⟩
     | _ => .unsupported
   match receiver with
   | .ref address => match heap[address]? with
@@ -2094,7 +2099,7 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       | .assign [.tuple targets] expression :: rest | .assign [.list targets] expression :: rest =>
           match Calls.targetNames targets with
           | some names => .next ⟨.expr expression env, .unpack names rest env :: stack, heap⟩
-          | none => .unsupported
+          | none => .next ⟨.block (UnpackingTargets.assignment targets expression ++ rest) env, stack, heap⟩
       | .augAssign (.subscript _ (.slice _ _ _)) _ _ :: _ => .unsupported
       | .augAssign (.subscript base index) op expression :: rest =>
           .next ⟨.expr base env, .augmentItemReceiver index op expression rest env :: stack, heap⟩
@@ -2175,7 +2180,8 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
         | .forIn (.list targets) iterable body otherwise :: rest =>
           match Calls.targetNames targets with
           | some names => .next ⟨.expr iterable env, .unpackSequence names body otherwise rest env :: stack, heap⟩
-          | none => .unsupported
+          | none => .next ⟨.block (.forIn (.name "$formalsw.unpack") iterable
+              (comprehensionTargetBody (.tuple targets) body) otherwise :: rest) env, stack, heap⟩
       | .unpackStepLoop names source position body otherwise :: rest =>
           run (globals := globals) anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
             match items[position]? with

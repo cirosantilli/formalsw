@@ -10,6 +10,13 @@ def flat_unpacking(target):
             and all(isinstance(item, ast.Name) for item in target.elts))
 
 
+def unpacking_target(target):
+    """Recognize recursively nested tuple/list targets with local-name leaves."""
+    return (isinstance(target, ast.Name)
+            or isinstance(target, (ast.Tuple, ast.List))
+            and all(unpacking_target(item) for item in target.elts))
+
+
 def runtime_tuple_element(node):
     """
     Recognize fields that prevent constant folding of a tuple display.

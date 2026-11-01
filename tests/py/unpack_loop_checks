@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compare flat unpacking loops and unevaluated local annotations with Python.
+Compare nested unpacking assignments and loops and unevaluated local annotations with Python.
 """
 import ast
 import itertools
@@ -40,9 +40,22 @@ def data(value):
 
 
 source = '''
+from itertools import combinations, permutations
+
+class Rows:
+    def __init__(self, n: int):
+        self.n = n
+    def items(self):
+        return [[[self.n, 2], 3], [[4, 5], 6]]
+    def values(self):
+        return self.items()
 def touch(xs: list[int], n: int) -> int:
     xs.append(n)
     return n
+def fields(xs: list[int], n: int):
+    xs.append(n)
+    return [[n, 2], 3]
+
 def fail(xs: list[int], n: int) -> int:
     xs.append(n)
     return n // 0
@@ -56,6 +69,37 @@ def scalar_annotation(n: int) -> int:
     return value
 '''
 bodies = {
+    'nested_zip': 'for (a, b), c in zip([[n, 2], [3, 4]], [5, 6]):\n    out.append([a, b, c])',
+    'nested_combinations': 'for (a, b), (c, d) in combinations([[n, 2], [3, 4]], 2):\n    out.append([a, b, c, d])',
+    'nested_permutations': 'for (a, b), (c, d) in permutations([[n, 2], [3, 4]], 2):\n    out.append([a, b, c, d])',
+    'custom_items': 'for (a, b), c in Rows(n).items():\n    out.append([a, b, c])',
+    'custom_values': 'for (a, b), c in Rows(n).values():\n    out.append([a, b, c])',
+    'nested_values': 'table = {1: [[n, 2], 3], 2: [[4, 5], 6]}\nfor (a, b), c in table.values():\n    out.append([a, b, c])',
+    'custom_items_comprehension': 'out = [a + b + c for (a, b), c in Rows(n).items()]',
+    'custom_values_sum': 'out.append(sum(a + b + c for (a, b), c in Rows(n).values()))',
+    'nested_rhs_once': '(a, b), c = fields(xs, n)\nout.append([a, b, c])',
+    'nested_scope': 'a = n\nb = n + 1\nc = n + 2\nout = [[a, b, c] for (a, b), c in [[[1, 2], 3]]]\nout.append([a, b, c])',
+    'nested_generators': 'out = [a + b + c + d + e for (a, b), c in [[[n, 2], 3]] for [d, [e]] in [[a, [c]]]]',
+    'nested_tuple_source': '(a, b), c = ((n, 2), 3)\nout.append([a, b, c])',
+    'nested_assignment': '(a, b), c = [[n, 2], 3]\nout.append([a, b, c])',
+    'nested_list_assignment': '[a, [b, c]] = [n, [2, 3]]\nout.append([a, b, c])',
+    'nested_duplicate': '(a, b), a = [[n, 2], 3]\nout.append([a, b])',
+    'nested_duplicate_later': 'a, (a, b) = [n, [2, 3]]\nout.append([a, b])',
+    'deep_target': '((a, b), c), (d, [e]) = [[[n, 2], 3], [4, [5]]]\nout.append([a, b, c, d, e])',
+    'nested_empty': '([], a), () = [[[], n], []]\nout.append(a)',
+    'nested_alias': '(a, b), c = [[xs, xs], xs]\na.append(n)\nout.append([a is b, b is c, c])',
+    'nested_effects': '(a, b), c = [[touch(xs, n), touch(xs, 2)], touch(xs, 3)]\nout.append([a, b, c])',
+    'nested_inner_short': '(a, b), c = [[touch(xs, n)], touch(xs, 3)]',
+    'nested_inner_long': '(a, b), c = [[touch(xs, n), 2, 4], touch(xs, 3)]',
+    'nested_outer_short': '(a, b), c = [[touch(xs, n), 2]]',
+    'nested_outer_long': '(a, b), c = [[touch(xs, n), 2], 3, 4]',
+    'nested_inner_type': '(a, b), c = [touch(xs, n), touch(xs, 3)]',
+    'nested_loop': 'for (a, b), c in [[[n, 2], 3], [[4, 5], 6]]:\n    out.append([a, b, c])',
+    'nested_loop_stop': 'for (a, b), c in [[[n, 2], 3], [[4, 5], 6]]:\n    out.append([a, b, c])\n    if a > 0:\n        break\nelse:\n    out.append(9)',
+    'nested_loop_skip': 'for (a, b), c in [[[n, 2], 3], [[4, 5], 6]]:\n    if a > 0:\n        continue\n    out.append([a, b, c])\nelse:\n    out.append(9)',
+    'nested_comprehension': 'out = [[a, b, c] for (a, b), c in [[[n, 2], 3], [[4, 5], 6]] if a > 0]',
+    'nested_generator': 'out.append(sum(a + b + c for (a, b), c in [[[n, 2], 3], [[4, 5], 6]] if a > 0))',
+    'nested_items': 'table = {}\ntable[(n, True)] = 3\ntable[(n + 1, False)] = 4\nfor (total, tight), ways in table.items():\n    out.append([total, tight, ways])',
     'ordinary': 'for a, b in [[n, 2], [3, n]]:\n    out.append([a, b])',
     'list_target': 'for [a, b] in [[n, 2], [3, n]]:\n    out.append([a, b])',
     'duplicate_target': 'for a, a in [[n, 2], [3, n]]:\n    out.append(a)',
@@ -95,7 +139,15 @@ for name, body in bodies.items():
     source += f'\ndef {name}(xs: list[int], n: int):\n    out = []\n'
     source += ''.join('    ' + line + '\n' for line in body.splitlines())
     source += '    return out\n'
+# Dictionary item views inside generator expressions need their own live cursor.
+source += '''
+def unsupported_items_sum(n: int):
+    table = {}
+    table[(n, True)] = 3
+    return sum(ways for (total, tight), ways in table.items() if tight)
+'''
 program = ast.parse(source)
+api['identify_classes'](program, Path(__file__).resolve())
 checker = SupportChecker(program)
 for name in (*bodies, 'scalar_annotation'):
     assert not checker.check(name), (name, checker.check(name))
@@ -126,6 +178,7 @@ for name, initial, n in itertools.product(bodies, ([], [0, 2]), (-2, 3)):
     count += 1
 for n in (-3, 0, 10 ** 30):
     lines.append(f'example : (Calls.function source "scalar_annotation" [.int ({n})]).observe 100 = .done (.ok (.int ({n + 1}))) := by decide')
+lines.append('example : (HeapCalls.call source "unsupported_items_sum" [.scalar (.int 3)] []).execution.observe 3000 = .unsupported := by native_decide')
 lines.append('example : (HeapCalls.call source "unsupported" [.ref 0, .scalar (.int 0)] [.list []]).execution.observe 100 = .unsupported := by decide')
 
 # Do not permit constant tuple pooling to become observable through the table.
@@ -137,12 +190,15 @@ for extra in ('return table', 'alias = table', 'xs.append(table)', 'touch(table,
               'for (a, b), c in table:\n    pass',
               'for a, xs[0] in table:\n    pass',
               'table: list[int]', 'table = []', 'return table[:]', 'return len(table)'):
-    text = source + '\ndef f(xs: list[int], n: int):\n    table = [(1, 2), (1, 2)]\n'
+    text = '\ndef touch(xs, n):\n    return n\n' + '\ndef f(xs: list[int], n: int):\n    table = [(1, 2), (1, 2)]\n'
     text += ''.join('    ' + line + '\n' for line in extra.splitlines())
     assert SupportChecker(ast.parse(text)).check('f'), extra
-for target in ('a, (b, c)', 'a, *rest', 'a, xs[0]'):
+for target in ('a, (b, *c)', 'a, *rest', 'a, xs[0]', '(a, xs[0]), b'):
     text = f'def f(xs: list[int]):\n    for {target} in [[1, 2]]:\n        pass\n'
     assert SupportChecker(ast.parse(text)).check('f'), target
+for iterable in ('enumerate([[1, 2]])', 'enumerate([[1, 2]], start=3)'):
+    text = f'def f():\n    for a, (b, c) in {iterable}:\n        pass\n'
+    assert SupportChecker(ast.parse(text)).check('f'), iterable
 nested_literal = 'def f(n: int):\n    table = [((1, 2), 3)]\n    for a, b in table:\n        return a\n'
 assert SupportChecker(ast.parse(nested_literal)).check('f')
 # A parameter's entry value may already expose the constant table.

@@ -176,7 +176,7 @@ theorem dictionaryValuesStart_relocates (logical physical : Mutable.Heap) (renam
     case dict => intros; rfl
     all_goals
       split <;> simp_all only [List.map_cons, relocateFrame, relocateValue]
-      all_goals split <;> simp_all only [List.map_cons, relocateFrame]
+      all_goals split <;> simp_all only [List.map_cons, relocateFrame, comprehensionTargetBody_relocates]
 
 variable (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
   (logicalAnchors physicalAnchors : Nat)
@@ -358,7 +358,9 @@ theorem dictionary_start_within (heap : Mutable.Heap) (closed : Closed heap) (an
       | .tuple targets | .list targets => match Calls.targetNames targets with
           | some names => .next ⟨.value receiver,
               .methodReceiver method [] env :: .unpackSequence names body otherwise following env :: stack, heap⟩
-          | none => .unsupported
+          | none => .next ⟨.value receiver,
+              .methodReceiver method [] env :: .sequence "$formalsw.unpack"
+                (comprehensionTargetBody (.tuple targets) body) otherwise following env :: stack, heap⟩
       | _ => .unsupported) := by
     have saved (frame : Frame) (frameInside : FrameWithin heap.length frame) :
         StepWithin (.next ⟨.value receiver, .methodReceiver method [] env :: frame :: stack, heap⟩) := by
@@ -374,6 +376,9 @@ theorem dictionary_start_within (heap : Mutable.Heap) (closed : Closed heap) (an
       | trivial)
     all_goals split <;> first
       | exact saved _ (by simpa only [FrameWithin] using And.intro envInside (And.intro bodyInside (And.intro otherwiseInside followingInside)))
+      | exact saved _ (by
+          simp only [FrameWithin]
+          exact ⟨envInside, comprehensionTargetBody_within _ _ _ bodyInside, otherwiseInside, followingInside⟩)
       | trivial
   cases receiver with
   | scalar value => cases valuesOnly <;> exact errorInside

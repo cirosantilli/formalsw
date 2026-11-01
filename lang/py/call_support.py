@@ -12,7 +12,7 @@ from lang.py.named_callbacks import callback_bindings_valid, callback_signature
 from lang.py.memo_support import cache_argument, cache_decorator, uses_memoized
 from lang.py.call_graph import call_targets
 from lang.py.sorting_support import uses_sort_model
-from lang.py.tuple_support import flat_unpacking, unpacked_tuple_displays, unpacked_return_tuple_displays, globally_private_return_tuple_displays, compared_set_tuple_displays, compared_local_tuple_displays, runtime_tuple_element
+from lang.py.tuple_support import flat_unpacking, unpacking_target, unpacked_tuple_displays, unpacked_return_tuple_displays, globally_private_return_tuple_displays, compared_set_tuple_displays, compared_local_tuple_displays, runtime_tuple_element
 from lang.py.class_support import ordinary_attribute, plain_class_methods
 
 
@@ -923,9 +923,9 @@ def check_calls(module, function, reject, *, heap=False):
                     recurse(bound)
                 return
             if heap and isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
-                if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
+                if any(generator.is_async or not unpacking_target(generator.target)
                        for generator in node.generators):
-                    reject(node, 'comprehensions require synchronous loops with names or flat tuple/list targets')
+                    reject(node, 'comprehensions require synchronous loops with names or nested tuple/list targets')
                     return
                 inner_scope = scope | {target.id for generator in node.generators
                                        for target in ast.walk(generator.target) if isinstance(target, ast.Name)}
@@ -1356,7 +1356,7 @@ def check_calls(module, function, reject, *, heap=False):
                     expr(node.target.value)
                 elif (heap and isinstance(node, ast.Assign) and len(node.targets) == 1
                       and isinstance(node.targets[0], (ast.Tuple, ast.List))
-                      and all(isinstance(target, ast.Name) for target in node.targets[0].elts)):
+                      and unpacking_target(node.targets[0])):
                     if isinstance(node.value, ast.Tuple):
                         # The container cannot escape immediate unpacking; its
                         # children still need ordinary expression coverage.
@@ -1440,8 +1440,8 @@ def check_calls(module, function, reject, *, heap=False):
                 elif heap and isinstance(node, ast.For) and combination_binding(node.iter, module) is not None:
                     if combination_binding(node.iter, module) in locals_:
                         reject(node.iter, 'combinations requires an unshadowed standard-library import')
-                    if not (isinstance(node.target, ast.Name) or flat_unpacking(node.target)):
-                        reject(node, 'combination loops require a name or flat tuple/list target')
+                    if not unpacking_target(node.target):
+                        reject(node, 'combination loops require a name or nested tuple/list target')
                     arguments = combination_arguments(node.iter, module)
                     if arguments is None:
                         reject(node.iter, 'combinations requires a positional iterable and a length')
@@ -1455,8 +1455,8 @@ def check_calls(module, function, reject, *, heap=False):
                 elif heap and isinstance(node, ast.For) and permutation_binding(node.iter, module) is not None:
                     if permutation_binding(node.iter, module) in locals_:
                         reject(node.iter, 'permutations requires an unshadowed standard-library import')
-                    if not (isinstance(node.target, ast.Name) or flat_unpacking(node.target)):
-                        reject(node, 'permutation loops require a name or flat tuple/list target')
+                    if not unpacking_target(node.target):
+                        reject(node, 'permutation loops require a name or nested tuple/list target')
                     arguments = permutation_arguments(node.iter, module)
                     if arguments is None:
                         reject(node.iter, 'permutations requires a positional iterable and optional length')
@@ -1470,8 +1470,8 @@ def check_calls(module, function, reject, *, heap=False):
                 elif heap and isinstance(node, ast.For) and zip_iterable(node.iter, module):
                     if 'zip' in locals_:
                         reject(node.iter, 'zip iteration requires the unshadowed builtin zip')
-                    if not (isinstance(node.target, ast.Name) or flat_unpacking(node.target)):
-                        reject(node, 'zip loops require a name or flat tuple/list target')
+                    if not unpacking_target(node.target):
+                        reject(node, 'zip loops require a name or nested tuple/list target')
                     if node.iter.keywords:
                         reject(node.iter, 'zip iteration supports positional sequence arguments, without strict')
                     for argument in node.iter.args:
@@ -1484,7 +1484,7 @@ def check_calls(module, function, reject, *, heap=False):
                     expr(node.iter)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)
-                elif heap and isinstance(node, ast.For) and flat_unpacking(node.target):
+                elif heap and isinstance(node, ast.For) and unpacking_target(node.target):
                     expr(node.iter)
                     block(node.body, loop_depth + 1)
                     block(node.orelse, loop_depth)

@@ -31,7 +31,7 @@ from lang.py.memo_support import cache_decorator, memoized_names, uses_memoized
 from lang.py.constant_pools import identify_constant_pools
 from lang.py.contracts import ContractError, input_condition, reference_kind, heap_input_name
 from lang.py.defaults import literal_default
-from lang.py.tuple_support import flat_unpacking
+from lang.py.tuple_support import unpacking_target
 from lang.py.imports import bindings, identify_classes, resolve_function, resolve_python_function
 from lang.py.class_support import dataclass_fields, resolve_record_inputs
 from lang.py.typing_support import resolve_typing_annotations
@@ -1653,9 +1653,9 @@ class AstJsonEmitter:
                     {"key": self.expr(key), "value": self.expr(value)}
                     for key, value in zip(keys, values)]}
             case ast.DictComp(key=key, value=value, generators=generators):
-                if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
+                if any(generator.is_async or not unpacking_target(generator.target)
                        for generator in generators):
-                    raise UnsupportedSyntax('comprehensions require synchronous loops with names or flat tuple/list targets')
+                    raise UnsupportedSyntax('comprehensions require synchronous loops with names or nested tuple/list targets')
                 return {"type": "DictComp", "key": self.expr(key), "value": self.expr(value), "generators": [
                     {"target": self.expr(generator.target), "iter": self.iterator_expr(generator.iter),
                      "ifs": [self.expr(condition) for condition in generator.ifs]}
@@ -1667,9 +1667,9 @@ class AstJsonEmitter:
                     raise UnsupportedSyntax("set displays support at most 30 elements without unpacking")
                 return {"type": "Set", "elts": [self.expr(elt) for elt in elts]}
             case ast.ListComp(elt=elt, generators=generators) | ast.SetComp(elt=elt, generators=generators):
-                if any(generator.is_async or not (isinstance(generator.target, ast.Name) or flat_unpacking(generator.target))
+                if any(generator.is_async or not unpacking_target(generator.target)
                        for generator in generators):
-                    raise UnsupportedSyntax('comprehensions require synchronous loops with names or flat tuple/list targets')
+                    raise UnsupportedSyntax('comprehensions require synchronous loops with names or nested tuple/list targets')
                 if isinstance(expr, ast.SetComp) or any(not isinstance(generator.target, ast.Name)
                        or zip_iterable(generator.iter, self.bindings_module)
                        or (not getattr(expr, 'formalsw_generator_context', False)

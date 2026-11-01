@@ -11,6 +11,7 @@ import lang.py.FormalSW.Permutations
 import lang.py.FormalSW.Combinations
 import lang.py.FormalSW.Instances
 import lang.py.FormalSW.HeapCalls
+import lang.py.FormalSW.UnpackingCalls
 import lang.py.FormalSW.HeapqCalls
 import lang.py.FormalSW.HeapqContents
 import lang.py.FormalSW.HeapqTotal

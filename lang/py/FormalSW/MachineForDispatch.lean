@@ -28,7 +28,8 @@ theorem step_for_unpack_dispatch (asList : Bool) (targets : List Expr) (iterable
               .enumerateSource index name start body otherwise following env :: stack, logical⟩
           | _, _ => match Calls.targetNames targets with
               | some names => .next ⟨.expr iterable env, .unpackSequence names body otherwise following env :: stack, logical⟩
-              | none => .unsupported := by
+              | none => .next ⟨.block (.forIn (.name "$formalsw.unpack") iterable
+                  (comprehensionTargetBody (.tuple targets) body) otherwise :: following) env, stack, logical⟩ := by
   cases asList <;> simp only [Bool.false_eq_true, ↓reduceIte]
   all_goals
     cases iterable with
@@ -55,8 +56,8 @@ theorem step_for_unpack_dispatch (asList : Bool) (targets : List Expr) (iterable
                   | nil => rfl
                   | cons start rest => cases rest <;> rfl
         · cases named : Calls.targetNames targets <;> simp [step, isEnumerate, named]
-      | _ => cases named : Calls.targetNames targets <;> simp only [step, named, protectGenerator_next, protectGenerator_unsupported]
-    | _ => first | rfl | (cases named : Calls.targetNames targets <;> simp only [step, named, protectGenerator_next, protectGenerator_unsupported])
+      | _ => cases named : Calls.targetNames targets <;> simp only [step, named, protectGenerator_next]
+    | _ => first | rfl | (cases named : Calls.targetNames targets <;> simp only [step, named, protectGenerator_next])
 
 theorem step_for_unpack_relocates (asList : Bool) (targets : List Expr) (iterable : Expr)
     (body otherwise following : List Stmt) (env : Env) (stack : List Frame) (globals : Mutable.Globals) :
@@ -79,7 +80,8 @@ theorem step_for_unpack_relocates (asList : Bool) (targets : List Expr) (iterabl
   · split
     · simp only [relocateStep, relocateState, relocateWork, List.map_cons, relocateFrame]
     · simp only [relocateStep, relocateState, relocateWork, List.map_cons, relocateFrame]
-    · split <;> simp only [relocateStep, relocateState, relocateWork, List.map_cons, relocateFrame]
+    · split <;> simp only [relocateStep, relocateState, relocateWork, List.map_cons, relocateFrame,
+        comprehensionTargetBody, relocateStmt]
 
 def flatForTarget : Expr → Bool
   | .name _ | .tuple _ | .list _ => true
@@ -171,7 +173,9 @@ theorem StateWithin.for_unpack (asList : Bool) (targets : List Expr) (iterable :
     · split
       · simpa only [StepWithin, StateWithin, WorkWithin, List.mem_cons, forall_eq_or_imp, FrameWithin] using
           And.intro envInside (And.intro (And.intro envInside (And.intro loopInside.1 (And.intro loopInside.2 restInside))) stackInside)
-      · trivial
+      · exact ⟨⟨envInside, by
+          simpa only [List.mem_cons, forall_eq_or_imp, StmtWithin, comprehensionTargetBody,
+            and_true, true_and] using And.intro (And.intro loopInside.1 loopInside.2) restInside⟩, stackInside⟩
 
 theorem StateWithin.for_other (target iterable : Expr) (other : flatForTarget target = false)
     (body otherwise following : List Stmt) (env : Env) (stack : List Frame) (globals : Mutable.Globals)
