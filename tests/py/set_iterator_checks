@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+Check scheduled set traversal, collector allocation, and source equivalence.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def filtered(items):
+    return [value for value in items if False]
+
+def direct(items):
+    return []
+
+def invalidated(items, new):
+    for value in items:
+        items.add(new)
+    return items
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+open SetCalls.Relocation
+namespace SetIteratorExamples
+set_option Elab.async false
+
+def args : List Arg := [{name := "items", annotation := none}]
+def generators : List (String × Expr × List Expr) := [("value", .name "items", [.constant (.bool false)])]
+def filteredBody : List Stmt := [.return (.listComp (.name "value") generators)]
+def directBody : List Stmt := [.return (.list [])]
+def filterBody (result : Nat) : List Stmt := [.ifThen (.constant (.bool false)) [.comprehensionAppend result (.name "value")] []]
+def env (address : Nat) : HeapCalls.Env := HeapCalls.argumentEnv args [.ref address]
+def inner (address : Nat) := comprehensionEnv (env address) generators
+
+theorem source_filtered : findFunctionIn Probe.module.body "filtered" = some (args, filteredBody) := rfl
+theorem source_direct : findFunctionIn Probe.module.body "direct" = some (args, directBody) := rfl
+
+theorem filter_loop (choices : ChoiceSchedule) (heap : Mutable.Heap) (address result : Nat)
+    (original remaining : List Constant) (found : heap[address]? = some (.set original))
+    (env : HeapCalls.Env) (anchors : Nat) (stack : List HeapCalls.Frame) (used : Nat) :
+    ∃ finalUsed, SetCalls.Reaches choices Probe.module anchors
+      ⟨⟨.block [.setStepLoop "value" address original remaining (filterBody result) []] env,
+        .comprehensionResult result :: stack, heap⟩, used⟩
+      ⟨⟨.value (.ref result), stack, heap⟩, finalUsed⟩ := by
+  cases remaining with
+  | nil =>
+    refine ⟨used, .next (following := ⟨⟨.block [] env, .comprehensionResult result :: stack, heap⟩, used⟩) ?_ ?_⟩
+    · simp [SetCalls.step, HeapCalls.step, SetCalls.iteratorStep, found]
+    · exact .next rfl (.next rfl .refl)
+  | cons head tail =>
+    let index := choices used % (head :: tail).length
+    have bound : index < (head :: tail).length := Nat.mod_lt _ (by simp)
+    let item := (head :: tail)[index]
+    have selected : (head :: tail)[choices used % (tail.length + 1)]? = some item := List.getElem?_eq_getElem bound
+    let rest := (head :: tail).eraseIdx index
+    let boundEnv := setLocal env "value" (.scalar item)
+    have filtered : BlockContinues Probe.module boundEnv (filterBody result) heap boundEnv heap := by
+      apply BlockContinues.branch (flag := false) Evaluates.constant (by rfl)
+      exact BlockContinues.nil
+    obtain ⟨finalUsed, completed⟩ := filter_loop choices heap address result original rest found boundEnv anchors stack (used + 1)
+    refine ⟨finalUsed, .next (following := ⟨⟨.block
+      (filterBody result ++ [.setStepLoop "value" address original rest (filterBody result) []]) boundEnv,
+      .comprehensionResult result :: stack, heap⟩, used + 1⟩) ?_ ?_⟩
+    · simp [SetCalls.step, HeapCalls.step, SetCalls.iteratorStep, found, selected, index, filterBody,
+        Calls.loopContinuation, Calls.loopControl, Calls.loopControlStmt, rest, boundEnv]
+    · exact (SetCalls.Reaches.of_heap (filtered [.setStepLoop "value" address original rest (filterBody result) []]
+        anchors (.comprehensionResult result :: stack)) choices (used + 1)).trans completed
+termination_by remaining.length
+decreasing_by
+  change ((head :: tail).eraseIdx index).length < (head :: tail).length
+  rw [List.length_eraseIdx_of_lt bound]
+  simp
+
+theorem filtered_finishes (choices : ChoiceSchedule) (heap : Mutable.Heap) (address : Nat)
+    (items : List Constant) (found : heap[address]? = some (.set items)) :
+    ((SetCalls.call Probe.module "filtered" [.ref address] heap).run choices).Finishes
+      ⟨.ok (.ref heap.length), [], heap ++ [.list []], heap.length⟩ := by
+  have entry : SetCalls.Reaches choices Probe.module heap.length
+      ⟨⟨.operation (.call "filtered") [.ref address], [], heap⟩, 0⟩
+      ⟨⟨.block [.setStepLoop "value" address items items (filterBody heap.length) []] (inner address),
+        [.comprehensionResult heap.length], heap ++ [.list []]⟩, 0⟩ := by
+    apply SetCalls.Reaches.next (following := ⟨⟨.block filteredBody (env address), [], heap⟩, 0⟩)
+      (by simp [SetCalls.step, HeapCalls.step, source_filtered, completeArguments, args, functionEnv, env, filteredBody, executableBody, SetCalls.liftStep])
+    apply SetCalls.Reaches.next rfl
+    apply SetCalls.Reaches.next rfl
+    apply SetCalls.Reaches.next rfl
+    apply SetCalls.Reaches.next rfl
+    exact .next (by simp [SetCalls.step, HeapCalls.step, HeapCalls.comprehensionStart, HeapCalls.run, argumentsState, protectGenerator,
+      Mutable.sequence, found, SetCalls.iteratorStep, SetCalls.comprehensionStart, Mutable.unsupported,
+      inner, generators, comprehensionFilters, comprehensionBody, comprehensionTargetBody, comprehensionTargetName, filterBody]) .refl
+  have retained : (heap ++ [.list []])[address]? = some (.set items) := by
+    rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+    exact found
+  obtain ⟨finalUsed, loop⟩ := filter_loop choices _ address heap.length items items retained (inner address) heap.length [] 0
+  exact (entry.trans loop).finishes (.done rfl)
+
+theorem direct_finishes (choices : ChoiceSchedule) (heap : Mutable.Heap) (address : Nat) :
+    ((SetCalls.call Probe.module "direct" [.ref address] heap).run choices).Finishes
+      ⟨.ok (.ref heap.length), [], heap ++ [.list []], heap.length⟩ := by
+  have returns : ReturnsValue Probe.module "direct" [.ref address] heap (.ref heap.length) (heap ++ [.list []]) := by
+    apply BlockReturns.function source_direct (completed := [.ref address]) (by rfl)
+    exact BlockReturns.return_value (Evaluates.list .nil)
+  exact SetCalls.finishes_of_heap returns.finishes choices 0
+
+theorem filtered_equiv_direct (heap : Mutable.Heap) (address : Nat) (items : List Constant)
+    (found : heap[address]? = some (.set items)) :
+    (SetCalls.call Probe.module "filtered" [.ref address] heap).Equiv
+      (SetCalls.call Probe.module "direct" [.ref address] heap) := by
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (filtered_finishes leftChoices heap address items found)
+    (direct_finishes rightChoices heap address) (Or.inl rfl)
+
+theorem changed_size_fails (choices : ChoiceSchedule) (heap : Mutable.Heap)
+    (address anchors used : Nat) (original current remaining : List Constant) (env : HeapCalls.Env)
+    (body otherwise following : List Stmt) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
+    (found : heap[address]? = some (.set current)) (changed : current.length ≠ original.length) :
+    SetCalls.step Probe.module anchors choices
+      ⟨⟨.block (.setStepLoop "value" address original remaining body otherwise :: following) env, stack, heap⟩, used⟩ globals =
+      .done (.ok ⟨.error ⟨"RuntimeError", []⟩, globals, heap, anchors⟩) := by
+  simp [SetCalls.step, HeapCalls.step, SetCalls.iteratorStep, found, changed, SetCalls.liftStep, done]
+
+theorem fallback_correspondence (choices : ChoiceSchedule) (core : SetCalls.State)
+    (physical : Mutable.Heap) (rename : Nat → Nat) (logicalAnchors physicalAnchors : Nat)
+    (globals : Mutable.Globals) (layout : RuntimeLayout core.core.heap physical rename)
+    (inside : HeapCalls.Relocation.StateWithin core.core) :
+    ∃ physicalAfter nextMap,
+      (∀ address < core.core.heap.length, nextMap address = rename address) ∧
+      SetCalls.iteratorStep choices physicalAnchors (IteratorCalls.Relocation.relocateCore rename physical core)
+          (relocateGlobals rename globals) =
+        SetCalls.Relocation.relocateStep nextMap physicalAfter physicalAnchors
+          (SetCalls.iteratorStep choices logicalAnchors core globals) :=
+  iteratorStep_relocates choices core physical rename logicalAnchors physicalAnchors globals layout inside
+
+theorem filtered_entry_layout (choices : ChoiceSchedule) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (address used logicalAnchors physicalAnchors : Nat) (items : List Constant)
+    (env : HeapCalls.Env) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
+    (found : logical[address]? = some (.set items)) (layout : ExecutionLayout logical physical rename)
+    (envInside : EnvWithin logical.length env) (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame) :
+    let nextMap := extendMap rename logical.length physical.length
+    SetCalls.iteratorStep choices physicalAnchors
+      (IteratorCalls.Relocation.relocateCore rename physical
+        ⟨⟨.operation (.comprehension (.name "value") generators env) [.ref address], stack, logical⟩, used⟩)
+      (relocateGlobals rename globals) =
+      SetCalls.Relocation.relocateStep nextMap (physical ++ [.list []]) physicalAnchors
+        (.next ⟨⟨.block [.setStepLoop "value" address items items (filterBody logical.length) []] env,
+          .comprehensionResult logical.length :: stack, logical ++ [.list []]⟩, used⟩) ∧
+      ExecutionLayout (logical ++ [.list []]) (physical ++ [.list []]) nextMap := by
+  dsimp only
+  constructor
+  · have paired := iterator_list_comprehension_relocates layout.runtime choices "value" (.name "value")
+      (.name "items") [.constant (.bool false)] [] env address used logicalAnchors physicalAnchors stack globals
+      (List.getElem?_eq_some_iff.mp found).1 envInside stackInside
+    simpa only [generators, SetCalls.iteratorStep, SetCalls.comprehensionStart, found,
+      comprehensionFilters, List.foldr_cons, List.foldr_nil, comprehensionBody, comprehensionTargetBody,
+      comprehensionTargetName, filterBody] using paired
+  · simpa only [relocateObject, List.map_nil] using layout.append_existing (.list []) (by simp) (by simp [ObjectWithin, objectValues])
+
+end SetIteratorExamples
+'''
+AUDITS = ["SetIteratorExamples." + name for name in (
+    "source_filtered", "source_direct", "filter_loop", "filtered_finishes", "direct_finishes",
+    "filtered_equiv_direct", "changed_size_fails", "fallback_correspondence", "filtered_entry_layout",
+)] + ["FormalSW.PyAst.SetCalls.Relocation." + name for name in ('iterator_sequence_relocates', 'iterator_cursor_relocates', 'iterator_cursor_within', 'comprehensionFilters_relocates', 'comprehensionBody_relocates', 'comprehensionTargetsBody_relocates', 'comprehensionFilters_within', 'comprehensionBody_within', 'comprehensionTargetsBody_within', 'comprehensionStart_relocates', 'comprehensionStart_within', 'iterator_list_comprehension_relocates', 'iterator_targets_comprehension_relocates', 'iterator_set_comprehension_relocates', 'iterator_dict_comprehension_relocates', 'comprehensionEnv_relocates', 'comprehensionTargetsEnv_relocates', 'sumBody_source', 'extremumBody_source', 'iterator_sum_generator_relocates', 'iterator_extremum_generator_relocates', 'sumInitial_relocates', 'sumInitial_keeps_heap', 'sumEnter_relocates', 'iterator_sum_sequence_relocates', 'iteratorStep_relocates')]
+
+with project_temporary_directory(prefix="set-iterator-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for items in (set(), {1}, {True, "x", b"y", -10**100}, set(range(30))):
+        before = items.copy()
+        left = namespace["filtered"](items)
+        right = namespace["direct"](items)
+        assert left == right == [] and left is not right
+        assert items == before
+    for items in ({1}, {1, 2, 3}):
+        try:
+            namespace["invalidated"](items, 10**100)
+        except RuntimeError:
+            assert 10**100 in items
+        else:
+            raise AssertionError("set size change accepted")
+    assert namespace["invalidated"](set(), 10**100) == set()
+    assert namespace["invalidated"]({1}, 1) == {1}
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.SetIteratorRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"set iteration: all fallback branches, allocation and scheduled source equivalence; {len(AUDITS)} axiom audits passed")
