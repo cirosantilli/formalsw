@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""
+Check arithmetic, captured augmented values, and short-circuiting around mutations.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Counter:
+    def advance(self, delta):
+        self.n += reset(self, delta)
+        return self.n
+
+def reset(counter, delta):
+    counter.n = 0
+    return delta
+
+def choose(value, counter):
+    return value or counter.advance(1)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineExpressionExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Counter").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}, {name := "delta", annotation := none}]
+def body : List Stmt := [.augAssign (.attribute (.name "self") "n") .add
+    (.call (.name "reset") [.name "self", .name "delta"]), .return (.attribute (.name "self") "n")]
+def resetArgs : List Arg := [{name := "counter", annotation := none}, {name := "delta", annotation := none}]
+def resetBody : List Stmt := [.assign [.attribute (.name "counter") "n"] (.constant (.int 0)), .return (.name "delta")]
+def chooseArgs : List Arg := [{name := "value", annotation := none}, {name := "counter", annotation := none}]
+def chooseBody : List Stmt := [.return (.boolOp .or [.name "value",
+  .call (.attribute (.name "counter") "advance") [.constant (.int 1)]])]
+def resetFields (fields : List (String × Mutable.Value)) := Mutable.putField fields "n" (.scalar (.int 0))
+def finalFields (fields : List (String × Mutable.Value)) (n delta : Int) :=
+  Mutable.putField (resetFields fields) "n" (.scalar (.int (n + delta)))
+def resetHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :=
+  heap.set address (.instance classInfo.1 "Counter" (resetFields fields))
+def finalHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (n delta : Int) :=
+  (resetHeap heap address fields).set address (.instance classInfo.1 "Counter" (finalFields fields n delta))
+
+theorem source_class : Probe.module.findClass "Counter" = some classInfo := rfl
+theorem source_method : findFunctionIn classInfo.2 "advance" = some (args, body) := rfl
+theorem source_reset : findFunctionIn Probe.module.body "reset" = some (resetArgs, resetBody) := rfl
+theorem source_choose : findFunctionIn Probe.module.body "choose" = some (chooseArgs, chooseBody) := rfl
+
+theorem reset_returns (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (delta : Int)
+    (found : heap[address]? = some (.instance classInfo.1 "Counter" fields)) :
+    ReturnsValue Probe.module "reset" [.ref address, .scalar (.int delta)] heap (.scalar (.int delta))
+      (resetHeap heap address fields) := by
+  apply BlockReturns.function source_reset (completed := [.ref address, .scalar (.int delta)]) rfl
+  apply BlockContinues.returns (body := [resetBody[0]'(by decide)])
+  · apply BlockContinues.setAttribute Evaluates.constant
+      (Evaluates.lookup (value := .ref address) (by simp [functionEnv, HeapCalls.argumentEnv, resetArgs]))
+    exact Mutable.writeField_result found (by simp)
+  · exact BlockReturns.return_value (Evaluates.lookup
+      (by simp [functionEnv, HeapCalls.argumentEnv, resetArgs, List.lookup]))
+
+/-- The old field value survives the reset performed while evaluating the right operand. -/
+theorem method_returns (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (n delta : Int)
+    (found : heap[address]? = some (.instance classInfo.1 "Counter" fields))
+    (stored : fields.lookup "n" = some (.scalar (.int n))) :
+    MethodReturns Probe.module (.ref address) args body [.scalar (.int delta)] heap (.scalar (.int (n + delta)))
+      (finalHeap heap address fields n delta) := by
+  have self : functionEnv args body [.ref address, .scalar (.int delta)] [] "self" = some (.ref address) := by
+    simp [functionEnv, HeapCalls.argumentEnv, args]
+  have amount : functionEnv args body [.ref address, .scalar (.int delta)] [] "delta" = some (.scalar (.int delta)) := by
+    simp [functionEnv, HeapCalls.argumentEnv, args, List.lookup]
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have resetFound : (resetHeap heap address fields)[address]? = some (.instance classInfo.1 "Counter" (resetFields fields)) := by
+    simp [resetHeap, inside]
+  have finalFound : (finalHeap heap address fields n delta)[address]? =
+      some (.instance classInfo.1 "Counter" (finalFields fields n delta)) := by
+    simp [finalHeap, resetHeap, inside]
+  apply MethodReturns.of_body (completed := [.ref address, .scalar (.int delta)]) rfl
+  apply BlockContinues.returns (body := [body[0]'(by decide)]) (middleHeap := finalHeap heap address fields n delta)
+  · apply BlockContinues.augAttribute (Evaluates.lookup self)
+      (previous := .scalar (.int n)) (rhs := .scalar (.int delta)) (updated := .scalar (.int (n + delta)))
+      (afterRead := heap) (afterOp := resetHeap heap address fields)
+    · simp [getAttribute, found, instanceClass, source_class, stored]
+    · exact Evaluates.call (.cons (Evaluates.lookup self) (.cons (Evaluates.lookup amount) .nil))
+        (reset_returns heap address fields delta found)
+    · simp [inplace, binary_scalars, scalarBinary, scalarNumber, scalarResult]
+    · exact Mutable.writeField_result resetFound (by simp)
+  · apply BlockReturns.return_value
+    apply Evaluates.field (Evaluates.lookup self)
+    simp [getAttribute, finalFound, instanceClass, source_class, finalFields, Mutable.putField_lookup]
+
+theorem choose_skip (heap : Mutable.Heap) (value counter : Mutable.Value)
+    (truth : Mutable.truth value heap = some (.ok true, heap)) :
+    ReturnsValue Probe.module "choose" [value, counter] heap value heap := by
+  apply BlockReturns.function source_choose (completed := [value, counter]) rfl
+  apply BlockReturns.return_value
+  exact Evaluates.boolean_stop (Evaluates.lookup (by simp [functionEnv, HeapCalls.argumentEnv, chooseArgs])) truth rfl
+
+theorem choose_advance (heap : Mutable.Heap) (value : Mutable.Value) (address : Nat)
+    (fields : List (String × Mutable.Value)) (n : Int)
+    (truth : Mutable.truth value heap = some (.ok false, heap))
+    (found : heap[address]? = some (.instance classInfo.1 "Counter" fields))
+    (stored : fields.lookup "n" = some (.scalar (.int n))) (absent : fields.lookup "advance" = none) :
+    ReturnsValue Probe.module "choose" [value, .ref address] heap (.scalar (.int (n + 1)))
+      (finalHeap heap address fields n 1) := by
+  have first : functionEnv chooseArgs chooseBody [value, .ref address] [] "value" = some value := by
+    simp [functionEnv, HeapCalls.argumentEnv, chooseArgs]
+  have counter : functionEnv chooseArgs chooseBody [value, .ref address] [] "counter" = some (.ref address) := by
+    simp [functionEnv, HeapCalls.argumentEnv, chooseArgs, List.lookup]
+  apply BlockReturns.function source_choose (completed := [value, .ref address]) rfl
+  apply BlockReturns.return_value
+  apply Evaluates.boolean_next (Evaluates.lookup first) truth rfl
+  apply Evaluates.boolean_last
+  · apply Evaluates.method (args := args) (body := body) counter (by decide)
+      (by simp [bindMethod, found, instanceClass, source_class, absent, source_method])
+    · exact .cons Evaluates.constant .nil
+    · exact method_returns heap address fields n 1 found stored
+  · exact (show Mutable.truth (.scalar (.int (n + 1))) _ = some (.ok (scalarTruth (.int (n + 1))), _) from rfl)
+
+/-- A scalar field write retains the runtime layout, including all unrelated shared objects. -/
+theorem write_layout (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (fields : List (String × Mutable.Value))
+    (value : Int) (found : logical[address]? = some (.instance classInfo.1 "Counter" fields)) :
+    ExecutionLayout
+      (logical.set address (.instance classInfo.1 "Counter" (Mutable.putField fields "n" (.scalar (.int value)))))
+      (physical.set (rename address) (.instance classInfo.1 "Counter"
+        (Mutable.putField (fields.map fun field => (field.1, relocateValue rename field.2)) "n" (.scalar (.int value))))) rename := by
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  obtain ⟨other, paired, retained, _, _⟩ := layout.writeField (.ref address) "n" (.scalar (.int value))
+    (List.getElem?_eq_some_iff.mp found).1 (by trivial) _ _ (Mutable.writeField_result found (by simp))
+  have expected := Mutable.writeField_result (value := .scalar (.int value)) moved (name := "n") (by simp)
+  change Mutable.writeField (.ref (rename address)) "n" (.scalar (.int value)) physical = some (.ok (.scalar .none), other) at paired
+  have same : physical.set (rename address) (.instance classInfo.1 "Counter"
+      (Mutable.putField (fields.map fun field => (field.1, relocateValue rename field.2)) "n" (.scalar (.int value)))) = other := by
+    simpa only [expected, Option.map_some, Option.some.injEq] using congrArg (Option.map Prod.snd) paired
+  simpa only [← same] using retained
+
+theorem paired_methods (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (fields : List (String × Mutable.Value))
+    (n delta : Int) (found : logical[address]? = some (.instance classInfo.1 "Counter" fields))
+    (stored : fields.lookup "n" = some (.scalar (.int n))) :
+    let mapped := fields.map fun field => (field.1, relocateValue rename field.2)
+    MethodReturns Probe.module (.ref address) args body [.scalar (.int delta)] logical (.scalar (.int (n + delta)))
+        (finalHeap logical address fields n delta) ∧
+      MethodReturns Probe.module (.ref (rename address)) args body [.scalar (.int delta)] physical (.scalar (.int (n + delta)))
+        (finalHeap physical (rename address) mapped n delta) ∧
+      ExecutionLayout (finalHeap logical address fields n delta) (finalHeap physical (rename address) mapped n delta) rename := by
+  dsimp only
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  have linked := fields_lookup_relocate rename fields "n"
+  rw [stored] at linked
+  have first := write_layout logical physical rename layout address fields 0 found
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have resetFound : (resetHeap logical address fields)[address]? = some (.instance classInfo.1 "Counter" (resetFields fields)) := by
+    simp [resetHeap, inside]
+  have second := write_layout _ _ rename first address (resetFields fields) (n + delta) resetFound
+  refine ⟨method_returns logical address fields n delta found stored,
+    method_returns physical (rename address) _ n delta moved linked, ?_⟩
+  simpa only [finalHeap, finalFields, resetHeap, resetFields, ← putField_relocate,
+    show relocateValue rename (.scalar (.int 0)) = Mutable.Value.scalar (.int 0) from rfl] using second
+
+theorem paired_choices (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (value : Mutable.Value) (address : Nat)
+    (fields : List (String × Mutable.Value)) (n : Int) (flag : Bool)
+    (inside : value.edge.Within logical.length)
+    (truth : Mutable.truth value logical = some (.ok flag, logical))
+    (found : logical[address]? = some (.instance classInfo.1 "Counter" fields))
+    (stored : fields.lookup "n" = some (.scalar (.int n))) (absent : fields.lookup "advance" = none) :
+    let mapped := fields.map fun field => (field.1, relocateValue rename field.2)
+    let answer := if flag then value else .scalar (.int (n + 1))
+    let after := if flag then logical else finalHeap logical address fields n 1
+    let other := if flag then physical else finalHeap physical (rename address) mapped n 1
+    ReturnsValue Probe.module "choose" [value, .ref address] logical answer after ∧
+      ReturnsValue Probe.module "choose" [relocateValue rename value, .ref (rename address)] physical
+        (relocateValue rename answer) other ∧ ExecutionLayout after other rename := by
+  dsimp only
+  have paired := layout.runtime.truth value inside
+  rw [truth] at paired
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  have otherStored := fields_lookup_relocate rename fields "n"
+  have otherAbsent := fields_lookup_relocate rename fields "advance"
+  rw [stored] at otherStored
+  rw [absent] at otherAbsent
+  cases flag with
+  | true => exact ⟨choose_skip logical value (.ref address) truth, choose_skip physical _ _ paired, layout⟩
+  | false => exact ⟨choose_advance logical value address fields n truth found stored absent,
+      choose_advance physical _ (rename address) _ n paired moved otherStored otherAbsent,
+      (paired_methods logical physical rename layout address fields n 1 found stored).2.2⟩
+
+theorem zero_division_step (heap : Mutable.Heap) (anchors : Nat) (n : Int)
+    (stack : List Frame) (globals : Mutable.Globals) :
+    HeapCalls.step Probe.module anchors
+      ⟨.value (.scalar (.int 0)), .binaryRight .floorDiv (.scalar (.int n)) false :: stack, heap⟩ globals =
+      .done (.ok ⟨.error {typeName := "ZeroDivisionError", args := []}, globals, heap, anchors⟩) := by
+  simp [HeapCalls.step, binary_scalars, scalarBinary, scalarNumber, scalarResult, HeapCalls.result,
+    HeapCalls.run, HeapCalls.done, protectGenerator, Calls.generatorException]
+
+end MachineExpressionExamples
+'''
+AUDITS = [
+    "MachineExpressionExamples.source_class", "MachineExpressionExamples.source_method",
+    "MachineExpressionExamples.source_reset", "MachineExpressionExamples.source_choose",
+    "MachineExpressionExamples.reset_returns", "MachineExpressionExamples.method_returns",
+    "MachineExpressionExamples.choose_skip", "MachineExpressionExamples.choose_advance",
+    "MachineExpressionExamples.write_layout", "MachineExpressionExamples.paired_methods", "MachineExpressionExamples.paired_choices",
+    "MachineExpressionExamples.zero_division_step", "scalarResult_relocates", "scalarResult_effect",
+    "binary_scalars", "binary_scalars_relocates", "truth_total", "unary_relocates", "unary_effect",
+    "result_scalar_relocates", "result_scalar_within", "step_binary_scalars_relocates", "step_unary_relocates",
+    "step_binaryLeft_relocates", "StateWithin.binaryLeft", "step_binary_expression_relocates",
+    "StateWithin.binary_expression", "step_unary_expression_relocates", "StateWithin.unary_expression",
+    "HeapCalls.BlockContinues.augAttribute", "step_boolean_relocates",
+    "StateWithin.boolean", "step_conditional_relocates", "StateWithin.conditional", "step_branch_relocates",
+    "StateWithin.branch", "step_chainResult_relocates", "StateWithin.chainResult",
+]
+
+with project_temporary_directory(prefix="machine-expression-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for n in (-10**80, -1, 0, 1, 10**80):
+        for delta in (-17, 0, 23):
+            counter = namespace["Counter"]()
+            counter.n = n
+            alias = counter
+            assert counter.advance(delta) == n + delta and alias.n == n + delta
+    counter.n = 41
+    shared = []
+    shared.append(shared)
+    assert namespace["choose"](shared, counter) is shared and counter.n == 41
+    assert namespace["choose"]([], counter) == 42 and counter.n == 42
+    assert namespace["choose"](shared, None) is shared
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineControl\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine expressions: signed arithmetic, captured old fields, short-circuit aliases; {len(AUDITS)} axiom audits passed")
