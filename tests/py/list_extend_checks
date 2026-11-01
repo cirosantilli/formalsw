@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""
+Compare shallow list extension and argument evaluation with Python.
+"""
+import argparse
+import ast
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(REPO / 'formalsw'))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--frontend-only', action='store_true')
+options = parser.parse_args()
+
+source = '''
+def append_all(items: list[int], extra: list[int]):
+    return items.extend(extra)
+def self_extend(items: list[int], extra: list[int]):
+    return items.extend(items)
+def mutate(items: list[int], extra: list[int]):
+    items.append(7)
+    return extra
+def effect(items: list[int], extra: list[int]):
+    return items.extend(mutate(items, extra))
+def fail(items: list[int], extra: list[int]):
+    items.append(8)
+    raise ValueError()
+def argument_error(items: list[int], extra: list[int]):
+    return items.extend(fail(items, extra))
+def no_argument(items: list[int], extra: list[int]):
+    return items.extend()
+def excess(items: list[int], extra: list[int]):
+    return items.extend(mutate(items, extra), mutate(items, extra))
+def replace(holder, extra):
+    holder[0] = [99]
+    return extra
+def captured(items: list[int], extra: list[int]):
+    holder = [items]
+    result = holder[0].extend(replace(holder, extra))
+    return [result, holder, items]
+def nested(items: list[int], extra: list[int]):
+    shared = [3]
+    extra = [shared, shared]
+    items.extend(extra)
+    shared.append(4)
+    return [items, extra]
+def cycle(items: list[int], extra: list[int]):
+    items.append(items)
+    return items.extend(items)
+class Custom:
+    def extend(self, extra):
+        extra.append(19)
+        return 23
+def custom(items: list[int], extra: list[int]):
+    return Custom().extend(extra)
+class Shadow:
+    def __init__(self):
+        self.extend = 0
+def shadow(items: list[int], extra: list[int]):
+    return Shadow().extend(mutate(items, extra))
+'''
+program = ast.parse(source)
+for node in program.body:
+    if isinstance(node, ast.ClassDef):
+        node.formalsw_origin = str(Path(__file__).resolve())
+names = ('append_all', 'self_extend', 'effect', 'argument_error', 'no_argument', 'excess',
+         'captured', 'nested', 'cycle', 'custom', 'shadow')
+checker = SupportChecker(program)
+for name in names:
+    assert not checker.check(name), (name, checker.check(name))
+world = {}
+exec(source, world)
+lines = ['import lang.py.FormalSW.ListExtensionCalls', 'open FormalSW.PyAst',
+         'set_option maxRecDepth 8192',
+         'def program : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    if value is None:
+        constant = '.none'
+    elif type(value) is bool:
+        constant = '.bool ' + str(value).lower()
+    elif type(value) is int:
+        constant = f'.int ({value})'
+    else:
+        constant = '.string ' + json.dumps(value, ensure_ascii=False)
+    return '.scalar (' + constant + ')'
+
+
+def comparison(name, initial, extra, alias=False):
+    global count
+    items = initial.copy()
+    other = items if alias else extra.copy() if type(extra) is list else extra
+    try:
+        result = world[name](items, other)
+        error = None
+    except (TypeError, ValueError) as exception:
+        result, error = None, type(exception).__name__
+    roots = [items] if alias else [items, other]
+    expected = data(snapshot_roots(roots + ([result] if error is None else [])))
+    initial_items = '.list [' + ', '.join(map(data, initial)) + ']'
+    source_object = ('.list' if type(extra) is list else '.tuple') + ' [' + ', '.join(map(data, extra)) + ']'
+    heap = '[' + initial_items + ('' if alias else ', ' + source_object) + ']'
+    call = f'HeapCalls.call program "{name}" [.ref 0, .ref {0 if alias else 1}] {heap}'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error error => decide (error = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([f'-- {name}, comparison {count}',
+                  f'example : (match ({call}).execution.observe 700 with',
+                  f'  | .done (.ok c) => ({outcome}) &&',
+                  f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 4000) == some true)',
+                  '  | _ => false) = true := by native_decide'])
+    count += 1
+
+
+for name in names:
+    for initial in ([], [1, 2]):
+        comparison(name, initial, [3, 4])
+for initial in ([], [False, 0, True, 1], [10**80, -10**80]):
+    for extra in ([], [1, 2], (), (3, 4)):
+        comparison('append_all', initial, extra)
+    comparison('append_all', initial, [], alias=True)
+    comparison('effect', initial, [], alias=True)
+
+# Protocol iterables must remain unsupported until extension can retain partial
+# writes and exceptions from their incremental advancement.
+for obj in ('.instance "origin" "Custom" []', '.dict []', '.set []', '.bytearray []'):
+    lines.append(f'example : HeapCalls.primitive (.extendList 0) [.ref 1] [.list [], {obj}] = none := by decide')
+lines.append('example : HeapCalls.primitive (.extendList 0) [.scalar (.string "abc")] [.list []] = none := by decide')
+probe = ast.parse('def f(items: list[int], extra: list[int]):\n    return items.extend(extra)\n')
+assert uses_heap_calls(probe, probe.body[0])
+for call in ('items.extend(extra=extra)', 'items.extend(*extra)', 'items.extend(**extra)'):
+    invalid = ast.parse(f'def f(items: list[int], extra: list[int]):\n    return {call}\n')
+    assert SupportChecker(invalid).check('f'), call
+
+if not options.frontend_only:
+    with project_temporary_directory(prefix='list-extend-check-') as temporary:
+        directory = Path(temporary)
+        (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+        proof = directory / 'Checks.lean'
+        proof.write_text('\n'.join(lines) + '\n')
+        subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=REPO, check=True)
+
+print(f'List extension: {count} Python comparisons '
+      + ('prepared (frontend-only)' if options.frontend_only else 'passed'))

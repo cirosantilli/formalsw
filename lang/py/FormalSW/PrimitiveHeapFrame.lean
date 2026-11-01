@@ -18,7 +18,7 @@ def builtinTargets (builtin : Builtin) (values : List Value) : List Nat :=
 /-- An overapproximation includes the receiver even when argument validation prevents the write. -/
 def primitiveTargets (operation : Operation) (values : List Value) : List Nat :=
   match operation with
-  | .append address | .pop address | .sort address | .sortReverse address | .add address
+  | .append address | .extendList address | .pop address | .sort address | .sortReverse address | .add address
     | .dictionarySetDefault address | .dictionaryClear address => [address]
   | .setField _ _ | .setItem _ | .setSlice _ => receiverTargets values
   | .builtin builtin => builtinTargets builtin values
@@ -172,6 +172,26 @@ theorem preserves_dictionarySingleton (invariant : Heap → Prop) (stable : Appe
   intro _
   exact Preserves.pure invariant _
 
+/-- Extension writes only its destination, even when source and destination alias. -/
+theorem preserves_extendList (address : Nat) (invariant : Heap → Prop)
+    (updates : UpdateInvariant address invariant) (source : Value) :
+    Preserves invariant (HeapCalls.extendList address source) := by
+  intro heap outcome after holds executed
+  cases destination : heap[address]? with
+  | none => simp [HeapCalls.extendList, destination, Mutable.unsupported] at executed
+  | some object =>
+    cases object with
+    | list items =>
+      cases source with
+      | scalar scalar => simp [HeapCalls.extendList, destination, Mutable.unsupported] at executed
+      | ref other =>
+        cases input : heap[other]? with
+        | none => simp [HeapCalls.extendList, destination, input, Mutable.unsupported] at executed
+        | some object =>
+          cases object <;> simp [HeapCalls.extendList, destination, input, Mutable.unsupported, Except.map] at executed
+          all_goals rcases executed with ⟨rfl, rfl⟩; exact updates heap _ holds
+    | _ => simp [HeapCalls.extendList, destination, Mutable.unsupported] at executed
+
 set_option maxHeartbeats 1200000 in
 /-- The actual primitive may allocate, read any object, and update only its listed receivers. -/
 theorem preserves_primitive (invariant : Heap → Prop) (stable : AppendInvariant invariant)
@@ -210,6 +230,7 @@ theorem preserves_primitive (invariant : Heap → Prop) (stable : AppendInvarian
     | exact preserves_dictionarySetDefault _ invariant updates _ _
     | exact preserves_clearDictionary _ invariant updates
     | exact preserves_appendItem _ invariant updates _
+    | exact preserves_extendList _ invariant updates _
     | exact preserves_popItem _ invariant updates _
     | exact preserves_addItem _ invariant updates _
     | exact preserves_allocate invariant stable _

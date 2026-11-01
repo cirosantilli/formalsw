@@ -16,6 +16,7 @@ def relocateOperation (rename : Nat → Nat) : Operation → Operation
   | .setItem value => .setItem (relocateValue rename value)
   | .setSlice value => .setSlice (relocateValue rename value)
   | .append address => .append (rename address)
+  | .extendList address => .extendList (rename address)
   | .pop address => .pop (rename address)
   | .count address => .count (rename address)
   | .sort address => .sort (rename address)

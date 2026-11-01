@@ -509,6 +509,7 @@ inductive Operation where
   | setItem (replacement : Value)
   | setSlice (replacement : Value)
   | append (address : Nat)
+  | extendList (address : Nat)
   | pop (address : Nat)
   | count (address : Nat)
   | sort (address : Nat)
@@ -1386,6 +1387,18 @@ def scalarRepresentation : List Value → Eval Value
   | [_] => Mutable.unsupported
   | _ => Mutable.error "TypeError"
 
+/-- Builtin list/tuple extension snapshots the source before writing, including self-extension.
+Other iterables require incremental protocol execution and remain unsupported here. -/
+def extendList (address : Nat) (source : Value) : Eval Value := do
+  let heap ← get
+  let some (.list items) := heap[address]? | Mutable.unsupported
+  let .ref other := source | Mutable.unsupported
+  let additional ← match heap[other]? with
+    | some (.list values) | some (.tuple values) => pure values
+    | _ => Mutable.unsupported
+  set (heap.set address (.list (items ++ additional)))
+  pure (.scalar .none)
+
 private abbrev basePrimitive : Operation → List Value → Eval Value
   | .builtin .heapqHeapify, values => Heapq.heapify values
   | .builtin .heapqPush, values => Heapq.heappush values
@@ -1417,6 +1430,8 @@ private abbrev basePrimitive : Operation → List Value → Eval Value
   | .dictionaryClear address, [] => clearDictionary address
   | .dictionaryClear _, _ => Mutable.error "TypeError"
   | .append address, [value] => Mutable.appendItem address value
+  | .extendList address, [value] => extendList address value
+  | .extendList _, _ => Mutable.error "TypeError"
   | .pop address, [] => Mutable.popItem address (.scalar (.int (-1)))
   | .pop address, [index] => Mutable.popItem address index
   | .pop _, _ => Mutable.error "TypeError"
@@ -1773,6 +1788,9 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
               | some (.list _) => pure (.sort address)
               | _ => Mutable.error "AttributeError"
             else if name = "append" then pure (.append address)
+            else if name = "extend" then match (← get)[address]? with
+              | some (.list _) => pure (.extendList address)
+              | _ => Mutable.unsupported
             else if name = "pop" then pure (.pop address)
             else if name = "count" then match (← get)[address]? with
               | some (.list _) => pure (.count address)
@@ -2668,7 +2686,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionarySingleton | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | isDigit _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | extendList _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionarySingleton | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | isDigit _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>

@@ -169,6 +169,12 @@ theorem bindMethod_builtin_relocates (logical physical : Mutable.Heap) (rename :
     all_goals simp only [relocateObject] at moved
     all_goals simp [bindMethod, found, moved, Mutable.error, Except.map, relocateOperation, relocateValue]
     all_goals rfl
+  by_cases extendName : name = "extend"
+  · subst name
+    cases object <;> try contradiction
+    all_goals simp only [relocateObject] at moved
+    all_goals simp [bindMethod, found, moved, Mutable.error, Mutable.unsupported, Except.map, relocateOperation, relocateValue]
+    all_goals rfl
   by_cases popName : name = "pop"
   · subst name
     cases object <;> try contradiction
@@ -243,7 +249,7 @@ theorem bindMethod_builtin_relocates (logical physical : Mutable.Heap) (rename :
     all_goals rfl
   cases object <;> try contradiction
   all_goals simp only [relocateObject] at moved
-  all_goals simp [bindMethod, found, moved, ordinary, sortName, appendName, popName, countName,
+  all_goals simp [bindMethod, found, moved, ordinary, sortName, appendName, extendName, popName, countName,
     getName, setdefaultName, isdigitName, upperName, stripName, splitName, zfillName, replaceName,
     addName, clearName, Mutable.unsupported]
 

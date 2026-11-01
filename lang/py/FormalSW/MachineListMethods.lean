@@ -1,5 +1,5 @@
 import lang.py.FormalSW.ListMethodRelocation
-import lang.py.FormalSW.MachineSliceInvariant
+import lang.py.FormalSW.MachineListExtension
 
 /-! Counting and in-place sorting read the captured list after argument effects. -/
 namespace FormalSW.PyAst.HeapCalls.Relocation
@@ -101,6 +101,7 @@ theorem result_sortReverse_preserves (logical physical : Mutable.Heap) (rename :
 
 inductive ListMethodOperation : Operation → Prop
   | count (address : Nat) : ListMethodOperation (.count address)
+  | extendList (address : Nat) : ListMethodOperation (.extendList address)
   | sort (address : Nat) : ListMethodOperation (.sort address)
   | sortReverse (address : Nat) : ListMethodOperation (.sortReverse address)
 
@@ -115,6 +116,14 @@ theorem step_listMethod_preserves (module : Module)
       (step module physicalAnchors (relocateState rename physical ⟨.operation operation values, stack, logical⟩)
         (relocateGlobals rename globals)) := by
   cases covered with
+  | extendList address =>
+    rcases values with _ | ⟨source, _ | ⟨extra, rest⟩⟩
+    case cons.nil =>
+      exact (result_extendList_preserves logical physical rename logicalAnchors physicalAnchors address source stack globals
+        layout inside.1.1 (inside.1.2 source (by simp)) inside.2 globalsInside).protectGenerator stack inside.2
+    all_goals
+      exact (result_scalar_preserves logical physical rename logicalAnchors physicalAnchors
+        (some (.error ⟨"TypeError", []⟩)) stack globals layout inside.2 globalsInside).protectGenerator stack inside.2
   | count address =>
     rcases values with _ | ⟨needle, _ | ⟨extra, rest⟩⟩
     case cons.nil =>
