@@ -123,7 +123,7 @@ theorem insert_strings (value : String) (values : List String) :
   | nil => rfl
   | cons first rest ih =>
       by_cases smaller : first < value <;>
-        simp [insert, insertString, scalarCompare, evalCmpOp, smaller, ih]
+        simp [insert, insertString, scalarCompare, smaller, ih]
 
 theorem sort_strings (values : List String) :
     sort (values.map Constant.string) = .ok ((strings values).map Constant.string) := by
