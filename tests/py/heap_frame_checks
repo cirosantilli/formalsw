@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""
+Check private cells across mutations, allocations, exceptions and interpreter steps.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def attach(items, value):
+    items.append(value)
+    return list(items)
+
+
+def append_fail(items, value):
+    items.append(value)
+    raise ValueError()
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace HeapFrameExamples
+set_option Elab.async false
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]
+
+def appended (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [value]))
+def copied (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) : Mutable.Heap :=
+  appended heap address items value ++ [.list (items ++ [value])]
+
+theorem attach_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "attach" [.ref address, value] heap (.ref heap.length) (copied heap address items value) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have updated : (appended heap address items value)[address]? = some (.list (items ++ [value])) := by
+    simp [appended, valid]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+  simpa [copied, appended] using primitive_list_list (appended heap address items value) address (items ++ [value]) updated
+
+theorem attach_finishes (choices : ChoiceSchedule) (heap : Mutable.Heap) (address : Nat)
+    (items : List Mutable.Value) (value : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    ((IteratorCalls.call Probe.module "attach" [.ref address, value] heap).run choices).Finishes
+      ⟨.ok (.ref heap.length), [], copied heap address items value, heap.length⟩ := by
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0)
+    (attach_returns heap address items value found heap.length []) []
+  exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+
+
+def failArgs : List Arg := [{name := "items", annotation := none}, {name := "value", annotation := none}]
+def failAppend : Stmt := .expr (.call (.attribute (.name "items") "append") [.name "value"])
+def failRaise : Stmt := .raise (some (.call (.name "ValueError") []))
+def failBody : List Stmt := [failAppend, failRaise]
+
+theorem append_fail_finishes (choices : ChoiceSchedule) (heap : Mutable.Heap) (receiver : Nat)
+    (items : List Mutable.Value) (value : Mutable.Value) (found : heap[receiver]? = some (.list items)) :
+    ((IteratorCalls.call Probe.module "append_fail" [.ref receiver, value] heap).run choices).Finishes
+      ⟨.error ⟨"ValueError", []⟩, [], appended heap receiver items value, heap.length⟩ := by
+  let env := functionEnv failArgs failBody [.ref receiver, value] []
+  have written : BlockContinues Probe.module env [failAppend] heap env (appended heap receiver items value) :=
+    BlockContinues.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  have entry : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.call "append_fail") [.ref receiver, value], [], heap⟩ ⟨.block failBody env, [], heap⟩ :=
+    .next (by rfl) .refl
+  have raised : Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.block [failRaise] env, [], appended heap receiver items value⟩
+      (.ok ⟨.error ⟨"ValueError", []⟩, [], appended heap receiver items value, heap.length⟩) :=
+    .next rfl (.done rfl)
+  have finished := entry.finishes ((written [failRaise] heap.length []).finishes raised)
+  exact IteratorCalls.finishes_of_set (SetCalls.finishes_of_heap finished choices 0)
+    (by intro completion same; cases same; simp)
+
+theorem attach_private_cell (choices : ChoiceSchedule) (heap : Mutable.Heap) (receiver privateAddress : Nat)
+    (items : List Mutable.Value) (value : Mutable.Value) (privateObject : Mutable.Object)
+    (found : heap[receiver]? = some (.list items)) (saved : SavedCell privateAddress privateObject heap)
+    (separate : receiver ≠ privateAddress) :
+    SavedCell privateAddress privateObject (copied heap receiver items value) ∧
+    ((IteratorCalls.call Probe.module "attach" [.ref receiver, value] heap).run choices).Finishes
+      ⟨.ok (.ref heap.length), [], copied heap receiver items value, heap.length⟩ := by
+  have appendedSaved := appendItem_preserves_cell privateAddress receiver privateObject value separate
+    heap (.ok (.scalar .none)) (appended heap receiver items value) saved
+    (by simp [Mutable.appendItem, found, appended, Except.map])
+  have copiedSaved := Heapq.preserves_allocate _ (SavedCell.allocates privateAddress privateObject) (items ++ [value])
+    (appended heap receiver items value) (.ok (.ref heap.length)) (copied heap receiver items value) appendedSaved
+    (by simp [Mutable.allocate, copied, appended, Except.map])
+  exact ⟨copiedSaved, attach_finishes choices heap receiver items value found⟩
+
+theorem failure_private_cell (choices : ChoiceSchedule) (heap : Mutable.Heap) (receiver privateAddress : Nat)
+    (items : List Mutable.Value) (value : Mutable.Value) (privateObject : Mutable.Object)
+    (found : heap[receiver]? = some (.list items)) (saved : SavedCell privateAddress privateObject heap)
+    (separate : receiver ≠ privateAddress) :
+    SavedCell privateAddress privateObject (appended heap receiver items value) ∧
+    ((IteratorCalls.call Probe.module "append_fail" [.ref receiver, value] heap).run choices).Finishes
+      ⟨.error ⟨"ValueError", []⟩, [], appended heap receiver items value, heap.length⟩ := by
+  exact ⟨appendItem_preserves_cell privateAddress receiver privateObject value separate
+    heap (.ok (.scalar .none)) (appended heap receiver items value) saved
+    (by simp [Mutable.appendItem, found, appended, Except.map]),
+    append_fail_finishes choices heap receiver items value found⟩
+
+/-- An arbitrary signed index may fail after the append; both outcomes retain the private object. -/
+theorem append_set_allocate (receiver privateAddress : Nat) (privateObject : Mutable.Object)
+    (index : Int) (value : Mutable.Value) (separate : receiver ≠ privateAddress) :
+    Heapq.Preserves (SavedCell privateAddress privateObject) (do
+      let _ ← Mutable.appendItem receiver value
+      let _ ← Mutable.setItem (.ref receiver) (.scalar (.int index)) value
+      Mutable.allocate [.ref receiver, value]) := by
+  apply Heapq.Preserves.bind _ _ _ (appendItem_preserves_cell privateAddress receiver privateObject value separate)
+  intro _
+  exact Heapq.Preserves.bind _ _ _
+    (setItem_preserves_cell privateAddress receiver privateObject (.scalar (.int index)) value separate)
+    (fun _ => Heapq.preserves_allocate _ (SavedCell.allocates privateAddress privateObject) _)
+
+end HeapFrameExamples
+'''
+AUDITS = ["FormalSW.PyAst.Heapq." + name for name in (
+    "Preserves.unsupported", "Preserves.get", "Preserves.modify",
+    "Preserves.readonly", "Preserves.total_readonly", "preserves_update_return",
+    "preserves_integer", "preserves_byte", "preserves_index",
+    "preserves_hashKey", "preserves_appendItem", "preserves_setItem",
+    "preserves_allocate", "preserves_allocateBuffer", "preserves_allocateSet",
+    "preserves_allocateDict", "preserves_allocateTuple", "preserves_instanceData",
+    "preserves_writeField", "preserves_popItem_integer", "preserves_popItem",
+    "preserves_addItem", "preserves_dictionarySetDefault", "UpdateInvariant.swaps",
+    "preserves_receiver_bind", "preserves_heappush", "preserves_heappop",
+)] + ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
+    "SavedCell.update", "SavedCell.append", "appendItem_preserves_cell",
+    "setItem_preserves_cell", "SavedCell.allocates", "writeField_preserves_cell",
+    "popItem_preserves_cell",
+)] + ["FormalSW.PyAst.HeapCalls.Framing." + name for name in (
+    "protectGenerator_retains_cell", "result_retains_cell", "step_append_cell",
+    "step_setItem_cell", "step_pop_cell", "step_field_cell",
+    "step_add_cell", "step_setDefault_cell", "step_heapify_cell",
+    "step_heappush_cell", "step_heappop_cell", "step_list_cell",
+    "step_tuple_cell",
+)] + ["HeapFrameExamples." + name for name in (
+    "source", "attach_returns", "attach_finishes",
+    "append_fail_finishes", "attach_private_cell", "failure_private_cell",
+    "append_set_allocate",
+)]
+
+with project_temporary_directory(prefix="heap-frame-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    private = []
+    private.append(private)
+    items = []
+    copied = namespace["attach"](items, items)
+    assert copied is not items and copied[0] is items and items[0] is items
+    try:
+        namespace["append_fail"](items, copied)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("append_fail did not raise ValueError")
+    assert items[-1] is copied and private[0] is private and len(private) == 1
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineFrame\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        "import lang.py.FormalSW.IteratorExecutionRelocation\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"heap frames: private cells survive mutations, allocation and exceptions; {len(AUDITS)} axiom audits passed")
