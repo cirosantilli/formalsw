@@ -18,6 +18,10 @@ class Allocating:
     def __next__(self):
         self.link = [self]
         return "123"
+
+class Interning:
+    def __next__(self):
+        return ()
 '''
 PROOF = r'''
 open FormalSW.PyAst HeapCalls
@@ -109,6 +113,85 @@ theorem paired_methods (logical physical : Mutable.Heap) (rename : Nat → Nat)
   simp only [relocateObject, ← putField_relocate, fieldsSame] at stored
   simpa only [afterHeap, List.map_cons, List.map_nil, relocateValue, extendMap_new, extendMap_old _ _ _ _ inside] using stored
 
+
+namespace EmptyTuple
+
+def classInfo := (Probe.module.findClass "Interning").getD ("", [])
+def body : List Stmt := [.return (.tuple [])]
+
+theorem source_class : Probe.module.findClass "Interning" = some classInfo := rfl
+theorem source_body : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Interning" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args body)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1
+    "Interning" "__next__" fields classInfo.2 found source_class
+  simpa [ProtocolCalls.nextMethod, found, source_body] using lookup
+
+theorem method_returns (heap after : Mutable.Heap) (receiver address : Nat)
+    (allocated : Mutable.allocateTuple [] heap = some (.ok (.ref address), after)) :
+    MethodReturns Probe.module (.ref receiver) args body [] heap (.ref address) after := by
+  apply MethodReturns.of_body (completed := [.ref receiver]) (by rfl)
+  exact BlockReturns.return_value (Evaluates.tuple_result .nil allocated)
+
+/-- Both parsed methods run even when one side interns a private tuple instead of allocating. -/
+theorem paired_methods (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
+    (interned : EmptyTuplesAligned logical physical rename)
+    (address : Nat) (fields : List (String × Mutable.Value))
+    (found : logical[address]? = some (.instance classInfo.1 "Interning" fields))
+    (choices : ChoiceSchedule) (used : Nat) :
+    ∃ left right leftAfter rightAfter nextMap,
+      ProtocolCalls.nextMethod Probe.module (.ref address) logical =
+        some (.ok (some (.method (.ref address) args body)), logical) ∧
+      ProtocolCalls.nextMethod Probe.module (.ref (rename address)) physical =
+        some (.ok (some (.method (.ref (rename address)) args body)), physical) ∧
+      IteratorCalls.OperationCompletes Probe.module choices used (.method (.ref address) args body)
+        logical (.ok (.ref left)) leftAfter ∧
+      IteratorCalls.OperationCompletes Probe.module choices used
+        (.method (.ref (rename address)) args body) physical (.ok (.ref right)) rightAfter ∧
+      RuntimeLayout leftAfter rightAfter nextMap ∧
+      EmptyTuplesAligned leftAfter rightAfter nextMap ∧ Closed leftAfter ∧
+      left < leftAfter.length ∧ nextMap left = right ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  obtain ⟨left, right, leftAfter, rightAfter, nextMap, leftRun, rightRun,
+      related, stillInterned, stillClosed, inside, result, old⟩ :=
+    layout.allocateTuple closed interned [] (by simp)
+  exact ⟨left, right, leftAfter, rightAfter, nextMap, next_bound logical address fields found,
+    next_bound physical (rename address) _ (layout.lookup address _ found),
+    .of_method (method_returns logical leftAfter address left leftRun),
+    .of_method (method_returns physical rightAfter (rename address) right rightRun),
+    related, stillInterned, stillClosed, inside, result, old⟩
+
+/-- Matching contents alone does not determine the allocator's chosen empty-tuple identity. -/
+theorem layout_without_interning :
+    RuntimeLayout [.tuple []] [.tuple [], .tuple []] Nat.succ ∧
+      ¬ EmptyTuplesAligned [.tuple []] [.tuple [], .tuple []] Nat.succ := by
+  constructor
+  · constructor
+    · intro i hi j hj _
+      simp only [List.length_singleton] at hi hj
+      omega
+    · intro index object found
+      have inside := (List.getElem?_eq_some_iff.mp found).1
+      have zero : index = 0 := by simp only [List.length_singleton] at inside; omega
+      subst index
+      have empty : object = .tuple [] := by simpa using found.symm
+      subst object
+      rfl
+  · intro aligned
+    have selected := aligned 0 rfl
+    simp [emptyTupleAddress, List.findIdx?_cons] at selected
+
+end EmptyTuple
+
+#print axioms EmptyTuple.paired_methods
+#print axioms EmptyTuple.layout_without_interning
+#print axioms FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.allocateTuple
+
 #print axioms paired_methods
 #print axioms FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.writeField
 #print axioms FormalSW.PyAst.HeapCalls.Relocation.lookup_relocates
@@ -132,10 +215,15 @@ with project_temporary_directory(prefix="runtime-relocation-") as temporary:
     assert first[0] is iterator
     assert next(iterator) == "123"
     assert iterator.link is not first and iterator.link[0] is iterator
+    interning = namespace["Interning"]()
+    empty = ()
+    assert next(interning) is empty
+    assert next(interning) is next(interning)
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.HeapRelocation\n"
+    proof.write_text("import lang.py.FormalSW.TupleRelocation\n"
+                     "import lang.py.FormalSW.HeapRelocation\n"
                      "import lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
     checked = subprocess.run(
@@ -145,8 +233,8 @@ with project_temporary_directory(prefix="runtime-relocation-") as temporary:
     )
     assert checked.returncode == 0, checked.stdout + checked.stderr
     audits = checked.stdout.split("depends on axioms:")[1:]
-    assert len(audits) == 6, checked.stdout
+    assert len(audits) == 9, checked.stdout
     for audit in audits:
         names = {name.strip() for name in audit.split("[", 1)[1].split("]", 1)[0].split(",")}
         assert names <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
-print("runtime relocation: allocating source method and six axiom audits passed")
+print("runtime relocation: allocating and interning source methods; nine axiom audits passed")
