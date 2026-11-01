@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""
+Compare implicit iter and next calls with Python, including shadowing and effects before errors.
+The low-level protocol runner is tested independently of for-loop frontend support.
+"""
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = '''
+class Advance:
+    def __next__(self):
+        self.position += 1
+        return self.position
+class Shared:
+    def __next__(self):
+        self.items.append(self.position)
+        self.position += 1
+        return self.items
+class Exhausted:
+    def __next__(self):
+        self.position += 1
+        raise StopIteration(self.position)
+class Failed:
+    def __next__(self):
+        self.items.append(self.position)
+        self.position += 1
+        raise ValueError("advance failed", self.position)
+class WrongArity:
+    def __next__(self, required):
+        self.position += required
+        return self.position
+class Missing:
+    pass
+class Acquire:
+    def __iter__(self):
+        self.items.append(self.position)
+        self.position += 1
+        return self
+    def __next__(self):
+        self.position += 100
+        return self.position
+class Other:
+    def __iter__(self):
+        self.items.append(self.position)
+        self.position += 1
+        return self.other
+class BadList:
+    def __iter__(self):
+        self.items.append(self.position)
+        self.position += 1
+        return self.items
+class BadScalar:
+    def __iter__(self):
+        self.items.append(self.position)
+        self.position += 1
+        return self.position
+class AcquireFailed:
+    def __iter__(self):
+        self.items.append(self.position)
+        self.position += 1
+        raise ValueError("acquire failed", self.position)
+class AcquireStopped:
+    def __iter__(self):
+        self.items.append(self.position)
+        self.position += 1
+        raise StopIteration(self.position)
+class AcquireWrongArity:
+    def __iter__(self, required):
+        return self
+class SequenceFallback:
+    def __getitem__(self, index):
+        return self.items[index]
+'''
+
+
+def constant(value):
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is str:
+        return f'.string {json.dumps(value, ensure_ascii=False)}'
+    raise AssertionError(value)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return f'.scalar ({constant(value)})'
+
+
+with project_temporary_directory(prefix='protocol-calls-') as temporary:
+    directory = Path(temporary)
+    path = directory / 'source.py'
+    path.write_text(source)
+    module = api['source_module'](path)
+    namespace = {}
+    exec(compile(source, str(path), 'exec'), namespace)
+    classes = {id(value): name for name, value in namespace.items() if isinstance(value, type)}
+    origin = json.dumps(str(path.resolve()))
+    checks = []
+    labels = []
+    cases = [(next, name) for name in
+             ('Advance', 'Shared', 'Exhausted', 'Failed', 'WrongArity', 'Missing')]
+    cases += [(iter, name) for name in
+              ('Acquire', 'Other', 'BadList', 'BadScalar', 'AcquireFailed', 'AcquireStopped',
+               'AcquireWrongArity', 'Missing', 'Advance')]
+    for operation, name in cases:
+        for initial in (-3, 0, 7):
+            for shadowed in (False, True):
+                instance = namespace[name].__new__(namespace[name])
+                instance.position = initial
+                items = [4]
+                instance.items = items
+                fields = [('position', f'.scalar (.int ({initial}))'), ('items', '.ref 1')]
+                roots = [instance, items]
+                extra_heap = ''
+                if name == 'Other':
+                    other = namespace['Advance'].__new__(namespace['Advance'])
+                    other.position = 81
+                    other.items = items
+                    instance.other = other
+                    roots.append(other)
+                    fields.append(('other', '.ref 2'))
+                    extra_heap = (f', .instance {origin} "Advance" '
+                                  '[("position", .scalar (.int 81)), ("items", .ref 1)]')
+                if shadowed:
+                    for attribute in ('__iter__', '__next__'):
+                        setattr(instance, attribute, 777)
+                        fields.append((attribute, '.scalar (.int 777)'))
+                try:
+                    result = operation(instance)
+                except Exception as error:
+                    if type(error) is TypeError:
+                        expected = 'completion.outcome matches .error {typeName := "TypeError", args := _}'
+                    else:
+                        args = ', '.join(constant(arg) for arg in error.args)
+                        expected = (f'decide (completion.outcome = Except.error {{typeName := '
+                                    f'{json.dumps(type(error).__name__)}, args := [{args}]}})')
+                    observed = snapshot_roots(roots)
+                else:
+                    expected = 'completion.outcome matches .ok _'
+                    observed = snapshot_roots([*roots, result])
+                for node in observed[1]:
+                    if type(node[0]) is list:
+                        node[0] = ['static_object', str(path.resolve()), classes[node[0][1]]]
+                entries = ', '.join(f'({json.dumps(key)}, {value})' for key, value in fields)
+                label = f'{operation.__name__} {name}({initial}), shadowed={shadowed}'
+                labels.append(label)
+                checks.append(f'''
+#eval (show Bool from match (ProtocolCalls.{operation.__name__} Probe.module (.ref 0)
+      [.instance {origin} {json.dumps(name)} [{entries}], .list [.scalar (.int 4)]{extra_heap}]
+      ).execution.observe 1000 with
+    | .done (.ok completion) =>
+        ({expected}) && (Graph.observedBool
+          ((Graph.compare completion.snapshot ({data(observed)})).observe 1000) == some true)
+    | _ => false)
+''')
+    for receiver, heap in (('.scalar (.int 4)', '[.list []]'), ('.ref 0', '[.list []]')):
+        labels.append('non-iterator')
+        checks.append(f'''
+#eval (show Bool from match (ProtocolCalls.next Probe.module ({receiver}) {heap}).execution.observe 10 with
+  | .done (.ok completion) => (completion.outcome matches .error {{typeName := "TypeError", args := _}})
+  | _ => false)
+''')
+    for receiver, heap in (('.ref 0', '[.instance "different-source" "Advance" []]'), ('.ref 1', '[]')):
+        labels.append('unresolved receiver')
+        checks.append(f'''
+#eval (show Bool from match (ProtocolCalls.next Probe.module ({receiver}) {heap}).execution.observe 10 with
+  | .unsupported => true
+  | _ => false)
+''')
+    for name in ('SequenceFallback',):
+        instance = namespace[name].__new__(namespace[name])
+        instance.items = [4]
+        assert next(iter(instance)) == 4
+        labels.append('sequence fallback remains unsupported')
+        checks.append(f'''
+#eval (show Bool from match (ProtocolCalls.iter Probe.module (.ref 0)
+    [.instance {origin} {json.dumps(name)} [("items", .ref 1)], .list [.scalar (.int 4)]]
+    ).execution.observe 1000 with
+  | .unsupported => true
+  | _ => false)
+''')
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('import lang.py.FormalSW.ProtocolCalls\n'
+                     + api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+                     + '\nopen FormalSW.PyAst\nset_option maxRecDepth 8192\n'
+                     + '\n'.join(checks))
+    checked = subprocess.run(['lake', 'env', 'lean', '-M4096', '-j1', '-DElab.async=false',
+                    '-DwarningAsError=true', str(proof)], cwd=ROOT, capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    results = checked.stdout.splitlines()
+    assert len(results) == len(labels), checked.stdout
+    for label, result in zip(labels, results):
+        assert result == 'true', (label, result)
+print(f'protocol calls: {len(labels)} Python comparison and unsupported-boundary checks passed')
