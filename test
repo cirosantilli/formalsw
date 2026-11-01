@@ -589,7 +589,7 @@ def main() -> int:
             print(textwrap.indent((checked.stdout + checked.stderr).rstrip(), "  "))
     raw_docs = (REPO / "README.adoc").read_text().split("=== Raw Lean specification\n", 1)[1].split("\n== How it works", 1)[0]
     raw_headers = re.findall(r"^==== (.+)$", raw_docs, re.MULTILINE)
-    raw_ids = re.findall(r"^\[\[(raw-lean-[^\]]+)\]\]\n==== ", raw_docs, re.MULTILINE)
+    raw_ids = re.findall(r"^\[\[([^\]]+-raw)\]\]\n==== ", raw_docs, re.MULTILINE)
     raw_docs_passed = (
         raw_headers == sorted(raw_headers, key=str.casefold)
         and len(raw_ids) == len(raw_headers) == len(set(raw_ids))

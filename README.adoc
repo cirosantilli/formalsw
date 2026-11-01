@@ -373,7 +373,7 @@ The DSL gets converted to corresponding Lean code behind the scenes.
 Each DSL construct includes a raw Lean equivalent, e.g.:
 
 * <<halts>>
-* <<raw-lean-halts>>
+* <<halts-raw>>
 
 ==== Py
 
@@ -490,7 +490,7 @@ For that function, the raw Lean equivalent is:
 
 The generated obligation is named `function.«Halts»`. It supports the same argument domains as <<returns,Returns>>. `Not` negates the whole obligation: for a function with arguments, `Not Halts` says that not all inputs halt. Use a raw universally quantified theorem to say that every input fails to halt.
 
-For an individual call, <<raw-lean-throws,Throws>> implies <<raw-lean-halts,Halts>>. The DSL `Throws` quantifies existentially over inputs, while `Halts` and `Returns` quantify universally: a function-level `Throws` marker therefore does not imply a function-level `Halts` marker.
+For an individual call, <<throws-raw,Throws>> implies <<halts-raw,Halts>>. The DSL `Throws` quantifies existentially over inputs, while `Halts` and `Returns` quantify universally: a function-level `Throws` marker therefore does not imply a function-level `Halts` marker.
 
 See link:tests/py/termination.py[] and link:tests/py/termination.py.lean[] for an infinite `while True` loop and a termination proof for subtraction-based Euclid. Euclid preserves positive operands while strictly decreasing `a + b` until they agree; the guards handle nonpositive inputs. Its proof covers arbitrarily many iterations. The infinite-loop proof supplies an invariant closed under execution steps.
 
@@ -938,53 +938,53 @@ Continuation lines are included until a blank line or another marker. The exampl
 
 The constructs below are available through `import FormalSW`. Lean parses the custom predicate and call syntax; state types and observation helpers are ordinary Lean definitions. Use ordinary Lean negation, such as `Not Throws(...)` or `¬ Throws(...)`.
 
-[[raw-lean-this-module]]
+[[this-module-raw]]
 ==== _this_module
 
 FormalSW supplies `_this_module` as the enclosing Python module's AST. Comparison syntax uses it to look up Python comparison methods, including in nested parenthesized expressions. The binding appears in generated stubs alongside `this_function`.
 
-[[raw-lean-candeadlock]]
+[[candeadlock-raw]]
 ==== CanDeadlock
 
 `CanDeadlock(py("run_retries(this_function, 1)"))` states that some finite schedule reaches a global deadlock: unfinished workers remain, and none can take a step. `CanDeadlock(Parallel(calls, heap))` is its explicit-call form. The `acquire_twice` example exhibits a non-reentrant self-deadlock; `lock_pair` exhibits the classic opposite-order two-lock deadlock in link:tests/py/parallel_liveness.py[]. A witness includes actual transitions, not a timeout.
 
-[[raw-lean-candiverge]]
+[[candiverge-raw]]
 ==== CanDiverge
 
 `CanDiverge(py("run_retries(this_function, 2)"))` states that some schedule executes infinitely many steps. `CanDiverge(Parallel(calls, heap))` is its explicit-call form. A proof supplies a set of configurations that contains the initial configuration and always admits a next configuration within the set. The set may be infinite: the tests include a worker whose integer keeps increasing.
 
 Livelock is an infinite execution without the desired application progress. The `retry_forever` example repeatedly acquires and releases a mutex without completing any work. Its proof repeats a schedule that advances both workers. `CanDiverge` establishes infinite execution; specifying a separate application progress property would be necessary to classify arbitrary useful infinite computations as livelock.
 
-[[raw-lean-can-return]]
+[[can-return-raw]]
 ==== CanReturn
 
 `CanReturn(run, state)` states that some modeled schedule finishes with exactly that shared state. For the counter, a final array containing one proves a lost update. The state is the result of the concurrent run, not a worker's Python return value.
 
 It does not say every schedule fails or assign a probability to failure. `ParallelRun.Ensures.of_canReturn` says that any reachable state must satisfy an established guarantee; a reachable corrupt state can therefore disprove a proposed invariant.
 
-[[raw-lean-data]]
+[[data-raw]]
 ==== Data
 
 `Data` is the read-only interpreter's value domain: Python scalars (`Constant`), nested lists, and supported builtin type objects. Lists in this interpreter cannot be mutated; programs build new lists with `+`. Cycles in observed Python objects are represented by explicit graph references, not by cyclic `Data` trees.
 
-[[raw-lean-data-function]]
+[[data-function-raw]]
 ==== dataFunction
 
 `dataFunction module name arguments` executes a function's actual AST on `Data` arguments. It supports local assignments, conditionals, while loops, scalar operations, list construction and indexing, and `len`/`type`. Other constructs are rejected by `python_data%`; operations on values outside the interpreter's supported domain yield an unsupported execution. Termination uses `Execution.Finishes` with no fuel limit.
 
-[[raw-lean-deadlockfree]]
+[[deadlockfree-raw]]
 ==== DeadlockFree
 
 `DeadlockFree(py("run_retries(this_function, 2)"))` rules out reachable global deadlock. `DeadlockFree(Parallel(calls, heap))` uses explicit worker calls. This is weaker than `Halts`: an execution can always have another enabled step and still run forever. The semantic tests prove both `DeadlockFree` and `CanDiverge` for one such worker.
 
 Global deadlock means every unfinished worker is blocked. A subset of workers can remain blocked while another runs forever; `DeadlockFree` alone does not exclude this, but `Halts` does. No fairness assumption is hidden in these predicates.
 
-[[raw-lean-diverges]]
+[[diverges-raw]]
 ==== diverges
 
 `diverges(this_function())` proves an infinite execution by supplying an invariant that contains the initial state and always permits another execution step. `Execution.diverges_not_halts` turns this proof into `Not Halts(this_function())`. See the `forever` example in link:tests/py/termination.py.lean[].
 
-[[raw-lean-ensures]]
+[[ensures-raw]]
 ==== Ensures
 
 `Ensures(run, postcondition)` requires every maximal modeled run to finish successfully with a shared state satisfying the postcondition. For example:
@@ -997,52 +997,52 @@ Ensures(Parallel(List.replicate 2 (this_function [.ref 0, .lock 0]),
 
 This checks the value at index 0 of shared array 0 after both workers finish. A linked-list specification can instead check relationships between fields throughout the heap. Deadlocks, exceptions, incomplete exploration, and empty outcome sets cannot satisfy this guarantee.
 
-[[raw-lean-execution-equiv-by]]
+[[execution-equiv-by-raw]]
 ==== Execution.EquivBy
 
 `Execution.EquivBy relation left right` requires every finite outcome on either side to have a matching outcome on the other. Successful results must satisfy `relation`; exceptions must have the same modeled class and arguments. Its `returns_iff` and `halts_iff` lemmas transfer termination guarantees. `Execution.equivBy_eq_iff` proves that using ordinary equality recovers `Execution.Equiv`.
 
-[[raw-lean-graph-compare]]
+[[graph-compare-raw]]
 ==== Graph.compare
 
 `Graph.compare left right` executes `same_snapshot(left, right)` from link:lang/py/graph_equivalence.py[]. Its arguments are encoded snapshots (`Data`), and its result is an `Execution Data`. It does not call overridable Python object equality.
 
-[[raw-lean-graph-edge]]
+[[graph-edge-raw]]
 ==== Graph.Edge
 
 An edge is a typed scalar value (`.scalar`) or a reference to a node index (`.ref`). Node indices are local to each heap; comparison permits consistent renaming.
 
-[[raw-lean-graph-equiv]]
+[[graph-equiv-raw]]
 ==== Graph.Equiv
 
 `Graph.Equiv left right` abbreviates `Execution.EquivBy Graph.Equivalent left right`. The executions must return snapshots containing all observable roots. It compares captured state while preserving the existing exception and termination requirements; it does not supply a heap interpreter for unsupported Python functions.
 
-[[raw-lean-graph-equivalent]]
+[[graph-equivalent-raw]]
 ==== Graph.Equivalent
 
 `Graph.Equivalent left right` states that the interpreted Python snapshot comparator terminates and returns `True`. It does not mean Python `left == right`. `Graph.equivalent_int` reduces this relation on integer snapshots to ordinary integer equality; `simp` uses the theorem automatically.
 
-[[raw-lean-graph-heap]]
+[[graph-heap-raw]]
 ==== Graph.Heap
 
 A finite observation consists of an ordered `roots` list and a `nodes` list. Include the result and externally observable input/global roots together to preserve their sharing. `heap.encode` produces the same nested-list format as the Python snapshot adapter. References must identify existing nodes, and node labels/edges must follow the adapter's layout; constructing this record alone does not prove those conditions. Unreachable nodes do not affect comparison.
 
-[[raw-lean-graph-kind]]
+[[graph-kind-raw]]
 ==== Graph.Kind
 
 A node's kind distinguishes lists, tuples, dictionaries, and instances with a runtime type identity. Both observations must use the same type-identity scheme. Object addresses may be renamed; type identities must agree.
 
-[[raw-lean-graph-node]]
+[[graph-node-raw]]
 ==== Graph.Node
 
 Each node stores its `kind`, ordered field `labels`, and outgoing `edges`. Instances use one label per field; list/tuple positions and alternating dictionary key/value positions are implicit and use an empty labels list.
 
-[[raw-lean-graph-observed-bool]]
+[[graph-observed-bool-raw]]
 ==== Graph.observedBool
 
 `Graph.observedBool (execution.observe fuel)` returns `some true` or `some false` only after a Boolean return. It returns `none` for unfinished execution, unsupported operations, exceptions, or other return values. `Graph.equivalent_of_observe` turns a `True` observation into a proof of equivalence; `Graph.not_equivalent_of_observe` uses an actual `False` return to disprove it. Exhausting fuel proves neither result.
 
-[[raw-lean-halts]]
+[[halts-raw]]
 ==== Halts
 
 `Halts(this_function(n))` states that this particular call terminates, either normally or by raising an exception. `Halts(left < right)` states the same for a comparison.
@@ -1055,89 +1055,89 @@ For concurrent trials, `Halts(py("run_retries(this_function, 2)"))` requires eve
 
 `Not Halts(this_function(values))` states that a deterministic call does not terminate. link:tests/py/sort.py[`Looping.__le__`] and its checked proof show that sorting two such objects does not halt. Unsupported source constructs cause validation errors and cannot be used to satisfy this requirement.
 
-[[raw-lean-mutable-call]]
+[[mutable-call-raw]]
 ==== Mutable.Call
 
 A heap-backed call containing an execution of `Mutable.Completion`. Its `Returns`, `Halts`, `Throws`, and `Diverges` predicates inspect the Python outcome, not the internal completion wrapper. `Call.returns_iff_halts_not_throws` proves `Returns ↔ Halts ∧ ¬ Throws`; `Call.throws_halts` proves `Throws → Halts`.
 
-[[raw-lean-mutable-call-equiv]]
+[[mutable-call-equiv-raw]]
 ==== Mutable.Call.Equiv
 
 `left.Equiv right` requires each finite completion on either side to have a matching `Mutable.Completion.Equivalent` completion on the other. Final global state and caller-visible mutations matter on exceptional exits too. `Call.equiv_of_finishes` proves equivalence from two matching completions.
 
-[[raw-lean-mutable-call-equiv-return]]
+[[mutable-call-equiv-return-raw]]
 ==== Mutable.Call.EquivReturn
 
 `left.EquivReturn right` compares successful completions using `Mutable.Completion.Equivalent` whenever both calls return. It does not prove termination. `Call.Equiv.equivReturn` derives it from `Equiv`.
 
-[[raw-lean-mutable-call-finishes]]
+[[mutable-call-finishes-raw]]
 ==== Mutable.Call.Finishes
 
 `call.Finishes completion` is a finite execution ending with that Python outcome, global bindings, and heap. `Call.finishes_of_observe` turns an actual completed observation into a proof; exhausting observation fuel is insufficient.
 
-[[raw-lean-mutable-call-return-type]]
+[[mutable-call-return-type-raw]]
 ==== Mutable.Call.ReturnType
 
 `call.ReturnType kind` means that the call throws or returns a value satisfying `Mutable.Value.HasType` in its final heap. For example, `"list[int]"` checks the returned reference and the exact scalar types of its elements.
 
 Module-level function signatures and global declarations also accept `typing.List`, `typing.Dict`, and `typing.Set`, including explicit import aliases, with the same supported element types as `list`, `dict`, and `set`. The import must remain unmodified; a local `typing.py` or `typing/` shadowing the standard library is rejected. Class-field annotations and string forward references do not use this alias resolver.
 
-[[raw-lean-mutable-completion]]
+[[mutable-completion-raw]]
 ==== Mutable.Completion
 
 A record with `outcome : Except ExceptionObject Mutable.Value`, `globals : Mutable.Globals`, `heap : Mutable.Heap`, and `anchors : Nat`. The first `anchors` heap objects existed at entry and remain observable even if a global stops referring to them.
 
-[[raw-lean-mutable-completion-equivalent]]
+[[mutable-completion-equivalent-raw]]
 ==== Mutable.Completion.Equivalent
 
 Two completions match if they are identical, or if their anchor counts, global-name order, and outcome kinds/exception objects agree and `Graph.Equivalent` holds between their snapshots. The snapshot comparison runs the Python definition of object-graph equivalence.
 
-[[raw-lean-mutable-completion-snapshot]]
+[[mutable-completion-snapshot-raw]]
 ==== Mutable.Completion.snapshot
 
 Encode the final graph as `Data` for the Python comparator. Ordered roots are entry objects, final global values, and the return value on success. Fresh unreachable objects are ignored by graph comparison; aliases between roots are preserved.
 
-[[raw-lean-mutable-function]]
+[[mutable-function-raw]]
 ==== Mutable.function
 
 `Mutable.function module "name" arguments globals heap` executes the actual translated Python function body with shared references. It respects whole-function local/global scope. Supplied globals unused by the body remain observable and unchanged, which allows comparing functions with different global dependencies in the same world.
 
-[[raw-lean-mutable-globals]]
+[[mutable-globals-raw]]
 ==== Mutable.Globals
 
 A list of `(String × Mutable.Value)` module bindings. A binding such as `("items", .ref 0)` refers to object zero in the shared heap. Rebinding changes this entry; mutation changes the object.
 
-[[raw-lean-mutable-heap]]
+[[mutable-heap-raw]]
 ==== Mutable.Heap
 
 A list of list objects, indexed by reference addresses. For example, `[[.scalar (.int 1)]]` contains one list. Arguments, globals, locals, and results share these addresses. The representation can express cycles; the current source validator restricts accessible containers to flat scalar lists.
 
-[[raw-lean-mutable-heap-valid]]
+[[mutable-heap-valid-raw]]
 ==== Mutable.Heap.Valid
 
 `heap.Valid` requires every reference stored in the heap to address an existing object. It does not assert that different bindings refer to different objects.
 
-[[raw-lean-mutable-value]]
+[[mutable-value-raw]]
 ==== Mutable.Value
 
 Either `.scalar constant` or `.ref address`. Constants use the existing `Constant` representation; references identify mutable list objects.
 
-[[raw-lean-mutable-value-has-type]]
+[[mutable-value-has-type-raw]]
 ==== Mutable.Value.HasType
 
 `value.HasType heap kind` is the entry-domain predicate used by the mutable-state DSL. Scalar kinds are `"int"`, `"str"`, `"bool"`, and `"None"`; list kinds check that a reference exists and, for `"list[int]"`, `"list[str]"`, or `"list[bool]"`, every element has that exact scalar type. Empty lists satisfy each scalar element domain.
 
-[[raw-lean-mutex-ensures]]
+[[mutex-ensures-raw]]
 ==== Mutex.Ensures
 
 An inductive successful-execution predicate for arbitrary finite batches protected by a common mutex. It accounts for every next lock owner and advances each body operation through the ordinary parallel interpreter. Workers waiting at acquire cannot execute while another worker owns the mutex. Source extraction checks the complete acquire/body/release region and prevents reassignment of the mutex local.
 
-[[raw-lean-mutex-invariant]]
+[[mutex-invariant-raw]]
 ==== Mutex.invariant
 
 The generic induction rule for `Mutex.Ensures`. Prove that the invariant holds initially, is preserved by any selected worker, and implies the postcondition when no workers remain. The counter proof relates the current value plus the number of pending increments to the required final value, preserving the remaining list contents throughout.
 
-[[raw-lean-parallel]]
+[[parallel-raw]]
 ==== Parallel
 
 `Parallel(calls, initialState)` explores the interleavings of an explicit list of worker calls over one shared heap. Calls may invoke different functions with different argument lists. There is no required parameter count, parameter order, shared-cell layout, or mutex argument. link:tests/py/parallel_calls.py[] demonstrates workers with one and three arguments, nonzero list indices, and no mutex parameter.
@@ -1154,64 +1154,64 @@ The model uses sequentially consistent atomic field/item accesses and mutex oper
 
 The finite explorer is an observation tool. Its default budget is the initial total operation count, sufficient for straight-line workers but potentially insufficient for branches and loops. An exhausted budget means incomplete exploration, never a proof of deadlock or divergence. Unbounded predicates use the transition system itself. The tests prove termination of a countdown even though its default observation is incomplete.
 
-[[raw-lean-parallelconfig]]
+[[parallelconfig-raw]]
 ==== ParallelConfig
 
 A concurrent configuration contains the shared heap, each worker's remaining operations and locals, and accumulated failures. Python exceptions stop their worker while the remaining workers continue. Internal model failures cannot be hidden behind an earlier Python exception. The low-level observer reports the first encountered Python exception when several workers fail; quoted `Throws` claims exceptional completion without specifying which exception is re-raised.
 
-[[raw-lean-parallelconfig-candiverge]]
+[[parallelconfig-candiverge-raw]]
 ==== ParallelConfig.CanDiverge
 
 The infinite-execution witness underlying `CanDiverge`. Its invariant contains the starting configuration and supplies at least one enabled successor from every member. `CanDiverge.before` and `CanDiverge.of_reaches` prepend a step or a finite path.
 
-[[raw-lean-parallelconfig-deadlocked]]
+[[parallelconfig-deadlocked-raw]]
 ==== ParallelConfig.Deadlocked
 
 An unfinished configuration with no enabled successor. Successfully completed configurations are not deadlocked.
 
-[[raw-lean-parallelconfig-follow]]
+[[parallelconfig-follow-raw]]
 ==== ParallelConfig.follow
 
 `ParallelConfig.follow initial schedule` executes a finite list of worker indices and returns the resulting configuration, even if unfinished. It rejects blocked or completed worker selections. `reaches_of_follow` turns a successful replay into a reachability proof. `canDiverge_of_follow` requires a nonempty schedule that returns to exactly its initial configuration, proving that this cycle can repeat forever.
 
-[[raw-lean-parallelconfig-mustfinish]]
+[[parallelconfig-mustfinish-raw]]
 ==== ParallelConfig.MustFinish
 
 An inductive proof that every enabled schedule finishes with an accepted outcome. A completed configuration must satisfy the acceptance predicate; an unfinished one must have a successor, and every successor must itself have a termination proof. This rules out both stuck configurations and infinite executions. `mustFinish_of_explore` converts a completely explored finite tree into such a proof when the acceptance predicate rejects deadlock and incomplete exploration.
 
-[[raw-lean-parallelconfig-reaches]]
+[[parallelconfig-reaches-raw]]
 ==== ParallelConfig.Reaches
 
 Finite reachability using zero or more enabled transitions. `Reaches.invariant` transports an invariant along such a path. Deadlock and exceptional-completion proofs use finite reachability witnesses.
 
-[[raw-lean-parallel-replay]]
+[[parallel-replay-raw]]
 ==== parallelReplay
 
 `parallelReplay initialState schedule` executes a concrete schedule, where the initial configuration contains the shared heap and initialized workers. Worker indices start at zero. Each index selects that worker's next operation. Selecting a blocked worker makes the schedule invalid; stopping before all workers finish is incomplete.
 
 The counter's schedule `[0, 1, 0, 1, 0, 1]` makes both workers read zero, both yield, and both write one. The doubly linked list's proof gives a longer schedule where different workers win the forward and backward pointer writes.
 
-[[raw-lean-parallelrun]]
+[[parallelrun-raw]]
 ==== ParallelRun
 
 An explicit list of optional compiled workers together with the initial shared heap. It retains the program, rather than only a finite list of observations. `config` initializes its transition system; a missing compiled worker prevents successful liveness claims. Its `Returns`, `Halts`, `Throws`, `CanDeadlock`, `CanDiverge`, and `DeadlockFree` properties are exposed by the corresponding specification constructs.
 
-[[raw-lean-parallelrun-ensures-returns]]
+[[parallelrun-ensures-returns-raw]]
 ==== ParallelRun.Ensures.returns
 
 Converts an established finite `Ensures` guarantee into unbounded `Returns`. Any deadlock, exception, unsupported operation, or incomplete branch prevents the premise from holding.
 
-[[raw-lean-parallelrun-eventually]]
+[[parallelrun-eventually-raw]]
 ==== ParallelRun.Eventually
 
 `run.Eventually accept` requires successful initialization and a `ParallelConfig.MustFinish accept` proof. It expresses total correctness for a general concurrent batch. `Eventually.of_explore` accepts an explicit observation budget when a complete finite exploration suffices; the resulting proposition has no fuel bound.
 
-[[raw-lean-parallelrun-outcomes]]
+[[parallelrun-outcomes-raw]]
 ==== ParallelRun.outcomes
 
 A bounded observation of the run. Straight-line workers need at most their initial total operation count; the same default budget may be insufficient for branching or looping workers. `.error .incomplete` is an observation limit, not a Python exception and not divergence. Increasing fuel can discover completion; an unbounded theorem can also prove it independently of this observer.
 
-[[raw-lean-py]]
+[[py-raw]]
 ==== py
 
 `py("...")` embeds a Python expression as a *Lean string literal*. Lean's real parser handles the theorem, comments, binders, parentheses, and string escapes. Its quotation elaborator passes the decoded string to Python's parser and translates the Python AST into modeled Lean semantics. It resolves captured variables in Lean's local context and checks that they have type `PyValue`. Generated code is a closed function applied to those captures, so its temporary names cannot capture theorem variables. Python source functions are not executed to decide whether a theorem is true.
@@ -1236,13 +1236,13 @@ Predicates support exact `type` checks, short-circuiting Boolean `and`, guarded 
 
 Trial helpers currently accept Python `int` and `list[int]` parameters after the worker parameter. Their first statement must be an executable `assert` establishing those types, usually by calling the same predicate used in the theorem. The compiler checks that assertion's Python AST, independently of the surrounding Lean logic. Invalid inputs raise `AssertionError`, so even negated outcome claims have a meaningful modeled input domain. Annotations guide translation but never act as assumptions. Execution assumes Python assertions are enabled.
 
-Setup supports integer-list snapshots with `copy()`, integer-list literals, and mutex allocation. Execution uses a `ThreadPoolExecutor`, a submission comprehension, and `future.result()` for every worker. Checks support indexing, slices, integer arithmetic, and ordinary assertions; a helper may omit final assertions when only its execution matters. Worker bodies use the operations described under <<raw-lean-parallel>>.
+Setup supports integer-list snapshots with `copy()`, integer-list literals, and mutex allocation. Execution uses a `ThreadPoolExecutor`, a submission comprehension, and `future.result()` for every worker. Checks support indexing, slices, integer arithmetic, and ordinary assertions; a helper may omit final assertions when only its execution matters. Worker bodies use the operations described under <<parallel-raw>>.
 
 Quoted outcomes support `Returns`, `Halts`, `Throws`, `CanDeadlock`, `DeadlockFree`, and `CanDiverge`. General proofs use the unbounded concurrent transition system. `Returns` also accepts the existing common-mutex certificate, which supports inductive proofs for arbitrary worker counts. Quoted helpers must provide enough pool threads for every submitted job: use `max_workers=max(1, worker_count)` with `range(worker_count)`, `max_workers=max(1, len(jobs))`, or a positive literal large enough for a literal range. This makes both positive and negated scheduling claims meaningful; a counterexample cannot rely on nonexistent pool capacity.
 
 A precondition in the Lean theorem is an assumption. An `assert` in the trial is executable code whose success or failure is modeled. Unsupported Python constructs in either helper are reported for every dependent proof while other supported obligations continue to be checked.
 
-[[raw-lean-python-comparison]]
+[[python-comparison-raw]]
 ==== python_comparison
 
 `python_comparison(left < right)` produces the comparison execution used by `Returns`, `Halts`, and `Throws`. These wrappers expand comparisons automatically, so it is usually unnecessary to write this helper yourself.
@@ -1253,114 +1253,114 @@ For example, `python_comparison(left <= right)` expands to `comparison _this_mod
 
 Custom same-class comparisons execute the supported method AST, including loops, on empty objects or objects with an integer `value` field. `.object "Looping"` represents an empty object; `.object "DummyInt" (some 2)` represents one with `value = 2`. These Lean constructors describe object state; they do not execute Python `__init__`. Reflected comparison, `NotImplemented`, general method calls, and arbitrary object layouts remain unsupported.
 
-[[raw-lean-python-context]]
+[[python-context-raw]]
 ==== python_context
 
 `python_context "source.py" "worker" SourceAst.module in proposition` supplies the Python source, enclosing function, and imported semantic AST for quotations. FormalSW inserts it around a function's quoted specification. Generated proof stubs preserve the quoted theorem and include this context explicitly, so the same syntax works directly in Lean. Names used inside a quotation refer to the Lean scope at that quotation, including nested binders and `let` values.
 
-[[raw-lean-python-data]]
+[[python-data-raw]]
 ==== python_data%
 
 `python_data% (include_str "path/to/definition.py")` parses Python source through the existing AST bridge and validates the reusable read-only data subset. It imports the resulting AST as a Lean `Module`; it does not run the Python definition during elaboration. `include_str` makes source edits a Lake build dependency. Validation covers the whole source, including dead branches, and rejects mutation, arbitrary calls, imports, defaults, builtin shadowing, and other unsupported syntax. The graph comparator uses this entry point; it is separate from the contextual `py("...")` specification syntax.
 
-[[raw-lean-pytrial]]
+[[pytrial-raw]]
 ==== PyTrial
 
 The generated trial description contains calls to actual compiled workers, their initial shared heap, and checks translated from the Python assertions. No fixed limit on list length or worker count is part of this description.
 
-[[raw-lean-pytrial-assert-true]]
+[[pytrial-assert-true-raw]]
 ==== PyTrial.assertTrue
 
 `PyTrial.assertTrue condition` evaluates one Python assertion condition, returning `some ()` for true and `none` for false.
 
-[[raw-lean-pytrial-call]]
+[[pytrial-call-raw]]
 ==== PyTrial.Call
 
 The generated description of a trial call: its initial Python assertion and the concurrent body reached when that assertion succeeds.
 
-[[raw-lean-pytrial-call-candeadlock]]
+[[pytrial-call-candeadlock-raw]]
 ==== PyTrial.Call.CanDeadlock
 
 The meaning of quoted `CanDeadlock`: the initial Python assertion succeeds and the body has a finite deadlock witness. A failed input assertion terminates exceptionally, so it cannot witness deadlock.
 
-[[raw-lean-pytrial-call-candiverge]]
+[[pytrial-call-candiverge-raw]]
 ==== PyTrial.Call.CanDiverge
 
 The meaning of quoted `CanDiverge`: the initial Python assertion succeeds and the concurrent body admits infinite execution.
 
-[[raw-lean-pytrial-call-deadlockfree]]
+[[pytrial-call-deadlockfree-raw]]
 ==== PyTrial.Call.DeadlockFree
 
 The meaning of quoted `DeadlockFree`: the input assertion fails immediately, or it succeeds and the body has a deadlock-freedom certificate. `Call.halts_deadlockFree` derives this from a quoted termination proof.
 
-[[raw-lean-pytrial-call-halts]]
+[[pytrial-call-halts-raw]]
 ==== PyTrial.Call.Halts
 
 The meaning of quoted `Halts`: the input assertion fails immediately, or it succeeds and the whole concurrent body terminates. `Call.returns_halts` derives this from quoted `Returns`.
 
-[[raw-lean-pytrial-call-returns]]
+[[pytrial-call-returns-raw]]
 ==== PyTrial.Call.Returns
 
 The meaning of `Returns(py("trial(...)"))`: the input assertion succeeds, and `PyTrial.Returns` proves successful completion and all final checks of the body.
 
-[[raw-lean-pytrial-call-throws]]
+[[pytrial-call-throws-raw]]
 ==== PyTrial.Call.Throws
 
 The meaning of `Throws(py("trial(...)"))`: the input assertion fails, or it succeeds and some actual modeled body execution raises a worker exception or fails a final assertion. A rejected input is an exception, not unsupported execution.
 
-[[raw-lean-pytrial-candeadlock]]
+[[pytrial-candeadlock-raw]]
 ==== PyTrial.CanDeadlock
 
 A successfully constructed trial whose explicit worker batch satisfies `ParallelRun.CanDeadlock`. Final assertions are reached only after workers finish, so they cannot introduce a worker deadlock.
 
-[[raw-lean-pytrial-candiverge]]
+[[pytrial-candiverge-raw]]
 ==== PyTrial.CanDiverge
 
 A successfully constructed trial whose explicit worker batch satisfies `ParallelRun.CanDiverge`. The trial's supported final assertion checks are finite.
 
-[[raw-lean-pytrial-deadlockfree]]
+[[pytrial-deadlockfree-raw]]
 ==== PyTrial.DeadlockFree
 
 Deadlock freedom of a constructed trial, established either by a termination certificate or by the general worker batch's `DeadlockFree` proof.
 
-[[raw-lean-pytrial-halts]]
+[[pytrial-halts-raw]]
 ==== PyTrial.Halts
 
 Termination of the concurrent body, established either by an existing `Returns` certificate or by the general worker batch's `Halts` proof. Both successful and exceptional completion count; deadlock and infinite execution do not.
 
-[[raw-lean-pytrial-mutexreturns]]
+[[pytrial-mutexreturns-raw]]
 ==== PyTrial.MutexReturns
 
 The optimized successful-completion certificate for a complete common-mutex region. `Mutex.Ensures` covers all orders of the worker bodies and proves their final assertions. Extraction rejects additional locks and control flow inside that region; use the general transition proof for those programs. This preserves the arbitrary-worker-count shared-counter proof.
 
-[[raw-lean-pytrial-observedthrows]]
+[[pytrial-observedthrows-raw]]
 ==== PyTrial.ObservedThrows
 
 A completed exceptional trial observed by the finite explorer, including failed final assertions. Incomplete observations never establish this predicate. `PyTrial.Throws` additionally accepts finite reachability witnesses that require more steps than the default observation budget.
 
-[[raw-lean-pytrial-read-int-item]]
+[[pytrial-read-int-item-raw]]
 ==== PyTrial.readIntItem
 
 `PyTrial.readIntItem heap object index` reads an integer from a mutable list using Python's positive or negative indexing. Missing objects, out-of-range indices, and non-integer elements fail the trial check.
 
-[[raw-lean-pytrial-returns]]
+[[pytrial-returns-raw]]
 ==== PyTrial.Returns
 
 Successful execution of a concurrent body, including all final assertion checks, on every enabled schedule. Proofs can supply either `PyTrial.MutexReturns` or a general `ParallelRun.Eventually` derivation whose accepted outcomes are successful heaps satisfying the checks. The general route allows branches, loops, and multiple locks. The optimized mutex route retains inductive proofs for arbitrary worker counts.
 
-[[raw-lean-pytrial-throws]]
+[[pytrial-throws-raw]]
 ==== PyTrial.Throws
 
 Exceptional execution of a concurrent body: some actual modeled schedule finishes all workers and exposes a worker exception or fails the trial's checks. A bounded complete observation or an unbounded finite reachability derivation supplies the witness. A worker exception followed by another worker's deadlock or infinite loop does not complete the joined batch. Deadlock, divergence, and unsupported execution do not count as exceptions. Unlike a deterministic call, the existence of one exceptional schedule does not imply termination of every schedule.
 
-[[raw-lean-pyvalue]]
+[[pyvalue-raw]]
 ==== PyValue
 
 The common type used by Lean quantifiers over modeled Python inputs. Its values include integers, booleans, strings, `None`, finite lists, and opaque objects. Python preconditions state the intended types; the user does not need to translate `list[int]` into a Lean list type.
 
 Each integer-list argument is materialized as a fresh mutable array for the trial. Passing it to several workers shares that array; `copy()` creates a snapshot of its initial contents. Aliasing between separate list inputs, cyclic containers, custom descriptors, and general object execution are outside the current quotation model. The shared-counter property uses one flat integer list, so its entire stated input domain is covered.
 
-[[raw-lean-returns]]
+[[returns-raw]]
 ==== Returns
 
 `Returns(this_function(values))` states that this particular call terminates successfully. Implicit `None`, bare `return`, and `return None` all count as successful returns.
@@ -1376,80 +1376,80 @@ Returns(f(x)) ↔ Halts(f(x)) ∧ Not Throws(f(x))
 
 The merge-sort theorem above assumes successful termination of the `<=` operations the algorithm actually uses. Absence of `<` exceptions is insufficient: comparison methods may differ or loop forever. The execution model requires an exact match with the supported merge-sort AST template and produces the actual merged list. Changing the body outside that template causes a validation error for requirements needing this model.
 
-[[raw-lean-scalar-call]]
+[[scalar-call-raw]]
 ==== ScalarCall
 
 A call with scalar global state. Its `Returns`, `Throws`, `Halts`, and `Diverges` predicates describe the Python outcome, while its internal `execution` records a `ScalarCompletion`. `Returns(this_function(...))` and the other call predicates select the appropriate model automatically. `ScalarCall.returns_iff_halts_not_throws` proves the same contract as for stateless execution.
 
-[[raw-lean-scalar-call-equiv]]
+[[scalar-call-equiv-raw]]
 ==== ScalarCall.Equiv
 
 `left.Equiv right` requires identical finite Python outcomes and final global state in both directions. `ScalarCall.equiv_of_finishes` proves equivalence from matching completions. Its `returns_iff` and `halts_iff` lemmas transfer execution contracts.
 
-[[raw-lean-scalar-call-equiv-return]]
+[[scalar-call-equiv-return-raw]]
 ==== ScalarCall.EquivReturn
 
 `left.EquivReturn right` requires equal results and equal final globals whenever both calls return successfully. It imposes no agreement on exceptional completions. An `Equiv` proof implies this property through `ScalarCall.Equiv.equivReturn`.
 
-[[raw-lean-scalar-call-finishes]]
+[[scalar-call-finishes-raw]]
 ==== ScalarCall.Finishes
 
 `call.Finishes outcome globals` means that the Python call terminates with that normal or exceptional outcome and that final global state. `ScalarCall.finishes_of_observe` turns a completed finite observation into this unbounded semantic proposition; running out of observation fuel supplies no such proof.
 
-[[raw-lean-scalar-call-return-type]]
+[[scalar-call-return-type-raw]]
 ==== ScalarCall.ReturnType
 
 `call.ReturnType "int"` requires exceptional completion or successful completion with an integer result. The other supported annotations are `"str"`, `"bool"`, and `"None"`. The DSL universally quantifies the arguments and initial globals around this per-call property.
 
-[[raw-lean-scalar-completion]]
+[[scalar-completion-raw]]
 ==== ScalarCompletion
 
 A completion pairs `outcome : Except ExceptionObject Constant` with `globals : ScalarGlobals`. Final globals are present after exceptions as well as successful returns; Python does not roll back completed assignments when it raises.
 
-[[raw-lean-scalar-function-with-globals]]
+[[scalar-function-with-globals-raw]]
 ==== scalarFunctionWithGlobals
 
 `scalarFunctionWithGlobals module "name" arguments globals` executes the actual function AST with explicit initial scalar global bindings. Ordinary locals shadow globals according to the whole function's scope. A `global` declaration changes the assignment target to module state. All declared global names must be supplied, duplicate bindings are rejected, and extra supplied globals are preserved so two functions can share an initial comparison state.
 
-[[raw-lean-scalar-globals]]
+[[scalar-globals-raw]]
 ==== ScalarGlobals
 
 A list of named scalar values, such as `[("offset", .int offset), ("enabled", .bool enabled)]`. The DSL supplies the required names and types automatically. Low-level calls supply unique names explicitly; the generated specifications use a stable sorted order for state comparison.
 
-[[raw-lean-shared-object]]
+[[shared-object-raw]]
 ==== SharedObject
 
 `.array values` represents a mutable Python list. `.object fields` represents a plain object's mutable fields, for example `.object [("prev", .none), ("next", .ref 1)]`. List indexing includes nonzero and negative integer indices; invalid indexing produces an exception. Field access uses the field name, independently of a worker's parameter names.
 
 Objects used by workers are created in the initial heap. The current interpreter does not execute allocation or constructors during a worker call.
 
-[[raw-lean-shared-state]]
+[[shared-state-raw]]
 ==== SharedState
 
-A shared state contains `objects`, a list of <<raw-lean-shared-object,SharedObject>> values indexed by their reference addresses, and `locked`, the identities of currently held mutexes. Both default to empty lists. For example, `{ objects := [.array [.int 0]] }` creates one zero-valued counter, with all mutexes initially unlocked.
+A shared state contains `objects`, a list of <<shared-object-raw,SharedObject>> values indexed by their reference addresses, and `locked`, the identities of currently held mutexes. Both default to empty lists. For example, `{ objects := [.array [.int 0]] }` creates one zero-valued counter, with all mutexes initially unlocked.
 
 Specifications can observe `state.item address index` or `state.field address "name"`; each lookup returns `some value` when present. A successful concurrent outcome contains the complete final shared state, allowing invariants to relate multiple objects and fields.
 
-[[raw-lean-shared-state-read-path]]
+[[shared-state-read-path-raw]]
 ==== SharedState.readPath
 
 `state.readPath (.ref address) ["prev", "next"]` follows fields through a finite shared heap. It returns `none` on a missing field or an attempt to dereference Python `None`. A path ending in a field containing Python `None` succeeds with `some .none`; a path that tries to continue through it fails.
 
-[[raw-lean-shared-value]]
+[[shared-value-raw]]
 ==== SharedValue
 
 A worker argument or local value can be `.int n`, `.string s`, `.bool b`, `.none`, `.ref address`, or `.lock identity`. References and mutex identities have distinct namespaces: `.ref 0` identifies heap object 0, while `.lock 0` identifies mutex 0. Copying a reference preserves identity and aliasing; it does not copy the object.
 
-[[raw-lean-this-function]]
+[[this-function-raw]]
 ==== this_function
 
 `this_function` binds the enclosing Python function using its source module and name. For scalar execution, calls accept zero or more arguments, for example `Returns(this_function())`, `Throws(this_function(1))`, or `Returns(this_function(a, b))`.
 
-In a concurrent specification, `this_function arguments` describes one worker call. `arguments` is a list of <<raw-lean-shared-value,SharedValue>> values in Python parameter order, such as `[.ref 0, .ref 2, .lock 0]`. Each call receives its own local variables while references identify shared objects and mutexes. `parallelFunction module "name" arguments` constructs a call to another function in the same module.
+In a concurrent specification, `this_function arguments` describes one worker call. `arguments` is a list of <<shared-value-raw,SharedValue>> values in Python parameter order, such as `[.ref 0, .ref 2, .lock 0]`. Each call receives its own local variables while references identify shared objects and mutexes. `parallelFunction module "name" arguments` constructs a call to another function in the same module.
 
 The binding appears in generated stubs; `dsimp only` exposes the proposition for a proof. Other Lean identifiers can be used when bound to compatible execution functions or worker-call builders.
 
-[[raw-lean-throws]]
+[[throws-raw]]
 ==== Throws
 
 `Throws(this_function(n))` states that this particular call terminates by raising an exception. `Throws(left < right)` states the same for a comparison. The execution model proves:
@@ -1461,7 +1461,7 @@ Throws(f(x)) → Halts(f(x))
 
 That implication applies to deterministic calls. For a concurrent batch, `Throws` means that *some* schedule completes exceptionally, whereas `Halts` covers *every* enabled schedule; one throwing schedule does not prove universal termination.
 
-`Not Throws(...)` permits deadlock and infinite execution. Use <<raw-lean-returns,Returns>> when successful termination is required.
+`Not Throws(...)` permits deadlock and infinite execution. Use <<returns-raw,Returns>> when successful termination is required.
 
 == How it works
 
