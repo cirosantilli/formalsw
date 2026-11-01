@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""
+Check parsed call entry, scalar defaults, shared globals, and lexical shadowing.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Allocating:
+    def __next__(self, marker=7):
+        """ignored"""
+        return [self, shared, marker]
+
+def shadow(value, fallback=9):
+    """ignored"""
+    if False:
+        shared = value
+    return shared
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineCallExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Allocating").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none},
+  {name := "marker", annotation := none, defaultValue := some (.int 7)}]
+def body : List Stmt := [.expr (.constant (.string "ignored")),
+  .return (.list [.name "self", .name "shared", .name "marker"])]
+
+theorem source_method : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+theorem source_body (limit : Nat) : ∀ statement ∈ body, StmtWithin limit statement := by
+  simp [body, StmtWithin]
+
+/-- The parsed method completes with a fresh list retaining receiver and global identities. -/
+theorem method_returns (heap : Mutable.Heap) (receiver shared : Mutable.Value) :
+    MethodReturns (globals := [("shared", shared)]) Probe.module receiver args body [] heap (.ref heap.length)
+      (heap ++ [.list [receiver, shared, .scalar (.int 7)]]) := by
+  apply MethodReturns.of_body (completed := [receiver, .scalar (.int 7)]) rfl
+  apply BlockReturns.return_value
+  apply Evaluates.list
+  refine .cons (Evaluates.lookup (by simp [functionEnv, HeapCalls.argumentEnv, args])) ?_
+  refine .cons (Evaluates.lookup (by simp [functionEnv, args, body, blockLocals, assignedLocals])) ?_
+  refine .cons (Evaluates.lookup (by simp [functionEnv, HeapCalls.argumentEnv, args, List.lookup])) ?_
+  exact .nil
+
+theorem paired_returns (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (receiver shared : Mutable.Value)
+    (receiverInside : receiver.edge.Within logical.length) (sharedInside : shared.edge.Within logical.length) :
+    MethodReturns (globals := [("shared", shared)]) Probe.module receiver args body [] logical (.ref logical.length)
+        (logical ++ [.list [receiver, shared, .scalar (.int 7)]]) ∧
+      MethodReturns (globals := [("shared", relocateValue rename shared)]) Probe.module
+        (relocateValue rename receiver) args body [] physical (.ref physical.length)
+        (physical ++ [.list [relocateValue rename receiver, relocateValue rename shared, .scalar (.int 7)]]) ∧
+      ExecutionLayout (logical ++ [.list [receiver, shared, .scalar (.int 7)]])
+        (physical ++ [.list [relocateValue rename receiver, relocateValue rename shared, .scalar (.int 7)]])
+        (extendMap rename logical.length physical.length) := by
+  have inside : ∀ value ∈ [receiver, shared, Mutable.Value.scalar (.int 7)], value.edge.Within logical.length := by
+    simpa using And.intro receiverInside (And.intro sharedInside (show (Mutable.Value.scalar (.int 7)).edge.Within logical.length from trivial))
+  have allocated := (layout.allocate_list [receiver, shared, .scalar (.int 7)] inside).2.2
+  refine ⟨method_returns logical receiver shared, method_returns physical _ _, ?_⟩
+  simpa only [List.map_cons, List.map_nil, show relocateValue rename (.scalar (.int 7)) = Mutable.Value.scalar (.int 7) from rfl]
+    using allocated
+
+/-- Entry correspondence derives the physical step and retains bounds under any saved stack. -/
+theorem paired_entry (logical physical : Mutable.Heap) (rename : Nat → Nat) (logicalAnchors physicalAnchors : Nat)
+    (receiver : Mutable.Value) (stack : List Frame) (globals : Mutable.Globals)
+    (receiverInside : receiver.edge.Within logical.length)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame) (globalsInside : GlobalsWithin logical.length globals) :
+    let initial : State := ⟨.operation (.method receiver args body) [], stack, logical⟩
+    let next : State := ⟨.block (executableBody body) (functionEnv args body [receiver, .scalar (.int 7)] globals), stack, logical⟩
+    HeapCalls.step Probe.module logicalAnchors initial globals = .next next ∧
+      HeapCalls.step Probe.module physicalAnchors (relocateState rename physical initial) (relocateGlobals rename globals) =
+        .next (relocateState rename physical next) ∧ StateWithin next := by
+  dsimp only
+  have first : HeapCalls.step Probe.module logicalAnchors
+      ⟨.operation (.method receiver args body) [], stack, logical⟩ globals =
+        .next ⟨.block (executableBody body) (functionEnv args body [receiver, .scalar (.int 7)] globals), stack, logical⟩ := rfl
+  have other := step_method_relocate Probe.module rename logical physical logicalAnchors physicalAnchors receiver args body [] stack globals
+  rw [first] at other
+  have bounded : StateWithin ⟨.operation (.method receiver args body) [], stack, logical⟩ :=
+    ⟨⟨⟨receiverInside, source_body logical.length⟩, by simp⟩, stackInside⟩
+  exact ⟨first, other, step_method_within Probe.module logical logicalAnchors receiver args body [] stack globals _ bounded globalsInside first⟩
+
+def shadowArgs : List Arg := [{name := "value", annotation := none},
+  {name := "fallback", annotation := none, defaultValue := some (.int 9)}]
+def shadowBody : List Stmt := [.expr (.constant (.string "ignored")),
+  .ifThen (.constant (.bool false)) [.assign [.name "shared"] (.name "value")] [], .return (.name "shared")]
+
+theorem source_shadow : findFunctionIn Probe.module.body "shadow" = some (shadowArgs, shadowBody) := rfl
+
+theorem shadow_entry_relocates (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (logicalAnchors physicalAnchors : Nat) (values : List Mutable.Value) (stack : List Frame) (globals : Mutable.Globals) :
+    HeapCalls.step Probe.module physicalAnchors (relocateState rename physical ⟨.operation (.call "shadow") values, stack, logical⟩)
+        (relocateGlobals rename globals) =
+      relocateStep rename physical physicalAnchors
+        (HeapCalls.step Probe.module logicalAnchors ⟨.operation (.call "shadow") values, stack, logical⟩ globals) := by
+  exact step_call_relocate Probe.module "shadow" shadowArgs shadowBody source_shadow
+    (by simp [shadowBody, StmtWithin]) rename logical physical logicalAnchors physicalAnchors values stack globals
+
+/-- An unreachable assignment still masks the global for the entire function. -/
+theorem shadow_raises (heap : Mutable.Heap) (value shared : Mutable.Value) :
+    (HeapCalls.call (globals := [("shared", shared)]) Probe.module "shadow" [value] heap).Finishes
+      ⟨.error {typeName := "UnboundLocalError", args := []}, [("shared", shared)], heap, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length (globals := [("shared", shared)])) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length (globals := [("shared", shared)])) rfl
+  exact .done rfl
+
+theorem method_arity_error (heap : Mutable.Heap) (anchors : Nat) (receiver first second : Mutable.Value)
+    (extra : List Mutable.Value) (stack : List Frame) (globals : Mutable.Globals) :
+    HeapCalls.step Probe.module anchors ⟨.operation (.method receiver args body) (first :: second :: extra), stack, heap⟩ globals =
+      protectGenerator stack (HeapCalls.done (globals := globals) anchors heap (.error {typeName := "TypeError", args := []})) := by
+  simp [HeapCalls.step, invokeMethod, completeArguments, args]
+
+end MachineCallExamples
+'''
+AUDITS = [
+    "MachineCallExamples.source_method", "MachineCallExamples.source_body", "MachineCallExamples.method_returns",
+    "MachineCallExamples.paired_returns", "MachineCallExamples.paired_entry", "MachineCallExamples.source_shadow",
+    "MachineCallExamples.shadow_entry_relocates", "MachineCallExamples.shadow_raises", "MachineCallExamples.method_arity_error",
+    "relocateSource_id", "relocateStmt_id", "relocateStmt_source", "relocateBody_source", "assignedLocals_forIn",
+    "assignedLocals_relocate", "blockLocals_relocate", "executableBody_relocate", "executableBody_within",
+    "zip_values_relocate", "argumentEnv_relocate", "functionEnv_relocate", "lookup_within", "zip_values_within",
+    "argumentEnv_within", "functionEnv_within", "completeArguments_relocate", "completeArguments_within",
+    "invokeMethod_relocate", "invokeMethod_within", "step_method_relocate", "step_method_within",
+    "step_call_relocate", "step_call_within",
+]
+
+with project_temporary_directory(prefix="machine-call-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    shared = []
+    shared.append(shared)
+    namespace = {"shared": shared}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    receiver = namespace["Allocating"]()
+    result = next(receiver)
+    assert result[0] is receiver and result[1] is shared and result[2] == 7
+    assert next(receiver) is not result
+    assert receiver.__next__(shared)[2] is shared
+    for invoke in (lambda: receiver.__next__(1, 2), lambda: namespace["shadow"](1, 2, 3)):
+        try:
+            invoke()
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("excess arguments must raise TypeError")
+    try:
+        namespace["shadow"](receiver)
+    except UnboundLocalError:
+        pass
+    else:
+        raise AssertionError("the unreachable local assignment must mask the global")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineCalls\nimport lang.py.FormalSW.ClassCalls\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine calls: defaults, shared globals, lexical shadowing, arity errors; {len(AUDITS)} axiom audits passed")

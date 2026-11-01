@@ -112,6 +112,7 @@ roots = [
   "lang.py.FormalSW.MachineRelocation",
   "lang.py.FormalSW.MachineBounds",
   "lang.py.FormalSW.MachineAllocation",
+  "lang.py.FormalSW.MachineCalls",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",
