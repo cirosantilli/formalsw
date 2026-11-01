@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""
+Check mutation steps, saved continuations, and allocation after a shared field update.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Mutating:
+    def __next__(self):
+        self.link = shared
+        return [self, shared]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineMutationExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Mutating").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def body : List Stmt := [.assign [.attribute (.name "self") "link"] (.name "shared"),
+  .return (.list [.name "self", .name "shared"])]
+
+theorem source_method : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+/-- Execute the parsed method on arbitrary fields, including a cyclic shared value. -/
+theorem method_returns (heap : Mutable.Heap) (address : Nat) (shared : Mutable.Value)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Mutating" fields)) :
+    let after := heap.set address (.instance classInfo.1 "Mutating" (Mutable.putField fields "link" shared))
+    MethodReturns (globals := [("shared", shared)]) Probe.module (.ref address) args body [] heap
+      (.ref after.length) (after ++ [.list [.ref address, shared]]) := by
+  have self : functionEnv args body [.ref address] [("shared", shared)] "self" = some (.ref address) := by
+    simp [functionEnv, HeapCalls.argumentEnv, args]
+  have global : functionEnv args body [.ref address] [("shared", shared)] "shared" = some shared := by
+    simp [functionEnv, args, body, blockLocals, assignedLocals, targetLocals]
+  apply MethodReturns.of_body (completed := [.ref address]) rfl
+  change BlockReturns (globals := [("shared", shared)]) Probe.module _ body heap _ _
+  apply BlockContinues.returns (body := [body[0]'(by decide)])
+  · exact BlockContinues.setAttribute (Evaluates.lookup global) (Evaluates.lookup self)
+      (Mutable.writeField_result found (by simp))
+  · exact BlockReturns.return_value (Evaluates.list (.cons (Evaluates.lookup self)
+      (.cons (Evaluates.lookup global) .nil)))
+
+/-- A write resumes the saved block on both layouts, without assuming a physical execution. -/
+theorem write_then_resume (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (logicalAnchors physicalAnchors : Nat)
+    (receiver value : Mutable.Value) (name : String) (rest : List Stmt) (env : HeapCalls.Env)
+    (stack : List Frame) (globals : Mutable.Globals) (after : Mutable.Heap)
+    (receiverInside : receiver.edge.Within logical.length) (valueInside : value.edge.Within logical.length)
+    (envInside : EnvWithin logical.length env) (restInside : ∀ statement ∈ rest, StmtWithin logical.length statement)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals)
+    (executed : Mutable.writeField receiver name value logical = some (.ok (.scalar .none), after)) :
+    ∃ other,
+      HeapCalls.Reaches (globals := globals) Probe.module logicalAnchors
+        ⟨.value value, .writeAttribute receiver name rest env :: stack, logical⟩ ⟨.block rest env, stack, after⟩ ∧
+      HeapCalls.Reaches (globals := relocateGlobals rename globals) Probe.module physicalAnchors
+        (relocateState rename physical ⟨.value value, .writeAttribute receiver name rest env :: stack, logical⟩)
+        (relocateState rename other ⟨.block rest env, stack, after⟩) ∧
+      ExecutionLayout after other rename ∧ StateWithin ⟨.block rest env, stack, after⟩ ∧
+      GlobalsWithin after.length globals := by
+  obtain ⟨other, retained, _, paired, bounded, globalBounds⟩ :=
+    step_writeAttribute_relocates Probe.module logical physical rename layout logicalAnchors physicalAnchors
+      receiver value name rest env stack globals receiverInside valueInside envInside restInside
+      stackInside globalsInside (.ok (.scalar .none)) after executed
+  have first : HeapCalls.step Probe.module logicalAnchors
+      ⟨.value value, .writeAttribute receiver name rest env :: stack, logical⟩ globals =
+      .next ⟨.value (.scalar .none), .discard rest env :: stack, after⟩ := by
+    simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, executed]
+  rw [first] at paired bounded
+  have second := step_discard_relocates Probe.module after other rename logicalAnchors physicalAnchors
+    (.scalar .none) rest env stack globals
+  exact ⟨other, .next first (.next rfl .refl), .next paired (.next second .refl), retained,
+    bounded.discard _ _ _ _ _, globalBounds⟩
+
+/-- A fresh result list after the write retains both receiver and shared-object aliases. -/
+theorem write_then_allocate (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (shared : Mutable.Value)
+    (fields : List (String × Mutable.Value))
+    (found : logical[address]? = some (.instance classInfo.1 "Mutating" fields))
+    (sharedInside : shared.edge.Within logical.length) :
+    let after := logical.set address (.instance classInfo.1 "Mutating" (Mutable.putField fields "link" shared))
+    ∃ other,
+      ExecutionLayout (after ++ [.list [.ref address, shared]])
+        (other ++ [.list [.ref (rename address), relocateValue rename shared]])
+        (extendMap rename after.length other.length) ∧
+      HeapCalls.step Probe.module other.length
+          ⟨.operation .list [.ref (rename address), relocateValue rename shared], [], other⟩
+          [("shared", relocateValue rename shared)] =
+        .next ⟨.value (.ref other.length), [], other ++ [.list [.ref (rename address), relocateValue rename shared]]⟩ := by
+  dsimp only
+  have addressInside : (Mutable.Value.ref address).edge.Within logical.length :=
+    (List.getElem?_eq_some_iff.mp found).1
+  obtain ⟨other, _, retained, length, _⟩ := layout.writeField (.ref address) "link" shared
+    addressInside sharedInside _ _ (Mutable.writeField_result found (by simp))
+  have itemsInside : ∀ value ∈ [Mutable.Value.ref address, shared], value.edge.Within
+      (logical.set address (.instance classInfo.1 "Mutating" (Mutable.putField fields "link" shared))).length := by
+    simpa [length] using And.intro addressInside sharedInside
+  have allocation := step_list_relocates Probe.module _ other rename retained 0 other.length
+    [.ref address, shared] [] [("shared", shared)] itemsInside (by simp)
+    (by simpa [GlobalsWithin, length] using sharedInside)
+  refine ⟨other, ?_, ?_⟩
+  · simpa only [List.map_cons, List.map_nil, relocateValue] using allocation.2.2.1
+  · simpa [relocateState, relocateWork, relocateRuntimeOperation, relocateOperation, relocateGlobals,
+      relocateValue, extendMap_new] using allocation.2.1
+
+/-- Frozen-field failure retains the caller's heap and globals, even within a generator. -/
+theorem frozen_error (heap : Mutable.Heap) (address anchors : Nat) (origin className : String)
+    (declared : List String) (fields : List (String × Mutable.Value)) (value : Mutable.Value)
+    (rest : List Stmt) (env : HeapCalls.Env) (stack : List Frame) (globals : Mutable.Globals)
+    (found : heap[address]? = some (.dataInstance origin className true declared fields)) :
+    HeapCalls.step Probe.module anchors
+      ⟨.value value, .writeAttribute (.ref address) "link" rest env :: .generatorEnd :: stack, heap⟩ globals =
+      .done (.ok ⟨.error {typeName := "FrozenInstanceError", args := []}, globals, heap, anchors⟩) := by
+  have failed := Mutable.writeField_frozen (value := value) found (name := "link") (by simp)
+  simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, failed, HeapCalls.done, protectGenerator,
+    Frame.inGenerator, Calls.generatorException]
+
+end MachineMutationExamples
+'''
+AUDITS = [
+    "MachineMutationExamples.source_method", "MachineMutationExamples.method_returns",
+    "MachineMutationExamples.write_then_resume", "MachineMutationExamples.write_then_allocate",
+    "MachineMutationExamples.frozen_error", "protectGenerator_within", "result_within",
+    "step_setField_relocates", "step_writeAttribute_relocates", "step_assignAttribute_relocates",
+    "step_discard_relocates", "StateWithin.assignAttribute", "StateWithin.discard",
+    "step_setItem_list_relocates", "step_append_list_relocates",
+]
+
+with project_temporary_directory(prefix="machine-mutation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    shared = []
+    shared.append(shared)
+    namespace = {"shared": shared}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    receiver = namespace["Mutating"]()
+    result = next(receiver)
+    assert receiver.link is shared and result[0] is receiver and result[1] is shared
+    namespace["shared"] = receiver
+    again = next(receiver)
+    assert receiver.link is receiver and again[0] is receiver and again[1] is receiver
+    assert result is not again and result[1] is shared
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineMutation\nimport lang.py.FormalSW.ClassCalls\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine mutation: shared writes, resumed blocks, later allocation, frozen errors; {len(AUDITS)} axiom audits passed")
