@@ -109,6 +109,7 @@ roots = [
   "lang.py.FormalSW.SequenceMembershipRelocation",
   "lang.py.FormalSW.MembershipDispatchRelocation",
   "lang.py.FormalSW.HeapRelocation",
+  "lang.py.FormalSW.MachineRelocation",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",

@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""
+Check suspended cursors, resumed membership, and generator exception boundaries.
+"""
+from pathlib import Path
+import re
+import subprocess
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+PROOF = r'''
+import lang.py.FormalSW.MachineRelocation
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineRelocationExamples
+set_option Elab.async false
+
+/-- Both machines resume the saved body and bind the same Boolean after membership.
+The body and continuation stack may contain arbitrarily nested private loop cursors. -/
+theorem resume_membership (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (logicalAnchors physicalAnchors : Nat)
+    (needle container : Mutable.Value) (negated answer : Bool) (name : String) (body : List Stmt)
+    (env : HeapCalls.Env) (stack : List Frame) (globals : Mutable.Globals)
+    (needleInside : needle.edge.Within logical.length) (containerInside : container.edge.Within logical.length)
+    (executed : HeapCalls.membership needle container negated logical = some (.ok (.scalar (.bool answer)), logical)) :
+    HeapCalls.Reaches (globals := globals) module logicalAnchors
+        ⟨.operation (.membership negated) [needle, container], .assign name body env :: stack, logical⟩
+        ⟨.block body (setLocal env name (.scalar (.bool answer))), stack, logical⟩ ∧
+      HeapCalls.Reaches (globals := relocateGlobals rename globals) module physicalAnchors
+        (relocateState rename physical
+          ⟨.operation (.membership negated) [needle, container], .assign name body env :: stack, logical⟩)
+        (relocateState rename physical ⟨.block body (setLocal env name (.scalar (.bool answer))), stack, logical⟩) := by
+  have first : HeapCalls.step module logicalAnchors
+      ⟨.operation (.membership negated) [needle, container], .assign name body env :: stack, logical⟩ globals =
+        .next ⟨.value (.scalar (.bool answer)), .assign name body env :: stack, logical⟩ := by
+    simp [HeapCalls.step, HeapCalls.primitive, HeapCalls.result, HeapCalls.run, executed]
+  have second : HeapCalls.step module logicalAnchors
+      ⟨.value (.scalar (.bool answer)), .assign name body env :: stack, logical⟩ globals =
+        .next ⟨.block body (setLocal env name (.scalar (.bool answer))), stack, logical⟩ := rfl
+  have otherFirst := step_membership_relocates module logical physical rename layout logicalAnchors physicalAnchors
+    needle container negated (.assign name body env :: stack) globals needleInside containerInside _ _ executed
+  have otherSecond := step_assign_relocates module logical physical rename logicalAnchors physicalAnchors
+    (.scalar (.bool answer)) name body env stack globals
+  rw [first] at otherFirst
+  rw [second] at otherSecond
+  exact ⟨.next first (.next second .refl), .next otherFirst (.next otherSecond .refl)⟩
+
+/-- Generator exception translation survives arbitrary saved continuation frames. -/
+theorem failure_boundary (rename : Nat → Nat) (physical : Mutable.Heap) (anchors : Nat)
+    (stack : List Frame) (completion : Mutable.Completion) (exception : ExceptionObject)
+    (failed : completion.outcome = .error exception) :
+    protectGenerator ((Frame.generatorEnd :: stack).map (relocateFrame rename))
+        (relocateStep rename physical anchors (.done (.ok completion))) =
+      .done (.ok ⟨.error (Calls.generatorException true exception),
+        relocateGlobals rename completion.globals, physical, anchors⟩) := by
+  rw [protectGenerator_relocates]
+  simp [protectGenerator, Frame.inGenerator, failed, relocateStep, relocateCompletion, Except.map]
+
+/-- A nested resume stack is mapped recursively; cursor positions are not addresses. -/
+theorem suspended_cursor (rename : Nat → Nat) (address position collector : Nat) (env : HeapCalls.Env)
+    (body otherwise : List Stmt) (stack : List Frame) :
+    relocateFrame rename (.extremumResume
+      (.nextStart true (.loopResume (.sequenceStepLoop "item" (.ref address) position
+        (.comprehensionAppend collector (.name "item") :: body) otherwise)) env :: stack)) =
+      .extremumResume
+        (.nextStart true (.loopResume (.sequenceStepLoop "item" (.ref (rename address)) position
+          (.comprehensionAppend (rename collector) (.name "item") :: body.map (relocateStmt rename))
+          (otherwise.map (relocateStmt rename)))) (relocateEnv rename env) :: stack.map (relocateFrame rename)) := by
+  simp only [relocateFrame, List.map_cons, relocateStmt, relocateSource]
+
+/-- Cached dictionary iteration keys retain references, independently of the cursor index. -/
+theorem dictionary_cursor (rename : Nat → Nat) (address position : Nat) (keys : List SequenceSource)
+    (body otherwise : List Stmt) :
+    relocateStmt rename (.dictionaryItemsStepLoop "pair" address keys position body otherwise) =
+      .dictionaryItemsStepLoop "pair" (rename address) (keys.map (relocateSource rename)) position
+        (body.map (relocateStmt rename)) (otherwise.map (relocateStmt rename)) := by
+  simp only [relocateStmt]
+
+#print axioms resume_membership
+#print axioms failure_boundary
+#print axioms suspended_cursor
+#print axioms dictionary_cursor
+#print axioms relocateFrame_inGenerator
+#print axioms relocateStack_inGenerator
+#print axioms protectGenerator_relocates
+#print axioms result_relocates
+#print axioms argumentsState_relocates
+#print axioms step_compare_relocates
+#print axioms step_membership_relocates
+#print axioms step_assign_relocates
+#print axioms step_arguments_relocates
+#print axioms step_constant_relocates
+#print axioms step_lookup_relocates
+#print axioms step_membership_expression_relocates
+#print axioms step_compare_left_relocates
+#print axioms step_chain_compare_relocates
+end MachineRelocationExamples
+'''
+
+with project_temporary_directory(prefix="machine-relocation-") as temporary:
+    proof = Path(temporary) / "Checks.lean"
+    proof.write_text(PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 18, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("machine relocation: resumed membership, nested cursors, generator boundaries; 18 axiom audits passed")
