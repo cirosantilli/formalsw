@@ -202,7 +202,7 @@ AUDITS = ["MachinePositionalExamples." + name for name in (
     "allocateTuple_preserves_lookup", "step_for_permutations_relocates", "step_permutation_start_relocates",
     "StateWithin.for_permutations", "StateWithin.permutation_start", "step_for_combinations_relocates",
     "step_combination_start_relocates", "StateWithin.for_combinations", "StateWithin.combination_start",
-    "row_values_relocate", "step_positional_loop_relocates",
+    "row_values_relocate", "step_positional_loop_relocates", "step_positional_loop_preserves",
 )]
 
 with project_temporary_directory(prefix="machine-positional-") as temporary:
@@ -229,7 +229,7 @@ with project_temporary_directory(prefix="machine-positional-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachinePositional\n"
+    proof.write_text("import lang.py.FormalSW.MachineCursorInvariant\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

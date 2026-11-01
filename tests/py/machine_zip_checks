@@ -136,7 +136,7 @@ AUDITS = ["MachineZipExamples." + name for name in (
     "zipSources_relocates", "zipFields_relocates", "zipItem_relocates", "zipSources_captured",
     "zipFields_values_within", "zipItem_values_within", "comprehensionTargetBody_relocates",
     "comprehensionTargetBody_within", "step_for_zip_relocates", "step_zip_start_relocates",
-    "StateWithin.for_zip", "StateWithin.zip_start", "step_zip_loop_relocates",
+    "StateWithin.for_zip", "StateWithin.zip_start", "step_zip_loop_relocates", "step_zip_loop_preserves",
 )]
 
 with project_temporary_directory(prefix="machine-zip-") as temporary:
@@ -160,7 +160,7 @@ with project_temporary_directory(prefix="machine-zip-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineZip\n"
+    proof.write_text("import lang.py.FormalSW.MachineCursorInvariant\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

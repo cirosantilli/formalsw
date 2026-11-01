@@ -183,7 +183,7 @@ AUDITS = ["MachineDictionaryExamples." + name for name in (
     "dictionaryItemsNext_relocates", "dictionaryItemsNext_values_within",
     "dictionaryItemsStart_relocates", "dictionaryValuesStart_relocates",
     "step_dictionary_items_start_relocates", "step_dictionary_values_start_relocates",
-    "step_dictionary_items_loop_relocates", "step_for_dictionary_items_relocates", "step_for_dictionary_values_relocates",
+    "step_dictionary_items_loop_relocates", "step_dictionary_items_loop_preserves", "step_for_dictionary_items_relocates", "step_for_dictionary_values_relocates",
     "StateWithin.for_dictionary_items", "StateWithin.for_dictionary_values", "dictionary_start_within",
     "StateWithin.dictionary_items_start", "StateWithin.dictionary_values_start",
 )]
@@ -219,7 +219,7 @@ with project_temporary_directory(prefix="machine-dictionary-iteration-") as temp
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineDictionaryIteration\n"
+    proof.write_text("import lang.py.FormalSW.MachineCursorInvariant\n"
                      "import lang.py.FormalSW.KeyDictionaryCalls\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
