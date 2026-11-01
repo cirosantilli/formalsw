@@ -10,7 +10,6 @@ theorem result_membership_preserves (logical physical : Mutable.Heap) (rename : 
     (logicalAnchors physicalAnchors : Nat) (needle container : Value) (negated : Bool)
     (stack : List Frame) (globals : Mutable.Globals) (layout : ExecutionLayout logical physical rename)
     (needleInside : needle.edge.Within logical.length) (containerInside : container.edge.Within logical.length)
-    (nonrecursive : NonrecursiveMembership logical needle container)
     (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
     (globalsInside : GlobalsWithin logical.length globals) :
     Preserves logical physical rename physicalAnchors
@@ -27,24 +26,23 @@ theorem result_membership_preserves (logical physical : Mutable.Heap) (rename : 
     rw [success] at executed
     obtain ⟨answer, rfl⟩ := membership_value logical after needle container negated returned executed
     trivial
-  · exact layout.runtime.membership_nonrecursive layout.closed needle container negated needleInside containerInside nonrecursive
+  · exact layout.runtime.membership_complete layout.closed needle container negated needleInside containerInside
 
 theorem step_membership_preserves (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (logicalAnchors physicalAnchors : Nat) (needle container : Value) (negated : Bool)
     (stack : List Frame) (globals : Mutable.Globals) (layout : ExecutionLayout logical physical rename)
     (inside : StateWithin ⟨.operation (.membership negated) [needle, container], stack, logical⟩)
-    (globalsInside : GlobalsWithin logical.length globals)
-    (nonrecursive : NonrecursiveMembership logical needle container) :
+    (globalsInside : GlobalsWithin logical.length globals) :
     Preserves logical physical rename physicalAnchors
       (step module logicalAnchors ⟨.operation (.membership negated) [needle, container], stack, logical⟩ globals)
       (step module physicalAnchors
         (relocateState rename physical ⟨.operation (.membership negated) [needle, container], stack, logical⟩)
         (relocateGlobals rename globals)) := by
   exact (result_membership_preserves logical physical rename logicalAnchors physicalAnchors needle container negated
-    stack globals layout (inside.1.2 needle (by simp)) (inside.1.2 container (by simp)) nonrecursive inside.2 globalsInside
+    stack globals layout (inside.1.2 needle (by simp)) (inside.1.2 container (by simp)) inside.2 globalsInside
     ).protectGenerator stack inside.2
 
-/-- Scalar needles cannot invoke nested sequence equality, regardless of the container's contents. -/
+/-- Scalar membership is a specialization of the unrestricted rule. -/
 theorem step_membership_scalar_preserves (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (logicalAnchors physicalAnchors : Nat) (needle : Constant) (container : Value) (negated : Bool)
     (stack : List Frame) (globals : Mutable.Globals) (layout : ExecutionLayout logical physical rename)
@@ -56,7 +54,7 @@ theorem step_membership_scalar_preserves (module : Module) (logical physical : M
         (relocateState rename physical ⟨.operation (.membership negated) [.scalar needle, container], stack, logical⟩)
         (relocateGlobals rename globals)) :=
   step_membership_preserves module logical physical rename logicalAnchors physicalAnchors (.scalar needle) container
-    negated stack globals layout inside globalsInside (NonrecursiveMembership.scalar logical needle container)
+    negated stack globals layout inside globalsInside
 
 theorem step_membership_expression_preserves (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (logicalAnchors physicalAnchors : Nat) (needle container : Expr) (negated : Bool) (env : Env)

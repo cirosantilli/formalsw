@@ -61,53 +61,46 @@ theorem identity_first_equiv (heap : Mutable.Heap) (value tail : Mutable.Value) 
 
 /-- Membership receives the allocation's actual output invariant under arbitrary saved consumers. -/
 theorem allocation_then_membership (logical physical : Mutable.Heap) (rename : Nat → Nat)
-    (layout : ExecutionLayout logical physical rename) (value tail : Mutable.Value) (negated : Bool)
+    (layout : ExecutionLayout logical physical rename) (needle : Mutable.Value) (items : List Mutable.Value) (negated : Bool)
     (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
-    (valueInside : value.edge.Within logical.length) (tailInside : tail.edge.Within logical.length)
+    (needleInside : needle.edge.Within logical.length)
+    (itemsInside : ∀ item ∈ items, item.edge.Within logical.length)
     (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
     ∃ other nextMap,
       (∀ old < logical.length, nextMap old = rename old) ∧
-      ExecutionLayout (logical ++ [.list [value, tail]]) other nextMap ∧
+      ExecutionLayout (logical ++ [.list items]) other nextMap ∧
       HeapCalls.step Probe.module physical.length
-        (relocateState rename physical ⟨.operation .list [value, tail], [], logical⟩) =
-        .next (relocateState nextMap other ⟨.value (.ref logical.length), [], logical ++ [.list [value, tail]]⟩) ∧
-      IteratorCalls.Relocation.Preserves (logical ++ [.list [value, tail]]) other nextMap physical.length
+        (relocateState rename physical ⟨.operation .list items, [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.ref logical.length), [], logical ++ [.list items]⟩) ∧
+      IteratorCalls.Relocation.Preserves (logical ++ [.list items]) other nextMap physical.length
         (IteratorCalls.step Probe.module logical.length choices
-          (.running ⟨⟨.operation (.membership negated) [value, .ref logical.length], [], logical ++ [.list [value, tail]]⟩, used⟩ resumes))
+          (.running ⟨⟨.operation (.membership negated) [needle, .ref logical.length], [], logical ++ [.list items]⟩, used⟩ resumes))
         (IteratorCalls.step Probe.module physical.length choices
           (IteratorCalls.Relocation.relocateState nextMap other physical.length
-            (.running ⟨⟨.operation (.membership negated) [value, .ref logical.length], [], logical ++ [.list [value, tail]]⟩, used⟩ resumes))) := by
+            (.running ⟨⟨.operation (.membership negated) [needle, .ref logical.length], [], logical ++ [.list items]⟩, used⟩ resumes))) := by
   have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
-  have inside : StateWithin ⟨.operation .list [value, tail], [], logical⟩ := by
-    refine ⟨⟨by trivial, ?_⟩, by simp⟩
-    intro selected member
-    rcases List.mem_cons.mp member with rfl | member
-    · exact valueInside
-    · have same : selected = tail := by simpa using member
-      subst selected
-      exact tailInside
+  have inside : StateWithin ⟨.operation .list items, [], logical⟩ :=
+    ⟨⟨by trivial, itemsInside⟩, by simp⟩
   have preserved := step_list_preserves Probe.module logical physical rename logical.length physical.length
-    [value, tail] [] [] layout inside globalsInside
-  have actual : HeapCalls.step Probe.module logical.length ⟨.operation .list [value, tail], [], logical⟩ =
-      .next ⟨.value (.ref logical.length), [], logical ++ [.list [value, tail]]⟩ := by
+    items [] [] layout inside globalsInside
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation .list items, [], logical⟩ =
+      .next ⟨.value (.ref logical.length), [], logical ++ [.list items]⟩ := by
     simp [HeapCalls.step, primitive, result, HeapCalls.run, Mutable.allocate, Except.map]
   rw [actual] at preserved
   obtain ⟨other, nextMap, agree, larger, _, retained, nextInside, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
   have membershipInside : StateWithin
-      ⟨.operation (.membership negated) [value, .ref logical.length], [], logical ++ [.list [value, tail]]⟩ := by
+      ⟨.operation (.membership negated) [needle, .ref logical.length], [], logical ++ [.list items]⟩ := by
     refine ⟨⟨by trivial, ?_⟩, by simp⟩
     intro selected member
     rcases List.mem_cons.mp member with rfl | member
-    · exact valueWithin_mono logical.length _ _ larger valueInside
+    · exact valueWithin_mono logical.length _ _ larger needleInside
     · have same : selected = .ref logical.length := by simpa using member
       subst selected
       exact nextInside.1
-  have nonrecursive : NonrecursiveMembership (logical ++ [.list [value, tail]]) value (.ref logical.length) := by
-    simp [NonrecursiveMembership, NonrecursiveSearch]
-  have raw := step_membership_preserves Probe.module (logical ++ [.list [value, tail]]) other nextMap
-    logical.length physical.length value (.ref logical.length) negated [] [] retained membershipInside nextGlobals nonrecursive
+  have raw := step_membership_preserves Probe.module (logical ++ [.list items]) other nextMap
+    logical.length physical.length needle (.ref logical.length) negated [] [] retained membershipInside nextGlobals
   have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
-    ⟨⟨.operation (.membership negated) [value, .ref logical.length], [], logical ++ [.list [value, tail]]⟩, used⟩ other nextMap
+    ⟨⟨.operation (.membership negated) [needle, .ref logical.length], [], logical ++ [.list items]⟩, used⟩ other nextMap
     logical.length physical.length [] retained membershipInside nextGlobals raw
   refine ⟨other, nextMap, agree, retained, paired, ?_⟩
   exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
@@ -128,6 +121,40 @@ theorem late_identity_error (heap : Mutable.Heap) (container left right : Nat) (
     simp [different, dataEqualityAnswer, declaredValues, comparisonEval, bind, Except.bind, Except.map]
   simp [HeapCalls.membership, HeapCalls.sequenceContains, found, different, failed, Mutable.eval_bind, Except.map]
 
+/-- A later identity match cannot skip an unresolved cyclic comparison, in either layout. -/
+theorem late_identity_unsupported (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (container left right : Nat)
+    (xs ys tail : List Mutable.Value) (different : left ≠ right) (lengths : xs.length = ys.length)
+    (found : logical[container]? = some (.list (.ref left :: .ref right :: tail)))
+    (first : logical[left]? = some (.list (.ref left :: xs)))
+    (second : logical[right]? = some (.list (.ref right :: ys)))
+    (negated : Bool) (stack : List Frame) (globals : Mutable.Globals) :
+    HeapCalls.step Probe.module logical.length
+        ⟨.operation (.membership negated) [.ref right, .ref container], stack, logical⟩ globals = .unsupported ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical
+          ⟨.operation (.membership negated) [.ref right, .ref container], stack, logical⟩)
+        (relocateGlobals rename globals) = .unsupported := by
+  have recursive (fuel : Nat) (equality : Bool) :
+      HeapSort.compare fuel logical equality (.ref left) (.ref right) = none := by
+    induction fuel generalizing equality with
+    | zero => rfl
+    | succ fuel ih =>
+      cases equality <;> simp [HeapSort.compare, first, second, different, lengths, HeapSort.lex, ih]
+  have compared : HeapCalls.compare .eq (.ref left) (.ref right) logical = none := by
+    have dispatch := compare_equal_sequences logical false false left right _ _ first second
+    simp only [Bool.false_eq_true, ↓reduceIte] at dispatch
+    rw [dispatch]
+    simp [different, HeapCalls.equalLists, HeapCalls.equalElements, lengths, recursive]
+  have searched : HeapCalls.membership (.ref right) (.ref container) negated logical = none := by
+    simp [HeapCalls.membership, HeapCalls.sequenceContains, found, different, compared, Mutable.eval_bind]
+  have moved := layout.runtime.membership_complete layout.closed (.ref right) (.ref container) negated
+    (List.getElem?_eq_some_iff.mp second).1 (List.getElem?_eq_some_iff.mp found).1
+  rw [searched] at moved
+  constructor <;>
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, searched,
+      relocateState, relocateWork, relocateOperation, relocateRuntimeOperation, moved]
+
 /-- Integer range validation precedes inspecting even an empty byte container. -/
 theorem bytes_invalid_integer (heap : Mutable.Heap) (bytes : List UInt8) (needle : Int) (negated : Bool)
     (invalid : needle < 0 ∨ 255 < needle) :
@@ -138,12 +165,9 @@ theorem bytes_invalid_integer (heap : Mutable.Heap) (bytes : List UInt8) (needle
 end MachineMembershipExamples
 '''
 AUDITS = [
-    "NonrecursiveSearch.of_comparisons",
-    "NonrecursiveSearch.scalar",
-    "NonrecursiveMembership.scalar",
-    "RuntimeLayout.sequenceContains_nonrecursive",
-    "RuntimeLayout.membership_sequences_nonrecursive",
-    "RuntimeLayout.membership_nonrecursive",
+    "RuntimeLayout.sequenceContains_complete",
+    "RuntimeLayout.membership_sequences_complete",
+    "RuntimeLayout.membership_complete",
     "result_membership_preserves",
     "step_membership_preserves",
     "step_membership_scalar_preserves",
@@ -153,6 +177,7 @@ AUDITS = [
     "MachineMembershipExamples.identity_first_equiv",
     "MachineMembershipExamples.allocation_then_membership",
     "MachineMembershipExamples.late_identity_error",
+    "MachineMembershipExamples.late_identity_unsupported",
     "MachineMembershipExamples.bytes_invalid_integer",
 ]
 
@@ -208,4 +233,4 @@ with project_temporary_directory(prefix="machine-membership-") as temporary:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print(f"machine membership: short-circuiting, private allocation, errors and saved consumers; {len(AUDITS)} axiom audits passed")
+print(f"machine membership: arbitrary searches, cyclic early stops, allocation and saved consumers; {len(AUDITS)} axiom audits passed")
