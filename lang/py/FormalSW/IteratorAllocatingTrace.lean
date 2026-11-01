@@ -71,6 +71,20 @@ inductive AllocatingTrace (module : Module) (anchors : Nat) (choices : ChoiceSch
         (heap ++ [.instance origin name []])
         (.running ⟨⟨.block (executableBody body) (functionEnv args body completed globals),
           .initialized heap.length :: stack, heap ++ [.instance origin name []]⟩, used⟩ resumes)
+  | dataInstance (heap : Mutable.Heap) (name origin : String) (classBody : List Stmt)
+      (frozen : Bool) (fields : List Arg) (values : List Mutable.Value)
+      (stack : List Frame) (used : Nat) (resumes : List Resume)
+      (noFunction : findFunctionIn module.body name = none)
+      (noLibrary : libraryFunction module name = none)
+      (defined : module.findClass name = some (origin, classBody))
+      (noInitializer : findFunctionIn classBody "__init__" = none)
+      (metadata : dataclassFields classBody = some (frozen, fields))
+      (arity : fields.length = values.length) :
+      AllocatingTrace module anchors choices globals heap
+        (.running ⟨⟨.operation (.call name) values, stack, heap⟩, used⟩ resumes)
+        (heap ++ [.dataInstance origin name frozen (fields.map Arg.name) ((fields.map Arg.name).zip values)])
+        (.running ⟨⟨.value (.ref heap.length), stack,
+          heap ++ [.dataInstance origin name frozen (fields.map Arg.name) ((fields.map Arg.name).zip values)]⟩, used⟩ resumes)
   | trans {before middle after first next final}
       (left : AllocatingTrace module anchors choices globals before first middle next)
       (right : AllocatingTrace module anchors choices globals middle next after final) :
@@ -82,7 +96,7 @@ theorem AllocatingTrace.heaps {module : Module} {anchors : Nat} {choices : Choic
     HeapAt before first ∧ HeapAt after final := by
   induction trace with
   | stable firstHeap finalHeap => exact ⟨firstHeap, finalHeap⟩
-  | list | tuple | newInstance | initializedInstance => exact ⟨rfl, rfl⟩
+  | list | tuple | newInstance | initializedInstance | dataInstance => exact ⟨rfl, rfl⟩
   | trans _ _ left right => exact ⟨left.1, right.2⟩
 
 theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : ChoiceSchedule}
@@ -103,6 +117,11 @@ theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : Cho
     apply Reaches.next (core_next rfl ?_) .refl
     simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, noFunction, noLibrary,
       construct, defined, initializer, invokeMethod, arguments]
+  | dataInstance heap name origin classBody frozen fields values stack used resumes noFunction noLibrary defined noInitializer metadata arity =>
+    apply Reaches.next (core_next rfl ?_) .refl
+    simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, noFunction, noLibrary,
+      construct, defined, noInitializer, metadata, result, run, Mutable.allocateDataclass_result,
+      show (fields.map Arg.name).length = values.length by simpa using arity]
   | trans _ _ left right => exact left.trans right
 
 end FormalSW.PyAst.IteratorCalls

@@ -156,6 +156,41 @@ theorem AllocatingTrace.isolated {module : Module} {logicalAnchors : Nat} {choic
         relocateOperation, HeapCalls.step, noFunction, noLibrary, construct, defined, initializer]
       rw [invoked]
       rfl
+  | dataInstance heap name origin classBody frozen fields values stack used resumes noFunction noLibrary defined noInitializer metadata arity =>
+    let declared := fields.map Arg.name
+    let fresh := Mutable.Object.dataInstance origin name frozen declared (declared.zip values)
+    let nextMap := extendMap rename heap.length physical.length
+    let other := physical ++ [relocateObject rename fresh]
+    have agree : ∀ index < heap.length, nextMap index = rename index := extendMap_old _ _ _
+    have bounded : ObjectWithin heap.length fresh := by
+      intro value member
+      obtain ⟨pair, paired, equal⟩ := List.mem_map.mp member
+      rw [← equal]
+      exact inside.1.2 pair.2 (List.of_mem_zip paired).2
+    have mapped : (declared.zip values).map (fun pair => (pair.1, relocateValue rename pair.2)) =
+        declared.zip (values.map (relocateValue rename)) := by
+      clear bounded arity inside
+      induction declared generalizing values with
+      | nil => rfl
+      | cons field fields ih => cases values <;> simp [ih]
+    have retained := layout.append_existing fresh (by simp [fresh]) bounded
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree inside.2.1
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    refine ⟨other, nextMap, ⟨retained, by simp, by simp [other], agree⟩, ?_, ?_, ?_⟩
+    · exact ⟨by simp [WorkWithin, Mutable.Value.edge, Graph.Edge.Within],
+        fun frame member => (inside.2.1 frame member).mono (by simp),
+        fun pending member => (inside.2.2 pending member).mono (by simp)⟩
+    · intro address object _ saved
+      exact saved.append_existing fresh (by simp [fresh]) bounded
+    · apply Reaches.next ?_ .refl
+      simp only [Relocation.relocateState, Relocation.relocateCore, HeapCalls.Relocation.relocateState,
+        relocateWork, relocateRuntimeOperation, relocateOperation, relocateValue, nextMap, extendMap_new,
+        stackSame, resumesSame]
+      apply core_next rfl
+      simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, noFunction, noLibrary,
+        construct, defined, noInitializer, metadata, result, run, Mutable.allocateDataclass_result,
+        show (fields.map Arg.name).length = (values.map (relocateValue rename)).length by simpa using arity,
+        other, fresh, relocateObject, mapped, declared]
   | @trans before middle after first next final left right leftIH rightIH =>
     obtain ⟨middlePhysical, middleMap, middleLayout, middleInside, firstKept, firstRan⟩ :=
       leftIH physical rename layout inside globalsInside

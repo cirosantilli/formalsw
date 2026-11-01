@@ -8,7 +8,7 @@ from lang.py.imports import bindings
 from lang.py.global_inputs import annotation_kind, RecordInput
 
 
-def dataclass_fields(module, cls, reject):
+def dataclass_fields(module, cls, reject, *, allow_iterator_methods=False):
     """Resolve the standard decorator and its required positional data fields."""
     if not cls.decorator_list:
         return None
@@ -64,8 +64,9 @@ def dataclass_fields(module, cls, reject):
             names.add(name)
             fields.append(node)
         elif isinstance(node, ast.FunctionDef):
-            if node.name.startswith('__') or node.name in names:
-                return fail('dataclasses do not support custom special methods or field/method collisions', node)
+            iterator_method = allow_iterator_methods and node.name in ('__iter__', '__next__')
+            if (node.name.startswith('__') and not iterator_method) or node.name in names:
+                return fail('dataclasses do not support these special methods or field/method collisions', node)
             names.add(node.name)
         elif not (isinstance(node, ast.Pass) or isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Constant) and type(node.value.value) is str):

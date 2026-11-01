@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""
+Check dataclass iterator factories, retained aliases and private consumer objects.
+"""
+from pathlib import Path
+import ast
+import json
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+from dataclasses import dataclass
+
+@dataclass
+class Cursor:
+    source: object
+    value: object
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.value
+
+@dataclass(frozen=True)
+class FrozenCursor:
+    source: object
+    value: object
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.value
+
+class Source:
+    def __iter__(self):
+        return Cursor(self, self.value)
+
+class FrozenSource:
+    def __iter__(self):
+        return FrozenCursor(self, self.value)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace DataclassIteratorExamples
+set_option Elab.async false
+
+def className (frozen : Bool) := if frozen then "FrozenCursor" else "Cursor"
+def classInfo (frozen : Bool) := (Probe.module.findClass (className frozen)).getD ("", [])
+def fieldArgs (frozen : Bool) := ((dataclassFields (classInfo frozen).2).getD (false, [])).2
+def sourceName (frozen : Bool) := if frozen then "FrozenSource" else "Source"
+def sourceClass (frozen : Bool) := (Probe.module.findClass (sourceName frozen)).getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def valueExpr : Expr := .attribute (.name "self") "value"
+def nextBody : List Stmt := [.return valueExpr]
+def cursorIter : List Stmt := [.return (.name "self")]
+def iterBody (frozen : Bool) : List Stmt := [.return (.call (.name (className frozen)) [.name "self", valueExpr])]
+def cursor (frozen : Bool) (receiver value : Mutable.Value) : Mutable.Object :=
+  .dataInstance (classInfo frozen).1 (className frozen) frozen ["source", "value"] [("source", receiver), ("value", value)]
+def created (frozen : Bool) (heap : Mutable.Heap) (address : Nat) (value : Mutable.Value) :=
+  heap ++ [cursor frozen (.ref address) value]
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class (frozen : Bool) : Probe.module.findClass (className frozen) = some (classInfo frozen) := by
+  cases frozen <;> rfl
+theorem source_next (frozen : Bool) : findFunctionIn (classInfo frozen).2 "__next__" = some (args, nextBody) := by
+  cases frozen <;> rfl
+theorem source_iter (frozen : Bool) : findFunctionIn (sourceClass frozen).2 "__iter__" = some (args, iterBody frozen) := by
+  cases frozen <;> rfl
+theorem cursor_iter (frozen : Bool) : findFunctionIn (classInfo frozen).2 "__iter__" = some (args, cursorIter) := by
+  cases frozen <;> rfl
+
+theorem constructor_trace (frozen : Bool) (choices : ChoiceSchedule) (used anchors : Nat)
+    (heap : Mutable.Heap) (receiver value : Mutable.Value) (stack : List Frame) (resumes : List Resume) :
+    AllocatingTrace Probe.module anchors choices [] heap
+      (.running ⟨⟨.operation (.call (className frozen)) [receiver, value], stack, heap⟩, used⟩ resumes)
+      (heap ++ [cursor frozen receiver value])
+      (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [cursor frozen receiver value]⟩, used⟩ resumes) := by
+  have trace := AllocatingTrace.dataInstance (module := Probe.module) (anchors := anchors) (choices := choices) (globals := [])
+    heap (className frozen) (classInfo frozen).1 (classInfo frozen).2 frozen (fieldArgs frozen) [receiver, value] stack used resumes
+    (by cases frozen <;> rfl) (by cases frozen <;> rfl) (source_class frozen)
+    (by cases frozen <;> rfl) (by cases frozen <;> rfl) (by cases frozen <;> rfl)
+  cases frozen <;> exact trace
+
+theorem next_bound (frozen : Bool) (heap : Mutable.Heap) (address : Nat) (receiver value : Mutable.Value)
+    (found : heap[address]? = some (cursor frozen receiver value)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args nextBody)), heap) := by
+  have lookup := ProtocolCalls.lookup_data_instance Probe.module heap address (classInfo frozen).1 (className frozen)
+    "__next__" frozen ["source", "value"] [("source", receiver), ("value", value)] (classInfo frozen).2 found (source_class frozen)
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found, cursor] using lookup
+
+theorem self_acquisition (frozen : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (receiver value : Mutable.Value)
+    (found : heap[address]? = some (cursor frozen receiver value)) :
+    AllocatingAcquireRun Probe.module choices (.ref address) heap used (.ref address) heap used := by
+  have lookup := ProtocolCalls.lookup_data_instance Probe.module heap address (classInfo frozen).1 (className frozen)
+    "__iter__" frozen ["source", "value"] [("source", receiver), ("value", value)] (classInfo frozen).2 found (source_class frozen)
+  simp only [cursor_iter, Option.map_some] at lookup
+  let env := functionEnv args cursorIter [.ref address] []
+  have returned : BlockReturns Probe.module env cursorIter heap (.ref address) heap :=
+    BlockReturns.return_value (Evaluates.lookup rfl)
+  refine ⟨.method (.ref address) args cursorIter, .method (.ref address) args nextBody,
+    (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found, cursor], ?_,
+    .stable rfl rfl rfl ?_, next_bound frozen heap address receiver value found⟩
+  · simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+  · exact .next (core_next rfl rfl)
+      ((IteratorCalls.Reaches.of_heap (returned heap.length []) []).trans (.next (core_done rfl rfl) .refl))
+
+theorem factory_trace (frozen : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (value : Mutable.Value) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (sourceClass frozen).1 (sourceName frozen) fields))
+    (field : fields.lookup "value" = some value) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.method (.ref address) args (iterBody frozen)) [], [], heap⟩, used⟩ [])
+      (created frozen heap address value)
+      (.completed (.ok ⟨.ok (.ref heap.length), [], created frozen heap address value, heap.length⟩) used []) := by
+  let env := functionEnv args (iterBody frozen) [.ref address] []
+  have read : Evaluates Probe.module env valueExpr heap value heap := by
+    apply Evaluates.field (Evaluates.lookup rfl)
+    have defined : Probe.module.findClass (sourceName frozen) = some (sourceClass frozen) := by cases frozen <;> rfl
+    simp [getAttribute, Mutable.eval_bind, found, instanceClass, defined, field]
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.method (.ref address) args (iterBody frozen)) [], [], heap⟩
+      ⟨.operation (.call (className frozen)) [.ref address, value], [], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl
+      (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) (.cons read .nil)) (.call (className frozen)) [] heap.length [])))
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.call (className frozen)) [.ref address, value], [], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · exact (constructor_trace frozen choices used heap.length heap (.ref address) value [] []).trans
+      (.stable rfl rfl rfl (.next (core_done rfl rfl) .refl))
+
+theorem acquisition (frozen : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (value : Mutable.Value) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (sourceClass frozen).1 (sourceName frozen) fields))
+    (field : fields.lookup "value" = some value) :
+    AllocatingAcquireRun Probe.module choices (.ref address) heap used (.ref heap.length)
+      (created frozen heap address value) used := by
+  have defined : Probe.module.findClass (sourceName frozen) = some (sourceClass frozen) := by cases frozen <;> rfl
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address (sourceClass frozen).1 (sourceName frozen)
+    "__iter__" fields (sourceClass frozen).2 found defined
+  simp only [source_iter, Option.map_some] at lookup
+  refine ⟨.method (.ref address) args (iterBody frozen), .method (.ref heap.length) args nextBody,
+    (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], ?_,
+    factory_trace frozen choices used heap address value fields found field,
+    next_bound frozen (created frozen heap address value) heap.length (.ref address) value (by simp [created])⟩
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+
+theorem next_run (frozen : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (receiver value : Mutable.Value)
+    (found : heap[address]? = some (cursor frozen receiver value)) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (.ok value) heap used := by
+  let env := functionEnv args nextBody [.ref address] []
+  have read : Evaluates Probe.module env valueExpr heap value heap := by
+    apply Evaluates.field (Evaluates.lookup rfl)
+    simp [getAttribute, Mutable.eval_bind, found, cursor, instanceClass, source_class, List.lookup]
+  have returned : BlockReturns Probe.module env nextBody heap value heap := BlockReturns.return_value read
+  refine ⟨.method (.ref address) args nextBody, (List.getElem?_eq_some_iff.mp found).1,
+    by simp [isInstance, found, cursor], next_bound frozen heap address receiver value found,
+    .stable rfl rfl rfl ?_⟩
+  exact .next (core_next rfl rfl)
+    ((IteratorCalls.Reaches.of_heap (returned heap.length []) []).trans (.next (core_done rfl rfl) .refl))
+
+/-- The factory's two fields retain aliases for every finite number of subsequent yields. -/
+theorem factory_prefix (frozen : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (value : Mutable.Value) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (sourceClass frozen).1 (sourceName frozen) fields))
+    (field : fields.lookup "value" = some value) (n : Nat) :
+    AllocatingAcquireRun Probe.module choices (.ref address) heap used (.ref heap.length)
+      (created frozen heap address value) used ∧
+    AllocatingYieldPrefix Probe.module choices (.ref heap.length) id (created frozen heap address value) used
+      (List.replicate n value) (created frozen heap address value) used := by
+  refine ⟨acquisition frozen choices used heap address value fields found field, ?_⟩
+  induction n with
+  | zero => exact .nil
+  | succ n ih =>
+      exact .cons
+        (next_run frozen choices used (created frozen heap address value) heap.length (.ref address) value (by simp [created])) ih
+
+theorem isolated_acquisition (frozen : Bool) (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address privateAddress : Nat)
+    (value : Mutable.Value) (fields : List (String × Mutable.Value)) (object : Mutable.Object)
+    (nonempty : object ≠ .tuple []) (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance (sourceClass frozen).1 (sourceName frozen) fields))
+    (field : fields.lookup "value" = some value)
+    (loop : Loop) (resumes : List Resume) (inputName : String)
+    (getInput : loop.env inputName = some (.ref (rename address))) :
+    ∃ other nextMap, PrivateLayout (created frozen logical address value) other nextMap privateAddress object ∧
+      nextMap logical.length ≠ privateAddress ∧
+      other[nextMap logical.length]? = some (cursor frozen (.ref (rename address)) (relocateValue rename value)) ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (.forIn (.name loop.name) (.name inputName) loop.body loop.otherwise :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (loopCode loop (.ref (nextMap logical.length)) :: loop.following)
+          loop.env, loop.stack, other⟩, used⟩ resumes) := by
+  obtain ⟨other, nextMap, extended, kept, entered⟩ :=
+    (acquisition frozen choices used logical address value fields found field).for_name_isolated source physical rename layout.layout anchors
+  have saved := kept privateAddress object nonempty layout
+  have originalInside := (List.getElem?_eq_some_iff.mp found).1
+  have valueInside : value.edge.Within logical.length := by
+    apply layout.layout.closed _ (List.mem_of_getElem? found)
+    obtain ⟨first, last, equal, _⟩ := List.lookup_eq_some_iff.mp field
+    exact List.mem_map.mpr ⟨("value", value), by simp [equal], rfl⟩
+  have result := extended.layout.runtime.lookup logical.length (cursor frozen (.ref address) value) (by simp [created])
+  have sameValue := relocateValue_congr nextMap rename logical.length value extended.agrees valueInside
+  refine ⟨other, nextMap, saved, saved.excludes logical.length (by simp [created]), ?_, entered loop resumes inputName getInput⟩
+  simp only [cursor, relocateObject, List.map_cons, List.map_nil] at result
+  rw [sameValue] at result
+  simpa only [cursor, relocateValue, extended.agrees address originalInside] using result
+
+end DataclassIteratorExamples
+'''
+AUDITS = ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "AllocatingTrace.reaches", "AllocatingTrace.isolated",
+)] + ["DataclassIteratorExamples." + name for name in (
+    "source", "source_class", "source_next", "source_iter", "cursor_iter", "self_acquisition",
+    "constructor_trace", "next_bound", "factory_trace", "acquisition", "next_run", "factory_prefix",
+    "isolated_acquisition",
+)]
+
+# AST emission admits the iterator hooks independently of public frontend coverage.
+from lang.py.class_support import dataclass_fields
+from lang.py.support import SupportChecker
+
+for frozen in (False, True):
+    decorator = f"@dataclass(frozen={frozen})"
+    for method in ("__iter__", "__next__"):
+        snippet = f"from dataclasses import dataclass\n{decorator}\nclass Cursor:\n    value: object\n    def {method}(self): return self\n"
+        program = ast.parse(snippet)
+        emitted = json.loads(api["AstJsonEmitter"](program).emit())["ast"]["body"]
+        assert emitted[-1]["type"] == "ClassDef", emitted
+        issues = []
+        assert dataclass_fields(program, program.body[-1], lambda node, message: issues.append(message)) is None
+        assert issues
+        checked = ast.parse(snippet + "def run(n: int) -> int:\n    cursor = Cursor(n)\n    return n\n")
+        assert SupportChecker(checked).check("run", heap_calls=True)
+    for method in ("__init__", "__post_init__", "__setattr__", "__getattribute__", "__eq__", "__hash__", "value"):
+        program = ast.parse(f"from dataclasses import dataclass\n{decorator}\nclass Cursor:\n    value: object\n    def {method}(self): return self\n")
+        emitted = json.loads(api["AstJsonEmitter"](program).emit())["ast"]["body"]
+        assert emitted[-1]["type"] == "Unsupported", (method, emitted)
+
+with project_temporary_directory(prefix="iterator-dataclass-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("Source", "FrozenSource"):
+        for own_value in (False, True):
+            receiver = namespace[name]()
+            shared = []
+            shared.append(shared)
+            receiver.value = receiver if own_value else shared
+            cursor = iter(receiver)
+            assert cursor is not receiver and iter(receiver) is not cursor
+            assert iter(cursor) is cursor
+            assert cursor.source is receiver and cursor.value is receiver.value
+            for _ in range(4):
+                assert next(cursor) is receiver.value
+            if own_value:
+                assert cursor.source is cursor.value
+            else:
+                shared.append("retained")
+                assert next(cursor)[1] == "retained" and next(cursor)[0] is shared
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAllocatingAcquisition\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"dataclass iterators: mutable and frozen factories, aliasing fields, arbitrary yielding prefixes; {len(AUDITS)} axiom audits passed")
