@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+Check constructor allocation, initializer effects, defaults and named-call composition.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+from dataclasses import dataclass
+from math import factorial
+
+
+class Checked:
+    def __init__(self, items, returned=None):
+        items.append(self)
+        return returned
+
+
+class Plain:
+    pass
+
+
+@dataclass(frozen=True)
+class Pair:
+    first: object
+    second: object
+
+
+def implicit(items):
+    return Checked(items)
+
+
+def explicit(items):
+    return Checked(items, None)
+
+
+def record(items, value):
+    items.append(value)
+    return value
+
+
+def fact_after(items, value):
+    return factorial(record(items, value))
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineNamedCallExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Checked").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}, {name := "items", annotation := none},
+  {name := "returned", annotation := none, defaultValue := some .none}]
+def body : List Stmt := [.expr (.call (.attribute (.name "items") "append") [.name "self"]),
+  .return (.name "returned")]
+def allocated (heap : Mutable.Heap) := heap ++ [.instance classInfo.1 "Checked" []]
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) :=
+  (allocated heap).set address (.list (items ++ [.ref heap.length]))
+def outcome (destination : Nat) : Mutable.Value → Except ExceptionObject Mutable.Value
+  | .scalar .none => .ok (.ref destination)
+  | _ => .error ⟨"TypeError", []⟩
+
+theorem initializer_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (returned : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    BlockReturns Probe.module (functionEnv args body [.ref heap.length, .ref address, returned] [])
+      (executableBody body) (allocated heap) returned (after heap address items) := by
+  have extended : (allocated heap)[address]? = some (.list items) := by
+    rw [allocated, List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+    exact found
+  apply BlockReturns.discard
+    (Evaluates.append (Evaluates.lookup (by rfl)) extended (Evaluates.lookup (by rfl)) extended)
+  exact BlockReturns.return_value (Evaluates.lookup (by rfl))
+
+/-- The failed constructor retains the newly allocated object already exposed to its caller. -/
+theorem checked_finishes (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (returned : Mutable.Value) (found : heap[address]? = some (.list items)) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "Checked") [.ref address, returned], [], heap⟩
+      (.ok ⟨outcome heap.length returned, [], after heap address items, heap.length⟩) := by
+  refine Finishes.next (following := ⟨.block (executableBody body)
+    (functionEnv args body [.ref heap.length, .ref address, returned] []), [.initialized heap.length], allocated heap⟩) ?_ ?_
+  · rfl
+  apply (initializer_returns heap address items returned found heap.length [.initialized heap.length]).finishes
+  cases returned <;> try cases ‹Constant›
+  all_goals first
+    | exact .done rfl
+    | exact .next rfl (.done rfl)
+
+theorem checked_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (values : List Mutable.Value)
+    (completed : completeArguments args (.ref heap.length :: values) =
+      some [.ref heap.length, .ref address, .scalar .none])
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "Checked" values heap (.ref heap.length) (after heap address items) := by
+  exact ReturnsValue.constructor rfl rfl (show Probe.module.findClass "Checked" = some classInfo from rfl)
+    (show findFunctionIn classInfo.2 "__init__" = some (args, body) from rfl) completed
+    (initializer_returns heap address items (.scalar .none) found)
+
+theorem implicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "implicit" [.ref address] heap (.ref heap.length) (after heap address items) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.call (.cons (Evaluates.lookup rfl) .nil)
+    (checked_returns heap address items [.ref address] rfl found)
+
+theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "explicit" [.ref address] heap (.ref heap.length) (after heap address items) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.call (.cons (Evaluates.lookup rfl) (.cons Evaluates.constant .nil))
+    (checked_returns heap address items [.ref address, .scalar .none] rfl found)
+
+theorem returns_finishes (name : String) (values : List Mutable.Value) (heap after : Mutable.Heap)
+    (value : Mutable.Value) (choices : ChoiceSchedule)
+    (returned : ReturnsValue Probe.module name values heap value after) :
+    ((IteratorCalls.call Probe.module name values heap).run choices).Finishes ⟨.ok value, [], after, heap.length⟩ := by
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+  exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+
+theorem default_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "implicit" [.ref address] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address] heap) := by
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (returns_finishes _ _ _ _ _ leftChoices (implicit_returns heap address items found))
+    (returns_finishes _ _ _ _ _ rightChoices (explicit_returns heap address items found)) (Or.inl rfl)
+
+/-- Named calls use the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_call (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (name : String) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation (.call name) values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation (.call name) values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation (.call name) values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_named_call_preserves Probe.module choices name _ other nextMap
+    logical.length physical.length used values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineNamedCallExamples
+'''
+
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "result_allocateInstance_preserves", "result_allocateDataclass_preserves", "invoke_fresh_instance_preserves",
+    "construct_preserves", "step_constructor_preserves", "libraryScalars_relocates", "library_arguments",
+    "library_scalarResult", "result_library_preserves", "step_named_call_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_named_call_preserves"] + ["MachineNamedCallExamples." + name for name in (
+    "initializer_returns", "checked_finishes", "checked_returns", "implicit_returns", "explicit_returns",
+    "returns_finishes", "default_equiv", "append_then_call",
+)]
+with project_temporary_directory(prefix="machine-named-call-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for size in (0, 1, 17):
+        for returned in (None, False, 0, 10**100, "", b"", []):
+            items = [object() for _ in range(size)]
+            try:
+                instance = namespace["Checked"](items, returned)
+            except TypeError:
+                assert returned is not None
+            else:
+                assert returned is None and items[-1] is instance
+            assert len(items) == size + 1 and isinstance(items[-1], namespace["Checked"])
+        for name in ("implicit", "explicit"):
+            items = []
+            instance = namespace[name](items)
+            assert items == [instance]
+    for value in (0, 7, -1, [], object()):
+        items = []
+        try:
+            result = namespace["fact_after"](items, value)
+        except (TypeError, ValueError):
+            assert value not in (0, 7)
+        else:
+            assert result == (1 if value == 0 else 5040)
+        assert len(items) == 1 and items[0] is value
+    shared = []
+    pair = namespace["Pair"](shared, shared)
+    assert pair.first is pair.second is shared
+    for name, values in (("Plain", [0]), ("Pair", [shared]), ("Pair", [shared] * 3), ("Checked", [])):
+        try:
+            namespace[name](*values)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError((name, values))
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineNamedCallInvariant\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"named calls: constructors, defaults, exposed instances on errors and post-mutation dispatch; {len(AUDITS)} axiom audits passed")
