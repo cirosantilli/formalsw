@@ -29,6 +29,15 @@ def take(items):
     else:
         return items
     return value
+
+def append_and_read(items):
+    items.append(items)
+    for value in items:
+        return value
+
+def append_and_index(items):
+    items.append(items)
+    return items[0]
 '''
 PROOF = r'''
 open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
@@ -127,18 +136,132 @@ theorem paired_cursor (logical physical : Mutable.Heap) (rename : Nat → Nat)
   step_sequence_loop_relocates Probe.module logical physical rename logicalAnchors physicalAnchors
     layout "value" source position (loopBody breaking) otherwise [] env stack globals inside
 
+
+def appended (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) :=
+  heap.set address (.list (items ++ [.ref address]))
+def readBody : List Stmt := [.return (.name "value")]
+
+theorem append_source_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "append_and_read" [.ref address] heap (items.headD (.ref address))
+      (appended heap address items) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have read : Mutable.sequence (.ref address) (appended heap address items) =
+      some (.ok (items ++ [.ref address]), appended heap address items) := by
+    simp [Mutable.sequence, appended, bounded]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.for_sequence (by intro expressions equal; cases equal) (Evaluates.lookup rfl) read
+  apply BlockReturns.sequence_step (source := .ref address) read
+    (show (items ++ [Mutable.Value.ref address])[0]? = some (items.headD (.ref address)) by cases items <;> rfl)
+  exact BlockReturns.return_value (Evaluates.lookup (by simp [setLocal]))
+
+theorem append_index_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "append_and_index" [.ref address] heap (items.headD (.ref address))
+      (appended heap address items) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have read : Mutable.getItem (.ref address) (.scalar (.int 0)) (appended heap address items) =
+      some (.ok (items.headD (.ref address)), appended heap address items) := by
+    cases items <;> simp [Mutable.getItem, Mutable.index, appended, bounded, Mutable.eval_bind, Except.map]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value
+    (Evaluates.subscript (by intros; simp) (Evaluates.lookup rfl) Evaluates.constant read)
+
+/-- Replacing the first-item loop by indexing preserves the append and every alias. -/
+theorem append_loop_equiv_index (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "append_and_read" [.ref address] heap).Equiv
+      (IteratorCalls.call Probe.module "append_and_index" [.ref address] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address] heap (items.headD (.ref address))
+        (appended heap address items)) :
+      ((IteratorCalls.call Probe.module name [.ref address] heap).run choices).Finishes
+        ⟨.ok (items.headD (.ref address)), [], appended heap address items, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "append_and_read" leftChoices (append_source_returns heap address items found))
+    (finishes "append_and_index" rightChoices (append_index_returns heap address items found)) (Or.inl rfl)
+
+/-- A real append supplies the invariant for a live cursor under arbitrary saved consumers. -/
+theorem append_then_cursor (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (position used : Nat) (choices : ChoiceSchedule) (env : HeapCalls.Env) (stack : List Frame)
+    (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items))
+    (envInside : EnvWithin logical.length env)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (appended logical address items) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [.ref address], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], appended logical address items⟩) ∧
+      IteratorCalls.Relocation.Preserves (appended logical address items) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.block [.sequenceStepLoop "value" (.ref address) position readBody []] env,
+            stack, appended logical address items⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.block [.sequenceStepLoop "value" (.ref address) position readBody []] env,
+              stack, appended logical address items⟩, used⟩ resumes))) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items (.ref address) [] [] layout found bounded (by simp) (by simp [GlobalsWithin])
+  have actual := (step_append_list_relocates Probe.module logical physical rename layout logical.length physical.length
+    address items (.ref address) [] [] found bounded (by simp) (by simp [GlobalsWithin])).2.1
+  rw [actual] at preserved
+  obtain ⟨after, other, nextMap, agree, _, _, retained, heap, _, paired⟩ := preserved
+  have same : appended logical address items = after := heap
+  subst after
+  have inside : StateWithin
+      ⟨.block [.sequenceStepLoop "value" (.ref address) position readBody []] env,
+        stack, appended logical address items⟩ := by
+    refine ⟨⟨?_, ?_⟩, ?_⟩
+    · simpa [appended] using envInside
+    · simp [StmtWithin, readBody, SourceWithin, appended, bounded]
+    · simpa [appended] using stackInside
+  have globalsInside : GlobalsWithin (appended logical address items).length [] := by simp [GlobalsWithin]
+  have raw := step_sequence_loop_preserves Probe.module (appended logical address items) other nextMap
+    logical.length physical.length "value" (.ref address) position readBody [] [] env stack [] retained inside globalsInside
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.block [.sequenceStepLoop "value" (.ref address) position readBody []] env,
+      stack, appended logical address items⟩, used⟩ other nextMap logical.length physical.length []
+    retained inside globalsInside raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  apply IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨inside.1, inside.2, by simpa [appended] using saved⟩ _ wrapped
+  simp [IteratorCalls.intercept, IteratorCalls.isInstance, sequenceValue, appended, bounded]
+
 end MachineLoopExamples
 '''
 AUDITS = [
     "MachineLoopExamples.source_returns",
     "MachineLoopExamples.paired_returns",
     "MachineLoopExamples.paired_cursor",
+    "MachineLoopExamples.append_source_returns",
+    "MachineLoopExamples.append_index_returns",
+    "MachineLoopExamples.append_loop_equiv_index",
+    "MachineLoopExamples.append_then_cursor",
 ] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
     "loopControlStmt_relocate", "loopContinuation_relocate", "loopTarget_relocate", "loopTarget_within",
     "step_while_relocates", "step_range_loop_relocates", "step_loopResume_relocates",
     "step_break_relocates", "step_continue_relocates", "step_sequence_loop_relocates",
     "StateWithin.while_loop", "StateWithin.range_loop", "StateWithin.loopResume",
     "StateWithin.break_loop", "StateWithin.continue_loop", "StateWithin.sequence_loop",
+    "run_readonly_heap", "step_while_preserves", "step_range_loop_preserves", "step_loopResume_preserves",
+    "step_break_preserves", "step_continue_preserves", "step_sequence_loop_preserves",
+    "step_reverse_loop_preserves", "step_enumerate_loop_preserves", "step_unpack_loop_preserves",
+    "step_range_start_preserves", "step_range_arguments_preserves", "step_sequence_start_preserves",
+    "step_for_heap", "step_for_preserves",
 )]
 
 with project_temporary_directory(prefix="machine-loop-") as temporary:
@@ -148,6 +271,17 @@ with project_temporary_directory(prefix="machine-loop-") as temporary:
     module = api["source_module"](path)
     namespace = {}
     exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("append_and_read", "append_and_index"):
+        for length in (0, 1, 17):
+            first = object()
+            items = [first] * length
+            result = namespace[name](items)
+            assert result is (first if length else items)
+            assert len(items) == length + 1 and items[-1] is items
+        cycle = []
+        cycle.append(cycle)
+        assert namespace[name](cycle) is cycle
+        assert len(cycle) == 2 and all(value is cycle for value in cycle)
     for name in ("take", "drain"):
         empty = []
         assert namespace[name](empty) is empty
@@ -163,7 +297,7 @@ with project_temporary_directory(prefix="machine-loop-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineLoops\n"
+    proof.write_text("import lang.py.FormalSW.MachineLoopInvariant\nimport lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
