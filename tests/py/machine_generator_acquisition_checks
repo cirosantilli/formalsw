@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""
+Check generator acquisition before fallback effects and under saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+from itertools import combinations, permutations
+
+
+def touch(log, value):
+    log.append(value)
+    return value
+
+
+def consumed(source, log, value):
+    return next((entry for entry in source), touch(log, value))
+
+
+def enumerated(source, log, value):
+    return next((entry for index, entry in enumerate(source)), touch(log, value))
+
+
+def zipped(source, log, value):
+    return next((entry for entry in zip(source, source)), touch(log, value))
+
+
+def permuted(source, log, value):
+    return next((entry for entry in permutations(source, 2)), touch(log, value))
+
+
+def combined(source, log, value):
+    return next((entry for entry in combinations(source, 2)), touch(log, value))
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineGeneratorAcquisitionExamples
+set_option Elab.async false
+
+/-- Acquiring an invalid first iterable never reaches the effectful fallback. -/
+theorem rejects_before_fallback (heap : Mutable.Heap) (number : Int) (log value : Mutable.Value) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "consumed") [.scalar (.int number), log, value], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], heap, heap.length⟩) := by
+  repeat first
+    | exact .done rfl
+    | refine .next rfl ?_
+
+/-- Enumerate must acquire its input before the outer next fallback can run. -/
+theorem enumerate_rejects_before_fallback (heap : Mutable.Heap) (number : Int) (log value : Mutable.Value) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "enumerated") [.scalar (.int number), log, value], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], heap, heap.length⟩) := by
+  repeat first
+    | exact .done rfl
+    | refine .next rfl ?_
+
+/-- Sequence acquisition uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_generator_operation (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (operation : Operation) (covered : GeneratorConsumerOperation operation) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation operation values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_generatorConsumerOperation_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used operation values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained covered
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineGeneratorAcquisitionExamples
+'''
+
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "nextSequence_positionalPool", "generatorSequence_keeps_heap", "generatorSequence_relocates",
+    "generatorAcquire_preserves", "nextGeneratorStart_acquire", "extremumGeneratorStart_acquire",
+    "sumGeneratorTargetsStart_acquire", "sumGeneratorStart_acquire", "sumGeneratorStart_preserves", "truthGeneratorStart_acquire", "nextGeneratorStart_preserves",
+    "extremumGeneratorStart_preserves", "sumGeneratorTargetsStart_preserves", "truthGeneratorStart_preserves",
+    "step_generatorConsumerOperation_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_generatorConsumerOperation_preserves"] + ["MachineGeneratorAcquisitionExamples." + name for name in (
+    "rejects_before_fallback", "enumerate_rejects_before_fallback", "append_then_generator_operation",
+)]
+with project_temporary_directory(prefix="machine-generator-acquisition-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("consumed", "enumerated", "zipped", "permuted", "combined"):
+        for number in (-10**100, -1, 0, 1, 10**100):
+            log = []
+            try:
+                namespace[name](number, log, log)
+            except TypeError:
+                assert not log
+            else:
+                raise AssertionError((name, number))
+        for size in (0, 1, 7):
+            source = list(range(size))
+            log = []
+            fallback = object()
+            result = namespace[name](source, log, fallback)
+            assert len(log) == 1 and log[0] is fallback
+            if size == 0 or size == 1 and name in ("permuted", "combined"):
+                assert result is fallback
+            elif name in ("consumed", "enumerated"):
+                assert result == 0
+            elif name == "zipped":
+                assert result == (0, 0)
+            else:
+                assert result == (0, 1)
+    for name in ("consumed", "enumerated"):
+        shared = []
+        result = namespace[name](shared, shared, shared)
+        assert result is shared and shared[0] is shared
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineGeneratorConsumers\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"generator acquisition: fallback ordering, invalid iterables and post-mutation preservation; {len(AUDITS)} axiom audits passed")
