@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+Check starred snapshots across later argument mutations and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def first(left, right):
+    return left
+
+
+def touch(items, value):
+    items.append(value)
+    return value
+
+
+def snapshot(items, value):
+    return first(*items, touch(items, value))
+
+
+def explicit(items, value):
+    old = items[0]
+    items.append(value)
+    return old
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineStarredExamples
+set_option Elab.async false
+
+def after (heap : Mutable.Heap) (address : Nat) (old value : Mutable.Value) :=
+  heap.set address (.list [old, value])
+
+theorem first_returns (heap : Mutable.Heap) (left right : Mutable.Value) :
+    ReturnsValue Probe.module "first" [left, right] heap left heap := by
+  apply BlockReturns.function rfl rfl
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (old value : Mutable.Value)
+    (found : heap[address]? = some (.list [old])) :
+    ReturnsValue Probe.module "touch" [.ref address, value] heap value (after heap address old value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem snapshot_returns (heap : Mutable.Heap) (address : Nat) (old value : Mutable.Value)
+    (found : heap[address]? = some (.list [old])) :
+    ReturnsValue Probe.module "snapshot" [.ref address, value] heap old (after heap address old value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.call_star
+    (.star (Evaluates.lookup rfl) (starItems_list heap address [old] found)
+      (.cons rfl (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+        (touch_returns heap address old value found)) .nil))
+    (first_returns (after heap address old value) old value)
+
+theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (old value : Mutable.Value)
+    (found : heap[address]? = some (.list [old])) :
+    ReturnsValue Probe.module "explicit" [.ref address, value] heap old (after heap address old value) := by
+  have read : Mutable.getItem (.ref address) (.scalar (.int 0)) heap = some (.ok old, heap) := by
+    simp [Mutable.getItem, Mutable.index, found, Mutable.eval_bind, Except.map]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.subscript (by intros; simp) (Evaluates.lookup rfl) Evaluates.constant read)
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+/-- Expansion snapshots the argument vector before a later argument mutates the same list. -/
+theorem snapshot_equiv (heap : Mutable.Heap) (address : Nat) (old value : Mutable.Value)
+    (found : heap[address]? = some (.list [old])) :
+    (IteratorCalls.call Probe.module "snapshot" [.ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, value] heap old (after heap address old value)) :
+      ((IteratorCalls.call Probe.module name [.ref address, value] heap).run choices).Finishes
+        ⟨.ok old, [], after heap address old value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "snapshot" leftChoices (snapshot_returns heap address old value found))
+    (finishes "explicit" rightChoices (explicit_returns heap address old value found)) (Or.inl rfl)
+
+/-- Continuation preservation uses the mutation's resulting heap, not a pre-expansion assumption. -/
+theorem append_then_starred (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (old item value : Mutable.Value)
+    (operation : Operation) (done : List Mutable.Value) (rest : List Expr) (env : HeapCalls.Env) (starred : Bool)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list [old])) (itemInside : item.edge.Within logical.length)
+    (valueInside : value.edge.Within logical.length) (operationInside : OperationWithin logical.length operation)
+    (doneInside : ∀ entry ∈ done, entry.edge.Within logical.length) (envInside : EnvWithin logical.length env)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout (after logical address old item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address old item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address old item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.value value, [.starredArguments operation done rest env starred], after logical address old item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.value value, [.starredArguments operation done rest env starred], after logical address old item⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address old item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address [old] item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have continuationInside : StateWithin
+      ⟨.value value, [.starredArguments operation done rest env starred], after logical address old item⟩ := by
+    constructor
+    · simpa [after] using valueInside
+    · intro frame member
+      have same : frame = .starredArguments operation done rest env starred := by simpa using member
+      subst frame
+      simpa only [FrameWithin, after, List.length_set] using ⟨envInside, operationInside, doneInside⟩
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_starredArguments_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used value operation done rest env starred [] resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨continuationInside.1, continuationInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineStarredExamples
+'''
+
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "starItems_sequence_or_unsupported", "starItems_relocates", "starItems_keeps_heap", "starItems_bounded",
+    "step_starredArguments_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_starredArguments_preserves"] + ["MachineStarredExamples." + name for name in (
+    "first_returns", "touch_returns", "snapshot_returns", "explicit_returns", "snapshot_equiv", "append_then_starred",
+)]
+with project_temporary_directory(prefix="machine-starred-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("snapshot", "explicit"):
+        for cyclic in (False, True):
+            for append_self in (False, True):
+                items = [object()]
+                if cyclic:
+                    items[0] = items
+                old = items[0]
+                value = items if append_self else object()
+                assert namespace[name](items, value) is old
+                assert len(items) == 2 and items[0] is old and items[1] is value
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineStarredInvariant\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"starred continuations: snapshot before mutation, cyclic aliases, saved consumers; {len(AUDITS)} axiom audits passed")
