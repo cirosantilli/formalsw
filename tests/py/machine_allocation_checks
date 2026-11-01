@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""
+Check allocating steps, resumed bindings, and bounds on suspended references.
+"""
+from pathlib import Path
+import re
+import subprocess
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+PROOF = r'''
+import lang.py.FormalSW.MachineAllocation
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineAllocationExamples
+set_option Elab.async false
+
+theorem list_then_assign (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (logicalAnchors physicalAnchors : Nat)
+    (items : List Mutable.Value) (name : String) (body : List Stmt) (env : HeapCalls.Env)
+    (stack : List Frame) (globals : Mutable.Globals)
+    (itemsInside : ∀ value ∈ items, value.edge.Within logical.length)
+    (envInside : EnvWithin logical.length env) (bodyInside : ∀ statement ∈ body, StmtWithin logical.length statement)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    let nextMap := extendMap rename logical.length physical.length
+    let logicalAfter := logical ++ [Mutable.Object.list items]
+    let physicalAfter := physical ++ [Mutable.Object.list (items.map (relocateValue rename))]
+    let initial : State := ⟨.operation .list items, .assign name body env :: stack, logical⟩
+    let final : State := ⟨.block body (setLocal env name (.ref logical.length)), stack, logicalAfter⟩
+    HeapCalls.Reaches (globals := globals) module logicalAnchors initial final ∧
+      HeapCalls.Reaches (globals := relocateGlobals rename globals) module physicalAnchors
+        (relocateState rename physical initial) (relocateState nextMap physicalAfter final) ∧
+      ExecutionLayout logicalAfter physicalAfter nextMap ∧ StateWithin final ∧
+      GlobalsWithin logicalAfter.length globals ∧
+      relocateGlobals nextMap globals = relocateGlobals rename globals := by
+  dsimp only
+  have waiting : ∀ frame ∈ Frame.assign name body env :: stack, FrameWithin logical.length frame := by
+    intro frame member
+    rcases List.mem_cons.mp member with rfl | member
+    · simpa only [FrameWithin] using And.intro envInside bodyInside
+    · exact stackInside frame member
+  obtain ⟨first, otherFirst, retained, bounded, globalBounds, globalSame, _⟩ :=
+    step_list_relocates module logical physical rename layout logicalAnchors physicalAnchors
+      items (.assign name body env :: stack) globals itemsInside waiting globalsInside
+  have second : HeapCalls.step module logicalAnchors
+      ⟨.value (.ref logical.length), .assign name body env :: stack, logical ++ [.list items]⟩ globals =
+        .next ⟨.block body (setLocal env name (.ref logical.length)), stack, logical ++ [.list items]⟩ := rfl
+  have otherSecond := step_assign_relocates module (logical ++ [.list items])
+    (physical ++ [.list (items.map (relocateValue rename))]) (extendMap rename logical.length physical.length)
+    logicalAnchors physicalAnchors (.ref logical.length) name body env stack globals
+  rw [second, globalSame] at otherSecond
+  exact ⟨.next first (.next second .refl), .next otherFirst (.next otherSecond .refl), retained,
+    bounded.assign _ _ _ _ _ _, globalBounds, globalSame⟩
+
+theorem tuple_then_assign (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (logicalAnchors physicalAnchors : Nat)
+    (items : List Mutable.Value) (name : String) (body : List Stmt) (env : HeapCalls.Env)
+    (stack : List Frame) (globals : Mutable.Globals)
+    (itemsInside : ∀ value ∈ items, value.edge.Within logical.length)
+    (envInside : EnvWithin logical.length env) (bodyInside : ∀ statement ∈ body, StmtWithin logical.length statement)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    ∃ address logicalAfter physicalAfter nextMap,
+      let initial : State := ⟨.operation .tuple items, .assign name body env :: stack, logical⟩
+      let final : State := ⟨.block body (setLocal env name (.ref address)), stack, logicalAfter⟩
+      HeapCalls.Reaches (globals := globals) module logicalAnchors initial final ∧
+        HeapCalls.Reaches (globals := relocateGlobals rename globals) module physicalAnchors
+          (relocateState rename physical initial) (relocateState nextMap physicalAfter final) ∧
+        ExecutionLayout logicalAfter physicalAfter nextMap ∧ StateWithin final ∧
+        GlobalsWithin logicalAfter.length globals ∧
+        relocateGlobals nextMap globals = relocateGlobals rename globals := by
+  have waiting : ∀ frame ∈ Frame.assign name body env :: stack, FrameWithin logical.length frame := by
+    intro frame member
+    rcases List.mem_cons.mp member with rfl | member
+    · simpa only [FrameWithin] using And.intro envInside bodyInside
+    · exact stackInside frame member
+  obtain ⟨address, physicalAddress, logicalAfter, physicalAfter, nextMap,
+      first, otherFirst, retained, bounded, globalBounds, _, globalSame, _⟩ :=
+    step_tuple_relocates module logical physical rename layout logicalAnchors physicalAnchors
+      items (.assign name body env :: stack) globals itemsInside waiting globalsInside
+  have second : HeapCalls.step module logicalAnchors
+      ⟨.value (.ref address), .assign name body env :: stack, logicalAfter⟩ globals =
+        .next ⟨.block body (setLocal env name (.ref address)), stack, logicalAfter⟩ := rfl
+  have otherSecond := step_assign_relocates module logicalAfter physicalAfter nextMap logicalAnchors physicalAnchors
+    (.ref address) name body env stack globals
+  rw [second, globalSame] at otherSecond
+  exact ⟨address, logicalAfter, physicalAfter, nextMap,
+    .next first (.next second .refl), .next otherFirst (.next otherSecond .refl), retained,
+    bounded.assign _ _ _ _ _ _, globalBounds, globalSame⟩
+
+/-- Logical allocation can correspond to physical reuse, under any bounded saved stack. -/
+theorem private_tuple_reuse (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (anchors address : Nat) (stack : List Frame) (globals : Mutable.Globals)
+    (absent : emptyTupleAddress logical = none) (found : emptyTupleAddress physical = some address)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame) :
+    HeapCalls.step module anchors (relocateState rename physical ⟨.operation .tuple [], stack, logical⟩)
+        (relocateGlobals rename globals) =
+      .next (relocateState (extendMap rename logical.length address) physical
+        ⟨.value (.ref logical.length), stack, logical ++ [.tuple []]⟩) ∧
+      HeapCalls.step module logical.length ⟨.operation .tuple [], stack, logical⟩ globals =
+        .next ⟨.value (.ref logical.length), stack, logical ++ [.tuple []]⟩ := by
+  have stackSame := relocateStack_congr (extendMap rename logical.length address) rename logical.length stack
+    (extendMap_old rename logical.length address) stackInside
+  simp only [emptyTupleAddress] at absent found
+  have allocated : Mutable.allocateTuple [] logical = some (.ok (.ref logical.length), logical ++ [.tuple []]) := by
+    simp [Mutable.allocateTuple, absent, Except.map]
+  have reused : Mutable.allocateTuple [] physical = some (.ok (.ref address), physical) := by
+    simp [Mutable.allocateTuple, found]
+  constructor
+  · simp [relocateState, relocateWork, relocateRuntimeOperation, relocateOperation, HeapCalls.step,
+      HeapCalls.primitive, HeapCalls.result, HeapCalls.run, reused, relocateValue, extendMap_new, stackSame]
+  · simp [HeapCalls.step, HeapCalls.primitive, HeapCalls.result, HeapCalls.run, allocated]
+
+/-- Positions and counters need no upper bound; only stored object addresses do. -/
+theorem nested_cursor_within (limit address collector position : Nat)
+    (sourceInside : address < limit) (collectorInside : collector < limit) :
+    FrameWithin limit (.extremumResume [.nextStart true
+      (.loopResume (.sequenceStepLoop "item" (.ref address) position
+        [.comprehensionAppend collector (.name "item")] [])) (fun _ => none)]) := by
+  simp [FrameWithin, StmtWithin, SourceWithin, EnvWithin, sourceInside, collectorInside]
+
+theorem dangling_collector_rejected (limit address : Nat) (outside : limit ≤ address) :
+    ¬FrameWithin limit (.comprehensionResult address) := by
+  simp only [FrameWithin]
+  omega
+
+end MachineAllocationExamples
+'''
+AUDITS = [
+    "MachineAllocationExamples.list_then_assign", "MachineAllocationExamples.tuple_then_assign",
+    "MachineAllocationExamples.private_tuple_reuse", "MachineAllocationExamples.nested_cursor_within",
+    "MachineAllocationExamples.dangling_collector_rejected",
+    "relocateEnv_congr", "relocateSource_congr", "relocateStmt_congr", "relocateRuntimeOperation_congr",
+    "relocateSort_congr", "relocateExtremum_congr", "relocatePair_congr", "relocateBest_congr",
+    "relocateFrame_congr", "relocateWork_congr", "relocateState_congr", "valueWithin_mono",
+    "EnvWithin.mono", "SourceWithin.mono", "StmtWithin.mono", "OperationWithin.mono", "SortWithin.mono",
+    "ExtremumWithin.mono", "PairWithin.mono", "FrameWithin.mono", "WorkWithin.mono", "relocateGlobals_congr",
+    "GlobalsWithin.mono", "relocateStack_congr", "EnvWithin.setLocal", "StateWithin.assign",
+    "argumentsState_within", "StateWithin.arguments", "result_extending_relocates", "value_state_within",
+    "step_list_relocates", "allocateTuple_length", "step_tuple_relocates",
+]
+
+with project_temporary_directory(prefix="machine-allocation-") as temporary:
+    proof = Path(temporary) / "Checks.lean"
+    proof.write_text(PROOF + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine allocation: resumed bindings, private tuple reuse, reference bounds; {len(AUDITS)} axiom audits passed")
