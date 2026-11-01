@@ -35,6 +35,21 @@ theorem swap_contents_perm (values : List α) (left right : Nat)
           | zero => exact cons_set_perm rest left (by simpa using hl) first
           | succ right => exact (ih left right (by simpa using hl) (by simpa using hr)).cons first
 
+/-- Exchange encoded entries without changing their representation or caller heap frame. -/
+theorem swap_mapped_list (encode : α → Value) (heap : Heap) (address left right : Nat)
+    (values : List α) (found : heap[address]? = some (.list (values.map encode)))
+    (hl : left < values.length) (hr : right < values.length) :
+    swap address left right heap = some (.ok (), heap.set address
+      (.list (((values.set left values[right]).set right values[left]).map encode))) := by
+  have leftEq : (values.map encode)[left]'(by simpa using hl) = encode values[left] :=
+    List.getElem_map encode
+  have rightEq : (values.map encode)[right]'(by simpa using hr) = encode values[right] :=
+    List.getElem_map encode
+  have result := swap_list heap address left right (values.map encode) found
+    (by simpa using hl) (by simpa using hr)
+  rw [leftEq, rightEq] at result
+  simpa only [List.map_set] using result
+
 /-- Only the designated list changes; its contents are a permutation of the supplied values. -/
 def Reorders (original : Heap) (address : Nat) (values : List Value) (after : Heap) : Prop :=
   ∃ changed, changed.Perm values ∧ after = original.set address (.list changed)
