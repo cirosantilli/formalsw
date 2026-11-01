@@ -25,6 +25,14 @@ def reset(counter, delta):
 
 def choose(value, counter):
     return value or counter.advance(1)
+
+def store_negated(counter, value):
+    counter.n = value
+    return -(-counter.n)
+
+def store(counter, value):
+    counter.n = value
+    return value
 '''
 PROOF = r'''
 open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
@@ -204,6 +212,121 @@ theorem zero_division_step (heap : Mutable.Heap) (anchors : Nat) (n : Int)
   simp [HeapCalls.step, binary_scalars, scalarBinary, scalarNumber, scalarResult, HeapCalls.result,
     HeapCalls.run, HeapCalls.done, protectGenerator, Calls.generatorException]
 
+
+/-- The integer update uses the arithmetic step's output invariant for its following field write. -/
+theorem add_then_write (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (n delta : Int) (receiver : Mutable.Value)
+    (name : String) (rest : List Stmt) (env : HeapCalls.Env) (stack : List Frame) (globals : Mutable.Globals)
+    (saved : ∀ frame ∈ .writeAttribute receiver name rest env :: stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout logical other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical
+          ⟨.value (.scalar (.int delta)), .binaryRight .add (.scalar (.int n)) true ::
+            .writeAttribute receiver name rest env :: stack, logical⟩) (relocateGlobals rename globals) =
+        .next (relocateState nextMap other
+          ⟨.value (.scalar (.int (n + delta))), .writeAttribute receiver name rest env :: stack, logical⟩) ∧
+      Preserves logical other nextMap physical.length
+        (HeapCalls.step Probe.module logical.length
+          ⟨.value (.scalar (.int (n + delta))), .writeAttribute receiver name rest env :: stack, logical⟩ globals)
+        (HeapCalls.step Probe.module physical.length
+          (relocateState nextMap other
+            ⟨.value (.scalar (.int (n + delta))), .writeAttribute receiver name rest env :: stack, logical⟩)
+          (relocateGlobals nextMap globals)) := by
+  have preserved := step_binary_scalars_preserves Probe.module logical physical rename logical.length physical.length
+    .add (.int n) (.int delta) true (.writeAttribute receiver name rest env :: stack) globals layout saved globalsInside
+  have actual : HeapCalls.step Probe.module logical.length
+      ⟨.value (.scalar (.int delta)), .binaryRight .add (.scalar (.int n)) true ::
+        .writeAttribute receiver name rest env :: stack, logical⟩ globals =
+      .next ⟨.value (.scalar (.int (n + delta))), .writeAttribute receiver name rest env :: stack, logical⟩ := by
+    simp [HeapCalls.step, inplace, binary_scalars, scalarBinary, scalarNumber, scalarResult, HeapCalls.result, HeapCalls.run]
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, _, _, retained, inside, nextGlobals, _, paired⟩ := preserved.next globals globalsInside
+  exact ⟨other, nextMap, agree, retained, paired,
+    step_writeAttribute_preserves Probe.module logical other nextMap logical.length physical.length receiver
+      (.scalar (.int (n + delta))) name rest env stack globals retained inside nextGlobals⟩
+
+/-- Saved iterator consumers survive unary successes, errors, and unsupported scalar operations. -/
+theorem unary_under_consumers (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (op : UnaryOp) (value : Mutable.Value)
+    (stack : List Frame) (resumes : List IteratorCalls.Resume) (globals : Mutable.Globals)
+    (logicalAnchors physicalAnchors used : Nat) (choices : ChoiceSchedule)
+    (inside : StateWithin ⟨.value value, .unary op :: stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    IteratorCalls.Relocation.Preserves logical physical rename physicalAnchors
+      (IteratorCalls.step Probe.module logicalAnchors choices
+        (.running ⟨⟨.value value, .unary op :: stack, logical⟩, used⟩ resumes) globals)
+      (IteratorCalls.step Probe.module physicalAnchors choices
+        (IteratorCalls.Relocation.relocateState rename physical physicalAnchors
+          (.running ⟨⟨.value value, .unary op :: stack, logical⟩, used⟩ resumes)) (relocateGlobals rename globals)) := by
+  have raw := step_unary_preserves Probe.module logical physical rename logicalAnchors physicalAnchors
+    op value stack globals layout inside globalsInside
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.value value, .unary op :: stack, logical⟩, used⟩ physical rename logicalAnchors physicalAnchors
+    globals layout inside globalsInside raw
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ physical rename logicalAnchors physicalAnchors
+    choices resumes globals (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin])
+    layout ⟨inside.1, inside.2, saved⟩ rfl wrapped
+
+
+def storeArgs : List Arg := [{name := "counter", annotation := none}, {name := "value", annotation := none}]
+def storeBody (negated : Bool) : List Stmt :=
+  [.assign [.attribute (.name "counter") "n"] (.name "value"),
+    .return (if negated then .unaryOp .uSub (.unaryOp .uSub (.attribute (.name "counter") "n")) else .name "value")]
+def storeName (negated : Bool) := if negated then "store_negated" else "store"
+def storedHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (n : Int) :=
+  heap.set address (.instance classInfo.1 "Counter" (Mutable.putField fields "n" (.scalar (.int n))))
+
+theorem source_store (negated : Bool) :
+    findFunctionIn Probe.module.body (storeName negated) = some (storeArgs, storeBody negated) := by
+  cases negated <;> rfl
+
+theorem store_returns (negated : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value)) (n : Int)
+    (found : heap[address]? = some (.instance classInfo.1 "Counter" fields)) :
+    ReturnsValue Probe.module (storeName negated) [.ref address, .scalar (.int n)] heap
+      (.scalar (.int n)) (storedHeap heap address fields n) := by
+  have receiver : functionEnv storeArgs (storeBody negated) [.ref address, .scalar (.int n)] [] "counter" = some (.ref address) := by
+    simp [functionEnv, HeapCalls.argumentEnv, storeArgs]
+  have value : functionEnv storeArgs (storeBody negated) [.ref address, .scalar (.int n)] [] "value" = some (.scalar (.int n)) := by
+    simp [functionEnv, HeapCalls.argumentEnv, storeArgs, List.lookup]
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have after : (storedHeap heap address fields n)[address]? =
+      some (.instance classInfo.1 "Counter" (Mutable.putField fields "n" (.scalar (.int n)))) := by
+    simp [storedHeap, bounded]
+  apply BlockReturns.function (source_store negated) (completed := [.ref address, .scalar (.int n)]) rfl
+  apply BlockContinues.returns (body := [.assign [.attribute (.name "counter") "n"] (.name "value")])
+    (middleHeap := storedHeap heap address fields n)
+  · apply BlockContinues.setAttribute (Evaluates.lookup value) (Evaluates.lookup receiver)
+    exact Mutable.writeField_result found (by simp)
+  · cases negated with
+    | false => exact BlockReturns.return_value (Evaluates.lookup value)
+    | true =>
+      apply BlockReturns.return_value
+      apply Evaluates.unary (value := .scalar (.int (-n))) (middle := storedHeap heap address fields n)
+      · apply Evaluates.unary (value := .scalar (.int n)) (middle := storedHeap heap address fields n)
+        · apply Evaluates.field (Evaluates.lookup receiver)
+          simp [getAttribute, after, instanceClass, source_class, Mutable.putField_lookup]
+        · simp [unary, scalarResult, scalarExpr]
+      · simp [unary, scalarResult, scalarExpr]
+
+/-- Eliminating redundant reads and negations retains the shared write for every signed integer. -/
+theorem store_equiv (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) (n : Int)
+    (found : heap[address]? = some (.instance classInfo.1 "Counter" fields)) :
+    (IteratorCalls.call Probe.module "store_negated" [.ref address, .scalar (.int n)] heap).Equiv
+      (IteratorCalls.call Probe.module "store" [.ref address, .scalar (.int n)] heap) := by
+  have finishes (negated : Bool) (choices : ChoiceSchedule) :
+      ((IteratorCalls.call Probe.module (storeName negated) [.ref address, .scalar (.int n)] heap).run choices).Finishes
+        ⟨.ok (.scalar (.int n)), [], storedHeap heap address fields n, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0)
+      (store_returns negated heap address fields n found heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (finishes true leftChoices) (finishes false rightChoices) (Or.inl rfl)
+
 end MachineExpressionExamples
 '''
 AUDITS = [
@@ -220,6 +343,11 @@ AUDITS = [
     "HeapCalls.BlockContinues.augAttribute", "step_boolean_relocates",
     "StateWithin.boolean", "step_conditional_relocates", "StateWithin.conditional", "step_branch_relocates",
     "StateWithin.branch", "step_chainResult_relocates", "StateWithin.chainResult",
+    "MachineExpressionExamples.add_then_write", "MachineExpressionExamples.unary_under_consumers",
+    "result_readonly_preserves", "result_scalar_preserves", "step_unary_preserves", "step_binary_scalars_preserves",
+    "step_binaryLeft_preserves", "step_binary_expression_preserves", "step_unary_expression_preserves",
+    "step_chainResult_preserves", "identity_scalar_result", "identity_relocates_value", "step_identity_preserves", "Preserves.next",
+    "MachineExpressionExamples.source_store", "MachineExpressionExamples.store_returns", "MachineExpressionExamples.store_equiv",
 ]
 
 with project_temporary_directory(prefix="machine-expression-") as temporary:
@@ -230,6 +358,11 @@ with project_temporary_directory(prefix="machine-expression-") as temporary:
     namespace = {}
     exec(compile(SOURCE, str(path), "exec"), namespace)
     for n in (-10**80, -1, 0, 1, 10**80):
+        for name in ("store_negated", "store"):
+            counter = namespace["Counter"]()
+            counter.shared = counter
+            assert namespace[name](counter, n) == n
+            assert counter.n == n and counter.shared is counter
         for delta in (-17, 0, 23):
             counter = namespace["Counter"]()
             counter.n = n
@@ -244,7 +377,7 @@ with project_temporary_directory(prefix="machine-expression-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineControl\n"
+    proof.write_text("import lang.py.FormalSW.MachineExpressionInvariant\nimport lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

@@ -146,6 +146,7 @@ roots = [
   "lang.py.FormalSW.MachineInvariant",
   "lang.py.FormalSW.MachineMutationInvariant",
   "lang.py.FormalSW.MachineLoopInvariant",
+  "lang.py.FormalSW.MachineExpressionInvariant",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",
