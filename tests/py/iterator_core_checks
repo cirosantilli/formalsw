@@ -270,17 +270,60 @@ theorem allocation_then_resume (logical physical : Mutable.Heap) (rename : Nat �
     apply IteratorCalls.Reaches.next (by simpa only [sameGlobals] using completedPair)
     exact .next resumePair .refl
 
+/-- The first-item call contains acquisition and advancement, then stops above any caller. -/
+theorem nested_first_prefix (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Allocating" fields)) (choices : ChoiceSchedule)
+    (resumes : List Resume) :
+    ∃ used, IteratorCalls.Reaches Probe.module heap.length choices []
+      (.running ⟨⟨.operation (.call "first") [.ref address], [], heap⟩, 0⟩ resumes)
+      (.completed (.ok (completion heap address)) used resumes) := by
+  obtain ⟨used, reached⟩ := completion_of_iterator (first_finishes heap address fields found choices)
+  exact ⟨used, by simpa only [appendResumes, List.nil_append] using reached.append_resumes resumes⟩
+
+/-- Derive the allocating advancement under an arbitrary physical consumer from one logical method proof. -/
+theorem relocated_next (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : logical[address]? = some (.instance classInfo.1 "Allocating" fields))
+    (choices : ChoiceSchedule) (anchors used : Nat) (loop : Loop) (resumes : List Resume) :
+    ∃ other nextMap finalUsed, ExtendedLayout logical.length physical.length rename (after logical address) other nextMap ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following) loop.env,
+          loop.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (loop.body ++ [Calls.loopContinuation loop.body (loopCode loop (.ref (rename address)))]
+          ++ loop.following) (setLocal loop.env loop.name (.ref (nextMap logical.length))),
+          loop.stack, other⟩, finalUsed⟩ resumes) := by
+  have executed : OperationCompletes Probe.module choices used (.method (.ref address) methodArgs nextBody)
+      logical (.ok (.ref logical.length)) (after logical address) :=
+    OperationCompletes.of_method (next_returns logical address)
+  obtain ⟨finalUsed, logicalRun⟩ := executed logical.length []
+  obtain ⟨other, nextMap, extended, called⟩ := advance_completion_relocates Probe.module choices logical physical rename
+    logical.length anchors used finalUsed (.ref address) (.method (.ref address) methodArgs nextBody)
+    (.ok (.ref logical.length)) (after logical address) [] source_module layout
+    (List.getElem?_eq_some_iff.mp found).1 (by simp [GlobalsWithin]) (by simp [isInstance, found])
+    (next_bound logical address fields found) logicalRun
+  refine ⟨other, nextMap, finalUsed, extended, ?_⟩
+  have completed : IteratorCalls.Reaches Probe.module anchors choices []
+      (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following) loop.env,
+        loop.stack, physical⟩, used⟩ resumes)
+      (.completed (.ok ⟨.ok (.ref (nextMap logical.length)), [], other, anchors⟩) finalUsed
+        (.advance loop (.ref (rename address)) :: resumes)) := by
+    simpa only [relocateGlobals, List.map_nil, Except.map, relocateValue] using called loop resumes
+  exact advanced completed
+
 end IteratorCoreExamples
 '''
 AUDITS = ["IteratorCoreExamples." + name for name in (
     "source_module", "source_class", "source_iter", "source_next", "source_first", "source_direct",
-    "iter_bound", "next_bound", "iter_returns", "next_returns", "first_finishes", "direct_finishes", "first_equiv_direct", "allocation_layout", "allocation_preserves", "allocation_then_resume",
+    "iter_bound", "next_bound", "iter_returns", "next_returns", "first_finishes", "direct_finishes", "first_equiv_direct", "allocation_layout", "allocation_preserves", "allocation_then_resume", "nested_first_prefix", "relocated_next",
 )] + ["FormalSW.PyAst.IteratorCalls.Relocation." + name for name in (
     "relocateResumes_congr", "step_ordinary_relocates", "set_step_supported", "set_lift_relocates",
     "set_step_relocates", "running_within_after", "completed_within_after", "Preserves.unchanged", "lift_invariant", "lift_preserves",
     "step_ordinary_preserves", "propagate_heap", "resume_heap", "step_completed_preserves",
     "step_completed_error_preserves", "iterMethod_keeps_heap", "advanceMethod_keeps_heap",
-    "enter_heap", "intercept_heap", "step_intercepted_preserves", "step_preserves", "Preserves.next", "Preserves.rebase", "reaches_preserves",
+    "enter_heap", "intercept_heap", "step_intercepted_preserves", "step_preserves", "Preserves.next", "Preserves.rebase", "reaches_preserves", "operation_completion_relocates", "advance_completion_relocates",
+)] + ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "enter_append", "intercept_append", "lift_append", "resume_append", "step_next_append", "Reaches.append_resumes",
+    "enter_not_done", "intercept_not_done", "step_done_boundary", "completion_of_iterator", "OperationCompletes.of_iterator",
 )]
 
 with project_temporary_directory(prefix="iterator-core-") as temporary:
@@ -302,7 +345,7 @@ with project_temporary_directory(prefix="iterator-core-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineInvariant\nimport lang.py.FormalSW.IteratorRules\n"
+    proof.write_text("import lang.py.FormalSW.MachineInvariant\nimport lang.py.FormalSW.IteratorOperationRelocation\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

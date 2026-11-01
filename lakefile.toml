@@ -206,6 +206,8 @@ roots = [
   "lang.py.FormalSW.MachineOperationInvariant",
   "lang.py.FormalSW.MachineExecutionInvariant",
   "lang.py.FormalSW.IteratorExecutionRelocation",
+  "lang.py.FormalSW.IteratorContinuation",
+  "lang.py.FormalSW.IteratorOperationRelocation",
   "lang.py.FormalSW.MachineExtremumSelection",
   "lang.py.FormalSW.MachineValueResults",
   "lang.py.FormalSW.MachineValueContinuation",
