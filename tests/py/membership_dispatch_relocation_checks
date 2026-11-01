@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+Check membership across all modeled container kinds and preserve caller aliases.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def search(needle, items):
+    present = needle in items
+    absent = needle not in items
+    return [needle, items, present, absent]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation
+namespace MembershipDispatchExamples
+set_option Elab.async false
+
+def resultHeap (heap : Mutable.Heap) (needle container : Mutable.Value) (present absent : Bool) :=
+  heap ++ [Mutable.Object.list [needle, container, .scalar (.bool present), .scalar (.bool absent)]]
+
+theorem source_searches (heap : Mutable.Heap) (needle container : Mutable.Value) (present absent : Bool)
+    (searched : HeapCalls.membership needle container false heap = some (.ok (.scalar (.bool present)), heap))
+    (negated : HeapCalls.membership needle container true heap = some (.ok (.scalar (.bool absent)), heap)) :
+    ReturnsValue Probe.module "search" [needle, container] heap (.ref heap.length)
+      (resultHeap heap needle container present absent) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.membership (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) searched)
+  apply BlockReturns.assign (Evaluates.membership (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)) negated)
+  exact BlockReturns.return_value (Evaluates.list (.cons (Evaluates.lookup rfl)
+    (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))))
+
+theorem paired_searches (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (needle container : Mutable.Value)
+    (present absent : Bool) (needleInside : needle.edge.Within logical.length)
+    (containerInside : container.edge.Within logical.length)
+    (searched : HeapCalls.membership needle container false logical = some (.ok (.scalar (.bool present)), logical))
+    (negated : HeapCalls.membership needle container true logical = some (.ok (.scalar (.bool absent)), logical)) :
+    ∃ nextMap,
+      ReturnsValue Probe.module "search" [needle, container] logical (.ref logical.length)
+        (resultHeap logical needle container present absent) ∧
+      ReturnsValue Probe.module "search" [relocateValue rename needle, relocateValue rename container] physical (.ref physical.length)
+        (resultHeap physical (relocateValue rename needle) (relocateValue rename container) present absent) ∧
+      ExecutionLayout (resultHeap logical needle container present absent)
+        (resultHeap physical (relocateValue rename needle) (relocateValue rename container) present absent) nextMap ∧
+      nextMap logical.length = physical.length ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  have other := layout.membership needle container false needleInside containerInside _ _ searched
+  have otherNegated := other.2.1.membership needle container true needleInside containerInside _ _ negated
+  have inside : ∀ value ∈ [needle, container, .scalar (.bool present), .scalar (.bool absent)],
+      value.edge.Within logical.length := by
+    simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq]
+    exact ⟨needleInside, containerInside, trivial, trivial⟩
+  have retained := (otherNegated.2.1.allocate_list [needle, container, .scalar (.bool present), .scalar (.bool absent)] inside).2.2
+  refine ⟨extendMap rename logical.length physical.length,
+    source_searches logical needle container present absent searched negated,
+    source_searches physical (relocateValue rename needle) (relocateValue rename container) present absent other.1 otherNegated.1,
+    ?_, extendMap_new _ _ _, fun index bound => extendMap_old _ _ _ _ bound⟩
+  simpa only [resultHeap, List.map_cons, List.map_nil,
+    show relocateValue rename (.scalar (.bool present)) = Mutable.Value.scalar (.bool present) from rfl,
+    show relocateValue rename (.scalar (.bool absent)) = Mutable.Value.scalar (.bool absent) from rfl] using retained
+
+theorem source_failed (heap : Mutable.Heap) (needle container : Mutable.Value) (exception : ExceptionObject)
+    (failed : HeapCalls.membership needle container false heap = some (.error exception, heap)) :
+    (HeapCalls.call Probe.module "search" [needle, container] heap).Finishes
+      ⟨.error exception, [], heap, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.argumentsState, HeapCalls.result, HeapCalls.run, HeapCalls.primitive, failed,
+    HeapCalls.done, HeapCalls.protectGenerator, Frame.inGenerator, Calls.generatorException])
+
+theorem paired_failures (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (needle container : Mutable.Value)
+    (exception : ExceptionObject) (needleInside : needle.edge.Within logical.length)
+    (containerInside : container.edge.Within logical.length)
+    (failed : HeapCalls.membership needle container false logical = some (.error exception, logical)) :
+    (HeapCalls.call Probe.module "search" [needle, container] logical).Finishes
+        ⟨.error exception, [], logical, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "search" [relocateValue rename needle, relocateValue rename container] physical).Finishes
+        ⟨.error exception, [], physical, physical.length⟩ ∧ ExecutionLayout logical physical rename := by
+  have other := layout.membership needle container false needleInside containerInside _ _ failed
+  exact ⟨source_failed logical needle container exception failed,
+    source_failed physical (relocateValue rename needle) (relocateValue rename container) exception other.1, other.2.1⟩
+
+/-- Invalid integers raise before negation or result allocation, for all byte strings. -/
+theorem source_byte_range_error (heap : Mutable.Heap) (bytes : List UInt8) (needle : Int)
+    (outside : needle < 0 ∨ 255 < needle) :
+    (HeapCalls.call Probe.module "search" [.scalar (.int needle), .scalar (.bytes bytes)] heap).Finishes
+      ⟨.error { typeName := "ValueError", args := [] }, [], heap, heap.length⟩ := by
+  apply source_failed
+  simp [HeapCalls.membership, HeapCalls.bytesContains, HeapCalls.bytesContainsInteger, outside, Mutable.error]
+
+/-- Negation does not swallow a failed membership operation. -/
+theorem negated_byte_range_error (heap : Mutable.Heap) (bytes : List UInt8) (needle : Int)
+    (outside : needle < 0 ∨ 255 < needle) (negated : Bool) :
+    HeapCalls.membership (.scalar (.int needle)) (.scalar (.bytes bytes)) negated heap =
+      some (.error { typeName := "ValueError", args := [] }, heap) := by
+  simp [HeapCalls.membership, HeapCalls.bytesContains, HeapCalls.bytesContainsInteger, outside, Mutable.error]
+
+#print axioms source_searches
+#print axioms paired_searches
+#print axioms source_failed
+#print axioms paired_failures
+#print axioms source_byte_range_error
+#print axioms negated_byte_range_error
+#print axioms RuntimeLayout.bytesContains
+#print axioms bytesContains_keeps_heap
+#print axioms RuntimeLayout.membership_bytes
+#print axioms membership_bytearray_eq
+#print axioms RuntimeLayout.membership_bytearray
+#print axioms RuntimeLayout.membership_scalar
+#print axioms RuntimeLayout.membership
+#print axioms membership_keeps_heap
+#print axioms boolean_bind_value
+#print axioms membership_value
+#print axioms ExecutionLayout.membership
+end MembershipDispatchExamples
+'''
+
+with project_temporary_directory(prefix="membership-dispatch-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    search = namespace["search"]
+    cycle = []
+    cycle.append(cycle)
+    for needle, items, expected in (
+        ("135", "12345", False), ("23", "12345", True), ("", "", True),
+        (True, b"\x00\x01", True), (255, b"\x00\xff", True), (254, b"\xff", False),
+        (b"bc", b"abcd", True), (bytearray(b"bc"), b"abcd", True),
+        (bytearray(b""), bytearray(), True), (b"bc", bytearray(b"abcd"), True),
+        (255, bytearray(b"\xff"), True), (1, [False, True], True), (cycle, (cycle,), True),
+        ((True, 2), {(1, 2)}, True), ((1, 3), {(1, 2)}, False),
+        ((True, 2), {(1, 2): cycle}, True), (True, {1: cycle}, True), (2, {1: cycle}, False),
+    ):
+        result = search(needle, items)
+        assert result[0] is needle and result[1] is items and result[2:] == [expected, not expected]
+    for needle, items, error in (
+        (-1, b"", ValueError), (256, b"", ValueError), (2**200, bytearray(b"abc"), ValueError),
+        (1, "123", TypeError), (None, b"", TypeError), ([], {1}, TypeError),
+        ([], {1: cycle}, TypeError), (1, 123, TypeError), (1, None, TypeError),
+    ):
+        for negated in (False, True):
+            try:
+                if negated:
+                    needle not in items
+                else:
+                    search(needle, items)
+            except error:
+                pass
+            else:
+                raise AssertionError((needle, items, error, negated))
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MembershipDispatchRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == 17, checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print("membership dispatch relocation: all containers, aliases, byte-range errors; 17 axiom audits passed")
