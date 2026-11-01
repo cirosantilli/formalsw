@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""
+Check field aliases and method binding before argument-side mutation.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Reader:
+    def read(self, ignored):
+        return self.link
+
+def shadow(reader):
+    reader.read = 0
+    return 0
+
+def invoke(reader):
+    return reader.read(shadow(reader))
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineAttributeExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Reader").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}, {name := "ignored", annotation := none}]
+def body : List Stmt := [.return (.attribute (.name "self") "link")]
+def shadowArgs : List Arg := [{name := "reader", annotation := none}]
+def shadowBody : List Stmt := [.assign [.attribute (.name "reader") "read"] (.constant (.int 0)),
+  .return (.constant (.int 0))]
+def invokeBody : List Stmt := [.return (.call (.attribute (.name "reader") "read")
+  [.call (.name "shadow") [.name "reader"]])]
+def afterShadow (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :=
+  heap.set address (.instance classInfo.1 "Reader" (Mutable.putField fields "read" (.scalar (.int 0))))
+
+theorem source_class : Probe.module.findClass "Reader" = some classInfo := rfl
+theorem source_method : findFunctionIn classInfo.2 "read" = some (args, body) := rfl
+theorem source_shadow : findFunctionIn Probe.module.body "shadow" = some (shadowArgs, shadowBody) := rfl
+theorem source_invoke : findFunctionIn Probe.module.body "invoke" = some (shadowArgs, invokeBody) := rfl
+
+theorem method_source : ∀ statement ∈ body, StmtWithin 0 statement :=
+  findFunctionIn_within 0 classInfo.2 "read" args body
+    (findClass_within 0 Probe.module "Reader" classInfo.1 classInfo.2
+      (by simp [Probe.module, StmtWithin]) source_class) source_method
+
+theorem method_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (absent : fields.lookup "read" = none) :
+    bindMethod Probe.module (.ref address) "read" heap = some (.ok (.method (.ref address) args body), heap) := by
+  simp [bindMethod, found, instanceClass, source_class, absent, source_method]
+
+theorem method_returns (heap : Mutable.Heap) (address : Nat) (ignored shared : Mutable.Value)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (linked : fields.lookup "link" = some shared) :
+    MethodReturns Probe.module (.ref address) args body [ignored] heap shared heap := by
+  apply MethodReturns.of_body (completed := [.ref address, ignored]) rfl
+  apply BlockReturns.return_value
+  apply Evaluates.field (Evaluates.lookup (value := .ref address) (by simp [functionEnv, HeapCalls.argumentEnv, args]))
+  simp [getAttribute, found, instanceClass, source_class, linked]
+
+theorem shadow_returns (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields)) :
+    ReturnsValue Probe.module "shadow" [.ref address] heap (.scalar (.int 0)) (afterShadow heap address fields) := by
+  apply BlockReturns.function source_shadow (completed := [.ref address]) rfl
+  apply BlockContinues.returns (body := [shadowBody[0]'(by decide)])
+  · apply BlockContinues.setAttribute Evaluates.constant
+      (Evaluates.lookup (value := .ref address) (by simp [functionEnv, HeapCalls.argumentEnv, shadowArgs]))
+    exact Mutable.writeField_result found (by simp)
+  · exact BlockReturns.return_value Evaluates.constant
+
+/-- The argument overwrites read, but the already captured method still returns the linked object. -/
+theorem invoke_returns (heap : Mutable.Heap) (address : Nat) (shared : Mutable.Value)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (absent : fields.lookup "read" = none) (linked : fields.lookup "link" = some shared) :
+    ReturnsValue Probe.module "invoke" [.ref address] heap shared (afterShadow heap address fields) := by
+  have reader : functionEnv shadowArgs invokeBody [.ref address] [] "reader" = some (.ref address) := by
+    simp [functionEnv, HeapCalls.argumentEnv, shadowArgs]
+  have inside : address < heap.length := (List.getElem?_eq_some_iff.mp found).1
+  have changed : (afterShadow heap address fields)[address]? =
+      some (.instance classInfo.1 "Reader" (Mutable.putField fields "read" (.scalar (.int 0)))) := by
+    simp [afterShadow, inside]
+  apply BlockReturns.function source_invoke (completed := [.ref address]) rfl
+  apply BlockReturns.return_value
+  apply Evaluates.method reader (by decide) (method_bound heap address fields found absent)
+  · exact .cons (Evaluates.call (.cons (Evaluates.lookup reader) .nil) (shadow_returns heap address fields found)) .nil
+  · exact method_returns _ address (.scalar (.int 0)) shared _ changed
+      (by simpa only [Mutable.putField_lookup_other fields "read" "link" _ (by decide)] using linked)
+
+/-- Both complete calls retain the same shared result and argument-side mutation. -/
+theorem paired_invocations (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (shared : Mutable.Value)
+    (fields : List (String × Mutable.Value))
+    (found : logical[address]? = some (.instance classInfo.1 "Reader" fields))
+    (absent : fields.lookup "read" = none) (linked : fields.lookup "link" = some shared) :
+    let mapped := fields.map fun field => (field.1, relocateValue rename field.2)
+    ReturnsValue Probe.module "invoke" [.ref address] logical shared (afterShadow logical address fields) ∧
+      ReturnsValue Probe.module "invoke" [.ref (rename address)] physical (relocateValue rename shared)
+        (afterShadow physical (rename address) mapped) ∧
+      ExecutionLayout (afterShadow logical address fields) (afterShadow physical (rename address) mapped) rename := by
+  dsimp only
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  have otherAbsent := fields_lookup_relocate rename fields "read"
+  have otherLinked := fields_lookup_relocate rename fields "link"
+  rw [absent] at otherAbsent
+  rw [linked] at otherLinked
+  have inside : (Mutable.Value.ref address).edge.Within logical.length := (List.getElem?_eq_some_iff.mp found).1
+  obtain ⟨other, paired, retained, _, _⟩ := layout.writeField (.ref address) "read" (.scalar (.int 0))
+    inside (by trivial) _ _ (Mutable.writeField_result found (by simp))
+  have expected := Mutable.writeField_result (value := .scalar (.int 0)) moved (name := "read") (by simp)
+  change Mutable.writeField (.ref (rename address)) "read" (.scalar (.int 0)) physical =
+    some (.ok (.scalar .none), other) at paired
+  have same : afterShadow physical (rename address)
+      (fields.map fun field => (field.1, relocateValue rename field.2)) = other := by
+    simpa only [expected, Option.map_some, Option.some.injEq, afterShadow] using
+      congrArg (Option.map Prod.snd) paired
+  rw [← same] at retained
+  exact ⟨invoke_returns logical address shared fields found absent linked,
+    invoke_returns physical (rename address) (relocateValue rename shared) _ moved otherAbsent otherLinked, retained⟩
+
+/-- The source-method rule derives the other machine step under arbitrary saved callers. -/
+theorem paired_binding (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (logicalAnchors physicalAnchors address : Nat)
+    (fields : List (String × Mutable.Value)) (expressions : List Expr) (env : HeapCalls.Env)
+    (stack : List Frame) (globals : Mutable.Globals)
+    (found : logical[address]? = some (.instance classInfo.1 "Reader" fields))
+    (absent : fields.lookup "read" = none) (envInside : EnvWithin logical.length env)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    HeapCalls.step Probe.module physicalAnchors
+        (relocateState rename physical ⟨.value (.ref address), .methodReceiver "read" expressions env :: stack, logical⟩)
+        (relocateGlobals rename globals) =
+      relocateStep rename physical physicalAnchors
+        (HeapCalls.step Probe.module logicalAnchors
+          ⟨.value (.ref address), .methodReceiver "read" expressions env :: stack, logical⟩ globals) ∧
+      StepWithin (HeapCalls.step Probe.module logicalAnchors
+        ⟨.value (.ref address), .methodReceiver "read" expressions env :: stack, logical⟩ globals) :=
+  step_source_methodReceiver_relocates Probe.module logical physical rename layout logicalAnchors physicalAnchors
+    (.ref address) "read" args body expressions env stack globals (List.getElem?_eq_some_iff.mp found).1
+    envInside stackInside globalsInside method_source
+    (method_bound logical address fields found absent)
+
+theorem shadowed_binding (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (stored : Mutable.Value) (found : heap[address]? = some (.instance classInfo.1 "Reader" fields))
+    (shadowed : fields.lookup "read" = some stored) :
+    bindMethod Probe.module (.ref address) "read" heap = some (.ok .notCallable, heap) := by
+  simp [bindMethod, found, instanceClass, source_class, shadowed]
+
+/-- Fields cannot bypass the nominal class-origin check. -/
+theorem wrong_origin (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (origin : String) (different : classInfo.1 ≠ origin)
+    (found : heap[address]? = some (.instance origin "Reader" fields)) :
+    getAttribute Probe.module (.ref address) "link" heap = none ∧
+      bindMethod Probe.module (.ref address) "read" heap = none := by
+  simp [getAttribute, bindMethod, found, instanceClass, source_class, different, Mutable.unsupported]
+
+theorem reverse_binding (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    bindMethod Probe.module (.ref address) "$formalsw.sort.reverse" heap = some (.ok (.sortReverse address), heap) := by
+  simp [bindMethod, found]
+
+end MachineAttributeExamples
+'''
+AUDITS = [
+    "MachineAttributeExamples.source_class", "MachineAttributeExamples.source_method",
+    "MachineAttributeExamples.source_shadow", "MachineAttributeExamples.source_invoke", "MachineAttributeExamples.method_source",
+    "MachineAttributeExamples.method_bound", "MachineAttributeExamples.method_returns",
+    "MachineAttributeExamples.shadow_returns", "MachineAttributeExamples.invoke_returns",
+    "MachineAttributeExamples.paired_invocations", "MachineAttributeExamples.paired_binding", "MachineAttributeExamples.shadowed_binding",
+    "MachineAttributeExamples.wrong_origin", "MachineAttributeExamples.reverse_binding",
+    "getAttribute_relocates", "getAttribute_readField", "step_attribute_relocates",
+    "bindMethod_scalar_relocates", "bindMethod_builtin_relocates", "bindMethod_ordinary_relocates",
+    "bindMethod_reverse", "bindMethod_relocates", "bindMethod_keeps_heap", "findFunctionIn_within",
+    "findClassBodyIn_within", "findClass_within",
+    "step_methodReceiver_relocates", "step_source_methodReceiver_relocates",
+    "step_attribute_expression_relocates", "step_augmentAttribute_relocates",
+]
+
+with project_temporary_directory(prefix="machine-attribute-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    reader = namespace["Reader"]()
+    reader.link = reader
+    assert namespace["invoke"](reader) is reader
+    assert reader.read == 0
+    reader.read = 7
+    try:
+        namespace["invoke"](reader)
+    except TypeError:
+        assert reader.read == 0  # Arguments still execute when a stored field is not callable.
+    else:
+        raise AssertionError("the second call must use the shadowing field")
+    missing = namespace["Reader"]()
+    try:
+        namespace["invoke"](missing)
+    except AttributeError:
+        assert missing.read == 0
+    else:
+        raise AssertionError("the bound method must propagate its missing-field error")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineAttributes\nimport lang.py.FormalSW.ClassCalls\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine attributes: aliases, captured methods, field shadowing, class origins; {len(AUDITS)} axiom audits passed")
