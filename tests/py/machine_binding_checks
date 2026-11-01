@@ -286,12 +286,51 @@ theorem append_then_unpack (logical physical : Mutable.Heap) (rename : Nat → N
     ⟨unpackInside.1, unpackInside.2,
       fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
 
+/-- Every loop acquisition consumes the mutation's proved output invariant. -/
+theorem append_then_loop_acquisition (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item value : Mutable.Value) (frame : Frame) (acquisition : LoopAcquisition frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (valueInside : value.edge.Within logical.length) (frameInside : FrameWithin logical.length frame)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout (after logical address items item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.value value, [frame], after logical address items item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.value value, [frame], after logical address items item⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have continuationInside : StateWithin ⟨.value value, [frame], after logical address items item⟩ := by
+    exact ⟨by simpa [after] using valueInside, by simpa [after] using frameInside⟩
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_loopAcquisition_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used value frame [] resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained acquisition
+    ⟨continuationInside.1, continuationInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
 end MachineBindingExamples
 '''
 AUDITS = ["MachineBindingExamples." + name for name in (
-    "direct_returns", "unpack_equiv", "append_then_unpack",
+    "direct_returns", "unpack_equiv", "append_then_unpack", "append_then_loop_acquisition",
     "prepare_returns", "source_finishes", "unpack_finishes", "answers_relocate", "paired_finishes",
 )] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "step_enumerate_source_preserves", "step_enumerate_start_preserves", "step_loopAcquisition_preserves",
     "step_unpack_preserves", "step_unpack_start_preserves", "step_assignment", "step_assignment_preserves",
     "step_for_unpack_dispatch", "step_for_unpack_relocates", "step_for_other_dispatch",
     "step_for_other_relocates", "step_for_relocates", "StateWithin.for_unpack",
@@ -302,7 +341,7 @@ AUDITS = ["MachineBindingExamples." + name for name in (
     "enumerateStart_relocate", "step_for_enumerate_relocates", "step_enumerate_source_relocates",
     "step_enumerate_start_relocates", "step_enumerate_loop_relocates", "StateWithin.for_enumerate",
     "StateWithin.enumerate_source", "StateWithin.enumerate_start", "StateWithin.enumerate_loop",
-)]
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_loopAcquisition_preserves"]
 
 with project_temporary_directory(prefix="machine-binding-") as temporary:
     directory = Path(temporary)
@@ -354,7 +393,7 @@ with project_temporary_directory(prefix="machine-binding-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineStatementInvariant\nimport lang.py.FormalSW.IteratorRules\n"
+    proof.write_text("import lang.py.FormalSW.MachineLoopAcquisition\nimport lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

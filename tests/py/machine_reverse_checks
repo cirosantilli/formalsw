@@ -125,7 +125,7 @@ AUDITS = ["MachineReverseExamples." + name for name in (
 )] + ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
     "RuntimeLayout.reversibleSequence", "reversibleSequence_keeps_heap", "reversibleSequence_sequence",
 )] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
-    "run_readonly_relocates", "run_readonly_within", "step_for_reversed_relocates",
+    "step_reverse_start_preserves", "run_readonly_relocates", "run_readonly_within", "step_for_reversed_relocates",
     "step_reverse_start_relocates", "step_reverse_loop_relocates", "StateWithin.for_reversed",
     "StateWithin.reverse_start", "StateWithin.reverse_loop",
 )]
@@ -155,7 +155,7 @@ with project_temporary_directory(prefix="machine-reverse-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineReverse\n"
+    proof.write_text("import lang.py.FormalSW.MachineLoopAcquisition\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

@@ -154,6 +154,7 @@ roots = [
   "lang.py.FormalSW.MachineRunInvariant",
   "lang.py.FormalSW.MachineConstructionInvariant",
   "lang.py.FormalSW.MachineLoopInvariant",
+  "lang.py.FormalSW.MachineLoopAcquisition",
   "lang.py.FormalSW.MachineExpressionInvariant",
   "lang.py.FormalSW.MachineGeneratorEntry",
   "lang.py.FormalSW.MachineGeneratorContinuation",
