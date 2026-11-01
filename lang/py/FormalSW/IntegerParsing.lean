@@ -126,6 +126,15 @@ end FormalSW.Py.Builtin.Int
 
 namespace FormalSW.PyAst.Calls
 
+/-- Parsing one ASCII decimal character yields its positional digit value. -/
+theorem integerConversion_digit (character : Char) (valid : character.isDigit) :
+    integerConversion [.string (String.singleton character)] =
+      some (.ok (.int (character.toNat - '0'.toNat : Nat))) := by
+  change integerConversion [.string (String.ofList [character])] = _
+  rw [integerConversion, Py.Builtin.Int.parseText_digits [character] (by simp)
+    (by intro digit member; simp only [List.mem_singleton] at member; subst digit; exact valid)]
+  simp [parsedInteger, Nat.ofDigitChars]
+
 theorem integerConversion_nat (n : Nat) :
     integerConversion [.string (toString n)] = some (.ok (.int n)) := by
   rw [integerConversion, Py.Builtin.Int.parseText_nat]
