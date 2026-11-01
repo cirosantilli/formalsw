@@ -17,12 +17,14 @@ toc::[]
 
 Install the formalsw Python library:
 
+[source,bash]
 ----
 pipx install formalsw
 ----
 
 Install Elan, Lean's version manager. On Linux:
 
+[source,bash]
 ----
 curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
 ----
@@ -31,6 +33,7 @@ Installation details for other systems: https://github.com/leanprover/elan
 
 Now test it on a hello world link:tests/py/range_sum.py[]:
 
+[source,bash]
 ----
 formalsw tests/py/range_sum.py
 ----
@@ -117,6 +120,7 @@ Here we are specifying:
 
 After this is specified, if you run:
 
+[source,bash]
 ----
 formalsw tmp.py
 ----
@@ -131,6 +135,7 @@ which is good because haven't proven what we said we wanted to prove yet!
 
 To create the required proofs, we must create a tmp.py.lean file containing the required theorems. The stubs can be generated automatically with:
 
+[source,bash]
 ----
 formalsw --stub tmp.py > tmp.py.lean
 ----
@@ -167,10 +172,11 @@ theorem sum_naive.«ReturnType» :
 end tmp
 ----
 
-Don't worry about understand it all. The important thing to note is how this file contains precise mathematical Lean statements of the things that we need to be proven: `Equiv`, and `Returns` and `ReturnType`.
+Don't worry about understanding it all. The important thing to note is how this file contains precise mathematical Lean statements of the things that we need to be proven: `Equiv`, and `Returns` and `ReturnType`.
 
 And now if we try again:
 
+[source,bash]
 ----
 formalsw tmp.py
 ----
@@ -213,16 +219,22 @@ Then you let the LLM loose, and so long as the LLM does not touch your .py sourc
 
 Once the proof is complete, when you run:
 
+[source,bash]
 ----
 formalsw tmp.py
 ----
 
-there's no output, which means that all proofs were verified!
+it will ouptut:
+
+----
+All 3 checks passed
+----
 
 You can check this with the following example contained in-tree:
 
 link:tests/py/range_sum.py[]
 
+[source,bash]
 ----
 formalsw tests/py/range_sum.py
 ----
@@ -358,8 +370,6 @@ The DSL specification is a magic custom and very simple language that allows spe
 
 The DSL gets converted to corresponding Lean code behind the scenes.
 
-Each construct below includes a raw Lean equivalent. `Returns`, `Halts`, `Equiv`, `EquivReturn`, and `ReturnType` quantify over every modeled argument value. `Throws` uses an existential input, while `Not` negates the whole proposition. The examples show explicit quantifiers; `./formalsw --stub file.py` prints the exact elaborated statement for a particular function, including its globals.
-
 ==== Py
 
 `Py` executes ordinary Python to prepare the evaluation environment for subsequent annotations. The language tag describes the setup language, independently of the language of the source being specified. It is not an assertion or a proof obligation. The current source frontend is Python.
@@ -463,7 +473,7 @@ This marker supports scalar `int`, `str`, and `bool` positional arguments (inclu
 
 ==== Halts
 
-`Halts` means that every modeled input finishes, either normally or by raising an exception. For example, link:tests/py/throws.py[`reject_odd`] has both `Halts` and `Throws`: all inputs terminate, and some inputs raise.
+`Halts` means that every modeled input finishes, either normally or by raising an exception. For example, link:tests/py/throws.py[`reject_odd` in tests/py/throws.py] has both `Halts` and `Throws`: all inputs terminate, and some inputs raise.
 
 For that function, the raw Lean equivalent is:
 
@@ -1575,7 +1585,7 @@ List, set, and dictionary comprehensions also accept scalar sets as their first 
 
 Dictionary comprehensions support the same range and sequence loops, filters, and local targets. Each key is evaluated before its value; hashing and insertion follow both evaluations. Duplicate keys retain their original position and representative while receiving the latest value, and values preserve shared references. `Evaluates.dict_comp_range`, `dict_comp_sequence`, and `BlockContinues.comprehension_store` compose source proofs. See link:tests/py/dictionary_comprehensions.py[] for an arbitrary-input proof and link:tests/py/comprehension_checks[] for Python comparisons covering scope, tuple keys, effects, and exceptions.
 
-Immediate `for key, value in mapping.items()` loops, including single-name and nested tuple/list targets, support dictionaries with builtin scalar and tuple keys in insertion order. Each step reads current values and preserves shared references; insertions raise `RuntimeError` on the next read, while early returns and breaks retain prior mutations. Stored builtin views, generator traversal of item views, and key deletion remain unsupported. Custom `items()` methods retain ordinary dispatch. `BlockReturns.for_dictionary_items`, `dictionary_items_step`, and `dictionary_items_done` compose source proofs. See link:tests/py/dictionary_items.py[] and link:tests/py/dictionary_items_checks[].
+Immediate `for key, value in mapping.items()` loops, including single-name and nested tuple/list targets, support dictionaries with builtin scalar and tuple keys in insertion order. Each step reads current values and preserves shared references; insertions raise `RuntimeError` on the next read, while early returns and breaks retain prior mutations. Fresh `items()` iterators also work in `sum` generators, including nested clauses. The first iterator is acquired before the start argument, and later clauses remain lazy. Stored builtin views and key deletion remain unsupported. Custom `items()` methods retain ordinary dispatch. `BlockReturns.for_dictionary_items`, `dictionary_items_step`, and `dictionary_items_done` compose source proofs. See link:tests/py/dictionary_items.py[], link:tests/py/dictionary_items_checks[], and link:tests/py/dictionary_items_sum_checks[]. The `Evaluates.sum_generator_items` rule connects a verified live cursor to the source sum expression.
 
 Fresh `zip(...)` calls are supported directly in loops, comprehensions, and generator sums over builtin sequences. Arguments evaluate before iterator validation; iteration reads live sequence contents, retains element identities, and stops at the shortest input. Stored zip iterators, range operands, and keyword arguments such as `strict` remain unsupported. `BlockReturns.for_zip`, `zip_step`, `zip_done`, and the corresponding comprehension rules compose proofs without a fuel bound. See link:tests/py/zip_calls.py[] for arbitrary-input proofs and link:tests/py/zip_checks[] for Python comparisons.
 
