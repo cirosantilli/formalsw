@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""
+Prove mutation-preserving iterator exhaustion and exception invariants.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Ending:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = self
+        raise StopIteration("done")
+
+def consume(iterator):
+    for value in iterator:
+        return value
+    else:
+        return iterator.link
+
+def direct(iterator):
+    iterator.link = iterator
+    return iterator
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+open IteratorCalls
+namespace MachineExceptionExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Ending").getD ("", [])
+def methodArgs : List Arg := [{name := "self", annotation := none}]
+def iterBody : List Stmt := [.return (.name "self")]
+def writeSelf : Stmt := .assign [.attribute (.name "self") "link"] (.name "self")
+def stopBody : List Stmt := [.raise (some (.call (.name "StopIteration") [.constant (.string "done")]))]
+def nextBody : List Stmt := writeSelf :: stopBody
+def args : List Arg := [{name := "iterator", annotation := none}]
+def loopBody : List Stmt := [.return (.name "value")]
+def otherwise : List Stmt := [.return (.attribute (.name "iterator") "link")]
+def consumeBody : List Stmt := [.forIn (.name "value") (.name "iterator") loopBody otherwise]
+def directBody : List Stmt :=
+  [.assign [.attribute (.name "iterator") "link"] (.name "iterator"), .return (.name "iterator")]
+def env (address : Nat) : HeapCalls.Env := HeapCalls.argumentEnv args [.ref address]
+def consumer (address : Nat) : Loop := ⟨"value", loopBody, otherwise, [], env address, []⟩
+def after (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :=
+  heap.set address (.instance classInfo.1 "Ending" (Mutable.putField fields "link" (.ref address)))
+def completion (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) : Mutable.Completion :=
+  ⟨.ok (.ref address), [], after heap address fields, heap.length⟩
+
+theorem source_class : Probe.module.findClass "Ending" = some classInfo := rfl
+theorem source_iter : findFunctionIn classInfo.2 "__iter__" = some (methodArgs, iterBody) := rfl
+theorem source_next : findFunctionIn classInfo.2 "__next__" = some (methodArgs, nextBody) := rfl
+theorem source_consume : findFunctionIn Probe.module.body "consume" = some (args, consumeBody) := rfl
+theorem source_direct : findFunctionIn Probe.module.body "direct" = some (args, directBody) := rfl
+
+theorem iter_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Ending" fields)) :
+    ProtocolCalls.iterMethod Probe.module (.ref address) heap =
+      some (.ok (.method (.ref address) methodArgs iterBody), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Ending"
+    "__iter__" fields classInfo.2 found source_class
+  simp only [source_iter, Option.map_some] at lookup
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Ending" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) methodArgs nextBody)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Ending"
+    "__next__" fields classInfo.2 found source_class
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem iter_returns (heap : Mutable.Heap) (address : Nat) :
+    MethodReturns Probe.module (.ref address) methodArgs iterBody [] heap (.ref address) heap := by
+  apply MethodReturns.of_body (completed := [.ref address]) rfl
+  exact BlockReturns.return_value (Evaluates.lookup (by simp [functionEnv, HeapCalls.argumentEnv, methodArgs]))
+
+/-- The method's actual exception carries the heap after the write. -/
+theorem next_stops (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Ending" fields)) (anchors : Nat) :
+    Finishes (HeapCalls.step Probe.module anchors)
+      ⟨.operation (.method (.ref address) methodArgs nextBody) [], [], heap⟩
+      (.ok ⟨.error ⟨"StopIteration", [.string "done"]⟩, [], after heap address fields, anchors⟩) := by
+  let localEnv := functionEnv methodArgs nextBody [.ref address] []
+  have self : localEnv "self" = some (.ref address) := by
+    simp [localEnv, HeapCalls.argumentEnv, methodArgs]
+  have written : BlockContinues Probe.module localEnv [writeSelf] heap localEnv (after heap address fields) :=
+    BlockContinues.setAttribute (Evaluates.lookup self) (Evaluates.lookup self)
+      (Mutable.writeField_result found (by simp))
+  apply Finishes.next (following := ⟨.block nextBody localEnv, [], heap⟩)
+    (by simp [HeapCalls.step, invokeMethod, completeArguments, methodArgs, executableBody, nextBody, writeSelf, stopBody, localEnv])
+  apply (written stopBody anchors []).finishes
+  exact .next rfl (.next rfl (.next rfl (.done (by
+    simp only [argumentsState]
+    simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, raiseException_result, exceptionArguments,
+      HeapCalls.done, protectGenerator, Calls.generatorException]))))
+
+theorem consume_finishes (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Ending" fields)) (choices : ChoiceSchedule) :
+    ((IteratorCalls.call Probe.module "consume" [.ref address] heap).run choices).Finishes (completion heap address fields) := by
+  have instanceFound : isInstance heap (.ref address) = true := by simp [isInstance, found]
+  have looked : env address "iterator" = some (.ref address) := by simp [env, HeapCalls.argumentEnv, args]
+  obtain ⟨acquiredUsed, acquired⟩ := for_instance (loop := consumer address) (resumes := [])
+    (anchors := heap.length) (choices := choices) (used := 0) (globals := [])
+    (source := .name "iterator") (by intros; intro impossible; cases impossible)
+    (Evaluates.lookup looked) instanceFound (iter_bound heap address fields found)
+    (OperationCompletes.of_method (iter_returns heap address)) (next_bound heap address fields found)
+  have stopped : OperationCompletes Probe.module choices acquiredUsed (.method (.ref address) methodArgs nextBody)
+      heap (.error ⟨"StopIteration", [.string "done"]⟩) (after heap address fields) :=
+    OperationCompletes.of_heap (next_stops heap address fields found) (by simp)
+  obtain ⟨advancedUsed, advanced⟩ := advance_exhausted (loop := consumer address) (resumes := [])
+    (anchors := heap.length) (choices := choices) (used := acquiredUsed) (globals := []) instanceFound
+    (next_bound heap address fields found) stopped
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have finalFound : (after heap address fields)[address]? =
+      some (.instance classInfo.1 "Ending" (Mutable.putField fields "link" (.ref address))) := by simp [after, bounded]
+  have returned : BlockReturns Probe.module (env address) otherwise (after heap address fields)
+      (.ref address) (after heap address fields) := by
+    apply BlockReturns.return_value
+    apply Evaluates.field (Evaluates.lookup looked)
+    simp [getAttribute, finalFound, instanceClass, source_class, Mutable.putField_lookup]
+  have entry : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.call "consume") [.ref address], [], heap⟩ ⟨.block consumeBody (env address), [], heap⟩ :=
+    .next (by simp [HeapCalls.step, source_consume, completeArguments, args, functionEnv, env, consumeBody, executableBody]) .refl
+  change Finishes (IteratorCalls.step Probe.module heap.length choices)
+    (.running ⟨⟨.operation (.call "consume") [.ref address], [], heap⟩, 0⟩ []) (.ok (completion heap address fields))
+  apply (IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) entry []).finishes
+  apply acquired.finishes
+  apply advanced.finishes
+  apply (IteratorCalls.Reaches.of_heap (choices := choices) (used := advancedUsed) (returned heap.length []) []).finishes
+  exact .next (core_done rfl rfl) (.done rfl)
+
+theorem direct_finishes (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Ending" fields)) (choices : ChoiceSchedule) :
+    ((IteratorCalls.call Probe.module "direct" [.ref address] heap).run choices).Finishes (completion heap address fields) := by
+  have returned : ReturnsValue Probe.module "direct" [.ref address] heap (.ref address) (after heap address fields) := by
+    apply BlockReturns.function source_direct (completed := [.ref address]) rfl
+    apply BlockContinues.returns (body := [.assign [.attribute (.name "iterator") "link"] (.name "iterator")])
+      (middleHeap := after heap address fields)
+    · apply BlockContinues.setAttribute (Evaluates.lookup rfl) (Evaluates.lookup rfl)
+      exact Mutable.writeField_result found (by simp)
+    · exact BlockReturns.return_value (Evaluates.lookup rfl)
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+  exact reached.finishes (.next (core_done rfl rfl) (.done rfl))
+
+theorem consume_equiv_direct (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Ending" fields)) :
+    (IteratorCalls.call Probe.module "consume" [.ref address] heap).Equiv
+      (IteratorCalls.call Probe.module "direct" [.ref address] heap) := by
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (consume_finishes heap address fields found leftChoices)
+    (direct_finishes heap address fields found rightChoices) (Or.inl rfl)
+
+
+/-- The write's proved output layout feeds the actual exception step under saved consumers. -/
+theorem write_then_raise (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (fields : List (String × Mutable.Value))
+    (typeName : String) (values : List Mutable.Value) (used : Nat) (choices : ChoiceSchedule)
+    (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.instance classInfo.1 "Ending" fields))
+    (valuesInside : ∀ value ∈ values, value.edge.Within logical.length)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (after logical address fields) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.setField "link" (.ref address)) [.ref address], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address fields⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address fields) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.operation (.raiseException typeName) values, [], after logical address fields⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.operation (.raiseException typeName) values, [], after logical address fields⟩, used⟩ resumes))) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have writeInside : StateWithin ⟨.operation (.setField "link" (.ref address)) [.ref address], [], logical⟩ :=
+    ⟨⟨bounded, by simpa using bounded⟩, by simp⟩
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_setField_preserves Probe.module logical physical rename logical.length physical.length
+    (.ref address) (.ref address) "link" [] [] layout writeInside globalsInside
+  have actual : HeapCalls.step Probe.module logical.length
+      ⟨.operation (.setField "link" (.ref address)) [.ref address], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address fields⟩ := by
+    have written := Mutable.writeField_result (value := .ref address) found (name := "link") (by simp)
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, written, after]
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, _, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have inside : StateWithin ⟨.operation (.raiseException typeName) values, [], after logical address fields⟩ := by
+    exact ⟨⟨by simp [OperationWithin], by simpa [after] using valuesInside⟩, by simp⟩
+  have raw := step_raiseException_preserves Probe.module (after logical address fields) other nextMap
+    logical.length physical.length typeName values [] [] retained (by simp) nextGlobals
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.operation (.raiseException typeName) values, [], after logical address fields⟩, used⟩ other nextMap
+    logical.length physical.length [] retained inside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨inside.1, inside.2, by simpa [after] using saved⟩ rfl wrapped
+
+theorem generator_stop (heap : Mutable.Heap) (anchors : Nat) (values : List Constant) (stack : List Frame) :
+    HeapCalls.step Probe.module anchors
+      ⟨.operation (.raiseException "StopIteration") (values.map Mutable.Value.scalar), .generatorEnd :: stack, heap⟩ =
+      .done (.ok ⟨.error ⟨"RuntimeError", []⟩, [], heap, anchors⟩) := by
+  rw [step_raise_scalars]
+  simp [Calls.generatorException, Frame.inGenerator]
+
+theorem reference_payload (heap : Mutable.Heap) (anchors address : Nat) (typeName : String) (stack : List Frame) :
+    HeapCalls.step Probe.module anchors ⟨.operation (.raiseException typeName) [.ref address], stack, heap⟩ = .unsupported := by
+  simp [HeapCalls.step, result, HeapCalls.run, raiseException_result, exceptionArguments]
+
+end MachineExceptionExamples
+'''
+AUDITS = [
+    "MachineExceptionExamples.source_class", "MachineExceptionExamples.source_iter", "MachineExceptionExamples.source_next",
+    "MachineExceptionExamples.source_consume", "MachineExceptionExamples.source_direct",
+    "MachineExceptionExamples.iter_bound", "MachineExceptionExamples.next_bound", "MachineExceptionExamples.iter_returns",
+    "MachineExceptionExamples.next_stops", "MachineExceptionExamples.consume_finishes",
+    "MachineExceptionExamples.direct_finishes", "MachineExceptionExamples.consume_equiv_direct",
+    "exceptionArguments_relocates", "exceptionArguments_eval", "raiseException_result", "step_raiseException_preserves",
+    "step_raise_call_preserves", "step_raise_name_preserves", "step_assert_preserves", "step_assertion_preserves",
+    "step_assertionMessage_preserves",
+    "exceptionArguments_scalars", "step_raise_scalars", "MachineExceptionExamples.write_then_raise",
+    "MachineExceptionExamples.generator_stop", "MachineExceptionExamples.reference_payload",
+]
+
+with project_temporary_directory(prefix="machine-exception-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("consume", "direct"):
+        iterator = namespace["Ending"]()
+        iterator.cycle = iterator
+        iterator.link = object()
+        iterator.__iter__ = None
+        iterator.__next__ = None
+        assert namespace[name](iterator) is iterator
+        assert iterator.link is iterator.cycle is iterator
+    iterator = namespace["Ending"]()
+    try:
+        next(iterator)
+    except StopIteration as error:
+        assert error.args == ("done",) and iterator.link is iterator
+    else:
+        raise AssertionError("iterator did not exhaust")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineExceptionInvariant\nimport lang.py.FormalSW.IteratorRules\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine exceptions: mutation, exhaustion, loop else, and source equivalence; {len(AUDITS)} axiom audits passed")
+
