@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""
+Check the guaranteed-equivalence boundary for caller-controlled set choices.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Selector:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        for flag in self.flags:
+            if flag:
+                return "123"
+            raise ValueError()
+        raise StopIteration()
+
+def first(iterator):
+    for value in iterator:
+        return value
+'''
+PROOF = r'''
+
+open FormalSW.PyAst HeapCalls IteratorCalls
+namespace IteratorChoiceExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Selector").getD ("", [])
+def methodArgs : List Arg := [{name := "self", annotation := none}]
+def iterBody : List Stmt := [.return (.name "self")]
+def yesBody : List Stmt := [.return (.constant (.string "123"))]
+def noBody : List Stmt := [.raise (some (.call (.name "ValueError") []))]
+def chooseBody : List Stmt := [.ifThen (.name "flag") yesBody []] ++ noBody
+def stopBody : List Stmt := [.raise (some (.call (.name "StopIteration") []))]
+def nextBody : List Stmt := [.forIn (.name "flag") (.attribute (.name "self") "flags") chooseBody []] ++ stopBody
+def args : List Arg := [{name := "iterator", annotation := none}]
+def loopBody : List Stmt := [.return (.name "value")]
+def firstBody : List Stmt := [.forIn (.name "value") (.name "iterator") loopBody []]
+def env (address : Nat) : HeapCalls.Env := HeapCalls.argumentEnv args [.ref address]
+def consumer (address : Nat) : Loop := ⟨"value", loopBody, [], [], env address, []⟩
+def methodEnv (address : Nat) := functionEnv methodArgs nextBody [.ref address] []
+def flags : List Constant := [.bool false, .bool true]
+def choices (flag : Bool) : ChoiceSchedule := fun _ => if flag then 1 else 0
+
+theorem source_class : Probe.module.findClass "Selector" = some classInfo := rfl
+theorem source_iter : findFunctionIn classInfo.2 "__iter__" = some (methodArgs, iterBody) := rfl
+theorem source_next : findFunctionIn classInfo.2 "__next__" = some (methodArgs, nextBody) := rfl
+theorem source_first : findFunctionIn Probe.module.body "first" = some (args, firstBody) := rfl
+theorem iter_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields)) :
+    ProtocolCalls.iterMethod Probe.module (.ref address) heap =
+      some (.ok (.method (.ref address) methodArgs iterBody), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Selector"
+    "__iter__" fields classInfo.2 found source_class
+  simp only [source_iter, Option.map_some] at lookup
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) methodArgs nextBody)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1 "Selector"
+    "__next__" fields classInfo.2 found source_class
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem iter_returns (heap : Mutable.Heap) (address : Nat) :
+    MethodReturns Probe.module (.ref address) methodArgs iterBody [] heap (.ref address) heap := by
+  apply MethodReturns.of_body (completed := [.ref address]) (by rfl)
+  exact BlockReturns.return_value (Evaluates.lookup (by simp [functionEnv, HeapCalls.argumentEnv, methodArgs]))
+
+
+theorem flags_read (heap : Mutable.Heap) (address flagAddress : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields))
+    (field : fields.lookup "flags" = some (.ref flagAddress)) :
+    Evaluates Probe.module (methodEnv address) (.attribute (.name "self") "flags")
+      heap (.ref flagAddress) heap := by
+  intro anchors stack
+  apply HeapCalls.Reaches.next rfl
+  apply (Evaluates.lookup (show methodEnv address "self" = some (.ref address) from by rfl) anchors _).trans
+  exact .next (by simp [HeapCalls.step, result, HeapCalls.run, getAttribute, Mutable.eval_bind,
+    found, instanceClass, source_class, field, protectGenerator]) .refl
+
+theorem method_cursor (heap : Mutable.Heap) (address flagAddress : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields))
+    (field : fields.lookup "flags" = some (.ref flagAddress))
+    (stored : heap[flagAddress]? = some (.set flags)) (schedule : ChoiceSchedule) (used anchors : Nat) :
+    SetCalls.Reaches schedule Probe.module anchors
+      ⟨⟨.operation (.method (.ref address) methodArgs nextBody) [], [], heap⟩, used⟩
+      ⟨⟨.block (.setStepLoop "flag" flagAddress flags flags chooseBody [] :: stopBody)
+        (methodEnv address), [], heap⟩, used⟩ := by
+  apply SetCalls.Reaches.next (following := ⟨⟨.block nextBody (methodEnv address), [], heap⟩, used⟩)
+    (by rfl)
+  apply SetCalls.Reaches.next rfl
+  apply (SetCalls.Reaches.of_heap (flags_read heap address flagAddress fields found field anchors _) schedule used).trans
+  exact .next (by simp [SetCalls.step, HeapCalls.step, HeapCalls.run, Mutable.sequence,
+    stored, SetCalls.iteratorStep, Mutable.unsupported]) .refl
+
+def remainder (flag : Bool) : List Constant := if flag then [.bool false] else [.bool true]
+def continuation (flagAddress : Nat) (flag : Bool) : List Stmt :=
+  .setStepLoop "flag" flagAddress flags (remainder flag) chooseBody [] :: stopBody
+
+theorem select_flag (heap : Mutable.Heap) (flagAddress anchors used : Nat) (locals : HeapCalls.Env)
+    (stored : heap[flagAddress]? = some (.set flags)) (flag : Bool) :
+    SetCalls.Reaches (choices flag) Probe.module anchors
+      ⟨⟨.block (.setStepLoop "flag" flagAddress flags flags chooseBody [] :: stopBody) locals, [], heap⟩, used⟩
+      ⟨⟨.block (chooseBody ++ continuation flagAddress flag) (setLocal locals "flag" (.scalar (.bool flag))),
+        [], heap⟩, used + 1⟩ := by
+  apply SetCalls.Reaches.next (following := ⟨⟨.block (chooseBody ++ continuation flagAddress flag)
+    (setLocal locals "flag" (.scalar (.bool flag))), [], heap⟩, used + 1⟩)
+  · cases flag <;> simp [SetCalls.step, HeapCalls.step, SetCalls.iteratorStep, stored,
+      flags, choices, remainder, continuation, chooseBody, yesBody, noBody,
+      Calls.loopContinuation, Calls.loopControl, Calls.loopControlStmt]
+  · exact .refl
+
+theorem chosen_returns (heap : Mutable.Heap) (locals : HeapCalls.Env) (following : List Stmt) :
+    BlockReturns Probe.module (setLocal locals "flag" (.scalar (.bool true)))
+      (chooseBody ++ following) heap (.scalar (.string "123")) heap := by
+  apply BlockReturns.branch (value := .scalar (.bool true)) (flag := true) (Evaluates.lookup (by simp [setLocal])) rfl
+  exact BlockReturns.return_value Evaluates.constant
+
+theorem chosen_throws (heap : Mutable.Heap) (locals : HeapCalls.Env) (following : List Stmt) (anchors : Nat) :
+    Finishes (HeapCalls.step Probe.module anchors)
+      ⟨.block (chooseBody ++ following) (setLocal locals "flag" (.scalar (.bool false))), [], heap⟩
+      (.ok ⟨.error ⟨"ValueError", []⟩, [], heap, anchors⟩) := by
+  have branch : HeapCalls.Reaches Probe.module anchors
+      ⟨.block (chooseBody ++ following) (setLocal locals "flag" (.scalar (.bool false))), [], heap⟩
+      ⟨.block (noBody ++ following) (setLocal locals "flag" (.scalar (.bool false))), [], heap⟩ := by
+    apply HeapCalls.Reaches.next rfl
+    apply (Evaluates.lookup (show setLocal locals "flag" (.scalar (.bool false)) "flag" =
+      some (.scalar (.bool false)) from by simp [setLocal]) anchors _).trans
+    exact .next rfl .refl
+  exact branch.finishes (.next rfl (.done rfl))
+
+theorem next_returns (heap : Mutable.Heap) (address flagAddress : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields))
+    (field : fields.lookup "flags" = some (.ref flagAddress))
+    (stored : heap[flagAddress]? = some (.set flags)) (used : Nat) :
+    OperationCompletes Probe.module (choices true) used (.method (.ref address) methodArgs nextBody)
+      heap (.ok (.scalar (.string "123"))) heap := by
+  intro anchors resumes
+  have entry := method_cursor heap address flagAddress fields found field stored (choices true) used anchors
+  have selected := select_flag heap flagAddress anchors used (methodEnv address) stored true
+  have returned := SetCalls.Reaches.of_heap (chosen_returns heap (methodEnv address)
+    (continuation flagAddress true) anchors []) (choices true) (used + 1)
+  exact ⟨used + 1, (IteratorCalls.Reaches.of_set ((entry.trans selected).trans returned) resumes).trans
+    (.next (core_done rfl rfl) .refl)⟩
+
+theorem next_throws (heap : Mutable.Heap) (address flagAddress : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields))
+    (field : fields.lookup "flags" = some (.ref flagAddress))
+    (stored : heap[flagAddress]? = some (.set flags)) (used : Nat) :
+    OperationCompletes Probe.module (choices false) used (.method (.ref address) methodArgs nextBody)
+      heap (.error ⟨"ValueError", []⟩) heap := by
+  intro anchors resumes
+  have entry := method_cursor heap address flagAddress fields found field stored (choices false) used anchors
+  have selected := select_flag heap flagAddress anchors used (methodEnv address) stored false
+  have thrown := SetCalls.finishes_of_heap (chosen_throws heap (methodEnv address)
+    (continuation flagAddress false) anchors) (choices false) (used + 1)
+  exact completion_of_set ((entry.trans selected).finishes thrown) (by intro c same; cases same; simp) resumes
+
+theorem first_acquires (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields)) (schedule : ChoiceSchedule) :
+    ∃ used, IteratorCalls.Reaches Probe.module heap.length schedule []
+      (.running ⟨⟨.operation (.call "first") [.ref address], [], heap⟩, 0⟩ [])
+      (.running ⟨⟨.block [loopCode (consumer address) (.ref address)] (env address), [], heap⟩, used⟩ []) := by
+  have instanceFound : isInstance heap (.ref address) = true := by simp [isInstance, found]
+  have looked : env address "iterator" = some (.ref address) := by simp [env, HeapCalls.argumentEnv, args]
+  obtain ⟨used, acquired⟩ := for_instance (loop := consumer address) (resumes := [])
+    (anchors := heap.length) (choices := schedule) (used := 0) (globals := [])
+    (source := .name "iterator") (by intros; intro impossible; cases impossible)
+    (Evaluates.lookup looked) instanceFound (iter_bound heap address fields found)
+    (OperationCompletes.of_method (iter_returns heap address)) (next_bound heap address fields found)
+  have entry : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.call "first") [.ref address], [], heap⟩ ⟨.block firstBody (env address), [], heap⟩ :=
+    .next (by simp [HeapCalls.step, source_first, completeArguments, args, functionEnv, env, firstBody, executableBody]) .refl
+  exact ⟨used, (IteratorCalls.Reaches.of_heap (choices := schedule) (used := 0) entry []).trans acquired⟩
+
+theorem first_returns (heap : Mutable.Heap) (address flagAddress : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields))
+    (field : fields.lookup "flags" = some (.ref flagAddress))
+    (stored : heap[flagAddress]? = some (.set flags)) :
+    ((IteratorCalls.call Probe.module "first" [.ref address] heap).run (choices true)).Finishes
+      ⟨.ok (.scalar (.string "123")), [], heap, heap.length⟩ := by
+  obtain ⟨used, acquired⟩ := first_acquires heap address fields found (choices true)
+  have instanceFound : isInstance heap (.ref address) = true := by simp [isInstance, found]
+  obtain ⟨advancedUsed, advanced⟩ := advance_returns (loop := consumer address) (resumes := [])
+    (anchors := heap.length) (choices := choices true) (used := used) (globals := []) instanceFound
+    (next_bound heap address fields found) (next_returns heap address flagAddress fields found field stored used)
+  have returned : BlockReturns Probe.module (setLocal (env address) "value" (.scalar (.string "123")))
+      (loopBody ++ [Calls.loopContinuation loopBody (loopCode (consumer address) (.ref address))])
+      heap (.scalar (.string "123")) heap :=
+    BlockReturns.return_value (Evaluates.lookup (by simp [setLocal]))
+  have doneBody := IteratorCalls.Reaches.of_heap (choices := choices true) (used := advancedUsed)
+    (returned heap.length []) []
+  exact acquired.finishes (advanced.finishes (doneBody.finishes (.next (core_done rfl rfl) (.done rfl))))
+
+theorem first_throws (heap : Mutable.Heap) (address flagAddress : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields))
+    (field : fields.lookup "flags" = some (.ref flagAddress))
+    (stored : heap[flagAddress]? = some (.set flags)) :
+    ((IteratorCalls.call Probe.module "first" [.ref address] heap).run (choices false)).Finishes
+      ⟨.error ⟨"ValueError", []⟩, [], heap, heap.length⟩ := by
+  obtain ⟨used, acquired⟩ := first_acquires heap address fields found (choices false)
+  have instanceFound : isInstance heap (.ref address) = true := by simp [isInstance, found]
+  obtain ⟨advancedUsed, advanced⟩ := advance_failed (loop := consumer address) (resumes := [])
+    (anchors := heap.length) (choices := choices false) (used := used) (globals := []) instanceFound
+    (next_bound heap address fields found) (next_throws heap address flagAddress fields found field stored used)
+    (by simp)
+  exact acquired.finishes (advanced.finishes (.done rfl))
+
+theorem not_self_equiv (heap : Mutable.Heap) (address flagAddress : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Selector" fields))
+    (field : fields.lookup "flags" = some (.ref flagAddress))
+    (stored : heap[flagAddress]? = some (.set flags)) :
+    ¬ (IteratorCalls.call Probe.module "first" [.ref address] heap).Equiv
+      (IteratorCalls.call Probe.module "first" [.ref address] heap) := by
+  exact Mutable.CallFamily.not_equiv_of_finishes
+    (first_returns heap address flagAddress fields found field stored)
+    (first_throws heap address flagAddress fields found field stored)
+    (by simp [Mutable.Completion.Equivalent])
+
+def exampleHeap : Mutable.Heap := [.instance classInfo.1 "Selector" [("flags", .ref 1)], .set flags]
+
+theorem counterexample :
+    ¬ (IteratorCalls.call Probe.module "first" [.ref 0] exampleHeap).Equiv
+      (IteratorCalls.call Probe.module "first" [.ref 0] exampleHeap) :=
+  not_self_equiv exampleHeap 0 1 [("flags", .ref 1)] rfl rfl rfl
+
+end IteratorChoiceExamples
+'''
+
+AUDITS = ["FormalSW.PyAst.Mutable.CallFamily.not_equiv_of_finishes"] + [f"IteratorChoiceExamples.{name}" for name in (
+    "source_class", "source_iter", "source_next", "source_first", "iter_bound", "next_bound",
+    "iter_returns", "flags_read", "method_cursor", "select_flag", "chosen_returns", "chosen_throws",
+    "next_returns", "next_throws", "first_acquires", "first_returns", "first_throws",
+    "not_self_equiv", "counterexample",
+)]
+with project_temporary_directory(prefix="iterator-choice-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    # Lists exercise each modeled traversal order in CPython. The Lean proof
+    # uses the same set heap for both runs, with independent choice schedules.
+    iterator = namespace["Selector"]()
+    for flags in ([True, False], [False, True], {False, True}):
+        iterator.flags = flags
+        if next(iter(flags)):
+            assert namespace["first"](iterator) == "123"
+        else:
+            try:
+                namespace["first"](iterator)
+            except ValueError as error:
+                assert error.args == ()
+            else:
+                raise AssertionError("expected the false flag to raise ValueError")
+    iterator.flags = []
+    assert namespace["first"](iterator) is None
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorRules\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"iterator choices: complete source counterexample to guaranteed self-equivalence; {len(AUDITS)} axiom audits passed")

@@ -53,6 +53,17 @@ def ReturnType (family : CallFamily) (kind : String) : Prop :=
 
 def deterministic (call : Call) : CallFamily := ⟨fun _ => call⟩
 
+/-- Two completed runs with incompatible observations refute a guaranteed contract. -/
+theorem not_equiv_of_finishes {left right : CallFamily} {a b : ChoiceSchedule}
+    {x y : Completion} (finishedLeft : (left.run a).Finishes x)
+    (finishedRight : (right.run b).Finishes y) (different : ¬ x.Equivalent y) :
+    ¬ left.Equiv right := by
+  intro equivalent
+  obtain ⟨result, finished, same⟩ := (equivalent a b).1 x finishedLeft
+  have unique := Call.unique finished finishedRight
+  subst result
+  exact different same
+
 end CallFamily
 end Mutable
 end FormalSW.PyAst
