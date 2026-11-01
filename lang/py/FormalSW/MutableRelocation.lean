@@ -1,7 +1,7 @@
 import lang.py.FormalSW.MutableGlobals
 import lang.py.FormalSW.GraphRelocation
 
-/-! Compare freshly allocated tuple/list results through the actual snapshot comparator. -/
+/-! Compare relocated mutable states through the actual Python snapshot comparator. -/
 namespace FormalSW.PyAst.Mutable.Relocation
 open Graph.Relocation
 
@@ -62,6 +62,108 @@ theorem graphNodes_closed {heap : Heap} (valid : heap.Valid) :
       cases value : entry.2 with
       | scalar _ => trivial
       | ref _ => simpa only [value] using within
+
+/-- Relocation preserves scalar values and translates references. -/
+def relocateValue (rename : Nat → Nat) : Value → Value
+  | .scalar value => .scalar value
+  | .ref address => .ref (rename address)
+
+@[simp] theorem relocateValue_edge (rename : Nat → Nat) (value : Value) :
+    (relocateValue rename value).edge = relocateEdge rename value.edge := by
+  cases value <;> rfl
+
+/-- Snapshot-visible cells correspond; private objects may be interleaved.
+This relation alone does not establish equivalence of method execution. -/
+abbrev HeapLayout (logical physical : Heap) (rename : Nat → Nat) : Prop :=
+  Layout (logical.map graphNode) ⟨[], physical.map graphNode⟩ rename
+
+/-- Changes outside the represented cells preserve their complete graph layout. -/
+theorem HeapLayout.preserves {logical before after : Heap} {rename : Nat → Nat}
+    (layout : HeapLayout logical before rename)
+    (retained : ∀ index < logical.length, after[rename index]? = before[rename index]?) :
+    HeapLayout logical after rename := by
+  refine ⟨layout.injective, ?_⟩
+  intro index node found
+  have bound : index < logical.length := by
+    simpa only [List.length_map] using (List.getElem?_eq_some_iff.mp found).1
+  simpa only [List.getElem?_map, retained index bound] using layout.lookup index node found
+
+/-- Entry addresses stay fixed; later allocations may be interleaved with private objects.
+The logical heap describes the final observable state, including mutations to entry objects. -/
+structure CompletionLayout (logical physical : Completion) (rename : Nat → Nat) : Prop where
+  heap : HeapLayout logical.heap physical.heap rename
+  anchors : physical.anchors = logical.anchors
+  fixed : ∀ address < logical.anchors, rename address = address
+  globals : physical.globals = logical.globals.map (fun entry => (entry.1, relocateValue rename entry.2))
+  outcome : physical.outcome = logical.outcome.map (relocateValue rename)
+
+private def resultRoots : Except ExceptionObject Value → List Graph.Edge
+  | .ok value => [value.edge]
+  | .error _ => []
+
+private def completionRoots (completion : Completion) : List Graph.Edge :=
+  (List.range completion.anchors).map Graph.Edge.ref ++
+    completion.globals.map (fun entry => entry.2.edge) ++ resultRoots completion.outcome
+
+private def completionGraph (completion : Completion) : Graph.Heap :=
+  ⟨completionRoots completion, completion.heap.map graphNode⟩
+
+private theorem completion_snapshot (completion : Completion) :
+    completion.snapshot = (completionGraph completion).encode := by
+  rfl
+
+private theorem completion_roots {logical physical : Completion} {rename : Nat → Nat}
+    (layout : CompletionLayout logical physical rename) :
+    completionRoots physical = (completionRoots logical).map (relocateEdge rename) := by
+  have anchors : ((List.range logical.anchors).map Graph.Edge.ref).map (relocateEdge rename) =
+      (List.range logical.anchors).map Graph.Edge.ref := by
+    simp only [List.map_map, Function.comp_def]
+    apply List.map_congr_left
+    intro address member
+    simp [relocateEdge, layout.fixed address (List.mem_range.mp member)]
+  have outcome : resultRoots physical.outcome =
+      (resultRoots logical.outcome).map (relocateEdge rename) := by
+    rw [layout.outcome]
+    cases logical.outcome <;> simp [Except.map, resultRoots]
+  simp only [completionRoots, layout.anchors, layout.globals, List.map_append,
+    anchors, outcome, List.map_map, Function.comp_def, relocateValue_edge]
+
+/-- Two layouts of the same final state have equivalent observable results, even
+when entry objects point to fresh, shared, or cyclic allocations. -/
+theorem equivalent_completions (logical left right : Completion) (leftMap rightMap : Nat → Nat)
+    (leftLayout : CompletionLayout logical left leftMap)
+    (rightLayout : CompletionLayout logical right rightMap)
+    (valid : logical.heap.Valid) (anchorsBound : logical.anchors ≤ logical.heap.length)
+    (globalsWithin : ∀ entry ∈ logical.globals, entry.2.edge.Within logical.heap.length)
+    (resultWithin : ∀ value, logical.outcome = .ok value → value.edge.Within logical.heap.length) :
+    Completion.Equivalent left right := by
+  refine Or.inr ⟨leftLayout.anchors.trans rightLayout.anchors.symm, ?_, ?_, ?_⟩
+  · simp only [leftLayout.globals, rightLayout.globals, List.map_map, Function.comp_def]
+  · rw [leftLayout.outcome, rightLayout.outcome]
+    cases logical.outcome <;> simp [Except.map]
+  · rw [completion_snapshot, completion_snapshot]
+    apply equivalent_layouts (logical.heap.map graphNode) (completionGraph left) (completionGraph right)
+      (completionRoots logical)
+      ⟨leftLayout.heap.injective, leftLayout.heap.lookup⟩
+      ⟨rightLayout.heap.injective, rightLayout.heap.lookup⟩
+    · simpa only [List.length_map] using graphNodes_closed valid
+    · intro edge member
+      simp only [completionRoots, List.mem_append] at member
+      rcases member with (anchor | global) | result
+      · obtain ⟨address, bound, rfl⟩ := List.mem_map.mp anchor
+        have := List.mem_range.mp bound
+        simp only [Graph.Edge.Within, List.length_map]
+        omega
+      · obtain ⟨entry, present, rfl⟩ := List.mem_map.mp global
+        simpa only [List.length_map] using globalsWithin entry present
+      · cases outcome : logical.outcome with
+        | error error => simp [outcome, resultRoots] at result
+        | ok value =>
+          have same : edge = value.edge := by simpa [outcome, resultRoots] using result
+          subst edge
+          simpa only [List.length_map] using resultWithin value outcome
+    · exact completion_roots leftLayout
+    · exact completion_roots rightLayout
 
 /-- Unreachable allocations preserve results when every observed reference stays in the entry heap. -/
 theorem equivalent_allocations_of_closed (heap leftExtra rightExtra : Heap)
@@ -242,13 +344,6 @@ theorem equivalent_tuple_list_of_closed (original left right : Heap) (globals : 
         · simp only [Graph.Edge.Within, tail, List.length_append, List.length_cons, List.length_nil]; omega
       · obtain ⟨value, _, rfl⟩ := List.mem_map.mp edgeMember
         trivial
-  have ordered : ∀ index node, nodes.length ≤ index → (nodes ++ tail)[index]? = some node →
-      ∀ edge ∈ node.edges, edge.Within (index + 2) := by
-    intro index node fresh found edge member
-    have inside := closedAll node (List.mem_of_getElem? found) edge member
-    cases edge with
-    | scalar _ => trivial
-    | ref address => change address < index + 2; change address < (nodes ++ tail).length at inside; simp only [tail, List.length_append, List.length_cons, List.length_nil] at inside; omega
   have extraNext : ∀ edge ∈ extra, edge.Within (nodes.length + 1) := by
     intro edge member
     rcases List.mem_append.mp member with global | returned
@@ -288,7 +383,7 @@ theorem equivalent_tuple_list_of_closed (original left right : Heap) (globals : 
         (by simpa only [nodes, List.length_map] using globalsWithin entry member)
     simp only [extra, List.map_append, fixedRoots, fixedGlobals, List.map_cons, List.map_nil]
     simp [relocateEdge, resultMap, List.append_assoc]
-  have equivalent := equivalent_relocated nodes tail leftGraph rightGraph extra leftLayout rightLayout closed closedAll ordered extraClosed extraNext
+  have equivalent := equivalent_relocated nodes tail leftGraph rightGraph extra leftLayout rightLayout closedAll extraClosed
     (by simpa only [leftGraph, leftMap, nodes, List.length_map, List.append_assoc] using roots leftTuple leftList)
     (by simpa only [rightGraph, rightMap, nodes, List.length_map, List.append_assoc] using roots rightTuple rightList)
   exact equivalent

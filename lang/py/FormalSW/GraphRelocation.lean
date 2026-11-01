@@ -1,9 +1,13 @@
 import lang.py.FormalSW.GraphPreservation
 
-/-! The actual snapshot comparator's seen-reference search, with relocated addresses. -/
+/-! The actual snapshot comparator accepts arbitrary finite graphs under injective relocation. -/
 namespace FormalSW.PyAst.Graph.Relocation
 open DataProof
 attribute [local simp] Except.bind Except.map Except.pure Int.natCast_inj
+
+variable {env finalEnv : DataEnv} {name referenceName : String} {op : CmpOp}
+  {address cursor : Nat} {seen : List Nat} {left right : Data} {pending : List Edge}
+  {leftMap rightMap : Nat → Nat} {edge : Edge} {value : Constant}
 
 private def item (name : String) (index : Int) : Expr := .subscript (.name name) (.constant (.int index))
 private def indexed (name index : String) : Expr := .subscript (.name name) (.name index)
@@ -80,8 +84,8 @@ theorem seenLoop_source : extractedSeenLoop = some seenLoop := rfl
 def InjectiveBelow (rename : Nat → Nat) (limit : Nat) : Prop :=
   ∀ i < limit, ∀ j < limit, rename i = rename j → i = j
 
-def addresses (rename : Nat → Nat) (count : Nat) : List Data :=
-  (List.range count).map fun (index : Nat) => .scalar (.int (rename index))
+def addresses (rename : Nat → Nat) (seen : List Nat) : List Data :=
+  seen.map fun (index : Nat) => .scalar (.int (rename index))
 
 private theorem eval_compare_int (left : dataExpr env a = some (.ok (.scalar (.int x))))
     (right : dataExpr env b = some (.ok (.scalar (.int y)))) :
@@ -93,33 +97,33 @@ private theorem reference_index (found : env name = some (Edge.ref address).enco
   simp [bind, pure, dataExpr, item, found, Edge.encode]
 
 
-private theorem seen_index {count position : Nat} (rename : Nat → Nat)
-    (found : env name = some (.list (addresses rename count)))
-    (index : env "index" = some (.scalar (.int position))) (valid : position < count) :
-    dataExpr env (indexed name "index") = some (.ok (.scalar (.int (rename position)))) := by
-  apply DataProof.getItem (items := addresses rename count) (position := position)
+private theorem seen_index {seen : List Nat} {position : Nat} (rename : Nat → Nat)
+    (found : env name = some (.list (addresses rename seen)))
+    (index : env "index" = some (.scalar (.int position))) (valid : position < seen.length) :
+    dataExpr env (indexed name "index") = some (.ok (.scalar (.int (rename seen[position])))) := by
+  apply DataProof.getItem (items := addresses rename seen) (position := position)
     (by simp [dataExpr, found]) (by simp [dataExpr, index]) (by omega)
   simp [addresses, valid]
 
 /-- Searching the two relocated seen tables recognizes the same logical
 reference. Distinct logical addresses cannot be silently merged into aliases. -/
-theorem seen_result (env : DataEnv) (leftMap rightMap : Nat → Nat) (limit address count position : Nat)
+theorem seen_result (env : DataEnv) (leftMap rightMap : Nat → Nat) (limit address : Nat) (seen : List Nat) (position : Nat)
     (leftInjective : InjectiveBelow leftMap limit) (rightInjective : InjectiveBelow rightMap limit)
-    (addressBound : address < limit) (countBound : count ≤ limit)
+    (addressBound : address < limit) (seenBound : ∀ address ∈ seen, address < limit)
     (left : env "a" = some (Edge.ref (leftMap address)).encode)
     (right : env "b" = some (Edge.ref (rightMap address)).encode)
-    (seenLeft : env "seen_left" = some (.list (addresses leftMap count)))
-    (seenRight : env "seen_right" = some (.list (addresses rightMap count)))
+    (seenLeft : env "seen_left" = some (.list (addresses leftMap seen)))
+    (seenRight : env "seen_right" = some (.list (addresses rightMap seen)))
     (index : env "index" = some (.scalar (.int position)))
-    (found : env "found" = some (.scalar (.bool (decide (address < position)))))
-    (bounded : position ≤ count) :
+    (found : env "found" = some (.scalar (.bool (decide (address ∈ seen.take position)))))
+    (bounded : position ≤ seen.length) :
     ∃ finalEnv, BlockContinues env [seenLoop] finalEnv ∧
-      finalEnv "found" = some (.scalar (.bool (decide (address < count)))) ∧
+      finalEnv "found" = some (.scalar (.bool (decide (address ∈ seen)))) ∧
       ∀ name, name ≠ "index" → name ≠ "found" → finalEnv name = env name := by
-  by_cases valid : position < count
-  · let flagEnv := if address = position then env.set "found" (.scalar (.bool true)) else env
+  by_cases valid : position < seen.length
+  · let flagEnv := if address = seen[position] then env.set "found" (.scalar (.bool true)) else env
     have step : BlockContinues env [seenBody[0]'(by decide)] flagEnv := by
-      by_cases equal : address = position
+      by_cases equal : address = seen[position]
       · apply BlockContinues.branch (flag := true)
         · simpa [evalCmpOp, equal] using eval_compare_int (op := .eq) (reference_index left) (seen_index leftMap seenLeft index valid)
         · apply BlockContinues.append (body := [.ifThen (.compare (item "b" 1)
@@ -129,27 +133,28 @@ theorem seen_result (env : DataEnv) (leftMap rightMap : Nat → Nat) (limit addr
           · simpa only [flagEnv, if_pos equal] using
               (BlockContinues.assign (env := env) (name := "found")
                 (show dataExpr env (.constant (.bool true)) = some (.ok (.scalar (.bool true))) from by simp [dataExpr]))
-      · have differentLeft : leftMap address ≠ leftMap position := by
+      · have differentLeft : leftMap address ≠ leftMap seen[position] := by
           intro same
-          exact equal (leftInjective address addressBound position (by omega) same)
-        have differentRight : rightMap address ≠ rightMap position := by
+          exact equal (leftInjective address addressBound seen[position] (seenBound _ (List.getElem_mem valid)) same)
+        have differentRight : rightMap address ≠ rightMap seen[position] := by
           intro same
-          exact equal (rightInjective address addressBound position (by omega) same)
+          exact equal (rightInjective address addressBound seen[position] (seenBound _ (List.getElem_mem valid)) same)
         apply BlockContinues.branch (flag := false)
         · simpa [evalCmpOp, differentLeft] using eval_compare_int (op := .eq) (reference_index left) (seen_index leftMap seenLeft index valid)
         · simpa only [flagEnv, if_neg equal] using BlockContinues.branch (flag := false)
             (by simpa [evalCmpOp, differentRight] using eval_compare_int (op := .eq) (reference_index right) (seen_index rightMap seenRight index valid)) BlockContinues.nil
     have kept : ∀ name, name ≠ "found" → flagEnv name = env name := by
       intro name different
-      by_cases equal : address = position <;> simp [flagEnv, equal, DataEnv.set, different]
-    have nextFound : flagEnv "found" = some (.scalar (.bool (decide (address < position + 1)))) := by
-      by_cases equal : address = position
+      by_cases equal : address = seen[position] <;> simp [flagEnv, equal, DataEnv.set, different]
+    have nextFound : flagEnv "found" = some (.scalar (.bool (decide (address ∈ seen.take (position + 1))))) := by
+      rw [List.take_succ_eq_append_getElem valid]
+      simp only [List.mem_append, List.mem_singleton]
+      by_cases equal : address = seen[position]
       · simp [flagEnv, equal, DataEnv.set]
-      · have same : (address < position + 1) = (address < position) := propext (by omega)
-        simpa [flagEnv, equal, same] using found
+      · simpa [flagEnv, equal] using found
     let nextEnv := flagEnv.set "index" (.scalar (.int (position + 1 : Nat)))
-    obtain ⟨finalEnv, rest, result, unchanged⟩ := seen_result nextEnv leftMap rightMap limit address count (position + 1)
-      leftInjective rightInjective addressBound countBound
+    obtain ⟨finalEnv, rest, result, unchanged⟩ := seen_result nextEnv leftMap rightMap limit address seen (position + 1)
+      leftInjective rightInjective addressBound seenBound
       (by simpa [nextEnv, DataEnv.set, kept] using left)
       (by simpa [nextEnv, DataEnv.set, kept] using right)
       (by simpa [nextEnv, DataEnv.set, kept] using seenLeft)
@@ -171,10 +176,10 @@ theorem seen_result (env : DataEnv) (leftMap rightMap : Nat → Nat) (limit addr
     · apply BlockContinues.while_loop (flag := false)
       · simp [bind, pure, dataExpr, length, index, seenLeft, addresses, scalarCompare, evalCmpOp, valid]
       · exact BlockContinues.nil
-    · have same : position = count := by omega
+    · have same : position = seen.length := by omega
       simpa [same] using found
     · intros; rfl
-termination_by count - position
+termination_by seen.length - position
 
 
 /-- Logical reference indices are translated independently in the two heaps. -/
@@ -186,7 +191,7 @@ def encodedEdges (rename : Nat → Nat) (edges : List Edge) : List Data :=
   edges.map (fun edge => (relocateEdge rename edge).encode)
 
 structure LoopState (env : DataEnv) (left right : Data) (pending : List Edge)
-    (leftMap rightMap : Nat → Nat) (seen cursor : Nat) : Prop where
+    (leftMap rightMap : Nat → Nat) (seen : List Nat) (cursor : Nat) : Prop where
   leftValue : env "left" = some left
   rightValue : env "right" = some right
   pendingLeft : env "pending_left" = some (.list (encodedEdges leftMap pending))
@@ -196,7 +201,7 @@ structure LoopState (env : DataEnv) (left right : Data) (pending : List Edge)
   cursorValue : env "cursor" = some (.scalar (.int cursor))
 
 structure EdgeState (env : DataEnv) (left right : Data) (pending : List Edge)
-    (leftMap rightMap : Nat → Nat) (seen cursor : Nat) (edge : Edge) : Prop
+    (leftMap rightMap : Nat → Nat) (seen : List Nat) (cursor : Nat) (edge : Edge) : Prop
     extends LoopState env left right pending leftMap rightMap seen cursor where
   a : env "a" = some (relocateEdge leftMap edge).encode
   b : env "b" = some (relocateEdge rightMap edge).encode
@@ -235,10 +240,10 @@ theorem advance (state : LoopState env left right pending leftMap rightMap seen 
 
 theorem search_reference (state : EdgeState env left right pending leftMap rightMap seen cursor (.ref address))
     (limit : Nat) (leftInjective : InjectiveBelow leftMap limit) (rightInjective : InjectiveBelow rightMap limit)
-    (addressBound : address < limit) (seenBound : seen ≤ limit) :
+    (addressBound : address < limit) (seenBound : ∀ address ∈ seen, address < limit) :
     ∃ finalEnv, BlockContinues env (referenceBody.take 3) finalEnv ∧
       EdgeState finalEnv left right pending leftMap rightMap seen cursor (.ref address) ∧
-      finalEnv "found" = some (.scalar (.bool (decide (address < seen)))) := by
+      finalEnv "found" = some (.scalar (.bool (decide (address ∈ seen)))) := by
   let initial := (env.set "found" (.scalar (.bool false))).set "index" (.scalar (.int 0))
   obtain ⟨finalEnv, searched, found, preserved⟩ := seen_result initial leftMap rightMap limit address seen 0
     leftInjective rightInjective addressBound seenBound
@@ -279,11 +284,11 @@ theorem scalar_tail (state : EdgeState env left right pending leftMap rightMap s
 
 theorem known_tail (state : EdgeState env left right pending leftMap rightMap seen cursor (.ref address))
     (limit : Nat) (leftInjective : InjectiveBelow leftMap limit) (rightInjective : InjectiveBelow rightMap limit)
-    (seenBound : seen ≤ limit) (known : address < seen) :
+    (seenBound : ∀ address ∈ seen, address < limit) (known : address ∈ seen) :
     ∃ finalEnv, BlockContinues env (graphBody.drop 2) finalEnv ∧
       LoopState finalEnv left right pending leftMap rightMap seen (cursor + 1) := by
   obtain ⟨searchEnv, searched, searchState, found⟩ :=
-    search_reference state limit leftInjective rightInjective (by omega) seenBound
+    search_reference state limit leftInjective rightInjective (seenBound address known) seenBound
   obtain ⟨increment, finalState⟩ := advance searchState.toLoopState
   refine ⟨_, ?_, finalState⟩
   apply BlockContinues.append (body := [.ifThen (.compare (item "a" 0) [(.notEq, item "b" 0)]) falseReturn []])
@@ -311,13 +316,13 @@ private theorem node_read {heap : Heap} {node : Node} (root : env name = some he
 
 
 theorem expand_reference (left right : Heap) (node : Node)
-    (state : EdgeState env left.encode right.encode pending leftMap rightMap seen cursor (.ref seen))
-    (leftNode : left.nodes[leftMap seen]? = some (relocateNode leftMap node))
-    (rightNode : right.nodes[rightMap seen]? = some (relocateNode rightMap node)) :
+    (state : EdgeState env left.encode right.encode pending leftMap rightMap seen cursor (.ref address))
+    (leftNode : left.nodes[leftMap address]? = some (relocateNode leftMap node))
+    (rightNode : right.nodes[rightMap address]? = some (relocateNode rightMap node)) :
     ∃ finalEnv, BlockContinues env expandBody finalEnv ∧
-      LoopState finalEnv left.encode right.encode (pending ++ node.edges) leftMap rightMap (seen + 1) cursor := by
-  let e1 := env.set "seen_left" (.list (addresses leftMap (seen + 1)))
-  let e2 := e1.set "seen_right" (.list (addresses rightMap (seen + 1)))
+      LoopState finalEnv left.encode right.encode (pending ++ node.edges) leftMap rightMap (seen ++ [address]) cursor := by
+  let e1 := env.set "seen_left" (.list (addresses leftMap (seen ++ [address])))
+  let e2 := e1.set "seen_right" (.list (addresses rightMap (seen ++ [address])))
   let e3 := e2.set "node_left" (relocateNode leftMap node).encode
   let e4 := e3.set "node_right" (relocateNode rightMap node).encode
   let e5 := e4.set "pending_left" (.list (encodedEdges leftMap (pending ++ node.edges)))
@@ -325,11 +330,11 @@ theorem expand_reference (left right : Heap) (node : Node)
   have addLeft : BlockContinues env [expandBody[0]'(by decide)] e1 := by
     apply BlockContinues.assign
     simp [bind, pure, Functor.map, dataExpr, item, state.a, state.seenLeft, relocateEdge,
-      Edge.encode, addresses, List.range_succ, List.map_append]
+      Edge.encode, addresses, List.map_append]
   have addRight : BlockContinues e1 [expandBody[1]'(by decide)] e2 := by
     apply BlockContinues.assign
     simp [bind, pure, Functor.map, dataExpr, item, e1, DataEnv.set, state.b, state.seenRight,
-      relocateEdge, Edge.encode, addresses, List.range_succ, List.map_append]
+      relocateEdge, Edge.encode, addresses, List.map_append]
   have readLeft : BlockContinues e2 [expandBody[2]'(by decide)] e3 :=
     BlockContinues.assign (node_read (by simp [e2, e1, DataEnv.set, state.leftValue])
       (by simpa [e2, e1, DataEnv.set, relocateEdge] using state.a) leftNode)
@@ -364,15 +369,16 @@ theorem expand_reference (left right : Heap) (node : Node)
   · constructor <;> simp [e6, e5, e4, e3, e2, e1, DataEnv.set, state.leftValue, state.rightValue, state.cursorValue]
 
 theorem new_tail (left right : Heap) (node : Node)
-    (state : EdgeState env left.encode right.encode pending leftMap rightMap seen cursor (.ref seen))
+    (state : EdgeState env left.encode right.encode pending leftMap rightMap seen cursor (.ref address))
     (limit : Nat) (leftInjective : InjectiveBelow leftMap limit) (rightInjective : InjectiveBelow rightMap limit)
-    (fresh : seen < limit)
-    (leftNode : left.nodes[leftMap seen]? = some (relocateNode leftMap node))
-    (rightNode : right.nodes[rightMap seen]? = some (relocateNode rightMap node)) :
+    (addressBound : address < limit) (seenBound : ∀ address ∈ seen, address < limit)
+    (fresh : address ∉ seen)
+    (leftNode : left.nodes[leftMap address]? = some (relocateNode leftMap node))
+    (rightNode : right.nodes[rightMap address]? = some (relocateNode rightMap node)) :
     ∃ finalEnv, BlockContinues env (graphBody.drop 2) finalEnv ∧
-      LoopState finalEnv left.encode right.encode (pending ++ node.edges) leftMap rightMap (seen + 1) (cursor + 1) := by
+      LoopState finalEnv left.encode right.encode (pending ++ node.edges) leftMap rightMap (seen ++ [address]) (cursor + 1) := by
   obtain ⟨searchEnv, searched, searchState, found⟩ :=
-    search_reference state limit leftInjective rightInjective fresh (by omega)
+    search_reference state limit leftInjective rightInjective addressBound seenBound
   obtain ⟨expandedEnv, expanded, expandedState⟩ := expand_reference left right node searchState leftNode rightNode
   obtain ⟨increment, finalState⟩ := advance expandedState
   refine ⟨_, ?_, finalState⟩
@@ -384,7 +390,7 @@ theorem new_tail (left right : Heap) (node : Node)
     · simp [bind, pure, dataExpr, item, state.a, relocateEdge, Edge.encode, Data.equal, scalarCompare]
     · apply BlockContinues.append searched
       exact BlockContinues.branch (flag := true)
-        (by simp [bind, pure, dataExpr, found, Data.truth, scalarTruth]) expanded
+        (by simp [bind, pure, dataExpr, found, fresh, Data.truth, scalarTruth]) expanded
   · exact increment
 
 
@@ -394,12 +400,6 @@ structure Layout (logical : List Node) (physical : Heap) (rename : Nat → Nat) 
   lookup : ∀ index node, logical[index]? = some node →
     physical.nodes[rename index]? = some (relocateNode rename node)
 
-private theorem within_mono {edge : Edge} {small large : Nat}
-    (inside : edge.Within small) (bounded : small ≤ large) : edge.Within large := by
-  cases edge with
-  | scalar value => trivial
-  | ref address => change address < large; change address < small at inside; omega
-
 private theorem continue_loop (state : LoopState env left right pending leftMap rightMap seen cursor)
     (valid : cursor < pending.length) (body : BlockContinues env graphBody finalEnv)
     (rest : BlockReturns finalEnv [graphLoop, .return (.constant (.bool true))] (.scalar (.bool true))) :
@@ -408,18 +408,16 @@ private theorem continue_loop (state : LoopState env left right pending leftMap 
   · simp [bind, pure, dataExpr, length, state.cursorValue, state.pendingLeft, encodedEdges, scalarCompare, evalCmpOp, valid]
   · exact body.returns rest
 
-/-- After the caller's anchored prefix has been visited, fresh logical nodes
-may be discovered in order. Each newly queued reference is at most the next
-logical index; a finite node domain bounds all expansion. -/
-theorem ordered_run (logical : List Node) (left right : Heap) (firstFresh : Nat)
+/-- Each new logical node is expanded once. The remaining finite node domain
+bounds expansion even when discovery order is arbitrary and the graph is cyclic. -/
+theorem closed_run {env : DataEnv} {pending : List Edge} {seen : List Nat} {cursor : Nat}
+    (logical : List Node) (left right : Heap) (remaining : List Nat)
     (leftLayout : Layout logical left leftMap) (rightLayout : Layout logical right rightMap)
     (closed : ∀ node ∈ logical, ∀ edge ∈ node.edges, edge.Within logical.length)
-    (ordered : ∀ index node, firstFresh ≤ index → logical[index]? = some node →
-      ∀ edge ∈ node.edges, edge.Within (index + 2))
     (state : LoopState env left.encode right.encode pending leftMap rightMap seen cursor)
-    (seenAtLeast : firstFresh ≤ seen) (seenBound : seen ≤ logical.length)
-    (pendingClosed : ∀ edge ∈ pending, edge.Within logical.length)
-    (pendingNext : ∀ edge ∈ pending, edge.Within (seen + 1)) :
+    (seenBound : ∀ address ∈ seen, address < logical.length)
+    (covered : ∀ address < logical.length, address ∈ seen ∨ address ∈ remaining)
+    (pendingClosed : ∀ edge ∈ pending, edge.Within logical.length) :
     BlockReturns env [graphLoop, .return (.constant (.bool true))] (.scalar (.bool true)) := by
   by_cases valid : cursor < pending.length
   · have found : pending[cursor]? = some pending[cursor] := List.getElem?_eq_getElem valid
@@ -433,136 +431,78 @@ theorem ordered_run (logical : List Node) (left right : Heap) (firstFresh : Nat)
       have body : BlockContinues env graphBody finalEnv := by
         simpa only [List.take_append_drop] using read.append tail
       exact continue_loop state valid body
-        (ordered_run logical left right firstFresh leftLayout rightLayout closed ordered finalState
-          seenAtLeast seenBound pendingClosed pendingNext)
+        (closed_run logical left right remaining leftLayout rightLayout closed finalState
+          seenBound covered pendingClosed)
     | ref address =>
       simp only [edge] at read
-      by_cases known : address < seen
+      by_cases known : address ∈ seen
       · obtain ⟨finalEnv, tail, finalState⟩ := known_tail (address := address)
           (by simpa only [edge] using edgeState) logical.length leftLayout.injective rightLayout.injective seenBound known
         have body : BlockContinues env graphBody finalEnv := by
           simpa only [List.take_append_drop] using read.append tail
         exact continue_loop state valid body
-          (ordered_run logical left right firstFresh leftLayout rightLayout closed ordered finalState
-            seenAtLeast seenBound pendingClosed pendingNext)
-      · have near := pendingNext pending[cursor] member
-        simp only [edge, Edge.Within] at near
-        have same : address = seen := by omega
-        subst address
-        have fresh : seen < logical.length := by
+          (closed_run logical left right remaining leftLayout rightLayout closed finalState
+            seenBound covered pendingClosed)
+      · have addressBound : address < logical.length := by
           simpa only [edge, Edge.Within] using pendingClosed pending[cursor] member
-        let node := logical[seen]'fresh
-        have nodeFound : logical[seen]? = some node := List.getElem?_eq_getElem fresh
+        have unvisited : address ∈ remaining := (covered address addressBound).resolve_left known
+        have smaller : (remaining.erase address).length < remaining.length := by
+          rw [List.length_erase_of_mem unvisited]
+          have := List.length_pos_of_mem unvisited
+          omega
+        let node := logical[address]'addressBound
+        have nodeFound : logical[address]? = some node := List.getElem?_eq_getElem addressBound
         obtain ⟨finalEnv, tail, finalState⟩ := new_tail left right node
-          (by simpa only [edge] using edgeState) logical.length leftLayout.injective rightLayout.injective fresh
-          (leftLayout.lookup seen node nodeFound) (rightLayout.lookup seen node nodeFound)
+          (by simpa only [edge] using edgeState) logical.length leftLayout.injective rightLayout.injective
+          addressBound seenBound known
+          (leftLayout.lookup address node nodeFound) (rightLayout.lookup address node nodeFound)
         have body : BlockContinues env graphBody finalEnv := by
           simpa only [List.take_append_drop] using read.append tail
         apply continue_loop state valid body
-        apply ordered_run logical left right firstFresh leftLayout rightLayout closed ordered finalState (by omega) (by omega)
+        apply closed_run logical left right (remaining.erase address) leftLayout rightLayout closed finalState
+        · intro index inside
+          rcases List.mem_append.mp inside with old | new
+          · exact seenBound index old
+          · simpa only [List.mem_singleton.mp new] using addressBound
+        · intro index bound
+          by_cases equal : index = address
+          · exact Or.inl (by simp [equal])
+          · rcases covered index bound with old | unseen
+            · exact Or.inl (List.mem_append_left _ old)
+            · exact Or.inr ((List.mem_erase_of_ne equal).mpr unseen)
         · intro queued inside
           rcases List.mem_append.mp inside with old | new
           · exact pendingClosed queued old
           · exact closed node (List.mem_of_getElem? nodeFound) queued new
-        · intro queued inside
-          rcases List.mem_append.mp inside with old | new
-          · exact within_mono (pendingNext queued old) (by omega)
-          · simpa only [Nat.add_assoc] using ordered seen node seenAtLeast nodeFound queued new
   · apply BlockReturns.while_loop (flag := false)
     · simp [bind, pure, dataExpr, length, state.cursorValue, state.pendingLeft, encodedEdges, scalarCompare, evalCmpOp, valid]
     · exact BlockReturns.return_value (by simp [dataExpr])
-termination_by (logical.length - seen, pending.length - cursor)
+termination_by (remaining.length, pending.length - cursor)
 decreasing_by
   all_goals simp_wf
   · apply Prod.Lex.right; omega
   · apply Prod.Lex.right; omega
-  · apply Prod.Lex.left; omega
+  · exact Prod.Lex.left _ _ smaller
 
-
-/-- The anchored caller objects are visited first. Their internal references
-may form arbitrary shared or cyclic graphs, provided they remain in that prefix. -/
-theorem visit_prefix (original tail : List Node) (left right : Heap) (extra : List Edge) (cursor : Nat)
-    (leftLayout : Layout (original ++ tail) left leftMap) (rightLayout : Layout (original ++ tail) right rightMap)
-    (closedOriginal : ∀ node ∈ original, ∀ edge ∈ node.edges, edge.Within original.length)
-    (closed : ∀ node ∈ original ++ tail, ∀ edge ∈ node.edges, edge.Within (original ++ tail).length)
-    (ordered : ∀ index node, original.length ≤ index → (original ++ tail)[index]? = some node →
-      ∀ edge ∈ node.edges, edge.Within (index + 2))
-    (state : LoopState env left.encode right.encode ((List.range original.length).map Edge.ref ++ extra)
-      leftMap rightMap cursor cursor)
-    (extraClosed : ∀ edge ∈ extra, edge.Within (original ++ tail).length)
-    (extraNext : ∀ edge ∈ extra, edge.Within (original.length + 1)) (bounded : cursor ≤ original.length) :
-    BlockReturns env [graphLoop, .return (.constant (.bool true))] (.scalar (.bool true)) := by
-  by_cases valid : cursor < original.length
-  · have found : ((List.range original.length).map Edge.ref ++ extra)[cursor]? = some (.ref cursor) := by
-      simp [List.getElem?_append, valid]
-    obtain ⟨read, edgeState⟩ := read_edge state found
-    have nodeFound : (original ++ tail)[cursor]? = some original[cursor] := by
-      simp [List.getElem?_append, valid]
-    obtain ⟨finalEnv, bodyTail, finalState⟩ := new_tail left right original[cursor] edgeState
-      (original ++ tail).length leftLayout.injective rightLayout.injective
-      (by simp only [List.length_append]; omega)
-      (leftLayout.lookup cursor original[cursor] nodeFound) (rightLayout.lookup cursor original[cursor] nodeFound)
-    have body : BlockContinues env graphBody finalEnv := by
-      simpa only [List.take_append_drop] using read.append bodyTail
-    have rest := visit_prefix original tail left right (extra ++ original[cursor].edges) (cursor + 1)
-      leftLayout rightLayout closedOriginal closed ordered (by simpa only [List.append_assoc] using finalState)
-      (by
-        intro queued inside
-        rcases List.mem_append.mp inside with old | new
-        · exact extraClosed queued old
-        · exact within_mono (closedOriginal original[cursor] (List.getElem_mem valid) queued new)
-            (by simp only [List.length_append]; omega))
-      (by
-        intro queued inside
-        rcases List.mem_append.mp inside with old | new
-        · exact extraNext queued old
-        · exact within_mono (closedOriginal original[cursor] (List.getElem_mem valid) queued new) (by omega)) (by omega)
-    exact continue_loop state (by simp only [List.length_append, List.length_map, List.length_range]; omega) body rest
-  · have done : cursor = original.length := by omega
-    apply ordered_run (original ++ tail) left right original.length leftLayout rightLayout closed ordered state
-      (by omega) (by simp only [List.length_append]; omega)
-    · intro queued inside
-      rcases List.mem_append.mp inside with root | extra
-      · obtain ⟨index, indexMember, rfl⟩ := List.mem_map.mp root
-        have below := List.mem_range.mp indexMember
-        change index < (original ++ tail).length
-        simp only [List.length_append]
-        omega
-      · exact extraClosed queued extra
-    · intro queued inside
-      rcases List.mem_append.mp inside with root | extra
-      · obtain ⟨index, indexMember, rfl⟩ := List.mem_map.mp root
-        have below := List.mem_range.mp indexMember
-        change index < cursor + 1
-        omega
-      · simpa only [done] using extraNext queued extra
-termination_by original.length - cursor
-
-/-- The actual Python comparator accepts two physical representations of the
-same logical graph. Caller roots are retained; only fresh-node discovery order
-is restricted, and extra unreachable allocations are unrestricted. -/
-theorem equivalent_relocated (original tail : List Node) (left right : Heap) (extra : List Edge)
-    (leftLayout : Layout (original ++ tail) left leftMap) (rightLayout : Layout (original ++ tail) right rightMap)
-    (closedOriginal : ∀ node ∈ original, ∀ edge ∈ node.edges, edge.Within original.length)
-    (closed : ∀ node ∈ original ++ tail, ∀ edge ∈ node.edges, edge.Within (original ++ tail).length)
-    (ordered : ∀ index node, original.length ≤ index → (original ++ tail)[index]? = some node →
-      ∀ edge ∈ node.edges, edge.Within (index + 2))
-    (extraClosed : ∀ edge ∈ extra, edge.Within (original ++ tail).length)
-    (extraNext : ∀ edge ∈ extra, edge.Within (original.length + 1))
-    (leftRoots : left.roots = ((List.range original.length).map Edge.ref ++ extra).map (relocateEdge leftMap))
-    (rightRoots : right.roots = ((List.range original.length).map Edge.ref ++ extra).map (relocateEdge rightMap)) :
+/-- Arbitrary corresponding roots in two layouts of a finite closed graph are
+accepted by the actual Python comparator. Unreachable physical objects are irrelevant. -/
+theorem equivalent_layouts (logical : List Node) (left right : Heap) (roots : List Edge)
+    (leftLayout : Layout logical left leftMap) (rightLayout : Layout logical right rightMap)
+    (closed : ∀ node ∈ logical, ∀ edge ∈ node.edges, edge.Within logical.length)
+    (rootsClosed : ∀ edge ∈ roots, edge.Within logical.length)
+    (leftRoots : left.roots = roots.map (relocateEdge leftMap))
+    (rightRoots : right.roots = roots.map (relocateEdge rightMap)) :
     Equivalent left.encode right.encode := by
-  let roots := (List.range original.length).map Edge.ref ++ extra
   let env : DataEnv := fun name => [("left", left.encode), ("right", right.encode)].lookup name
   let e1 := env.set "pending_left" (.list (encodedEdges leftMap roots))
   let e2 := e1.set "pending_right" (.list (encodedEdges rightMap roots))
   let e3 := e2.set "seen_left" (.list [])
   let e4 := e3.set "seen_right" (.list [])
   let e5 := e4.set "cursor" (.scalar (.int 0))
-  have state : LoopState e5 left.encode right.encode roots leftMap rightMap 0 0 := by
+  have state : LoopState e5 left.encode right.encode roots leftMap rightMap [] 0 := by
     constructor <;> simp [e5, e4, e3, e2, e1, env, DataEnv.set, List.lookup, addresses]
-  have run := visit_prefix original tail left right extra 0 leftLayout rightLayout closedOriginal closed ordered
-    state extraClosed extraNext (by omega)
+  have run := closed_run logical left right (List.range logical.length) leftLayout rightLayout closed
+    state (by simp) (by simp) rootsClosed
   unfold Equivalent compare dataFunction
   rw [source_body]
   change BlockReturns env _ (.scalar (.bool true))
@@ -571,10 +511,10 @@ theorem equivalent_relocated (original tail : List Node) (left right : Heap) (ex
   · apply BlockReturns.branch (flag := false)
     · simp [bind, pure, Functor.map, dataExpr, env, List.lookup, Heap.encode, Data.typeName, Data.equal]
     · apply BlockReturns.assign (value := .list (encodedEdges leftMap roots))
-      · simp [bind, pure, dataExpr, item, env, List.lookup, Heap.encode, leftRoots, roots,
+      · simp [bind, pure, dataExpr, item, env, List.lookup, Heap.encode, leftRoots,
           encodedEdges, List.map_map, Function.comp_def]
       · apply BlockReturns.assign (value := .list (encodedEdges rightMap roots))
-        · simp [bind, pure, dataExpr, item, env, List.lookup, DataEnv.set, Heap.encode, rightRoots, roots,
+        · simp [bind, pure, dataExpr, item, env, List.lookup, DataEnv.set, Heap.encode, rightRoots,
             encodedEdges, List.map_map, Function.comp_def]
         · apply BlockReturns.branch (flag := false)
           · simp [bind, pure, dataExpr, length, DataEnv.set, Data.equal_self, encodedEdges]
@@ -582,5 +522,23 @@ theorem equivalent_relocated (original tail : List Node) (left right : Heap) (ex
             apply BlockReturns.assign (value := .list []) (by simp [pure, Functor.map, dataExpr])
             apply BlockReturns.assign (value := .scalar (.int 0)) (by simp [dataExpr])
             exact run
+
+/-- Anchored caller objects may reference any logical node, including fresh objects. -/
+theorem equivalent_relocated (original tail : List Node) (left right : Heap) (extra : List Edge)
+    (leftLayout : Layout (original ++ tail) left leftMap)
+    (rightLayout : Layout (original ++ tail) right rightMap)
+    (closed : ∀ node ∈ original ++ tail, ∀ edge ∈ node.edges, edge.Within (original ++ tail).length)
+    (extraClosed : ∀ edge ∈ extra, edge.Within (original ++ tail).length)
+    (leftRoots : left.roots = ((List.range original.length).map Edge.ref ++ extra).map (relocateEdge leftMap))
+    (rightRoots : right.roots = ((List.range original.length).map Edge.ref ++ extra).map (relocateEdge rightMap)) :
+    Equivalent left.encode right.encode := by
+  apply equivalent_layouts (original ++ tail) left right _ leftLayout rightLayout closed _ leftRoots rightRoots
+  intro edge member
+  rcases List.mem_append.mp member with anchor | added
+  · obtain ⟨index, bound, rfl⟩ := List.mem_map.mp anchor
+    have := List.mem_range.mp bound
+    simp only [Edge.Within, List.length_append]
+    omega
+  · exact extraClosed edge added
 
 end FormalSW.PyAst.Graph.Relocation
