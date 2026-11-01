@@ -122,6 +122,7 @@ roots = [
   "lang.py.FormalSW.EvaluationRelocation",
   "lang.py.FormalSW.SequenceArithmeticRelocation",
   "lang.py.FormalSW.MachineBinary",
+  "lang.py.FormalSW.ListInplaceRelocation",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",

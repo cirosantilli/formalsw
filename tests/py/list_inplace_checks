@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+Prove augmented list updates preserve aliases and mutations before exceptions.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def grow(left, right, count):
+    left += right
+    left *= count
+    return left
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace ListInplaceExamples
+set_option Elab.async false
+
+def extended (heap : Mutable.Heap) (address : Nat) (items more : List Mutable.Value) :=
+  heap.set address (.list (items ++ more))
+def grown (heap : Mutable.Heap) (address : Nat) (items more : List Mutable.Value) (number : Int) :=
+  (extended heap address items more).set address (.list (List.replicate number.toNat (items ++ more)).flatten)
+
+theorem extend_result (heap : Mutable.Heap) (address : Nat) (items more : List Mutable.Value) (right : Mutable.Value)
+    (found : heap[address]? = some (.list items))
+    (read : Mutable.sequence right heap = some (.ok more, heap)) :
+    HeapCalls.inplace .add (.ref address) right heap = some (.ok (.ref address), extended heap address items more) := by
+  rw [inplace_add_list_eval heap address items right found]
+  simp [read, Mutable.eval_bind, Except.map, extended]
+
+theorem repeat_result (heap : Mutable.Heap) (address : Nat) (items more : List Mutable.Value) (count : Mutable.Value)
+    (number : Int) (found : heap[address]? = some (.list items))
+    (converted : Mutable.integer count heap = some (.ok number, heap)) :
+    HeapCalls.inplace .mult (.ref address) count (extended heap address items more) =
+      some (.ok (.ref address), grown heap address items more number) := by
+  have bound := (List.getElem?_eq_some_iff.mp found).1
+  have convertedAfter := integer_relocates heap (extended heap address items more) id count
+  simp only [relocateValue_id, converted, Option.map_some] at convertedAfter
+  rw [inplace_mult_list_value_eval (extended heap address items more) address (items ++ more) count
+    (by simp [extended, bound])]
+  simp [convertedAfter, Mutable.eval_bind, Except.map, grown]
+
+/-- The return is the original list, including self-extension and counts that clear its contents. -/
+theorem source_grows (heap : Mutable.Heap) (address : Nat) (items more : List Mutable.Value)
+    (right count : Mutable.Value) (number : Int) (found : heap[address]? = some (.list items))
+    (read : Mutable.sequence right heap = some (.ok more, heap))
+    (converted : Mutable.integer count heap = some (.ok number, heap)) :
+    ReturnsValue Probe.module "grow" [.ref address, right, count] heap (.ref address)
+      (grown heap address items more number) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.augAssign rfl (Evaluates.lookup rfl) (extend_result heap address items more right found read)
+  apply BlockReturns.augAssign rfl (Evaluates.lookup rfl) (repeat_result heap address items more count number found converted)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem extension_layout (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items more : List Mutable.Value)
+    (right : Mutable.Value) (found : logical[address]? = some (.list items))
+    (read : Mutable.sequence right logical = some (.ok more, logical)) :
+    ExecutionLayout (extended logical address items more)
+      (extended physical (rename address) (items.map (relocateValue rename)) (more.map (relocateValue rename))) rename := by
+  have inside : ∀ value ∈ items ++ more, value.edge.Within logical.length := by
+    intro value member
+    rcases List.mem_append.mp member with old | new
+    · exact layout.closed _ (List.mem_of_getElem? found) value old
+    · exact sequence_items_within logical logical layout.closed right more read value new
+  simpa only [extended, List.map_append] using layout.set_list address items (items ++ more) found inside
+
+/-- Both calls are derived from one sequence read and count conversion, with no counterpart-execution premise. -/
+theorem paired_grows (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items more : List Mutable.Value)
+    (right count : Mutable.Value) (number : Int) (found : logical[address]? = some (.list items))
+    (rightInside : right.edge.Within logical.length)
+    (read : Mutable.sequence right logical = some (.ok more, logical))
+    (converted : Mutable.integer count logical = some (.ok number, logical)) :
+    ReturnsValue Probe.module "grow" [.ref address, right, count] logical (.ref address)
+        (grown logical address items more number) ∧
+      ReturnsValue Probe.module "grow" [.ref (rename address), relocateValue rename right, relocateValue rename count]
+        physical (.ref (rename address))
+        (grown physical (rename address) (items.map (relocateValue rename)) (more.map (relocateValue rename)) number) ∧
+      ExecutionLayout (grown logical address items more number)
+        (grown physical (rename address) (items.map (relocateValue rename)) (more.map (relocateValue rename)) number) rename := by
+  have otherRead := layout.runtime.sequence right rightInside
+  simp only [read, Option.map_some, Except.map] at otherRead
+  have otherCount := integer_relocates logical physical rename count
+  simp only [converted, Option.map_some] at otherCount
+  have middleLayout := extension_layout logical physical rename layout address items more right found read
+  have middleFound : (extended logical address items more)[address]? = some (.list (items ++ more)) := by
+    simp [extended, (List.getElem?_eq_some_iff.mp found).1]
+  have inside := replicated_values_within (extended logical address items more).length number.toNat (items ++ more)
+    (middleLayout.closed _ (List.mem_of_getElem? middleFound))
+  refine ⟨source_grows logical address items more right count number found read converted,
+    source_grows physical (rename address) _ _ _ _ number (layout.runtime.lookup _ _ found) otherRead otherCount, ?_⟩
+  simpa only [grown, List.map_append, map_replicated_values] using
+    middleLayout.set_list address (items ++ more) _ middleFound inside
+
+/-- An invalid multiplier exits after extension, preserving that earlier mutation. -/
+theorem source_fails (heap : Mutable.Heap) (address : Nat) (items more : List Mutable.Value)
+    (right count : Mutable.Value) (exception : ExceptionObject) (found : heap[address]? = some (.list items))
+    (read : Mutable.sequence right heap = some (.ok more, heap))
+    (failed : Mutable.integer count heap = some (.error exception, heap)) :
+    (HeapCalls.call Probe.module "grow" [.ref address, right, count] heap).Finishes
+      ⟨.error exception, [], extended heap address items more, heap.length⟩ := by
+  let args : List Arg := [{name := "left", annotation := none}, {name := "right", annotation := none},
+    {name := "count", annotation := none}]
+  let env := HeapCalls.argumentEnv args [.ref address, right, count]
+  let rest : List Stmt := [.augAssign (.name "left") .mult (.name "count"), .return (.name "left")]
+  have failedAfter := integer_relocates heap (extended heap address items more) id count
+  simp only [relocateValue_id, failed, Option.map_some] at failedAfter
+  have operation : HeapCalls.inplace .mult (.ref address) count (extended heap address items more) =
+      some (.error exception, extended heap address items more) := by
+    rw [inplace_mult_list_value_eval (extended heap address items more) address (items ++ more) count
+      (by simp [extended, (List.getElem?_eq_some_iff.mp found).1])]
+    simp [failedAfter, Mutable.eval_bind]
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  apply Finishes.next (step := HeapCalls.step Probe.module heap.length)
+    (following := ⟨.block (.augAssign (.name "left") .add (.name "right") :: rest) env, [], heap⟩) rfl
+  have extendedTrace := BlockContinues.augAssign (globals := []) (module := Probe.module) (env := env)
+    (name := "left") (by rfl) (Evaluates.lookup (name := "right") (by rfl))
+    (extend_result heap address items more right found read)
+  apply (extendedTrace rest heap.length []).finishes
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, operation, HeapCalls.done,
+    HeapCalls.protectGenerator, Frame.inGenerator, Calls.generatorException])
+
+theorem paired_failures (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items more : List Mutable.Value)
+    (right count : Mutable.Value) (exception : ExceptionObject) (found : logical[address]? = some (.list items))
+    (rightInside : right.edge.Within logical.length)
+    (read : Mutable.sequence right logical = some (.ok more, logical))
+    (failed : Mutable.integer count logical = some (.error exception, logical)) :
+    (HeapCalls.call Probe.module "grow" [.ref address, right, count] logical).Finishes
+        ⟨.error exception, [], extended logical address items more, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "grow" [.ref (rename address), relocateValue rename right, relocateValue rename count]
+        physical).Finishes ⟨.error exception, [],
+          extended physical (rename address) (items.map (relocateValue rename)) (more.map (relocateValue rename)), physical.length⟩ ∧
+      ExecutionLayout (extended logical address items more)
+        (extended physical (rename address) (items.map (relocateValue rename)) (more.map (relocateValue rename))) rename := by
+  have otherRead := layout.runtime.sequence right rightInside
+  simp only [read, Option.map_some, Except.map] at otherRead
+  have otherCount := integer_relocates logical physical rename count
+  simp only [failed, Option.map_some] at otherCount
+  exact ⟨source_fails logical address items more right count exception found read failed,
+    source_fails physical (rename address) _ _ _ _ exception (layout.runtime.lookup _ _ found) otherRead otherCount,
+    extension_layout logical physical rename layout address items more right found read⟩
+
+/-- The shared binary-step rule also transports in-place operations under arbitrary saved frames. -/
+theorem augmented_step (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (logicalAnchors physicalAnchors address : Nat)
+    (items : List Mutable.Value) (right : Mutable.Value) (stack : List Frame) (globals : Mutable.Globals)
+    (found : logical[address]? = some (.list items))
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals) (outcome : Except ExceptionObject Mutable.Value) (after : Mutable.Heap)
+    (executed : HeapCalls.inplace .mult (.ref address) right logical = some (outcome, after)) :
+    ∃ other nextMap, ExecutionLayout after other nextMap ∧
+      step module physicalAnchors
+          (relocateState rename physical ⟨.value right, .binaryRight .mult (.ref address) true :: stack, logical⟩)
+          (relocateGlobals rename globals) =
+        relocateStep nextMap other physicalAnchors
+          (step module logicalAnchors ⟨.value right, .binaryRight .mult (.ref address) true :: stack, logical⟩ globals) := by
+  obtain ⟨other, nextMap, retained, _, _, _, transported, _⟩ :=
+    step_binary_relocates module logical physical rename logicalAnchors physicalAnchors .mult (.ref address) right true
+      stack globals (List.getElem?_eq_some_iff.mp found).1 stackInside globalsInside
+      (layout.inplace_mult_list_value address items right found) outcome after executed
+  exact ⟨other, nextMap, retained, transported⟩
+
+end ListInplaceExamples
+'''
+AUDITS = [
+    "ListInplaceExamples.extend_result", "ListInplaceExamples.repeat_result", "ListInplaceExamples.source_grows",
+    "ListInplaceExamples.extension_layout", "ListInplaceExamples.paired_grows", "ListInplaceExamples.source_fails",
+    "ListInplaceExamples.paired_failures", "ListInplaceExamples.augmented_step",
+    "inplace_add_list_eval", "inplace_mult_list_eval", "inplace_mult_list_bool_eval", "inplace_mult_list_value_eval",
+    "sequence_keeps_heap", "sequence_items_within", "integer_relocates", "integer_keeps_heap",
+    "ExecutionLayout.list_update_relocates", "ExecutionLayout.inplace_mult_list", "ExecutionLayout.inplace_mult_list_bool",
+    "ExecutionLayout.inplace_mult_list_value", "ExecutionLayout.inplace_add_list", "RuntimeLayout.inplace_add_list_unsupported",
+]
+
+with project_temporary_directory(prefix="list-inplace-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    grow = namespace["grow"]
+    shared = []
+    shared.append(shared)
+    # CPython samples use representable counts; the formal model uses all integers.
+    for count in (-sys.maxsize - 1, -1, 0, 1, 3, False, True):
+        for self_extend in (False, True):
+            left = [shared]
+            alias = left
+            right = left if self_extend else (shared, shared)
+            expected_size = (2 if self_extend else 3) * max(0, count)
+            result = grow(left, right, count)
+            assert result is left and result is alias
+            assert len(alias) == expected_size and all(item is shared for item in alias)
+    for right in (b"\x00\xff", bytearray(b"\x01\x80"), "λ🦆", (), []):
+        left = [None]
+        alias = left
+        expected = ([None] + list(right)) * 2
+        assert grow(left, right, 2) is alias and alias == expected
+    for invalid in ("bad", b"bad", None, [], object()):
+        left = [shared]
+        alias = left
+        try:
+            grow(left, (shared,), invalid)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("invalid repetition count accepted")
+        assert left is alias and len(alias) == 2 and all(item is shared for item in alias)
+    for invalid in (1, True, None, object()):
+        left = [shared]
+        try:
+            grow(left, invalid, 2)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("invalid extension source accepted")
+        assert len(left) == 1 and left[0] is shared
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.ListInplaceRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"list inplace: shared mutations, signed and Boolean counts, exception exits; {len(AUDITS)} axiom audits passed")
