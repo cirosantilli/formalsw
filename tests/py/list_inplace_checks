@@ -171,6 +171,46 @@ theorem augmented_step (module : Module) (logical physical : Mutable.Heap) (rena
       (layout.inplace_mult_list_value address items right found) outcome after executed
   exact ⟨other, nextMap, retained, transported⟩
 
+/-- Self-extension and arbitrary signed repetition preserve every unrelated existing cell. -/
+theorem source_private_growth (heap : Mutable.Heap) (address privateAddress : Nat)
+    (items : List Mutable.Value) (privateObject : Mutable.Object) (count : Int) (choices : ChoiceSchedule)
+    (found : heap[address]? = some (.list items)) (saved : SavedCell privateAddress privateObject heap)
+    (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (grown heap address items items count) ∧
+    ((IteratorCalls.call Probe.module "grow" [.ref address, .ref address, .scalar (.int count)] heap).run choices).Finishes
+      ⟨.ok (.ref address), [], grown heap address items items count, heap.length⟩ := by
+  have read : Mutable.sequence (.ref address) heap = some (.ok items, heap) := by
+    simp [Mutable.sequence, found]
+  have converted : Mutable.integer (.scalar (.int count)) heap = some (.ok count, heap) := rfl
+  have stable := SavedCell.update privateAddress address privateObject separate
+  have allocate := SavedCell.allocates privateAddress privateObject
+  have middleSaved := Heapq.preserves_inplace_ref address _ allocate stable .add (.ref address)
+    heap (.ok (.ref address)) (extended heap address items items) saved
+    (extend_result heap address items items (.ref address) found read)
+  have finalSaved := Heapq.preserves_inplace_ref address _ allocate stable .mult (.scalar (.int count))
+    (extended heap address items items) (.ok (.ref address)) (grown heap address items items count) middleSaved
+    (repeat_result heap address items items (.scalar (.int count)) count found converted)
+  have returns := source_grows heap address items items (.ref address) (.scalar (.int count)) count found read converted
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returns heap.length []) []
+  exact ⟨finalSaved, reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))⟩
+
+/-- Failure after self-extension keeps that mutation and the unrelated private object. -/
+theorem source_private_failure (heap : Mutable.Heap) (address privateAddress : Nat)
+    (items : List Mutable.Value) (privateObject : Mutable.Object)
+    (found : heap[address]? = some (.list items)) (saved : SavedCell privateAddress privateObject heap)
+    (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (extended heap address items items) ∧
+    (HeapCalls.call Probe.module "grow" [.ref address, .ref address, .scalar (.string "bad")] heap).Finishes
+      ⟨.error ⟨"TypeError", []⟩, [], extended heap address items items, heap.length⟩ := by
+  have read : Mutable.sequence (.ref address) heap = some (.ok items, heap) := by
+    simp [Mutable.sequence, found]
+  have middleSaved := Heapq.preserves_inplace_ref address _ (SavedCell.allocates privateAddress privateObject)
+    (SavedCell.update privateAddress address privateObject separate) .add (.ref address)
+    heap (.ok (.ref address)) (extended heap address items items) saved
+    (extend_result heap address items items (.ref address) found read)
+  exact ⟨middleSaved, source_fails heap address items items (.ref address) (.scalar (.string "bad"))
+    ⟨"TypeError", []⟩ found read rfl⟩
+
 end ListInplaceExamples
 '''
 AUDITS = [
@@ -181,6 +221,42 @@ AUDITS = [
     "sequence_keeps_heap", "sequence_items_within", "integer_relocates", "integer_keeps_heap",
     "ExecutionLayout.list_update_relocates", "ExecutionLayout.inplace_mult_list", "ExecutionLayout.inplace_mult_list_bool",
     "ExecutionLayout.inplace_mult_list_value", "ExecutionLayout.inplace_add_list", "RuntimeLayout.inplace_add_list_unsupported",
+]
+
+AUDITS += [
+    "FormalSW.PyAst.Heapq.preserves_sequence",
+    "FormalSW.PyAst.Heapq.preserves_byteValues",
+    "FormalSW.PyAst.Heapq.preserves_sliceBounds",
+    "FormalSW.PyAst.Heapq.preserves_sliceResult",
+    "FormalSW.PyAst.Heapq.preserves_writeSliceObject",
+    "FormalSW.PyAst.Heapq.preserves_setSlice",
+    "FormalSW.PyAst.Heapq.preserves_clearDictionary",
+    "FormalSW.PyAst.Heapq.preserves_sortListCore",
+    "FormalSW.PyAst.Heapq.preserves_truth",
+    "FormalSW.PyAst.Heapq.preserves_sortDirection",
+    "FormalSW.PyAst.Heapq.preserves_sort",
+    "FormalSW.PyAst.Heapq.preserves_sortReverse",
+    "FormalSW.PyAst.Heapq.Preserves.throw",
+    "FormalSW.PyAst.Heapq.preserves_array",
+    "FormalSW.PyAst.Heapq.preserves_invalidBinary",
+    "FormalSW.PyAst.Heapq.preserves_setUnion",
+    "FormalSW.PyAst.Heapq.preserves_setDifference",
+    "FormalSW.PyAst.Heapq.preserves_binary_scalar_ref",
+    "FormalSW.PyAst.Heapq.preserves_binary_ref_scalar",
+    "FormalSW.PyAst.Heapq.preserves_binary_refs",
+    "FormalSW.PyAst.Heapq.preserves_binary",
+    "FormalSW.PyAst.Heapq.preserves_bufferOperand",
+    "FormalSW.PyAst.Heapq.preserves_storeBufferResult",
+    "FormalSW.PyAst.Heapq.preserves_inplaceBinary",
+    "FormalSW.PyAst.Heapq.preserves_inplace_ref",
+    "FormalSW.PyAst.Heapq.preserves_inplace",
+    "FormalSW.PyAst.HeapCalls.Framing.step_setSlice_cell",
+    "FormalSW.PyAst.HeapCalls.Framing.step_dictionaryClear_cell",
+    "FormalSW.PyAst.HeapCalls.Framing.step_sort_cell",
+    "FormalSW.PyAst.HeapCalls.Framing.step_sortReverse_cell",
+    "FormalSW.PyAst.HeapCalls.Framing.step_binary_cell",
+    "ListInplaceExamples.source_private_growth",
+    "ListInplaceExamples.source_private_failure",
 ]
 
 with project_temporary_directory(prefix="list-inplace-") as temporary:
@@ -230,7 +306,8 @@ with project_temporary_directory(prefix="list-inplace-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.ListInplaceRelocation\n"
+    proof.write_text("import lang.py.FormalSW.CompositeMachineFrame\n"
+                     "import lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
