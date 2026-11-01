@@ -198,6 +198,46 @@ theorem paired_complete (logical physical : Mutable.Heap) (rename : Nat → Nat)
     exact ⟨.error exception, appended logical address items,
       appended physical (rename address) (items.map (relocateValue rename)), left, right, afterLayout⟩
 
+/-- The actual self-append supplies the invariant for the later indexed assignment. -/
+theorem append_then_assignment (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat)
+    (items : List Mutable.Value) (subscript : Mutable.Value)
+    (found : logical[address]? = some (.list items)) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      HeapCalls.step Probe.module physical.length
+        (HeapCalls.Relocation.relocateState rename physical ⟨.operation (.append address) [.ref address], [], logical⟩) =
+        .next (HeapCalls.Relocation.relocateState nextMap other
+          ⟨.value (.scalar .none), [], appended logical address items⟩) ∧
+      HeapCalls.Relocation.Preserves (appended logical address items) other nextMap physical.length
+        (HeapCalls.step Probe.module logical.length
+          ⟨.operation (.setItem (.ref address)) [.ref address, subscript], [], appended logical address items⟩)
+        (HeapCalls.step Probe.module physical.length
+          (HeapCalls.Relocation.relocateState nextMap other
+            ⟨.operation (.setItem (.ref address)) [.ref address, subscript], [], appended logical address items⟩)) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have preserved := HeapCalls.Relocation.step_append_list_preserves Probe.module logical physical rename
+    logical.length physical.length address items (.ref address) [] [] layout found bounded (by simp)
+    (by simp [HeapCalls.Relocation.GlobalsWithin])
+  have first : HeapCalls.step Probe.module logical.length
+      ⟨.operation (.append address) [.ref address], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], appended logical address items⟩ := by
+    exact (HeapCalls.Relocation.step_append_list_relocates Probe.module logical physical rename layout
+      logical.length physical.length address items (.ref address) [] [] found bounded (by simp)
+      (by simp [HeapCalls.Relocation.GlobalsWithin])).2.1
+  rw [first] at preserved
+  obtain ⟨after, other, nextMap, agree, _, _, retained, heap, _, actual⟩ := preserved
+  have same : appended logical address items = after := heap
+  subst after
+  have foundAfter : (appended logical address items)[address]? = some (.list (items ++ [.ref address])) := by
+    simp [appended, bounded]
+  have later := HeapCalls.Relocation.step_setItem_list_preserves Probe.module (appended logical address items) other nextMap
+    logical.length physical.length address (items ++ [.ref address]) subscript (.ref address) [] [] retained foundAfter
+    (by simpa [appended] using bounded) (by simp) (by simp [HeapCalls.Relocation.GlobalsWithin])
+  exact ⟨other, nextMap, agree, actual, later⟩
+
+#print axioms append_then_assignment
+
 #print axioms paired_complete
 #print axioms index_total
 #print axioms source_raises
@@ -239,7 +279,7 @@ with project_temporary_directory(prefix="sequence-relocation-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.SequenceRelocation\n"
+    proof.write_text("import lang.py.FormalSW.MachineMutationInvariant\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
     checked = subprocess.run(
         ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
@@ -249,9 +289,9 @@ with project_temporary_directory(prefix="sequence-relocation-") as temporary:
     assert checked.returncode == 0, checked.stdout + checked.stderr
     audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
     independent = checked.stdout.count("does not depend on any axioms")
-    assert len(audits) + independent == 14, checked.stdout
+    assert len(audits) + independent == 15, checked.stdout
     for audit in audits:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print("sequence relocation: composed source mutations and reads; fourteen axiom audits passed")
+print("sequence relocation: composed source mutations and reads; fifteen axiom audits passed")

@@ -125,6 +125,93 @@ theorem frozen_error (heap : Mutable.Heap) (address anchors : Nat) (origin class
   simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, failed, HeapCalls.done, protectGenerator,
     Frame.inGenerator, Calls.generatorException]
 
+/-- The complete parsed method preserves caller aliases across its write and fresh result. -/
+theorem method_preserves (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (shared : Mutable.Value)
+    (fields : List (String × Mutable.Value))
+    (found : logical[address]? = some (.instance classInfo.1 "Mutating" fields))
+    (sharedInside : shared.edge.Within logical.length) :
+    let logicalAfter := logical.set address (.instance classInfo.1 "Mutating" (Mutable.putField fields "link" shared))
+    let physicalFields := fields.map (fun field => (field.1, relocateValue rename field.2))
+    let physicalAfter := physical.set (rename address)
+      (.instance classInfo.1 "Mutating" (Mutable.putField physicalFields "link" (relocateValue rename shared)))
+    ∃ finalMap,
+      (∀ old < logical.length, finalMap old = rename old) ∧
+      MethodReturns (globals := [("shared", shared)]) Probe.module (.ref address) args body [] logical
+        (.ref logicalAfter.length) (logicalAfter ++ [.list [.ref address, shared]]) ∧
+      MethodReturns (globals := [("shared", relocateValue rename shared)]) Probe.module (.ref (rename address)) args body [] physical
+        (.ref physicalAfter.length) (physicalAfter ++ [.list [.ref (rename address), relocateValue rename shared]]) ∧
+      ExecutionLayout (logicalAfter ++ [.list [.ref address, shared]])
+        (physicalAfter ++ [.list [.ref (rename address), relocateValue rename shared]]) finalMap := by
+  dsimp only
+  have addressInside := (List.getElem?_eq_some_iff.mp found).1
+  have globalInside : GlobalsWithin logical.length [("shared", shared)] := by simpa [GlobalsWithin] using sharedInside
+  have bounded : StateWithin ⟨.operation (.setField "link" shared) [.ref address], [], logical⟩ :=
+    ⟨⟨sharedInside, by simpa using addressInside⟩, by simp⟩
+  have preserved := step_setField_preserves Probe.module logical physical rename logical.length physical.length
+    (.ref address) shared "link" [] [("shared", shared)] layout bounded globalInside
+  have first : HeapCalls.step Probe.module logical.length
+      ⟨.operation (.setField "link" shared) [.ref address], [], logical⟩ [("shared", shared)] =
+      .next ⟨.value (.scalar .none), [], logical.set address (.instance classInfo.1 "Mutating" (Mutable.putField fields "link" shared))⟩ := by
+    have written := Mutable.writeField_result (value := shared) found (name := "link") (by simp)
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, written]
+  rw [first] at preserved
+  obtain ⟨logicalAfter, physicalAfter, nextMap, agree, _, _, retained, heap, _, paired⟩ := preserved
+  have sameLogical : logical.set address (.instance classInfo.1 "Mutating" (Mutable.putField fields "link" shared)) = logicalAfter := heap
+  subst logicalAfter
+  have physicalFound : physical[rename address]? = some (.instance classInfo.1 "Mutating"
+      (fields.map (fun field => (field.1, relocateValue rename field.2)))) := layout.runtime.lookup address _ found
+  have second : HeapCalls.step Probe.module physical.length
+      (relocateState rename physical ⟨.operation (.setField "link" shared) [.ref address], [], logical⟩)
+        (relocateGlobals rename [("shared", shared)]) =
+      .next ⟨.value (.scalar .none), [], physical.set (rename address) (.instance classInfo.1 "Mutating"
+        (Mutable.putField (fields.map (fun field => (field.1, relocateValue rename field.2))) "link" (relocateValue rename shared)))⟩ := by
+    have written := Mutable.writeField_result (value := relocateValue rename shared) physicalFound (name := "link") (by simp)
+    change HeapCalls.step Probe.module physical.length
+      ⟨.operation (.setField "link" (relocateValue rename shared)) [.ref (rename address)], [], physical⟩ _ = _
+    simp [HeapCalls.step, primitive, result, HeapCalls.run, written]
+  rw [second] at paired
+  have samePhysical := congrArg HeapCalls.State.heap (Step.next.inj paired)
+  dsimp only [relocateState] at samePhysical
+  subst physicalAfter
+  have valueInside : ∀ value ∈ [Mutable.Value.ref address, shared], value.edge.Within
+      (logical.set address (.instance classInfo.1 "Mutating" (Mutable.putField fields "link" shared))).length := by
+    simpa using And.intro addressInside sharedInside
+  have allocation := (retained.allocate_list [.ref address, shared] valueInside).2.2
+  have sameShared := relocateValue_congr nextMap rename logical.length shared agree sharedInside
+  have sameAddress : relocateValue nextMap (.ref address) = Mutable.Value.ref (rename address) := by
+    simp only [relocateValue, agree address addressInside]
+  simp only [List.map_cons, List.map_nil, sameAddress, sameShared] at allocation
+  refine ⟨_, ?_, method_returns logical address shared fields found,
+    method_returns physical (rename address) (relocateValue rename shared) _ physicalFound, allocation⟩
+  intro old bounded
+  rw [extendMap_old nextMap _ _ old (by simpa using bounded)]
+  exact agree old bounded
+
+/-- Actual writes, errors, and unsupported special names pass through saved iterator consumers. -/
+theorem write_under_consumers (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (logicalAnchors physicalAnchors used : Nat) (choices : ChoiceSchedule)
+    (receiver value : Mutable.Value) (name : String) (rest : List Stmt) (env : HeapCalls.Env)
+    (stack : List Frame) (resumes : List IteratorCalls.Resume) (globals : Mutable.Globals)
+    (layout : ExecutionLayout logical physical rename)
+    (inside : StateWithin ⟨.value value, .writeAttribute receiver name rest env :: stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    IteratorCalls.Relocation.Preserves logical physical rename physicalAnchors
+      (IteratorCalls.step Probe.module logicalAnchors choices
+        (.running ⟨⟨.value value, .writeAttribute receiver name rest env :: stack, logical⟩, used⟩ resumes) globals)
+      (IteratorCalls.step Probe.module physicalAnchors choices
+        (IteratorCalls.Relocation.relocateState rename physical physicalAnchors
+          (.running ⟨⟨.value value, .writeAttribute receiver name rest env :: stack, logical⟩, used⟩ resumes)) (relocateGlobals rename globals)) := by
+  have raw := step_writeAttribute_preserves Probe.module logical physical rename logicalAnchors physicalAnchors
+    receiver value name rest env stack globals layout inside globalsInside
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.value value, .writeAttribute receiver name rest env :: stack, logical⟩, used⟩ physical rename
+    logicalAnchors physicalAnchors globals layout inside globalsInside raw
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ physical rename logicalAnchors physicalAnchors
+    choices resumes globals (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) layout
+    ⟨inside.1, inside.2, saved⟩ rfl wrapped
+
 end MachineMutationExamples
 '''
 AUDITS = [
@@ -133,7 +220,11 @@ AUDITS = [
     "MachineMutationExamples.frozen_error", "protectGenerator_within", "result_within",
     "step_setField_relocates", "step_writeAttribute_relocates", "step_assignAttribute_relocates",
     "step_discard_relocates", "StateWithin.assignAttribute", "StateWithin.discard",
-    "step_setItem_list_relocates", "step_append_list_relocates",
+    "step_setItem_list_relocates", "step_append_list_relocates", "MachineMutationExamples.method_preserves", "MachineMutationExamples.write_under_consumers",
+    "result_preserves", "Preserves.protectGenerator", "writeField_unsupported_iff", "result_writeField_preserves",
+    "step_setField_preserves", "step_writeAttribute_preserves", "setItem_list_total", "setItem_list_length",
+    "step_setItem_list_preserves", "step_append_list_preserves", "step_discard_preserves", "step_attribute_preserves",
+    "step_assignAttribute_preserves", "step_assignField_start_preserves",
 ]
 
 with project_temporary_directory(prefix="machine-mutation-") as temporary:
@@ -155,7 +246,7 @@ with project_temporary_directory(prefix="machine-mutation-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineMutation\nimport lang.py.FormalSW.ClassCalls\n"
+    proof.write_text("import lang.py.FormalSW.MachineMutationInvariant\nimport lang.py.FormalSW.ClassCalls\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
