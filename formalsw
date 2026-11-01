@@ -2228,8 +2228,8 @@ def source_proof_helpers(proof: Path) -> list[Path]:
             return
         visiting.add(path)
         for parts in parse_imports(path.read_text()):
-            if parts[-1].endswith('.source'):
-                visit(root.joinpath(*parts).with_suffix('.source.lean'))
+            if parts[-1].endswith('.source') or any(part.endswith('.py.lean.d') for part in parts[:-1]):
+                visit(root.joinpath(*parts[:-1], parts[-1] + '.lean'))
         visiting.remove(path)
         visited.add(path)
         if path != proof.resolve():
@@ -2312,7 +2312,7 @@ def check_source(source: Path, report: CheckReport, *, compilation: dict | None 
         cache.compile(helper, output, command, lambda command: run(command,
             env=environment,
             failure_message=f"source proof helper failed for {source}: {helper}",
-            failure_hint="Complete the imported .source.lean proof without admissions.",
+            failure_hint="Complete the imported Lean proof helper without admissions.",
         ))
     proof_command = [
         "lean",
