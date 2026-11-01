@@ -26,6 +26,10 @@ def nested(items, value):
 def explicit(items, value):
     items.append(value)
     return sorted(items, key=lambda entry: 0)
+
+
+def nested_keys(items):
+    return sorted(items, key=lambda entry: entry)
 '''
 PROOF = r'''
 open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
@@ -146,6 +150,69 @@ theorem append_then_key_preparation (logical physical : Mutable.Heap) (rename : 
     ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
       fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
 
+/-- Sorting completion consumes the append's actual output invariant, including saved callback state. -/
+theorem append_then_sorting (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (cursor : SequenceSort) (remaining : List Mutable.Value)
+    (keys : List (Mutable.Value × Mutable.Value)) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.sortedLoop cursor remaining keys, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout (after logical address items item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.sortedLoop cursor remaining keys, stack, after logical address items item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.sortedLoop cursor remaining keys, stack, after logical address items item⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_sortedLoop_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used cursor remaining keys stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+/-- Parsed identity keys compare arbitrary nested integer lists and return their original aliases. -/
+theorem nested_keys_returns (heap : Mutable.Heap) (container left right : Nat) (xs ys : List Int)
+    (found : heap[container]? = some (.list [.ref left, .ref right]))
+    (first : heap[left]? = some (.list (xs.map fun n => .scalar (.int n))))
+    (second : heap[right]? = some (.list (ys.map fun n => .scalar (.int n)))) :
+    ReturnsValue Probe.module "nested_keys" [.ref container] heap (.ref heap.length)
+      (heap ++ [.list (if HeapSort.lexInt ys xs then [.ref right, .ref left] else [.ref left, .ref right])]) := by
+  have acquired : sortedStart (.ref container) (.scalar (.bool false)) heap =
+      some (.ok ([.ref left, .ref right], false), heap) := by
+    simp [sortedStart, sortedItems, Mutable.sequence, found, Mutable.truth, scalarTruth]
+  have bound := (List.getElem?_eq_some_iff.mp first).1
+  have enough := HeapSort.comparisonFuel_ge_linear heap
+  have depth : HeapSort.comparisonFuel heap - 2 + 2 = HeapSort.comparisonFuel heap := by omega
+  have compared := HeapSort.compare_int_lists heap right left (HeapSort.comparisonFuel heap - 2) ys xs second first
+  rw [depth] at compared
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.sorted_sequence (Evaluates.lookup rfl) Evaluates.constant acquired
+  apply SortedReturns.next (Evaluates.lookup rfl)
+  apply SortedReturns.next (Evaluates.lookup rfl)
+  apply SortedReturns.done
+  cases flag : HeapSort.lexInt ys xs <;>
+    simp [sortedFinish, HeapSort.keyedSortWithReverse, HeapSort.keyedSort, HeapSort.keyedInsert,
+      Mutable.eval_bind, compared, flag, Mutable.allocate, Except.map]
+
+
 end MachineSortExamples
 '''
 
@@ -156,7 +223,17 @@ AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
     "extremumItem_relocates", "extremumItem_effect", "step_extremum_loop_preserves", "step_keyPreparation_preserves",
 )] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_keyPreparation_preserves"] + ["MachineSortExamples." + name for name in (
     "keys_result", "prepare_returns", "acquired", "nested_returns", "explicit_returns", "reverse_mutation_equiv", "append_then_key_preparation",
+    "append_then_sorting", "nested_keys_returns",
 )]
+AUDITS += ["FormalSW.PyAst.HeapSort." + name for name in (
+    "insert_perm", "sort_perm", "sortWithReverse_perm", "keyedInsert_perm", "keyedSort_perm", "keyedSortWithReverse_perm",
+)] + ["FormalSW.PyAst.Mutable.Relocation.RuntimeLayout." + name for name in (
+    "insert", "sort", "sortWithReverse", "keyedInsert", "keyedSort", "keyedSortWithReverse",
+)] + [
+    "FormalSW.PyAst.HeapCalls.Relocation.result_sortedFinish_preserves",
+    "FormalSW.PyAst.HeapCalls.Relocation.step_sortedLoop_preserves",
+    "FormalSW.PyAst.IteratorCalls.Relocation.step_sortedLoop_preserves",
+]
 with project_temporary_directory(prefix="machine-sort-") as temporary:
     directory = Path(temporary)
     path = directory / "source.py"
@@ -175,11 +252,17 @@ with project_temporary_directory(prefix="machine-sort-") as temporary:
                 assert result is not items and len(result) == size + 1
                 assert all(actual is wanted for actual, wanted in zip(result, expected))
                 assert len(items) == size + 1 and items[-1] is items
+    for xs, ys in (([], []), ([1], [1]), ([1, 2], [1]), ([-10**100], [10**100]), ([0, 2], [0, 1])):
+        items = [xs, ys]
+        result = namespace["nested_keys"](items)
+        expected = [ys, xs] if ys < xs else [xs, ys]
+        assert result is not items and all(actual is wanted for actual, wanted in zip(result, expected))
+        assert items[0] is xs and items[1] is ys
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     checked_source = directory / "Checks.lean"
     checked_source.write_text(
-        "import lang.py.FormalSW.MachineSortAcquisition\n"
+        "import lang.py.FormalSW.MachineSortCompletion\n"
         "import lang.py.FormalSW.IteratorRules\n"
         + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
         + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
@@ -197,4 +280,4 @@ with project_temporary_directory(prefix="machine-sort-") as temporary:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print(f"key preparation: reverse effects, snapshots, cached references, live extrema; {len(AUDITS)} axiom audits passed")
+print(f"sorting: callback effects, complete key comparisons, returned aliases and live extrema; {len(AUDITS)} axiom audits passed")
