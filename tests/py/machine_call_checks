@@ -121,6 +121,44 @@ theorem method_arity_error (heap : Mutable.Heap) (anchors : Nat) (receiver first
       protectGenerator stack (HeapCalls.done (globals := globals) anchors heap (.error {typeName := "TypeError", args := []})) := by
   simp [HeapCalls.step, invokeMethod, completeArguments, args]
 
+theorem method_entry_preserves (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (logicalAnchors physicalAnchors used : Nat) (choices : ChoiceSchedule) (receiver : Mutable.Value)
+    (values : List Mutable.Value) (stack : List Frame) (resumes : List IteratorCalls.Resume) (globals : Mutable.Globals)
+    (layout : ExecutionLayout logical physical rename) (receiverInside : receiver.edge.Within logical.length)
+    (valuesInside : ∀ value ∈ values, value.edge.Within logical.length)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    IteratorCalls.Relocation.Preserves logical physical rename physicalAnchors
+      (IteratorCalls.step Probe.module logicalAnchors choices
+        (.running ⟨⟨.operation (.method receiver args body) values, stack, logical⟩, used⟩ resumes) globals)
+      (IteratorCalls.step Probe.module physicalAnchors choices
+        (IteratorCalls.Relocation.relocateState rename physical physicalAnchors
+          (.running ⟨⟨.operation (.method receiver args body) values, stack, logical⟩, used⟩ resumes)) (relocateGlobals rename globals)) := by
+  have bounded : StateWithin ⟨.operation (.method receiver args body) values, stack, logical⟩ :=
+    ⟨⟨⟨receiverInside, source_body logical.length⟩, valuesInside⟩, stackInside⟩
+  have raw := step_method_preserves Probe.module logical physical rename logicalAnchors physicalAnchors receiver args body
+    values stack globals layout bounded globalsInside
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.operation (.method receiver args body) values, stack, logical⟩, used⟩ physical rename
+    logicalAnchors physicalAnchors globals layout bounded globalsInside raw
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ physical rename logicalAnchors physicalAnchors
+    choices resumes globals (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) layout
+    ⟨bounded.1, bounded.2, saved⟩ rfl wrapped
+
+theorem shadow_entry_preserves (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (logicalAnchors physicalAnchors : Nat) (values : List Mutable.Value) (stack : List Frame) (globals : Mutable.Globals)
+    (layout : ExecutionLayout logical physical rename)
+    (valuesInside : ∀ value ∈ values, value.edge.Within logical.length)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    Preserves logical physical rename physicalAnchors
+      (HeapCalls.step Probe.module logicalAnchors ⟨.operation (.call "shadow") values, stack, logical⟩ globals)
+      (HeapCalls.step Probe.module physicalAnchors (relocateState rename physical ⟨.operation (.call "shadow") values, stack, logical⟩)
+        (relocateGlobals rename globals)) :=
+  step_call_preserves Probe.module "shadow" shadowArgs shadowBody source_shadow (by simp [shadowBody, StmtWithin])
+    logical physical rename logicalAnchors physicalAnchors values stack globals layout ⟨⟨by trivial, valuesInside⟩, stackInside⟩ globalsInside
+
 end MachineCallExamples
 '''
 AUDITS = [
@@ -132,7 +170,12 @@ AUDITS = [
     "zip_values_relocate", "argumentEnv_relocate", "functionEnv_relocate", "lookup_within", "zip_values_within",
     "argumentEnv_within", "functionEnv_within", "completeArguments_relocate", "completeArguments_within",
     "invokeMethod_relocate", "invokeMethod_within", "step_method_relocate", "step_method_within",
-    "step_call_relocate", "step_call_within",
+    "step_call_relocate", "step_call_within", "MachineCallExamples.method_entry_preserves", "MachineCallExamples.shadow_entry_preserves",
+    "Preserves.unchanged", "protectGenerator_heap", "argumentsState_heap", "step_method_preserves", "step_call_preserves",
+    "step_list_preserves", "step_assign_preserves", "step_arguments_preserves", "step_boolean_preserves",
+    "step_conditional_preserves", "step_branch_preserves", "step_return_preserves", "step_lookup_preserves",
+    "step_constant_preserves", "step_list_expression_preserves", "step_value_preserves",
+    "FormalSW.PyAst.SetCalls.Relocation.lift_preserves", "FormalSW.PyAst.SetCalls.Relocation.step_preserves_of_heap",
 ]
 
 with project_temporary_directory(prefix="machine-call-") as temporary:
@@ -165,7 +208,7 @@ with project_temporary_directory(prefix="machine-call-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.MachineCalls\nimport lang.py.FormalSW.ClassCalls\n"
+    proof.write_text("import lang.py.FormalSW.MachineInvariant\nimport lang.py.FormalSW.ClassCalls\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

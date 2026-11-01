@@ -179,7 +179,7 @@ theorem allocation_then_cursor (choices : ChoiceSchedule) (logical physical : Mu
             ⟨⟨.operation (.comprehension (.name "value") generators env) [.ref address], stack, logical⟩, used⟩)
           (relocateGlobals rename globals) =
         .next (IteratorCalls.Relocation.relocateCore nextMap physicalAfter (entered logical address used items env stack)) ∧
-      Preserves logical physical rename physicalAnchors
+      SetCalls.Relocation.Preserves logical physical rename physicalAnchors
         (SetCalls.step Probe.module logicalAnchors choices (entered logical address used items env stack) globals)
         (SetCalls.step Probe.module physicalAnchors choices
           (IteratorCalls.Relocation.relocateCore nextMap physicalAfter (entered logical address used items env stack))
@@ -196,8 +196,14 @@ theorem allocation_then_cursor (choices : ChoiceSchedule) (logical physical : Mu
     simp only [relocateObject] at moved
     simp [core, generators, HeapCalls.Relocation.relocateState, relocateWork, relocateRuntimeOperation, relocateOperation,
       relocateValue, HeapCalls.step, HeapCalls.comprehensionStart, run, Mutable.sequence, moved, Mutable.unsupported, protectGenerator]
-  have first := step_fallback_preserves Probe.module choices core physical rename logicalAnchors physicalAnchors globals
-    layout bounds globalsInside fallback otherFallback
+  have raw : HeapCalls.Relocation.Preserves logical physical rename physicalAnchors
+      (HeapCalls.step Probe.module logicalAnchors core.core globals)
+      (HeapCalls.step Probe.module physicalAnchors (HeapCalls.Relocation.relocateState rename physical core.core)
+        (relocateGlobals rename globals)) := by
+    rw [fallback, otherFallback]
+    exact HeapCalls.Relocation.Preserves.unchanged layout trivial trivial rfl
+  have first := step_preserves_of_heap Probe.module choices core physical rename logicalAnchors physicalAnchors globals
+    layout bounds globalsInside raw
   have entry : SetCalls.step Probe.module logicalAnchors choices core globals = .next (entered logical address used items env stack) := by
     simp only [SetCalls.step, fallback]
     simp [core, SetCalls.iteratorStep, SetCalls.comprehensionStart, generators, found,
@@ -247,7 +253,7 @@ with project_temporary_directory(prefix="set-iterator-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.SetIteratorInvariant\n"
+    proof.write_text("import lang.py.FormalSW.MachineInvariant\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(

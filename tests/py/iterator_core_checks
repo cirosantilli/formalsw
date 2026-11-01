@@ -175,29 +175,20 @@ theorem allocation_preserves (logical physical : Mutable.Heap) (rename : Nat →
     (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
     (saved : ∀ pending ∈ resumes, ResumeWithin logical.length pending)
     (globalsInside : GlobalsWithin logical.length globals) :
-    Preserves logical physical rename physicalAnchors
+    IteratorCalls.Relocation.Preserves logical physical rename physicalAnchors
       (IteratorCalls.step Probe.module logicalAnchors choices
         (.running ⟨⟨.operation .list items, stack, logical⟩, used⟩ resumes) globals)
       (IteratorCalls.step Probe.module physicalAnchors choices
         (IteratorCalls.Relocation.relocateState rename physical physicalAnchors
           (.running ⟨⟨.operation .list items, stack, logical⟩, used⟩ resumes)) (relocateGlobals rename globals)) := by
-  have allocated := step_list_relocates Probe.module logical physical rename layout logicalAnchors physicalAnchors
-    items stack globals itemsInside stackInside globalsInside
-  apply step_preserves Probe.module choices
-    (.running ⟨⟨.operation .list items, stack, logical⟩, used⟩ resumes) logical physical rename logicalAnchors physicalAnchors globals
-    source_module layout rfl ⟨⟨by trivial, itemsInside⟩, stackInside, saved⟩ globalsInside
-  intro core pending same _
-  cases same
-  refine ⟨logical ++ [.list items], physical ++ [.list (items.map (relocateValue rename))],
-    extendMap rename logical.length physical.length, extendMap_old rename logical.length physical.length,
-    by simp, by simp, allocated.2.2.1, ?_, ?_, ?_⟩
-  · simp only [SetCalls.step, allocated.1, SetCalls.liftStep, SetCalls.Relocation.StepHeap]
-  · simpa only [SetCalls.step, allocated.1, SetCalls.liftStep, SetCalls.Relocation.StepWithin] using allocated.2.2.2.1
-  · have corePair := set_step_relocates Probe.module ⟨.operation .list items, stack, logical⟩ physical
-      (physical ++ [.list (items.map (relocateValue rename))]) rename (extendMap rename logical.length physical.length)
-      logicalAnchors physicalAnchors used choices globals (by rw [allocated.1]; simp)
-      (by rw [allocated.1]; exact allocated.2.1)
-    exact corePair
+  have bounded : HeapCalls.Relocation.StateWithin ⟨.operation .list items, stack, logical⟩ :=
+    ⟨⟨by trivial, itemsInside⟩, stackInside⟩
+  have raw := step_list_preserves Probe.module logical physical rename logicalAnchors physicalAnchors items stack globals layout bounded globalsInside
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.operation .list items, stack, logical⟩, used⟩ physical rename
+    logicalAnchors physicalAnchors globals layout bounded globalsInside raw
+  exact step_ordinary_preserves Probe.module _ physical rename logicalAnchors physicalAnchors choices resumes globals
+    source_module layout ⟨bounded.1, bounded.2, saved⟩ rfl wrapped
 
 /-- Allocate the actual __next__ result, complete the method, then resume the source consumer. -/
 theorem allocation_then_resume (logical physical : Mutable.Heap) (rename : Nat → Nat)
@@ -208,7 +199,7 @@ theorem allocation_then_resume (logical physical : Mutable.Heap) (rename : Nat �
       (∀ old < logical.length, nextMap old = rename old) ∧
       ExecutionLayout logicalAfter physicalAfter nextMap ∧
       logicalAfter = after logical address ∧
-      Preserves logical physical rename physicalAnchors
+      IteratorCalls.Relocation.Preserves logical physical rename physicalAnchors
         (IteratorCalls.step Probe.module logicalAnchors choices
           (.completed (.ok ⟨.ok (.ref logical.length), globals, after logical address, logicalAnchors⟩)
             used [.advance (consumer address) (.ref address)]) globals)
@@ -311,7 +302,7 @@ with project_temporary_directory(prefix="iterator-core-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.IteratorInvariant\nimport lang.py.FormalSW.IteratorRules\n"
+    proof.write_text("import lang.py.FormalSW.MachineInvariant\nimport lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
