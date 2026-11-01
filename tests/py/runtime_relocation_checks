@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""
+Prove an allocating iterator method preserves runtime relocation for arbitrary caller heaps.
+The source bridge and structural proofs run without whole-program evaluation.
+"""
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Allocating:
+    def __next__(self):
+        self.link = [self]
+        return "123"
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls
+open Mutable.Relocation HeapCalls.Relocation
+namespace RuntimeRelocationExamples
+set_option Elab.async false
+
+def classInfo := (Probe.module.findClass "Allocating").getD ("", [])
+def args : List Arg := [{ name := "self", annotation := none }]
+def body : List Stmt := [
+  .assign [.attribute (.name "self") "link"] (.list [.name "self"]),
+  .return (.constant (.string "123"))]
+
+theorem source_class : Probe.module.findClass "Allocating" = some classInfo := rfl
+theorem source_body : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+def afterHeap (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :
+    Mutable.Heap :=
+  (heap ++ [Mutable.Object.list [.ref address]]).set address
+    (.instance classInfo.1 "Allocating" (Mutable.putField fields "link" (.ref heap.length)))
+
+/-- This theorem executes the actual parsed method for every matching receiver and caller heap. -/
+theorem method_returns (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Allocating" fields)) :
+    MethodReturns Probe.module (.ref address) args body [] heap (.scalar (.string "123"))
+      (afterHeap heap address fields) := by
+  have self : functionEnv args body [.ref address] [] "self" = some (.ref address) := by
+    simp [functionEnv, HeapCalls.argumentEnv, args]
+  apply MethodReturns.of_body (completed := [.ref address]) (by rfl)
+  change BlockReturns Probe.module (functionEnv args body [.ref address] []) body heap _ _ []
+  apply BlockContinues.returns (body := [body[0]'(by decide)])
+  · apply BlockContinues.setAttribute
+      (Evaluates.list (.cons (Evaluates.lookup self) .nil)) (Evaluates.lookup self)
+    exact Mutable.writeField_result
+      (by simpa [List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1] using found)
+      (by simp)
+  · exact BlockReturns.return_value Evaluates.constant
+
+/-- The implicit next lookup ignores arbitrary stored fields, including a shadowing __next__. -/
+theorem next_bound (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Allocating" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args body)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1
+    "Allocating" "__next__" fields classInfo.2 found source_class
+  simpa [ProtocolCalls.nextMethod, found, source_body] using lookup
+
+/-- Arbitrary private allocations may separate the two receivers and their new cyclic lists. -/
+theorem paired_methods (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical)
+    (address : Nat) (fields : List (String × Mutable.Value))
+    (found : logical[address]? = some (.instance classInfo.1 "Allocating" fields))
+    (choices : ChoiceSchedule) (used : Nat) :
+    let mapped := fields.map (fun field => (field.1, relocateValue rename field.2))
+    ProtocolCalls.nextMethod Probe.module (.ref address) logical =
+      some (.ok (some (.method (.ref address) args body)), logical) ∧
+    ProtocolCalls.nextMethod Probe.module (.ref (rename address)) physical =
+      some (.ok (some (.method (.ref (rename address)) args body)), physical) ∧
+    IteratorCalls.OperationCompletes Probe.module choices used (.method (.ref address) args body)
+      logical (.ok (.scalar (.string "123"))) (afterHeap logical address fields) ∧
+    IteratorCalls.OperationCompletes Probe.module choices used
+      (.method (.ref (rename address)) args body) physical (.ok (.scalar (.string "123")))
+      (afterHeap physical (rename address) mapped) ∧
+    RuntimeLayout (afterHeap logical address fields) (afterHeap physical (rename address) mapped)
+      (extendMap rename logical.length physical.length) := by
+  dsimp only
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have moved := layout.lookup address _ found
+  have bound := next_bound logical address fields found
+  have movedBound := nextMethod_relocates layout Probe.module (.ref address) inside
+  simp only [bound, relocateValue, Option.map_some, Except.map, relocateOperation] at movedBound
+  refine ⟨bound, movedBound, .of_method (method_returns logical address fields found),
+    .of_method (method_returns physical (rename address) _ moved), ?_⟩
+  have allocated := (layout.allocate_list closed [.ref address]
+    (by intro value member; simpa only [List.mem_singleton.mp member] using inside)).2.2
+  have stored := allocated.set address (by simp; omega)
+    (.instance classInfo.1 "Allocating" (Mutable.putField fields "link" (.ref logical.length)))
+  have same : relocateObject (extendMap rename logical.length physical.length)
+      (.instance classInfo.1 "Allocating" fields) =
+      relocateObject rename (.instance classInfo.1 "Allocating" fields) :=
+    relocateObject_congr _ _ logical.length _ (fun index hi => extendMap_old _ _ _ _ hi)
+      (closed _ (List.mem_of_getElem? found))
+  have fieldsSame : fields.map (fun field =>
+      (field.1, relocateValue (extendMap rename logical.length physical.length) field.2)) =
+      fields.map (fun field => (field.1, relocateValue rename field.2)) := by
+    simpa only [relocateObject, Mutable.Object.instance.injEq, true_and] using same
+  simp only [relocateObject, ← putField_relocate, fieldsSame] at stored
+  simpa only [afterHeap, List.map_cons, List.map_nil, relocateValue, extendMap_new, extendMap_old _ _ _ _ inside] using stored
+
+#print axioms paired_methods
+#print axioms FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.writeField
+#print axioms FormalSW.PyAst.HeapCalls.Relocation.lookup_relocates
+#print axioms FormalSW.PyAst.HeapCalls.Relocation.nextMethod_relocates
+#print axioms FormalSW.PyAst.HeapCalls.Relocation.identity_relocates
+#print axioms FormalSW.PyAst.HeapCalls.Relocation.iterMethod_relocates
+end RuntimeRelocationExamples
+'''
+
+with project_temporary_directory(prefix="runtime-relocation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    iterator = namespace["Allocating"]()
+    iterator.__next__ = "shadowed"
+    assert next(iterator) == "123"
+    first = iterator.link
+    assert first[0] is iterator
+    assert next(iterator) == "123"
+    assert iterator.link is not first and iterator.link[0] is iterator
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.HeapRelocation\n"
+                     "import lang.py.FormalSW.IteratorRules\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = checked.stdout.split("depends on axioms:")[1:]
+    assert len(audits) == 6, checked.stdout
+    for audit in audits:
+        names = {name.strip() for name in audit.split("[", 1)[1].split("]", 1)[0].split(",")}
+        assert names <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print("runtime relocation: allocating source method and six axiom audits passed")
