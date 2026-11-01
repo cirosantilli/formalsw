@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Check nonrecursive comparison invariants, chain evaluation, and shared mutations.
+Check complete comparison invariants, chain evaluation, and shared mutations.
 """
 from pathlib import Path
 import re
@@ -125,12 +125,8 @@ theorem store_then_compare (logical physical : Mutable.Heap) (rename : Nat → N
     refine ⟨?_, ?_⟩
     · simpa [stored] using rightInside
     · simp [FrameWithin, stored, Mutable.Value.edge, Graph.Edge.Within, bounded]
-  have nonrecursive : NonrecursiveComparison (stored logical address entries key value) op (.ref address) right := by
-    cases right with
-    | scalar scalar => trivial
-    | ref other => simp [NonrecursiveComparison, stored, bounded]
-  have raw := step_compare_nonrecursive_preserves Probe.module (stored logical address entries key value) other nextMap
-    logical.length physical.length op (.ref address) right [] [] retained comparisonInside nextGlobals nonrecursive
+  have raw := step_compare_preserves Probe.module (stored logical address entries key value) other nextMap
+    logical.length physical.length op (.ref address) right [] [] retained comparisonInside nextGlobals
   have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
     ⟨⟨.value right, [.compareRight op (.ref address)], stored logical address entries key value⟩, used⟩ other nextMap
     logical.length physical.length [] retained comparisonInside nextGlobals raw
@@ -193,33 +189,49 @@ theorem stopped_chain_equiv (heap : Mutable.Heap) (items value : Mutable.Value) 
     (finishes "stopped_chain" leftChoices (stopped_chain_returns heap items value left right stopped))
     (finishes "stopped_false" rightChoices (stopped_false_returns heap items value left right)) (Or.inl rfl)
 
-/-- Equality fast paths retain arbitrary shared references, including cyclic prefixes. -/
-theorem shared_prefix_preserves (logical physical : Mutable.Heap) (rename : Nat → Nat)
-    (layout : ExecutionLayout logical physical rename) (left right shared : Nat) (x y : Int) (negated : Bool)
-    (stack : List Frame) (globals : Mutable.Globals)
-    (first : logical[left]? = some (.list [.ref shared, .scalar (.int x)]))
-    (second : logical[right]? = some (.list [.ref shared, .scalar (.int y)]))
-    (inside : StateWithin ⟨.value (.ref right), .compareRight (if negated then .notEq else .eq) (.ref left) :: stack, logical⟩)
-    (globalsInside : GlobalsWithin logical.length globals) :
-    Preserves logical physical rename physical.length
-      (HeapCalls.step Probe.module logical.length
-        ⟨.value (.ref right), .compareRight (if negated then .notEq else .eq) (.ref left) :: stack, logical⟩ globals)
-      (HeapCalls.step Probe.module physical.length
+/-- Distinct self-leading sequences remain unresolved at every comparison depth. -/
+theorem cyclic_unresolved (heap : Mutable.Heap) (left right : Nat) (xs ys : List Mutable.Value)
+    (different : left ≠ right) (lengths : xs.length = ys.length)
+    (first : heap[left]? = some (.list (.ref left :: xs)))
+    (second : heap[right]? = some (.list (.ref right :: ys))) (fuel : Nat) (equality : Bool) :
+    HeapSort.compare fuel heap equality (.ref left) (.ref right) = none := by
+  induction fuel generalizing equality with
+  | zero => rfl
+  | succ fuel ih =>
+    cases equality <;> simp [HeapSort.compare, first, second, different, lengths, HeapSort.lex, ih]
+
+/-- An unresolved recursive prefix stops a chain before its remaining expressions, even after relocation. -/
+theorem cyclic_chain_unsupported (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat) (xs ys : List Mutable.Value)
+    (different : left ≠ right) (lengths : xs.length = ys.length)
+    (first : logical[left]? = some (.list (.ref left :: xs)))
+    (second : logical[right]? = some (.list (.ref right :: ys)))
+    (rest : List (CmpOp × Expr)) (env : HeapCalls.Env) (stack : List Frame) (globals : Mutable.Globals) :
+    HeapCalls.step Probe.module logical.length
+        ⟨.value (.ref right), .chainRight .eq (.ref left) rest env :: stack, logical⟩ globals = .unsupported ∧
+      HeapCalls.step Probe.module physical.length
         (relocateState rename physical
-          ⟨.value (.ref right), .compareRight (if negated then .notEq else .eq) (.ref left) :: stack, logical⟩)
-        (relocateGlobals rename globals)) := by
-  apply step_compare_nonrecursive_preserves Probe.module logical physical rename logical.length physical.length
-    _ _ _ stack globals layout inside globalsInside
-  cases negated <;>
-    simp [NonrecursiveComparison, first, second, HeapCalls.equalLists, HeapCalls.equalElements,
-      scalarCompare, evalCmpOp, bind, Option.bind]
-  all_goals (repeat' split) <;> simp_all
+          ⟨.value (.ref right), .chainRight .eq (.ref left) rest env :: stack, logical⟩)
+        (relocateGlobals rename globals) = .unsupported := by
+  have compared : HeapCalls.compare .eq (.ref left) (.ref right) logical = none := by
+    have dispatch := compare_equal_sequences logical false false left right _ _ first second
+    simp only [Bool.false_eq_true, ↓reduceIte] at dispatch
+    rw [dispatch]
+    have recursive := cyclic_unresolved logical left right xs ys different lengths first second
+      (HeapSort.comparisonFuel logical) true
+    simp [different, HeapCalls.equalLists, HeapCalls.equalElements, lengths, recursive]
+  have moved := layout.runtime.compare_complete layout.closed .eq (.ref left) (.ref right)
+    (List.getElem?_eq_some_iff.mp first).1 (List.getElem?_eq_some_iff.mp second).1
+  rw [compared] at moved
+  constructor <;>
+    simp [HeapCalls.step, result, HeapCalls.run, compared, relocateState, relocateWork, relocateFrame, moved]
 
 end MachineComparisonExamples
 '''
 AUDITS = [
     "compare_dataInstance_self",
-    "MachineComparisonExamples.shared_prefix_preserves",
+    "MachineComparisonExamples.cyclic_unresolved",
+    "MachineComparisonExamples.cyclic_chain_unsupported",
     "RuntimeLayout.compare_shallow_sequences",
     "RuntimeLayout.compare_sequences_nonrecursive",
     "MachineComparisonExamples.stopped_chain_returns",
@@ -227,9 +239,9 @@ AUDITS = [
     "MachineComparisonExamples.stopped_chain_equiv",
     "MachineComparisonExamples.dictionary_unknown_values",
     "RuntimeLayout.compare_nonrecursive",
-    "result_compare_nonrecursive_preserves",
-    "step_compare_nonrecursive_preserves",
-    "step_chainCompare_nonrecursive_preserves",
+    "result_compare_preserves",
+    "step_compare_preserves",
+    "step_chainCompare_preserves",
     "step_compareLeft_preserves",
     "step_chainLeft_preserves",
     "step_compare_expression_preserves",
@@ -287,4 +299,4 @@ with project_temporary_directory(prefix="machine-comparison-") as temporary:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print(f"machine comparisons: nonrecursive dispatch, chains and mutation composition; {len(AUDITS)} axiom audits passed")
+print(f"machine comparisons: complete dispatch, cyclic chains and mutation composition; {len(AUDITS)} axiom audits passed")

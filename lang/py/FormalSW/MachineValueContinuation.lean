@@ -7,22 +7,15 @@ import lang.py.FormalSW.MachineGeneratorContinuation
 import lang.py.FormalSW.MachineBinaryInvariant
 import lang.py.FormalSW.MachineExceptionInvariant
 
-/-! Value dispatch isolates the remaining recursive-comparison obligation. -/
+/-! Value dispatch preserves every frame constructor, including recursive primitive comparisons. -/
 namespace FormalSW.PyAst.HeapCalls.Relocation
 open Mutable.Relocation
 set_option Elab.async false
 
-/-- Only comparison-bearing frames restrict the domain; other continuations cover every modeled outcome. -/
-def ValueComparisonDomain (heap : Mutable.Heap) (value : Value) : List Frame → Prop
-  | .compareRight op left :: _ | .chainRight op left _ _ :: _ => NonrecursiveComparison heap op left value
-  | .extremumKey cursor _ _ best :: _ => ExtremumComparison heap cursor value best
-  | _ => True
-
 theorem step_value_continuation_preserves (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (logicalAnchors physicalAnchors : Nat) (value : Value) (stack : List Frame) (globals : Mutable.Globals)
     (layout : ExecutionLayout logical physical rename) (source : ∀ statement ∈ module.body, StmtWithin 0 statement)
-    (inside : StateWithin ⟨.value value, stack, logical⟩) (globalsInside : GlobalsWithin logical.length globals)
-    (comparison : ValueComparisonDomain logical value stack) :
+    (inside : StateWithin ⟨.value value, stack, logical⟩) (globalsInside : GlobalsWithin logical.length globals) :
     Preserves logical physical rename physicalAnchors
       (step module logicalAnchors ⟨.value value, stack, logical⟩ globals)
       (step module physicalAnchors (relocateState rename physical ⟨.value value, stack, logical⟩)
@@ -56,9 +49,9 @@ theorem step_value_continuation_preserves (module : Module) (logical physical : 
     | binaryLeft => apply step_binaryLeft_preserves <;> assumption
     | binaryRight => apply step_binary_preserves <;> assumption
     | compareLeft => apply step_compareLeft_preserves <;> assumption
-    | compareRight => apply step_compare_nonrecursive_preserves <;> assumption
+    | compareRight => apply step_compare_preserves <;> assumption
     | chainLeft => apply step_chainLeft_preserves <;> assumption
-    | chainRight => apply step_chainCompare_nonrecursive_preserves <;> assumption
+    | chainRight => apply step_chainCompare_preserves <;> assumption
     | chainResult => apply step_chainResult_preserves <;> assumption
     | unary => apply step_unary_preserves <;> assumption
     | boolean => apply step_boolean_preserves <;> assumption
@@ -96,7 +89,7 @@ theorem step_value_continuation_preserves (module : Module) (choices : ChoiceSch
     (value : Mutable.Value) (stack : List HeapCalls.Frame) (resumes : List Resume)
     (globals : Mutable.Globals) (source : ModuleSource module) (layout : ExecutionLayout logical physical rename)
     (inside : StateWithin logical.length (.running ⟨⟨.value value, stack, logical⟩, used⟩ resumes))
-    (globalsInside : GlobalsWithin logical.length globals) (comparison : ValueComparisonDomain logical value stack) :
+    (globalsInside : GlobalsWithin logical.length globals) :
     Preserves logical physical rename physicalAnchors
       (IteratorCalls.step module logicalAnchors choices (.running ⟨⟨.value value, stack, logical⟩, used⟩ resumes) globals)
       (IteratorCalls.step module physicalAnchors choices
@@ -109,6 +102,6 @@ theorem step_value_continuation_preserves (module : Module) (choices : ChoiceSch
   exact SetCalls.Relocation.step_preserves_of_heap module choices _ physical rename logicalAnchors physicalAnchors
     globals layout ⟨inside.1, inside.2.1⟩ globalsInside
     (HeapCalls.Relocation.step_value_continuation_preserves module logical physical rename logicalAnchors physicalAnchors
-      value stack globals layout source ⟨inside.1, inside.2.1⟩ globalsInside comparison)
+      value stack globals layout source ⟨inside.1, inside.2.1⟩ globalsInside)
 
 end FormalSW.PyAst.IteratorCalls.Relocation

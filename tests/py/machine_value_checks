@@ -53,14 +53,13 @@ theorem initialization_finishes (heap : Mutable.Heap) (address destination : Nat
     | exact .done rfl
     | exact .next rfl (.done rfl)
 
-/-- Comparison requirements are checked in the heap produced by the preceding mutation. -/
+/-- Every value continuation composes with the actual heap produced by the preceding mutation. -/
 theorem append_then_value (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
     (item value : Mutable.Value) (stack : List Frame)
     (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
     (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
     (inside : StateWithin ⟨.value value, stack, logical⟩)
-    (comparison : ValueComparisonDomain (after logical address items item) value stack)
     (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
     ∃ other nextMap,
       (∀ previous < logical.length, nextMap previous = rename previous) ∧
@@ -88,14 +87,7 @@ theorem append_then_value (logical physical : Mutable.Heap) (rename : Nat → Na
     logical.length physical.length used value stack resumes []
     (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
     ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
-      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals comparison
-
-/-- Scalar extremum keys satisfy the comparison condition for any existing winner. -/
-theorem scalar_key_domain (heap : Mutable.Heap) (cursor : SequenceExtremum) (position : Nat)
-    (candidate : Mutable.Value) (score : Constant) (best : Option (Mutable.Value × Mutable.Value)) (stack : List Frame) :
-    ValueComparisonDomain heap (.scalar score) (.extremumKey cursor position candidate best :: stack) := by
-  intro pair _
-  simp [NonrecursiveComparison]
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
 
 end MachineValueExamples
 '''
@@ -105,7 +97,7 @@ AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
     "extremum_choose_relocates", "extremum_choose_effect", "step_extremumKey_preserves",
     "step_value_continuation_preserves",
 )] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_value_continuation_preserves"] + ["MachineValueExamples." + name for name in (
-    "initialize_returns", "initialization_finishes", "append_then_value", "scalar_key_domain",
+    "initialize_returns", "initialization_finishes", "append_then_value",
 )]
 with project_temporary_directory(prefix="machine-value-") as temporary:
     directory = Path(temporary)
@@ -146,4 +138,4 @@ with project_temporary_directory(prefix="machine-value-") as temporary:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print(f"value dispatch: all frame constructors with explicit comparison domain, constructor errors after mutation; {len(AUDITS)} axiom audits passed")
+print(f"value dispatch: all frame constructors without comparison restrictions, constructor errors after mutation; {len(AUDITS)} axiom audits passed")

@@ -1,20 +1,15 @@
 import lang.py.FormalSW.MachineSortAcquisition
 import lang.py.FormalSW.MachineComparisonInvariant
 
-/-! Extremum selection preserves original items for nonrecursive key comparisons. -/
+/-! Extremum selection preserves original items for every primitive key-comparison outcome. -/
 namespace FormalSW.PyAst.HeapCalls.Relocation
 open Mutable.Relocation
 set_option Elab.async false
 
-def ExtremumComparison (heap : Mutable.Heap) (cursor : SequenceExtremum) (score : Value)
-    (best : Option (Value × Value)) : Prop :=
-  ∀ pair, best = some pair → NonrecursiveComparison heap (if cursor.maximum then .gt else .lt) score pair.2
-
 theorem extremum_choose_relocates (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (layout : ExecutionLayout logical physical rename) (cursor : SequenceExtremum) (candidate score : Value)
     (best : Option (Value × Value)) (scoreInside : score.edge.Within logical.length)
-    (bestInside : ∀ pair, best = some pair → PairWithin logical.length pair)
-    (comparison : ExtremumComparison logical cursor score best) :
+    (bestInside : ∀ pair, best = some pair → PairWithin logical.length pair) :
     (relocateExtremum rename cursor).choose (relocateValue rename candidate) (relocateValue rename score)
         (best.map (relocatePair rename)) physical =
       (cursor.choose candidate score best logical).map
@@ -26,8 +21,8 @@ theorem extremum_choose_relocates (logical physical : Mutable.Heap) (rename : Na
     have previousInside := (bestInside (winner, previous) rfl).2
     obtain ⟨result, read⟩ := compare_readonly logical (if cursor.maximum then .gt else .lt)
       score previous scoreInside previousInside
-    have paired := layout.runtime.compare_nonrecursive layout.closed (if cursor.maximum then .gt else .lt)
-      score previous scoreInside previousInside (comparison (winner, previous) rfl)
+    have paired := layout.runtime.compare_complete layout.closed (if cursor.maximum then .gt else .lt)
+      score previous scoreInside previousInside
     rw [read] at paired
     dsimp only [relocateExtremum]
     simp only [SequenceExtremum.choose, Option.map_some, relocatePair, Mutable.eval_bind]
@@ -81,7 +76,7 @@ theorem step_extremumKey_preserves (module : Module) (logical physical : Mutable
     (best : Option (Value × Value)) (stack : List Frame) (globals : Mutable.Globals)
     (layout : ExecutionLayout logical physical rename)
     (inside : StateWithin ⟨.value value, .extremumKey cursor position candidate best :: stack, logical⟩)
-    (globalsInside : GlobalsWithin logical.length globals) (comparison : ExtremumComparison logical cursor value best) :
+    (globalsInside : GlobalsWithin logical.length globals) :
     Preserves logical physical rename physicalAnchors
       (step module logicalAnchors ⟨.value value, .extremumKey cursor position candidate best :: stack, logical⟩ globals)
       (step module physicalAnchors
@@ -99,7 +94,7 @@ theorem step_extremumKey_preserves (module : Module) (logical physical : Mutable
     globals layout globalsInside
     (fun outcome after executed => (extremum_choose_effect logical after cursor candidate value best captured.1 inside.1
       captured.2.2 outcome executed).1)
-    (extremum_choose_relocates logical physical rename layout cursor candidate value best inside.1 captured.2.2 comparison) (by
+    (extremum_choose_relocates logical physical rename layout cursor candidate value best inside.1 captured.2.2) (by
       intro updated executed
       have bounded := (extremum_choose_effect logical logical cursor candidate value best captured.1 inside.1
         captured.2.2 _ executed).2 updated rfl
