@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""
+Prove buffer copies survive aliased mutations and self-extension preserves errors.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def update(left, more, count):
+    copied = left + more
+    left *= count
+    return [left, copied, copied]
+
+def extend(left, right, count):
+    left *= count
+    left += right
+    return left
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace BufferArithmeticExamples
+set_option Elab.async false
+
+def copied (heap : Mutable.Heap) (bytes more : List UInt8) := heap ++ [.bytearray (bytes ++ more)]
+def scaledCopy (heap : Mutable.Heap) (address : Nat) (bytes more : List UInt8) (number : Int) :=
+  (copied heap bytes more).set address (.bytearray (List.replicate number.toNat bytes).flatten)
+def finalHeap (heap : Mutable.Heap) (address : Nat) (bytes more : List UInt8) (number : Int) :=
+  scaledCopy heap address bytes more number ++ [.list [.ref address, .ref heap.length, .ref heap.length]]
+def scaled (heap : Mutable.Heap) (address : Nat) (bytes : List UInt8) (number : Int) :=
+  heap.set address (.bytearray (List.replicate number.toNat bytes).flatten)
+
+theorem source_updates (heap : Mutable.Heap) (address : Nat) (bytes more : List UInt8)
+    (count : Mutable.Value) (number : Int) (found : heap[address]? = some (.bytearray bytes))
+    (converted : Mutable.integer count heap = some (.ok number, heap)) :
+    ReturnsValue Probe.module "update" [.ref address, .scalar (.bytes more), count] heap (.ref (heap.length + 1))
+      (finalHeap heap address bytes more number) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have middleFound : (copied heap bytes more)[address]? = some (.bytearray bytes) := by
+    simpa only [copied, List.getElem?_append_left inside] using found
+  have first : Mutable.binary .add (.ref address) (.scalar (.bytes more)) heap =
+      some (.ok (.ref heap.length), copied heap bytes more) := by
+    rw [binary_add_buffer_eval heap address bytes _ found]
+    simp [bufferOperand, storeBufferResult, Mutable.allocateBuffer, Except.map, copied]
+  have middleCount := integer_relocates heap (copied heap bytes more) id count
+  simp only [relocateValue_id, converted, Option.map_some] at middleCount
+  have second : HeapCalls.inplace .mult (.ref address) count (copied heap bytes more) =
+      some (.ok (.ref address), scaledCopy heap address bytes more number) := by
+    rw [inplace_mult_buffer_eval (copied heap bytes more) address bytes count middleFound]
+    simp [middleCount, storeBufferResult, Mutable.eval_bind, Except.map, scaledCopy]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.assign (Evaluates.binary (Evaluates.lookup rfl) (Evaluates.lookup rfl) first)
+  apply BlockReturns.augAssign rfl (Evaluates.lookup rfl) second
+  apply BlockReturns.return_value
+  have size : (scaledCopy heap address bytes more number).length = heap.length + 1 := by simp [scaledCopy, copied]
+  rw [← size]
+  exact Evaluates.list (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)))
+
+/-- The copied buffer retains its old bytes while all references to the original observe the update. -/
+theorem paired_updates (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (bytes more : List UInt8)
+    (count : Mutable.Value) (number : Int) (found : logical[address]? = some (.bytearray bytes))
+    (converted : Mutable.integer count logical = some (.ok number, logical)) :
+    ∃ nextMap,
+      ReturnsValue Probe.module "update" [.ref address, .scalar (.bytes more), count] logical (.ref (logical.length + 1))
+        (finalHeap logical address bytes more number) ∧
+      ReturnsValue Probe.module "update" [.ref (rename address), .scalar (.bytes more), relocateValue rename count]
+        physical (.ref (physical.length + 1)) (finalHeap physical (rename address) bytes more number) ∧
+      ExecutionLayout (finalHeap logical address bytes more number)
+        (finalHeap physical (rename address) bytes more number) nextMap ∧
+      nextMap (logical.length + 1) = physical.length + 1 ∧
+      (∀ old < logical.length, nextMap old = rename old) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  let middleMap := extendMap rename logical.length physical.length
+  have first := (layout.allocateBuffer (bytes ++ more)).2.2
+  have middleFound : (logical ++ [Mutable.Object.bytearray (bytes ++ more)])[address]? = some (.bytearray bytes) := by
+    simpa only [List.getElem?_append_left inside] using found
+  have second := first.set_nonempty address (.bytearray bytes) (.bytearray (List.replicate number.toNat bytes).flatten)
+    middleFound (by simp) (by simp) (by simp [ObjectWithin, objectValues])
+  change ExecutionLayout (scaledCopy logical address bytes more number)
+    (scaledCopy physical (middleMap address) bytes more number) middleMap at second
+  have addressSame : middleMap address = rename address := extendMap_old _ _ _ _ inside
+  rw [addressSame] at second
+  have valuesInside : ∀ value ∈ [Mutable.Value.ref address, .ref logical.length, .ref logical.length],
+      value.edge.Within (scaledCopy logical address bytes more number).length := by
+    simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq,
+      Mutable.Value.edge, Graph.Edge.Within, scaledCopy, copied, List.length_set, List.length_append, List.length_singleton]
+    omega
+  have retained := (second.allocate_list [.ref address, .ref logical.length, .ref logical.length] valuesInside).2.2
+  have otherCount := integer_relocates logical physical rename count
+  simp only [converted, Option.map_some] at otherCount
+  let nextMap := extendMap middleMap (logical.length + 1) (physical.length + 1)
+  refine ⟨nextMap, source_updates logical address bytes more count number found converted,
+    source_updates physical (rename address) bytes more _ number (layout.runtime.lookup _ _ found) otherCount, ?_, ?_, ?_⟩
+  · simpa only [finalHeap, scaledCopy, copied, List.length_set, List.length_append, List.length_singleton,
+      List.map_cons, List.map_nil, relocateValue, addressSame, middleMap, extendMap_new] using retained
+  · exact extendMap_new _ _ _
+  · intro old bound
+    have later : old < logical.length + 1 := by omega
+    simp only [nextMap, extendMap_old _ _ _ _ later, middleMap, extendMap_old _ _ _ _ bound]
+
+theorem scaled_result (heap : Mutable.Heap) (address : Nat) (bytes : List UInt8) (number : Int)
+    (found : heap[address]? = some (.bytearray bytes)) :
+    HeapCalls.inplace .mult (.ref address) (.scalar (.int number)) heap =
+      some (.ok (.ref address), scaled heap address bytes number) := by
+  rw [inplace_mult_buffer_eval heap address bytes _ found]
+  simp [Mutable.integer, storeBufferResult, Except.map, scaled]
+
+/-- Self-extension reads the bytes after the earlier multiplication, then fails without another write. -/
+theorem source_self_error (heap : Mutable.Heap) (address : Nat) (bytes : List UInt8) (number : Int)
+    (found : heap[address]? = some (.bytearray bytes))
+    (nonempty : (List.replicate number.toNat bytes).flatten ≠ []) :
+    (HeapCalls.call Probe.module "extend" [.ref address, .ref address, .scalar (.int number)] heap).Finishes
+      ⟨.error {typeName := "BufferError", args := []}, [], scaled heap address bytes number, heap.length⟩ := by
+  let args : List Arg := [{name := "left", annotation := none}, {name := "right", annotation := none},
+    {name := "count", annotation := none}]
+  let env := HeapCalls.argumentEnv args [.ref address, .ref address, .scalar (.int number)]
+  let rest : List Stmt := [.augAssign (.name "left") .add (.name "right"), .return (.name "left")]
+  have afterFound : (scaled heap address bytes number)[address]? =
+      some (.bytearray (List.replicate number.toNat bytes).flatten) := by
+    simp [scaled, (List.getElem?_eq_some_iff.mp found).1]
+  have failed : HeapCalls.inplace .add (.ref address) (.ref address) (scaled heap address bytes number) =
+      some (.error {typeName := "BufferError", args := []}, scaled heap address bytes number) := by
+    rw [inplace_add_buffer_eval _ address _ _ afterFound]
+    simp [bufferOperand, afterFound, nonempty, Mutable.error, Mutable.eval_bind]
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  apply Finishes.next (step := HeapCalls.step Probe.module heap.length)
+    (following := ⟨.block (.augAssign (.name "left") .mult (.name "count") :: rest) env, [], heap⟩) rfl
+  have scaledTrace := BlockContinues.augAssign (globals := []) (module := Probe.module) (env := env) (name := "left")
+    (by rfl) (Evaluates.lookup (name := "count") (by rfl)) (scaled_result heap address bytes number found)
+  apply (scaledTrace rest heap.length []).finishes
+  repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+  exact .done (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, failed, HeapCalls.done,
+    HeapCalls.protectGenerator, Frame.inGenerator, Calls.generatorException])
+
+theorem paired_self_errors (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (bytes : List UInt8) (number : Int)
+    (found : logical[address]? = some (.bytearray bytes)) (nonempty : (List.replicate number.toNat bytes).flatten ≠ []) :
+    (HeapCalls.call Probe.module "extend" [.ref address, .ref address, .scalar (.int number)] logical).Finishes
+        ⟨.error {typeName := "BufferError", args := []}, [], scaled logical address bytes number, logical.length⟩ ∧
+      (HeapCalls.call Probe.module "extend" [.ref (rename address), .ref (rename address), .scalar (.int number)] physical).Finishes
+        ⟨.error {typeName := "BufferError", args := []}, [], scaled physical (rename address) bytes number, physical.length⟩ ∧
+      ExecutionLayout (scaled logical address bytes number) (scaled physical (rename address) bytes number) rename := by
+  exact ⟨source_self_error logical address bytes number found nonempty,
+    source_self_error physical (rename address) bytes number (layout.runtime.lookup _ _ found) nonempty,
+    layout.set_nonempty address (.bytearray bytes) (.bytearray (List.replicate number.toNat bytes).flatten)
+      found (by simp) (by simp) (by simp [ObjectWithin, objectValues])⟩
+
+/-- Clearing the receiver makes subsequent self-extension valid and preserves its identity. -/
+theorem source_self_empty (heap : Mutable.Heap) (address : Nat) (bytes : List UInt8) (number : Int)
+    (found : heap[address]? = some (.bytearray bytes)) (empty : (List.replicate number.toNat bytes).flatten = []) :
+    ReturnsValue Probe.module "extend" [.ref address, .ref address, .scalar (.int number)] heap (.ref address)
+      (scaled heap address bytes number) := by
+  have afterFound : (scaled heap address bytes number)[address]? = some (.bytearray []) := by
+    simp [scaled, empty, (List.getElem?_eq_some_iff.mp found).1]
+  have second : HeapCalls.inplace .add (.ref address) (.ref address) (scaled heap address bytes number) =
+      some (.ok (.ref address), scaled heap address bytes number) := by
+    rw [inplace_add_buffer_eval _ address [] _ afterFound]
+    simp [bufferOperand, afterFound, storeBufferResult, Except.map]
+    simp [scaled, empty]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.augAssign rfl (Evaluates.lookup rfl) (scaled_result heap address bytes number found)
+  apply BlockReturns.augAssign rfl (Evaluates.lookup rfl) second
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+/-- The addition rule transports actual machine steps, including errors under saved continuations. -/
+theorem addition_step (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (logicalAnchors physicalAnchors address : Nat)
+    (bytes : List UInt8) (right : Mutable.Value) (inPlace : Bool) (stack : List Frame) (globals : Mutable.Globals)
+    (found : logical[address]? = some (.bytearray bytes)) (rightInside : right.edge.Within logical.length)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame) (globalsInside : GlobalsWithin logical.length globals)
+    (outcome : Except ExceptionObject Mutable.Value) (after : Mutable.Heap)
+    (executed : (if inPlace then HeapCalls.inplace .add (.ref address) right else Mutable.binary .add (.ref address) right) logical =
+      some (outcome, after)) :
+    ∃ other nextMap, ExecutionLayout after other nextMap ∧
+      step module physicalAnchors
+          (relocateState rename physical ⟨.value right, .binaryRight .add (.ref address) inPlace :: stack, logical⟩)
+          (relocateGlobals rename globals) =
+        relocateStep nextMap other physicalAnchors
+          (step module logicalAnchors ⟨.value right, .binaryRight .add (.ref address) inPlace :: stack, logical⟩ globals) := by
+  obtain ⟨other, nextMap, retained, _, _, _, transported, _⟩ :=
+    step_binary_relocates module logical physical rename logicalAnchors physicalAnchors .add (.ref address) right inPlace
+      stack globals (List.getElem?_eq_some_iff.mp found).1 stackInside globalsInside
+      (layout.add_buffer address bytes right inPlace found rightInside) outcome after executed
+  exact ⟨other, nextMap, retained, transported⟩
+
+end BufferArithmeticExamples
+'''
+AUDITS = [
+    "BufferArithmeticExamples.source_updates", "BufferArithmeticExamples.paired_updates", "BufferArithmeticExamples.scaled_result",
+    "BufferArithmeticExamples.source_self_error", "BufferArithmeticExamples.paired_self_errors",
+    "BufferArithmeticExamples.source_self_empty", "BufferArithmeticExamples.addition_step",
+    "EvalRelocates.readonly_bind", "binary_add_buffer_eval", "inplace_add_buffer_eval",
+    "binary_mult_buffer_eval", "inplace_mult_buffer_eval", "binary_mult_ref_value_comm", "binary_add_bytes_buffer_eval",
+    "RuntimeLayout.bufferOperand", "bufferOperand_keeps_heap", "ExecutionLayout.storeBufferResult",
+    "ExecutionLayout.add_buffer", "ExecutionLayout.mult_buffer", "ExecutionLayout.add_bytes_buffer", "ExecutionLayout.mult_buffer_left",
+]
+
+with project_temporary_directory(prefix="buffer-arithmetic-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    update, extend = namespace["update"], namespace["extend"]
+    # Native samples respect CPython's count-conversion range; Lean counts remain unrestricted.
+    for original in (b"", b"\x00\xff", b"ab"):
+        for more in (b"", b"\x80c"):
+            for count in (-sys.maxsize - 1, -1, 0, 1, 3, False, True):
+                left = bytearray(original)
+                alias = left
+                result = update(left, more, count)
+                assert result[0] is alias and bytes(alias) == original * max(0, count)
+                assert result[1] is result[2] and result[1] is not alias
+                assert type(result[1]) is bytearray and bytes(result[1]) == original + more
+                result[1].append(17)
+                assert result[1] is result[2] and bytes(alias) == original * max(0, count)
+                assert count * bytearray(original) == bytearray(original) * count
+                assert type(more + bytearray(original)) is bytes
+                assert more + bytearray(original) == more + original
+                left = bytearray(original)
+                alias = left
+                try:
+                    value = extend(left, left, count)
+                except BufferError:
+                    assert original and count > 0
+                else:
+                    assert not original or count <= 0
+                    assert value is alias and not alias
+                assert bytes(alias) == original * max(0, count)
+    left, right = bytearray(b"ab"), bytearray(b"cd")
+    assert extend(left, right, 2) is left and left == b"ababcd" and right == b"cd"
+    copied = right + right
+    assert copied == b"cdcd" and copied is not right
+    for invalid in (None, "x", [], object()):
+        left = bytearray(b"ab")
+        try:
+            update(left, b"c", invalid)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("invalid buffer repetition accepted")
+        assert left == b"ab"
+        try:
+            extend(left, invalid, 2)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("invalid buffer extension accepted")
+        assert left == b"abab"
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.BufferArithmeticRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"buffer arithmetic: copied bytes, shared updates, self-extension errors; {len(AUDITS)} axiom audits passed")

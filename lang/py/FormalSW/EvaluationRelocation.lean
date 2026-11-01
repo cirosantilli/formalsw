@@ -35,6 +35,36 @@ theorem ExecutionLayout.pure_relocates {logical physical : Heap} {rename : Nat �
   cases equal
   exact inside
 
+/-- A read-only conversion can feed an allocating or mutating action, retaining early exceptions. -/
+theorem EvalRelocates.readonly_bind {α : Type} {logical physical : Heap} {rename : Nat → Nat}
+    (layout : ExecutionLayout logical physical rename) (read otherRead : Eval α) (next otherNext : α → Eval Value)
+    (paired : otherRead physical = (read logical).map (fun result => (result.1, physical)))
+    (unchanged : ∀ outcome after, read logical = some (outcome, after) → after = logical)
+    (following : ∀ value, read logical = some (.ok value, logical) →
+      EvalRelocates logical physical rename (next value) (otherNext value)) :
+    EvalRelocates logical physical rename (read >>= next) (otherRead >>= otherNext) := by
+  intro outcome after executed
+  cases tested : read logical with
+  | none => simp [tested, eval_bind] at executed
+  | some pair =>
+    rcases pair with ⟨result, middle⟩
+    have same := unchanged result middle tested
+    subst middle
+    cases result with
+    | error exception =>
+      have equal : Except.error exception = outcome ∧ logical = after := by
+        simpa [tested, eval_bind] using executed
+      obtain ⟨rfl, rfl⟩ := equal
+      refine ⟨physical, rename, ?_, layout, fun _ _ => rfl, Nat.le_refl _, ?_⟩
+      · simp [paired, tested, eval_bind, Except.map]
+      · intro value impossible
+        cases impossible
+    | ok value =>
+      have continued : next value logical = some (outcome, after) := by simpa [tested, eval_bind] using executed
+      obtain ⟨other, nextMap, completed, rest⟩ := following value tested outcome after continued
+      refine ⟨other, nextMap, ?_, rest⟩
+      simpa [paired, tested, eval_bind] using completed
+
 theorem ExecutionLayout.allocate_list_relocates {logical physical : Heap} {rename : Nat → Nat}
     (layout : ExecutionLayout logical physical rename) (items : List Value)
     (inside : ∀ value ∈ items, value.edge.Within logical.length) :
