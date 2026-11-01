@@ -167,14 +167,129 @@ theorem allocation_layout (logical physical : Mutable.Heap) (rename : Nat → Na
     ⟨by trivial, itemsInside⟩ saved (extendMap_old rename logical.length physical.length) rfl setPair
   simpa only [IteratorCalls.step, intercept, SetCalls.step, core, allocated.1, SetCalls.liftStep, lift] using paired
 
+theorem allocation_preserves (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (logicalAnchors physicalAnchors used : Nat) (choices : ChoiceSchedule)
+    (items : List Mutable.Value) (stack : List HeapCalls.Frame) (resumes : List Resume)
+    (globals : Mutable.Globals) (layout : ExecutionLayout logical physical rename)
+    (itemsInside : ∀ value ∈ items, value.edge.Within logical.length)
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (saved : ∀ pending ∈ resumes, ResumeWithin logical.length pending)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    Preserves logical physical rename physicalAnchors
+      (IteratorCalls.step Probe.module logicalAnchors choices
+        (.running ⟨⟨.operation .list items, stack, logical⟩, used⟩ resumes) globals)
+      (IteratorCalls.step Probe.module physicalAnchors choices
+        (IteratorCalls.Relocation.relocateState rename physical physicalAnchors
+          (.running ⟨⟨.operation .list items, stack, logical⟩, used⟩ resumes)) (relocateGlobals rename globals)) := by
+  have allocated := step_list_relocates Probe.module logical physical rename layout logicalAnchors physicalAnchors
+    items stack globals itemsInside stackInside globalsInside
+  apply step_preserves Probe.module choices
+    (.running ⟨⟨.operation .list items, stack, logical⟩, used⟩ resumes) logical physical rename logicalAnchors physicalAnchors globals
+    source_module layout rfl ⟨⟨by trivial, itemsInside⟩, stackInside, saved⟩ globalsInside
+  intro core pending same _
+  cases same
+  refine ⟨logical ++ [.list items], physical ++ [.list (items.map (relocateValue rename))],
+    extendMap rename logical.length physical.length, extendMap_old rename logical.length physical.length,
+    by simp, by simp, allocated.2.2.1, ?_, ?_, ?_⟩
+  · simp only [SetCalls.step, allocated.1, SetCalls.liftStep, SetCalls.Relocation.StepHeap]
+  · simpa only [SetCalls.step, allocated.1, SetCalls.liftStep, SetCalls.Relocation.StepWithin] using allocated.2.2.2.1
+  · have corePair := set_step_relocates Probe.module ⟨.operation .list items, stack, logical⟩ physical
+      (physical ++ [.list (items.map (relocateValue rename))]) rename (extendMap rename logical.length physical.length)
+      logicalAnchors physicalAnchors used choices globals (by rw [allocated.1]; simp)
+      (by rw [allocated.1]; exact allocated.2.1)
+    exact corePair
+
+/-- Allocate the actual __next__ result, complete the method, then resume the source consumer. -/
+theorem allocation_then_resume (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (address logicalAnchors physicalAnchors used : Nat) (choices : ChoiceSchedule)
+    (globals : Mutable.Globals) (layout : ExecutionLayout logical physical rename)
+    (addressInside : address < logical.length) (globalsInside : GlobalsWithin logical.length globals) :
+    ∃ logicalAfter physicalAfter nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout logicalAfter physicalAfter nextMap ∧
+      logicalAfter = after logical address ∧
+      Preserves logical physical rename physicalAnchors
+        (IteratorCalls.step Probe.module logicalAnchors choices
+          (.completed (.ok ⟨.ok (.ref logical.length), globals, after logical address, logicalAnchors⟩)
+            used [.advance (consumer address) (.ref address)]) globals)
+        (IteratorCalls.step Probe.module physicalAnchors choices
+          (IteratorCalls.Relocation.relocateState nextMap physicalAfter physicalAnchors
+            (.completed (.ok ⟨.ok (.ref logical.length), globals, after logical address, logicalAnchors⟩)
+              used [.advance (consumer address) (.ref address)])) (relocateGlobals rename globals)) ∧
+      IteratorCalls.Reaches Probe.module physicalAnchors choices (relocateGlobals rename globals)
+        (IteratorCalls.Relocation.relocateState rename physical physicalAnchors
+          (.running ⟨⟨.operation .list [.ref address], [], logical⟩, used⟩ [.advance (consumer address) (.ref address)]))
+        (IteratorCalls.Relocation.relocateState nextMap physicalAfter physicalAnchors
+          (.running ⟨⟨.block (loopBody ++ [Calls.loopContinuation loopBody (loopCode (consumer address) (.ref address))])
+            (setLocal (env address) "value" (.ref logical.length)), [], after logical address⟩, used⟩ [])) := by
+  let saved : List Resume := [.advance (consumer address) (.ref address)]
+  have savedInside : ∀ pending ∈ saved, ResumeWithin logical.length pending := by
+    intro pending member
+    have same : pending = .advance (consumer address) (.ref address) := List.mem_singleton.mp member
+    subst pending
+    refine ⟨⟨?_, ?_, by simp [consumer], by simp [consumer], by simp [consumer]⟩, addressInside⟩
+    · exact argumentEnv_within logical.length args [.ref address] (by simpa using addressInside)
+    · simp [consumer, loopBody, StmtWithin]
+  have allocated := allocation_preserves logical physical rename logicalAnchors physicalAnchors used choices
+    [.ref address] [] saved globals layout (by simpa using addressInside) (by simp) savedInside globalsInside
+  have first : IteratorCalls.step Probe.module logicalAnchors choices
+      (.running ⟨⟨.operation .list [.ref address], [], logical⟩, used⟩ saved) globals =
+      .next (.running ⟨⟨.value (.ref logical.length), [], after logical address⟩, used⟩ saved) := rfl
+  rw [first] at allocated
+  obtain ⟨logicalAfter, physicalAfter, nextMap, agree, grows, physicalGrows, nextLayout, heap, inside,
+    globalsAfter, sameGlobals, moved⟩ := allocated.next globals globalsInside
+  have sameHeap : after logical address = logicalAfter := heap
+  subst logicalAfter
+  have completionInside : CompletionWithin
+      ⟨.ok (.ref logical.length), globals, after logical address, logicalAnchors⟩ :=
+    ⟨globalsAfter, by intro value success; cases success; simp [after, Mutable.Value.edge, Graph.Edge.Within]⟩
+  have second : IteratorCalls.step Probe.module logicalAnchors choices
+      (.running ⟨⟨.value (.ref logical.length), [], after logical address⟩, used⟩ saved) globals =
+      .next (.completed (.ok ⟨.ok (.ref logical.length), globals, after logical address, logicalAnchors⟩) used saved) := rfl
+  have completionCore : SetCalls.Relocation.Preserves (after logical address) physicalAfter nextMap physicalAnchors
+      (SetCalls.step Probe.module logicalAnchors choices ⟨⟨.value (.ref logical.length), [], after logical address⟩, used⟩ globals)
+      (SetCalls.step Probe.module physicalAnchors choices
+        (relocateCore nextMap physicalAfter ⟨⟨.value (.ref logical.length), [], after logical address⟩, used⟩)
+        (relocateGlobals nextMap globals)) := by
+    apply SetCalls.Relocation.Preserves.unchanged nextLayout
+    · rfl
+    · exact completionInside
+    · rfl
+  have completed := step_ordinary_preserves Probe.module _ physicalAfter nextMap logicalAnchors physicalAnchors choices
+    saved globals source_module nextLayout inside rfl completionCore
+  rw [second] at completed
+  obtain ⟨logicalFinal, physicalFinal, finalMap, nextAgree, nextGrows, physicalNextGrows, finalLayout,
+    finalHeap, finalInside, finalGlobals, finalSameGlobals, completedPair⟩ := completed.next globals globalsAfter
+  have finalSameHeap : after logical address = logicalFinal := finalHeap
+  subst logicalFinal
+  have rootAgree : ∀ old < logical.length, finalMap old = rename old := by
+    intro old bounded
+    exact (nextAgree old (Nat.lt_of_lt_of_le bounded grows)).trans (agree old bounded)
+  have fixedGlobals := finalSameGlobals.trans sameGlobals
+  have resumePreserved := step_completed_preserves Probe.module choices
+    ⟨.ok (.ref logical.length), globals, after logical address, logicalAnchors⟩ physicalFinal finalMap
+    logicalAnchors physicalAnchors used saved globals finalLayout ⟨finalInside.1, finalInside.2.1⟩ finalInside.2.2
+  have resumePair := step_completed_relocates Probe.module choices
+    ⟨.ok (.ref logical.length), globals, after logical address, logicalAnchors⟩ physicalFinal finalMap
+    logicalAnchors physicalAnchors used saved finalLayout.runtime finalInside.2.1
+  refine ⟨after logical address, physicalFinal, finalMap, rootAgree, finalLayout, rfl, ?_, ?_⟩
+  · rw [← fixedGlobals]
+    exact resumePreserved.rebase rootAgree grows (Nat.le_trans physicalGrows physicalNextGrows)
+  · apply IteratorCalls.Reaches.next moved
+    apply IteratorCalls.Reaches.next (by simpa only [sameGlobals] using completedPair)
+    exact .next resumePair .refl
+
 end IteratorCoreExamples
 '''
 AUDITS = ["IteratorCoreExamples." + name for name in (
     "source_module", "source_class", "source_iter", "source_next", "source_first", "source_direct",
-    "iter_bound", "next_bound", "iter_returns", "next_returns", "first_finishes", "direct_finishes", "first_equiv_direct", "allocation_layout",
+    "iter_bound", "next_bound", "iter_returns", "next_returns", "first_finishes", "direct_finishes", "first_equiv_direct", "allocation_layout", "allocation_preserves", "allocation_then_resume",
 )] + ["FormalSW.PyAst.IteratorCalls.Relocation." + name for name in (
     "relocateResumes_congr", "step_ordinary_relocates", "set_step_supported", "set_lift_relocates",
-    "set_step_relocates", "running_within_after", "completed_within_after",
+    "set_step_relocates", "running_within_after", "completed_within_after", "Preserves.unchanged", "lift_invariant", "lift_preserves",
+    "step_ordinary_preserves", "propagate_heap", "resume_heap", "step_completed_preserves",
+    "step_completed_error_preserves", "iterMethod_keeps_heap", "advanceMethod_keeps_heap",
+    "enter_heap", "intercept_heap", "step_intercepted_preserves", "step_preserves", "Preserves.next", "Preserves.rebase", "reaches_preserves",
 )]
 
 with project_temporary_directory(prefix="iterator-core-") as temporary:
@@ -196,7 +311,7 @@ with project_temporary_directory(prefix="iterator-core-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.IteratorCore\nimport lang.py.FormalSW.IteratorRules\n"
+    proof.write_text("import lang.py.FormalSW.IteratorInvariant\nimport lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
@@ -212,4 +327,4 @@ with project_temporary_directory(prefix="iterator-core-") as temporary:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print(f"iterator core: allocation under saved consumers and complete source equivalence; {len(AUDITS)} axiom audits passed")
+print(f"iterator core: allocation, method completion, consumer resumption, and complete source equivalence; {len(AUDITS)} axiom audits passed")
