@@ -61,6 +61,7 @@ roots = [
   "lang.py.FormalSW.HeapSortingCalls",
   "lang.py.FormalSW.Choices",
   "lang.py.FormalSW.SetCalls",
+  "lang.py.FormalSW.SetComprehensionCalls",
   "lang.py.FormalSW.SetSumCalls",
   "lang.py.FormalSW.SetDifferenceCalls",
   "lang.py.FormalSW.DictionaryCalls",

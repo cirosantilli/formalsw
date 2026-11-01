@@ -71,13 +71,14 @@ theorem distinct.result (heap : Mutable.Heap) (address : Nat) (items : List Int)
 
 theorem distinct.«Returns» (heap : Mutable.Heap) (address : Nat)
     (_valid : heap.Valid) (typed : Mutable.Value.HasType heap (.ref address) "list[int]") :
-    (HeapCalls.call program "distinct" [.ref address] heap).Returns := by
+    (SetCalls.call program "distinct" [.ref address] heap).Returns := by
   obtain ⟨items, found⟩ := Mutable.Value.ints_of_hasType typed
-  exact (distinct.result heap address items found).returns
+  exact SetCalls.returns_of_heap (distinct.result heap address items found).returns
 
 theorem distinct.«Supported» (heap : Mutable.Heap) (address : Nat)
     (valid : heap.Valid) (typed : Mutable.Value.HasType heap (.ref address) "list[int]") :
-    (HeapCalls.call program "distinct" [.ref address] heap).Supported :=
-  (distinct.«Returns» heap address valid typed).supported
+    (SetCalls.call program "distinct" [.ref address] heap).Supported := by
+  intro choices
+  exact (distinct.«Returns» heap address valid typed choices).supported
 
 end tests.py.set_comprehensions

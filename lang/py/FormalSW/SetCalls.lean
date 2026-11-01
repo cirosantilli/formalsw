@@ -18,10 +18,48 @@ def liftStep (used : Nat) : Step HeapCalls.State Mutable.Completion → Step Sta
   | .done outcome => .done outcome
   | .unsupported => .unsupported
 
+/-- The first iterable is already evaluated; capture its set before allocating the collector. -/
+def comprehensionStart (target iterable : Expr) (body : List Stmt) (collector : Mutable.Object)
+    (env : HeapCalls.Env) (address : Nat) (stack : List HeapCalls.Frame)
+    (heap : Mutable.Heap) (used : Nat) : Step State Mutable.Completion :=
+  match iterable with
+  | .call (.name "range") _ | .call (.name "enumerate") _
+  | .zipIterable _ | .permutationsIterable _ | .combinationsIterable _
+  | .dictionaryValuesIterable _ => .unsupported
+  | _ => match heap[address]? with
+      | some (.set items) => .next ⟨⟨.block
+          [.setStepLoop (comprehensionTargetName target) address items items
+            (comprehensionTargetBody target body) []] env,
+          .comprehensionResult heap.length :: stack, heap ++ [collector]⟩, used⟩
+      | _ => .unsupported
+
 def iteratorStep (choices : ChoiceSchedule) (anchors : Nat) (state : State)
     (globals : Mutable.Globals := []) : Step State Mutable.Completion :=
   let ⟨⟨work, stack, heap⟩, used⟩ := state
   match work, stack with
+  | .operation (.comprehension element ((name, iterable, filters) :: generators) env)
+      [.ref address], stack =>
+      comprehensionStart (.name name) iterable
+        (comprehensionFilters filters (comprehensionBody heap.length element generators))
+        (.list []) env address stack heap used
+  | .operation (.comprehensionTargets element ((target, iterable, filters) :: generators) env)
+      [.ref address], stack =>
+      comprehensionStart target iterable
+        (comprehensionFilters filters
+          (comprehensionTargetsBody [.comprehensionAppend heap.length element] generators))
+        (.list []) env address stack heap used
+  | .operation (.setComprehension element ((target, iterable, filters) :: generators) env)
+      [.ref address], stack =>
+      comprehensionStart target iterable
+        (comprehensionFilters filters
+          (comprehensionTargetsBody [.comprehensionAdd heap.length element] generators))
+        (.set []) env address stack heap used
+  | .operation (.dictionaryComprehension key value
+      ((target, iterable, filters) :: generators) env) [.ref address], stack =>
+      comprehensionStart target iterable
+        (comprehensionFilters filters
+          (comprehensionTargetsBody [.comprehensionStore heap.length key value] generators))
+        (.dict []) env address stack heap used
   | .operation (.sumGenerator element ((name, iterable, filters) :: generators) env start)
       [.ref address], stack =>
       match iterable with

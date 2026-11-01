@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Compare set-backed comprehensions with Python, including traversal choices and effects."""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_set_iteration
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if value is None:
+        return '.none'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if type(value) is int:
+        return f'.int ({value})'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+source = '''
+def record(events: list[int], value: int) -> int:
+    events.append(value)
+    return value
+
+def capture(values: set[int], events: list[int]) -> set[int]:
+    events.append(77)
+    values.add(99)
+    return values
+
+def add_duplicate(values: set[int], events: list[int], value: int) -> int:
+    events.append(value)
+    values.add(value)
+    return value
+
+def add_new(values: set[int], events: list[int], value: int) -> int:
+    events.append(value)
+    values.add(99)
+    return value
+
+def raise_stop(events: list[int]) -> int:
+    events.append(8)
+    raise StopIteration
+'''
+bodies = {
+    'collect': 'return [value for value in values]',
+    'filtered': 'return [2 * value for value in values if value > 0]',
+    'filters': 'return [record(events, value) for value in values '
+               'if record(events, value + 10) > 0 if record(events, value + 20) > 0]',
+    'nested_range': 'return [value + i for value in values for i in range(2)]',
+    'nested_set': 'return [a + b for a in values for b in values if a != b]',
+    'inner_set': 'return [value + i for i in range(2) for value in values]',
+    'scope': 'value = 123\nresult = [value for value in values]\nreturn [value, result]',
+    'shadow': 'return [values for values in values]',
+    'alias': 'return [events for value in values]',
+    'captured': 'return [value for value in capture(values, events)]',
+    'duplicate': 'return [add_duplicate(values, events, value) for value in values]',
+    'grow': 'return [add_new(values, events, value) for value in values]',
+    'filter_grow': 'return [value for value in values if add_new(values, events, value)]',
+    'stop': 'return [raise_stop(events) for value in values]',
+    'unhashable': 'return {events for value in values}',
+    'distinct': 'return {record(events, value % 2) for value in values}',
+    'dictionary': 'return {record(events, value % 2): record(events, value) '
+                  'for value in values}',
+    'dictionary_alias': 'return {value: events for value in values}',
+    'bad_iterable': 'return [record(events, 1) for value in 3]',
+    'unpacked': 'return [a + b for a, b in values]',
+    'unpacked_set': 'return {a + b for a, b in values}',
+    'unpacked_dictionary': 'return {a: b for a, b in values}',
+}
+for name, body in bodies.items():
+    source += f'\ndef {name}(values: set[int], events: list[int]):\n'
+    source += ''.join('    ' + line + '\n' for line in body.splitlines())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for function in program.body:
+    if function.name in bodies:
+        assert not checker.check(function.name), (function.name, checker.check(function.name))
+        assert uses_set_iteration(program, function), function.name
+
+
+class ObserveIterators(ast.NodeTransformer):
+    """Observe Python's own set iteration without changing its order or mutation checks."""
+
+    def visit_comprehension(self, node):
+        self.generic_visit(node)
+        node.iter = ast.Call(func=ast.Name(id='observe_iterator', ctx=ast.Load()),
+                             args=[node.iter], keywords=[])
+        return node
+
+
+world = {}
+exec(compile(ast.fix_missing_locations(ObserveIterators().visit(ast.parse(source))),
+             '<python-set-comprehensions>', 'exec'), world)
+plain = {}
+exec(source, plain)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+count = 0
+
+
+def check(name, initial, choices, values, events, result, error):
+    global count
+    schedule = 'fun n => ([' + ', '.join(map(str, choices)) + '] : List Nat)[n]?.getD 0'
+    expected = data(snapshot_roots([values, events] + ([result] if error is None else [])))
+    heap = '[.set [' + ', '.join(map(constant, initial)) + '], .list []]'
+    call = f'(SetCalls.call source "{name}" [.ref 0, .ref 1] {heap}).run ({schedule})'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e.typeName = "{error}") | _ => false')
+    lines.extend([
+        f'-- {name}, {initial!r}, choices={choices!r}',
+        f'example : (match ({call}).execution.observe 2000 with',
+        f'  | .done (.ok c) => ({outcome}) &&',
+        f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)',
+        '  | _ => false) = true := by native_decide',
+    ])
+    count += 1
+
+
+for name in bodies:
+    inputs = [[], ['ab', 'cd'], ['x']] if name.startswith('unpacked') else [[], [3], [3, -2, 1], [1, 99]]
+    for initial in inputs:
+        values, events, choices = set(initial), [], []
+
+        def observe_iterator(iterable):
+            iterator = iter(iterable)
+            if not isinstance(iterable, set):
+                return iterator
+            # New members in these fixtures are added only by capture/grow.
+            remaining = [value for value in initial if value in iterable]
+            remaining += [value for value in iterable if value not in remaining]
+
+            class Observed:
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    value = next(iterator)
+                    index = remaining.index(value)
+                    choices.append(index)
+                    remaining.pop(index)
+                    return value
+
+            return Observed()
+
+        world['observe_iterator'] = observe_iterator
+        try:
+            result, error = world[name](values, events), None
+        except (TypeError, ValueError, RuntimeError, StopIteration) as exception:
+            result, error = None, type(exception).__name__
+        check(name, initial, choices, values, events, result, error)
+
+# Every permutation is permitted, including output orders unlike this Python process's set order.
+for order in itertools.permutations([1, 2, 3]):
+    remaining, choices = [1, 2, 3], []
+    for value in order:
+        index = remaining.index(value)
+        choices.append(index)
+        remaining.pop(index)
+    for name in ('collect', 'filtered', 'scope', 'shadow', 'distinct', 'dictionary'):
+        events = []
+        result = plain[name](list(order), events)
+        check(name, [1, 2, 3], choices, {1, 2, 3}, events, result, None)
+
+with project_temporary_directory(prefix='set-comprehension-checks-') as directory:
+    directory = Path(directory)
+    for index, expression in enumerate(('[x for x in values]', '{x for x in values}',
+                                        '{x: x for x in values}')):
+        path = directory / f'contract{index}.py'
+        path.write_text('def collect(values: set[int]):\n    """\n    @formalsw: Returns\n    """\n'
+                        f'    return {expression}\n')
+        module = api['source_module'](path)
+        requirements = api['collect_requirements'](path, module, 'Probe', 'ProbeAst')
+        assert not any(item.unsupported for item in requirements), requirements
+        assert all('SetCalls.call' in item.property_type for item in requirements), requirements
+        assert SupportChecker(module).requirement(
+            'collect', 'theorem wrong : (HeapCalls.call ProbeAst.module "collect" []).Returns')
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} set-backed comprehension comparisons passed, including scopes, aliases, and errors')

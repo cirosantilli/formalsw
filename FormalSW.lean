@@ -19,6 +19,7 @@ import lang.py.FormalSW.HeapSortingCalls
 import lang.py.FormalSW.ReverseSortingCalls
 import lang.py.FormalSW.TupleComparisons
 import lang.py.FormalSW.SetCalls
+import lang.py.FormalSW.SetComprehensionCalls
 import lang.py.FormalSW.SetSumCalls
 import lang.py.FormalSW.SetDifferenceCalls
 import lang.py.FormalSW.DictionaryCalls

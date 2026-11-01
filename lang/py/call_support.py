@@ -499,6 +499,11 @@ def uses_set_iteration(module, function):
                 if isinstance(node, ast.For):
                     loops |= not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                                   and node.iter.func.id == 'range')
+                if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+                    loops |= any(not (isinstance(generator.iter, ast.Call)
+                                      and isinstance(generator.iter.func, ast.Name)
+                                      and generator.iter.func.id == 'range')
+                                 for generator in node.generators)
                 loops |= (sequence_extremum(node) is not None or sequence_sort(node) is not None
                           or sequence_sum(node) is not None or generator_extremum(node) is not None)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
