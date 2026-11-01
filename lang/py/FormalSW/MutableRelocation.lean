@@ -87,6 +87,26 @@ theorem equivalent_allocations_of_closed (heap leftExtra rightExtra : Heap)
   simpa only [Completion.snapshot, List.map_append, List.length_map, List.append_assoc,
     graphNode] using equivalent
 
+/-- Unreachable allocations also preserve exceptions and every caller-owned object. -/
+theorem equivalent_exception_allocations (heap leftExtra rightExtra : Heap)
+    (error : ExceptionObject) (globals : Globals) (valid : heap.Valid)
+    (globalsWithin : ∀ entry ∈ globals, entry.2.edge.Within heap.length) :
+    Completion.Equivalent ⟨.error error, globals, heap ++ leftExtra, heap.length⟩
+      ⟨.error error, globals, heap ++ rightExtra, heap.length⟩ := by
+  refine Or.inr ⟨rfl, rfl, rfl, ?_⟩
+  have rootsClosed : ∀ edge ∈ globals.map (fun entry => entry.2.edge),
+      edge.Within heap.length := by
+    intro edge member
+    obtain ⟨entry, present, rfl⟩ := List.mem_map.mp member
+    exact globalsWithin entry present
+  have equivalent := Graph.equivalent_allocations (heap.map graphNode)
+    (leftExtra.map graphNode) (rightExtra.map graphNode)
+    (globals.map (fun entry => entry.2.edge))
+    (by simpa only [List.length_map] using graphNodes_closed valid)
+    (by simpa only [List.length_map] using rootsClosed)
+  simpa only [Completion.snapshot, List.map_append, List.length_map, List.append_nil,
+    graphNode] using equivalent
+
 /-- Fix caller objects, then relocate the result tuple and its selected list. -/
 def resultMap (anchors tuple selected index : Nat) : Nat :=
   if index < anchors then index else if index = anchors then tuple else selected
