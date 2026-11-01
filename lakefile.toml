@@ -141,6 +141,7 @@ roots = [
   "lang.py.FormalSW.IteratorEntry",
   "lang.py.FormalSW.IteratorCore",
   "lang.py.FormalSW.SetIteratorRelocation",
+  "lang.py.FormalSW.SetIteratorInvariant",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",
   "lang.py.FormalSW.Parallel",

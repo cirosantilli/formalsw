@@ -162,12 +162,65 @@ theorem filtered_entry_layout (choices : ChoiceSchedule) (logical physical : Mut
       comprehensionTargetName, filterBody] using paired
   · simpa only [relocateObject, List.map_nil] using layout.append_existing (.list []) (by simp) (by simp [ObjectWithin, objectValues])
 
+def entered (heap : Mutable.Heap) (address used : Nat) (items : List Constant)
+    (env : HeapCalls.Env) (stack : List HeapCalls.Frame) : SetCalls.State :=
+  ⟨⟨.block [.setStepLoop "value" address items items (filterBody heap.length) []] env,
+    .comprehensionResult heap.length :: stack, heap ++ [.list []]⟩, used⟩
+
+theorem allocation_then_cursor (choices : ChoiceSchedule) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (address used logicalAnchors physicalAnchors : Nat) (items : List Constant)
+    (env : HeapCalls.Env) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
+    (found : logical[address]? = some (.set items)) (layout : ExecutionLayout logical physical rename)
+    (envInside : EnvWithin logical.length env) (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    ∃ physicalAfter nextMap,
+      SetCalls.step Probe.module physicalAnchors choices
+          (IteratorCalls.Relocation.relocateCore rename physical
+            ⟨⟨.operation (.comprehension (.name "value") generators env) [.ref address], stack, logical⟩, used⟩)
+          (relocateGlobals rename globals) =
+        .next (IteratorCalls.Relocation.relocateCore nextMap physicalAfter (entered logical address used items env stack)) ∧
+      Preserves logical physical rename physicalAnchors
+        (SetCalls.step Probe.module logicalAnchors choices (entered logical address used items env stack) globals)
+        (SetCalls.step Probe.module physicalAnchors choices
+          (IteratorCalls.Relocation.relocateCore nextMap physicalAfter (entered logical address used items env stack))
+          (relocateGlobals rename globals)) := by
+  let core : SetCalls.State := ⟨⟨.operation (.comprehension (.name "value") generators env) [.ref address], stack, logical⟩, used⟩
+  have addressInside := (List.getElem?_eq_some_iff.mp found).1
+  have bounds : HeapCalls.Relocation.StateWithin core.core :=
+    ⟨⟨envInside, by intro value member; have same := List.mem_singleton.mp member; subst value; exact addressInside⟩, stackInside⟩
+  have moved := layout.runtime.lookup address _ found
+  have fallback : HeapCalls.step Probe.module logicalAnchors core.core globals = .unsupported := by
+    simp [core, generators, HeapCalls.step, HeapCalls.comprehensionStart, run, Mutable.sequence, found, Mutable.unsupported, protectGenerator]
+  have otherFallback : HeapCalls.step Probe.module physicalAnchors
+      (HeapCalls.Relocation.relocateState rename physical core.core) (relocateGlobals rename globals) = .unsupported := by
+    simp only [relocateObject] at moved
+    simp [core, generators, HeapCalls.Relocation.relocateState, relocateWork, relocateRuntimeOperation, relocateOperation,
+      relocateValue, HeapCalls.step, HeapCalls.comprehensionStart, run, Mutable.sequence, moved, Mutable.unsupported, protectGenerator]
+  have first := step_fallback_preserves Probe.module choices core physical rename logicalAnchors physicalAnchors globals
+    layout bounds globalsInside fallback otherFallback
+  have entry : SetCalls.step Probe.module logicalAnchors choices core globals = .next (entered logical address used items env stack) := by
+    simp only [SetCalls.step, fallback]
+    simp [core, SetCalls.iteratorStep, SetCalls.comprehensionStart, generators, found,
+      comprehensionFilters, comprehensionBody, comprehensionTargetBody, comprehensionTargetName, filterBody, entered]
+  rw [entry] at first
+  obtain ⟨physicalAfter, nextMap, agree, grows, physicalGrows, retained, inside, globalBounds, sameGlobals, actualEntry⟩ :=
+    first.next globals globalsInside
+  refine ⟨physicalAfter, nextMap, actualEntry, ?_⟩
+  have second := step_fallback_preserves Probe.module choices (entered logical address used items env stack)
+    physicalAfter nextMap logicalAnchors physicalAnchors globals retained inside globalBounds
+    (by simp [entered, HeapCalls.step])
+    (by simp [entered, HeapCalls.Relocation.relocateState, relocateWork, relocateStmt, HeapCalls.step])
+  rw [sameGlobals] at second
+  exact second.rebase agree grows physicalGrows
+
 end SetIteratorExamples
 '''
 AUDITS = ["SetIteratorExamples." + name for name in (
     "source_filtered", "source_direct", "filter_loop", "filtered_finishes", "direct_finishes",
-    "filtered_equiv_direct", "changed_size_fails", "fallback_correspondence", "filtered_entry_layout",
+    "filtered_equiv_direct", "changed_size_fails", "fallback_correspondence", "filtered_entry_layout", "allocation_then_cursor",
 )] + ["FormalSW.PyAst.SetCalls.Relocation." + name for name in ('iterator_sequence_relocates', 'iterator_cursor_relocates', 'iterator_cursor_within', 'comprehensionFilters_relocates', 'comprehensionBody_relocates', 'comprehensionTargetsBody_relocates', 'comprehensionFilters_within', 'comprehensionBody_within', 'comprehensionTargetsBody_within', 'comprehensionStart_relocates', 'comprehensionStart_within', 'iterator_list_comprehension_relocates', 'iterator_targets_comprehension_relocates', 'iterator_set_comprehension_relocates', 'iterator_dict_comprehension_relocates', 'comprehensionEnv_relocates', 'comprehensionTargetsEnv_relocates', 'sumBody_source', 'extremumBody_source', 'iterator_sum_generator_relocates', 'iterator_extremum_generator_relocates', 'sumInitial_relocates', 'sumInitial_keeps_heap', 'sumEnter_relocates', 'iterator_sum_sequence_relocates', 'iteratorStep_relocates')]
+
+AUDITS += ["FormalSW.PyAst.SetCalls.Relocation." + name for name in ('Preserves.unchanged', 'Preserves.allocated', 'comprehensionStart_heap', 'iterator_sequence_invariant', 'iterator_cursor_heap', 'comprehensionEnv_within', 'comprehensionTargetsEnv_within', 'sumInitial_value', 'sumEnter_invariant', 'iterator_sum_generator_invariant', 'iterator_extremum_generator_invariant', 'iterator_sum_sequence_invariant', 'iterator_list_comprehension_preserves', 'iterator_targets_comprehension_preserves', 'iterator_set_comprehension_preserves', 'iterator_dict_comprehension_preserves', 'iteratorStep_preserves', 'Preserves.next', 'Preserves.rebase', 'step_fallback_preserves')]
 
 with project_temporary_directory(prefix="set-iterator-") as temporary:
     directory = Path(temporary)
@@ -194,7 +247,7 @@ with project_temporary_directory(prefix="set-iterator-") as temporary:
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.SetIteratorRelocation\n"
+    proof.write_text("import lang.py.FormalSW.SetIteratorInvariant\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
                      + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
     checked = subprocess.run(
