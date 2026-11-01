@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""
+Check ordinary sorting after argument mutations, source failure order and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(items, value):
+    items.append(value)
+    return items
+
+
+def plain_nested(items, value, reverse):
+    return sorted(touch(items, value))
+
+
+def plain_explicit(items, value, reverse):
+    items.append(value)
+    return sorted(items)
+
+
+def reverse_nested(items, value, reverse):
+    return sorted(touch(items, value), reverse=reverse)
+
+
+def reverse_explicit(items, value, reverse):
+    items.append(value)
+    return sorted(items, reverse=reverse)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineSortedBuiltinExamples
+set_option Elab.async false
+
+def ints (items : List Int) : List Mutable.Value := (items.map Constant.int).map Mutable.Value.scalar
+
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [item]))
+
+theorem primitive_sorted_ints (hasReverse reverse : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    primitive (.builtin (if hasReverse then .sortedReverse else .sorted))
+        (if hasReverse then [.ref address, .scalar (.bool reverse)] else [.ref address]) heap =
+      some (.ok (.ref heap.length), heap ++ [.list (ints (sortedInts (hasReverse && reverse) items))]) := by
+  have ordered := sortWithReverse_ints heap (hasReverse && reverse) items
+  change HeapSort.sortWithReverse heap (hasReverse && reverse) (ints items) =
+    some (.ok (ints (sortedInts (hasReverse && reverse) items))) at ordered
+  rw [primitive_sorted_eq]
+  cases hasReverse <;> simp only [Bool.false_and, Bool.true_and] at ordered <;>
+    simp [sortedPrimitive, sortedPool, sortedValues, found, Mutable.sequence, sortDirection,
+      Mutable.truth, scalarTruth, Mutable.eval_bind, ordered, Except.map, Mutable.allocate]
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (item : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, item] heap (.ref address) (inserted heap address items item) := by
+  unfold inserted
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem calls_equiv (left right : String) (arguments : List Mutable.Value) (heap after : Mutable.Heap) (answer : Mutable.Value)
+    (leftReturns : ReturnsValue Probe.module left arguments heap answer after)
+    (rightReturns : ReturnsValue Probe.module right arguments heap answer after) :
+    (IteratorCalls.call Probe.module left arguments heap).Equiv (IteratorCalls.call Probe.module right arguments heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule) (returned : ReturnsValue Probe.module name arguments heap answer after) :
+      ((IteratorCalls.call Probe.module name arguments heap).run choices).Finishes ⟨.ok answer, [], after, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (finishes left leftChoices leftReturns) (finishes right rightChoices rightReturns) (Or.inl rfl)
+
+theorem nested_returns (hasReverse reverse : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    ReturnsValue Probe.module (if hasReverse then "reverse_nested" else "plain_nested")
+      [.ref address, .scalar (.int value), .scalar (.bool reverse)] heap (.ref heap.length)
+      (inserted heap address (ints items) (.scalar (.int value)) ++
+        [.list (ints (sortedInts (hasReverse && reverse) (items ++ [value])))]) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address (ints items) (.scalar (.int value)))[address]? =
+      some (.list (ints (items ++ [value]))) := by simp [inserted, ints, bounded]
+  have ordered := primitive_sorted_ints hasReverse reverse _ address (items ++ [value]) retained
+  cases hasReverse <;> apply BlockReturns.function rfl rfl
+  all_goals apply BlockReturns.return_value
+  · apply Evaluates.builtin (.cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (touch_returns heap address (ints items) (.scalar (.int value)) found)) .nil)
+    simpa only [inserted, List.length_set] using ordered
+  · apply Evaluates.builtin (.cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (touch_returns heap address (ints items) (.scalar (.int value)) found)) (.cons (Evaluates.lookup rfl) .nil))
+    simpa only [inserted, List.length_set] using ordered
+
+theorem explicit_returns (hasReverse reverse : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    ReturnsValue Probe.module (if hasReverse then "reverse_explicit" else "plain_explicit")
+      [.ref address, .scalar (.int value), .scalar (.bool reverse)] heap (.ref heap.length)
+      (inserted heap address (ints items) (.scalar (.int value)) ++
+        [.list (ints (sortedInts (hasReverse && reverse) (items ++ [value])))]) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address (ints items) (.scalar (.int value)))[address]? =
+      some (.list (ints (items ++ [value]))) := by simp [inserted, ints, bounded]
+  have ordered := primitive_sorted_ints hasReverse reverse _ address (items ++ [value]) retained
+  cases hasReverse <;> apply BlockReturns.function rfl rfl
+  all_goals apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  all_goals apply BlockReturns.return_value
+  · apply Evaluates.builtin (.cons (Evaluates.lookup rfl) .nil)
+    simpa only [inserted, List.length_set] using ordered
+  · apply Evaluates.builtin (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+    simpa only [inserted, List.length_set] using ordered
+
+theorem sorted_equiv (hasReverse reverse : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    (IteratorCalls.call Probe.module (if hasReverse then "reverse_nested" else "plain_nested")
+      [.ref address, .scalar (.int value), .scalar (.bool reverse)] heap).Equiv
+    (IteratorCalls.call Probe.module (if hasReverse then "reverse_explicit" else "plain_explicit")
+      [.ref address, .scalar (.int value), .scalar (.bool reverse)] heap) :=
+  calls_equiv _ _ _ _ _ _ (nested_returns hasReverse reverse heap address items value found)
+    (explicit_returns hasReverse reverse heap address items value found)
+
+/-- Rejected sources fail before inspecting an arbitrary reverse argument. -/
+theorem source_failure_first (heap : Mutable.Heap) (value : Int) (reverse : Mutable.Value) :
+    primitive (.builtin .sortedReverse) [.scalar (.int value), reverse] heap =
+      some (.error ⟨"TypeError", []⟩, heap) := by
+  simp [primitive, Mutable.sequence, Mutable.error, Mutable.eval_bind]
+
+/-- Incomparable values fail without allocating a result list. -/
+theorem primitive_incomparable (heap : Mutable.Heap) (address : Nat) (first : Int) (text : String)
+    (found : heap[address]? = some (.list [.scalar (.int first), .scalar (.string text)])) :
+    primitive (.builtin .sorted) [.ref address] heap = some (.error ⟨"TypeError", []⟩, heap) := by
+  simp [primitive, found, Mutable.sequence, HeapSort.sort, HeapSort.insert, HeapSort.compare,
+    HeapSort.typeError, scalarCompare, Mutable.eval_bind]
+
+theorem failure_retains_mutation (heap : Mutable.Heap) (address : Nat) (first : Int) (text : String)
+    (found : heap[address]? = some (.list [.scalar (.int first)])) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "plain_nested") [.ref address, .scalar (.string text), .scalar (.bool false)], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], inserted heap address [.scalar (.int first)] (.scalar (.string text)), heap.length⟩) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (inserted heap address [.scalar (.int first)] (.scalar (.string text)))[address]? =
+      some (.list [.scalar (.int first), .scalar (.string text)]) := by simp [inserted, inside]
+  repeat first
+    | apply (Evaluates.arguments_reach (.cons
+        (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+          (touch_returns heap address [.scalar (.int first)] (.scalar (.string text)) found)) .nil)
+        (.builtin .sorted) [] heap.length []).finishes
+    | refine .next rfl ?_
+  apply Finishes.done
+  change protectGenerator [] (result heap.length _ (primitive (.builtin .sorted) [.ref address]) []) = _
+  have failed : primitive (.builtin .sorted) [.ref address]
+      (inserted heap address [.scalar (.int first)] (.scalar (.string text))) =
+      some (.error ⟨"TypeError", []⟩, inserted heap address [.scalar (.int first)] (.scalar (.string text))) :=
+    primitive_incomparable _ address first text retained
+  simp only [result, run, failed]
+  rfl
+
+/-- Sorting uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_sorted (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (hasReverse : Bool) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation (.builtin (if hasReverse then .sortedReverse else .sorted)) values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation (.builtin (if hasReverse then .sortedReverse else .sorted)) values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation (.builtin (if hasReverse then .sortedReverse else .sorted)) values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_sortedBuiltin_preserves Probe.module hasReverse choices _ other nextMap
+    logical.length physical.length used values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineSortedBuiltinExamples
+'''
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "sortedPool_relocates", "sortedPool_heap", "sortedPool_bounded", "primitive_sorted_eq",
+    "result_sortedValues_preserves", "result_sortedBuiltin_preserves", "step_sortedBuiltin_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_sortedBuiltin_preserves"] + ["MachineSortedBuiltinExamples." + name for name in (
+    "primitive_sorted_ints", "touch_returns", "calls_equiv", "nested_returns", "explicit_returns", "sorted_equiv",
+    "source_failure_first", "primitive_incomparable", "failure_retains_mutation", "append_then_sorted",
+)]
+with project_temporary_directory(prefix="machine-sorted-builtin-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for prefix in ("plain", "reverse"):
+        for reverse in (False, True):
+            for initial in ([], [0], [True, 1, -10**100, 10**100, 1]):
+                left, right = list(initial), list(initial)
+                a = namespace[prefix + "_nested"](left, -1, reverse)
+                b = namespace[prefix + "_explicit"](right, -1, reverse)
+                expected = sorted(list(initial) + [-1], reverse=prefix == "reverse" and reverse)
+                assert a == b == expected and left == right == list(initial) + [-1]
+                assert a is not left and b is not right
+                assert [type(value) for value in a] == [type(value) for value in expected]
+    class Poison:
+        def __bool__(self):
+            raise AssertionError("reverse was inspected before acquiring the source")
+    try:
+        sorted(17, reverse=Poison())
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("noniterable source accepted")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineSortedBuiltins\n"
+        "import lang.py.FormalSW.ReverseSortingCalls\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"ordinary sorting: argument mutations, both directions, source errors and saved consumers; {len(AUDITS)} axiom audits passed")
