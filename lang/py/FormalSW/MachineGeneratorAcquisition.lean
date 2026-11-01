@@ -74,21 +74,22 @@ theorem generatorSequence_relocates (nextOnly : Bool) (logical physical : Mutabl
   | false => exact layout.sequence source inside
   | true => simpa only [generatorSequence, if_true, nextSequence_positionalPool] using positionalPool_relocates layout source inside
 
-theorem generatorAcquire_preserves (kind : GeneratorSource) (nextOnly : Bool) (target : Expr)
+theorem generatorAcquire_preserves_at (kind : GeneratorSource) (nextOnly : Bool) (target : Expr)
     (logical physical : Mutable.Heap) (rename : Nat → Nat) (logicalAnchors physicalAnchors : Nat)
+    (bodyLimit : Nat) (larger : logical.length ≤ bodyLimit)
     (body : List Stmt) (values : List Value) (globals : Mutable.Globals)
     (enter otherEnter : Stmt → Mutable.Heap → Step State Mutable.Completion)
     (layout : ExecutionLayout logical physical rename)
-    (bodyInside : ∀ statement ∈ body, StmtWithin logical.length statement)
+    (bodyInside : ∀ statement ∈ body, StmtWithin bodyLimit statement)
     (valuesInside : ∀ value ∈ values, value.edge.Within logical.length)
     (globalsInside : GlobalsWithin logical.length globals)
-    (continues : ∀ loop, StmtWithin logical.length loop →
+    (continues : ∀ loop, StmtWithin bodyLimit loop →
       Preserves logical physical rename physicalAnchors (enter loop logical) (otherEnter (relocateStmt rename loop) physical)) :
     Preserves logical physical rename physicalAnchors
       (generatorAcquire logicalAnchors kind nextOnly target body values logical globals enter)
       (generatorAcquire physicalAnchors kind nextOnly target (body.map (relocateStmt rename))
         (values.map (relocateValue rename)) physical (relocateGlobals rename globals) otherEnter) := by
-  have wrappedInside := comprehensionTargetBody_within logical.length target body bodyInside
+  have wrappedInside := comprehensionTargetBody_within bodyLimit target body bodyInside
   cases kind with
   | permutations =>
     apply run_readonly_preserves logical physical rename logicalAnchors physicalAnchors _ _
@@ -98,7 +99,7 @@ theorem generatorAcquire_preserves (kind : GeneratorSource) (nextOnly : Bool) (t
     intro rows captured
     simpa only [relocateStmt, comprehensionTargetBody_relocates, List.map_nil] using
       continues (.permutationStepLoop (comprehensionTargetName target) rows (comprehensionTargetBody target body) [])
-        (by simp only [StmtWithin]; exact ⟨permutationRows_within logical layout.closed values rows captured, wrappedInside, by simp⟩)
+        (by simp only [StmtWithin]; exact ⟨(fun row present source member => (permutationRows_within logical layout.closed values rows captured row present source member).mono larger), wrappedInside, by simp⟩)
   | combinations =>
     apply run_readonly_preserves logical physical rename logicalAnchors physicalAnchors _ _
       (List.map (List.map (relocateSource rename))) _ _ globals layout globalsInside
@@ -107,18 +108,18 @@ theorem generatorAcquire_preserves (kind : GeneratorSource) (nextOnly : Bool) (t
     intro rows captured
     simpa only [relocateStmt, comprehensionTargetBody_relocates, List.map_nil] using
       continues (.permutationStepLoop (comprehensionTargetName target) rows (comprehensionTargetBody target body) [])
-        (by simp only [StmtWithin]; exact ⟨combinationRows_within logical layout.closed values rows captured, wrappedInside, by simp⟩)
+        (by simp only [StmtWithin]; exact ⟨(fun row present source member => (combinationRows_within logical layout.closed values rows captured row present source member).mono larger), wrappedInside, by simp⟩)
   | zip =>
     apply run_readonly_preserves logical physical rename logicalAnchors physicalAnchors _ _
       (List.map (relocateSource rename)) _ _ globals layout globalsInside
       (fun outcome after executed => zipSources_keeps_heap logical values outcome after executed)
       (zipSources_relocates layout.runtime values valuesInside)
     intro sources captured
-    have sourcesInside : ∀ source ∈ sources, SourceWithin logical.length source := by
+    have sourcesInside : ∀ source ∈ sources, SourceWithin bodyLimit source := by
       rw [zipSources_captured logical values sources captured]
       intro source member
       obtain ⟨value, present, rfl⟩ := List.mem_map.mp member
-      exact sequenceSource_within logical.length value (valuesInside value present)
+      exact (sequenceSource_within logical.length value (valuesInside value present)).mono larger
     simpa only [relocateStmt, comprehensionTargetBody_relocates, List.map_nil] using
       continues (.zipStepLoop (comprehensionTargetName target) sources 0 (comprehensionTargetBody target body) [])
         (by simp only [StmtWithin]; exact ⟨sourcesInside, wrappedInside, by simp⟩)
@@ -145,7 +146,7 @@ theorem generatorAcquire_preserves (kind : GeneratorSource) (nextOnly : Bool) (t
     intro items captured
     simpa only [relocateStmt, sequenceSource_relocate, comprehensionTargetBody_relocates, List.map_nil] using
       continues (.sequenceStepLoop (comprehensionTargetName target) (sequenceSource source) 0 (comprehensionTargetBody target body) [])
-        (by simp only [StmtWithin]; exact ⟨sequenceSource_within logical.length source sourceInside, wrappedInside, by simp⟩)
+        (by simp only [StmtWithin]; exact ⟨(sequenceSource_within logical.length source sourceInside).mono larger, wrappedInside, by simp⟩)
   | enumerate =>
     cases selected : enumerateTarget target with
     | none =>
@@ -180,6 +181,24 @@ theorem generatorAcquire_preserves (kind : GeneratorSource) (nextOnly : Bool) (t
       intro items captured
       simpa only [relocateStmt, sequenceSource_relocate, List.map_nil, id_eq] using
         continues (.enumerateStepLoop index name (sequenceSource source) 0 counter body [])
-          (by simp only [StmtWithin]; exact ⟨sequenceSource_within logical.length source sourceInside, bodyInside, by simp⟩)
+          (by simp only [StmtWithin]; exact ⟨(sequenceSource_within logical.length source sourceInside).mono larger, bodyInside, by simp⟩)
+
+
+theorem generatorAcquire_preserves (kind : GeneratorSource) (nextOnly : Bool) (target : Expr)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (logicalAnchors physicalAnchors : Nat)
+    (body : List Stmt) (values : List Value) (globals : Mutable.Globals)
+    (enter otherEnter : Stmt → Mutable.Heap → Step State Mutable.Completion)
+    (layout : ExecutionLayout logical physical rename)
+    (bodyInside : ∀ statement ∈ body, StmtWithin logical.length statement)
+    (valuesInside : ∀ value ∈ values, value.edge.Within logical.length)
+    (globalsInside : GlobalsWithin logical.length globals)
+    (continues : ∀ loop, StmtWithin logical.length loop →
+      Preserves logical physical rename physicalAnchors (enter loop logical) (otherEnter (relocateStmt rename loop) physical)) :
+    Preserves logical physical rename physicalAnchors
+      (generatorAcquire logicalAnchors kind nextOnly target body values logical globals enter)
+      (generatorAcquire physicalAnchors kind nextOnly target (body.map (relocateStmt rename))
+        (values.map (relocateValue rename)) physical (relocateGlobals rename globals) otherEnter) :=
+  generatorAcquire_preserves_at kind nextOnly target logical physical rename logicalAnchors physicalAnchors
+    logical.length (Nat.le_refl _) body values globals enter otherEnter layout bodyInside valuesInside globalsInside continues
 
 end FormalSW.PyAst.HeapCalls.Relocation
