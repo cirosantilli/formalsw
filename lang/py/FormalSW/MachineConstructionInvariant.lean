@@ -73,7 +73,7 @@ theorem step_dictionary_entry_preserves (module : Module) (logical physical : Mu
     · exact inside.2 frame member
   · simp [step, relocateState, relocateWork, relocateFrame, relocateStep]
 
-/-- A reference key stops the modeled display before evaluating its value expression. -/
+/-- A singleton retains its reference key while the value expression runs. -/
 theorem step_dictionaryKey_preserves (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (logicalAnchors physicalAnchors : Nat) (key : Value) (value : Expr) (rest : List (Expr × Expr))
     (entries : List (Constant × Value)) (env : Env) (stack : List Frame) (globals : Mutable.Globals)
@@ -84,19 +84,29 @@ theorem step_dictionaryKey_preserves (module : Module) (logical physical : Mutab
       (step module physicalAnchors
         (relocateState rename physical ⟨.value key, .dictionaryKey value rest entries env :: stack, logical⟩)
         (relocateGlobals rename globals)) := by
+  have saved := inside.2 (.dictionaryKey value rest entries env) (by simp)
+  simp only [FrameWithin] at saved
   apply Preserves.unchanged layout
-  · cases key <;> simp [step, StepHeap, protectGenerator]
+  · cases key <;> cases rest <;> cases entries <;> simp [step, StepHeap, protectGenerator]
   · cases key with
-    | ref address => trivial
+    | ref address =>
+      cases rest <;> cases entries
+      all_goals try trivial
+      refine ⟨saved.1, ?_⟩
+      intro frame member
+      rcases List.mem_cons.mp member with rfl | member
+      · simp only [FrameWithin, OperationWithin]
+        exact ⟨saved.1, by trivial, by simpa using inside.1⟩
+      · exact inside.2 frame (by simp [member])
     | scalar scalar =>
-      have saved := inside.2 (.dictionaryKey value rest entries env) (by simp)
-      simp only [FrameWithin] at saved
       refine ⟨saved.1, ?_⟩
       intro frame member
       rcases List.mem_cons.mp member with rfl | member
       · simpa only [FrameWithin] using saved
       · exact inside.2 frame (by simp [member])
-  · cases key <;> simp [step, relocateState, relocateWork, relocateFrame, relocateValue, relocateStep, protectGenerator]
+  · cases key <;> cases rest <;> cases entries <;>
+      simp [step, relocateState, relocateWork, relocateFrame, relocateValue, relocateStep,
+        relocateRuntimeOperation, relocateOperation, protectGenerator]
 
 /-- Duplicate keys keep their original representative while the latest value replaces the old one. -/
 theorem step_dictionaryValue_preserves (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)

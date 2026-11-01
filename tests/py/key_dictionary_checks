@@ -99,6 +99,43 @@ def unhashable(log: list[int]):
     table = {}
     return table.setdefault(([],), record(log, 1))
 
+def literal_alias(n: int):
+    saved = (True, n)
+    bucket = [n]
+    table = {saved: bucket}
+    table[(1, n)].append(9)
+    return (table, saved, bucket)
+
+def literal_nested(n: int):
+    saved = ((n,), False)
+    bucket = [n]
+    return ({saved: bucket}, saved, bucket)
+
+def literal_empty():
+    saved = ()
+    return ({saved: 7}, saved)
+
+def literal_key(log: list[int]):
+    log.append(1)
+    return (len(log), 8)
+
+def literal_bad_key(log: list[int]):
+    log.append(1)
+    return ([],)
+
+def literal_fail(log: list[int]):
+    log.append(2)
+    return 1 // 0
+
+def literal_order(log: list[int]):
+    return {literal_key(log): record(log, 2)}
+
+def literal_unhashable(log: list[int]):
+    return {literal_bad_key(log): record(log, 2)}
+
+def literal_value_raises(log: list[int]):
+    return {literal_bad_key(log): literal_fail(log)}
+
 def map_digits(text: str):
     return list(map(int, text))
 
@@ -112,7 +149,9 @@ program = ast.parse(source)
 world = {}
 exec(source, world)
 for name in ('push_pair', 'retained_key', 'missing_default', 'nested_key', 'eager', 'late_read',
-             'promoted', 'unhashable', 'map_digits', 'map_lengths', 'map_range'):
+             'promoted', 'unhashable', 'map_digits', 'map_lengths', 'map_range',
+             'literal_alias', 'literal_nested', 'literal_empty', 'literal_order',
+             'literal_unhashable', 'literal_value_raises'):
     rejected = SupportChecker(program).check(name)
     assert not rejected, (name, rejected)
 
@@ -127,9 +166,12 @@ for kind in ('dict[str,list[int]]', 'list[dict[int,str]]', 'dict[tuple[int,int],
 cases = []
 for a, b in ((-1, 0), (0, 0), (1, 2), (2**130 + 7, -(2**130))):
     cases.extend([('push_pair', [a, b], False), ('nested_key', [a, b], False),
-                  ('missing_default', [a], False), ('late_read', [a], False)])
+                  ('missing_default', [a], False), ('late_read', [a], False),
+                  ('literal_alias', [a], False), ('literal_nested', [a], False)])
 cases += [('retained_key', [7], False), ('promoted', [], False), ('eager', [], True),
-          ('unhashable', [], True), ('map_lengths', [], False)]
+          ('unhashable', [], True), ('map_lengths', [], False),
+          ('literal_empty', [], False), ('literal_order', [], True),
+          ('literal_unhashable', [], True), ('literal_value_raises', [], True)]
 cases += [('map_digits', [text], False) for text in ('', '0123456789', '١٢٣', '7x')]
 cases += [('map_range', [n], False) for n in (-2, 0, 4)]
 lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
@@ -140,7 +182,7 @@ for name, scalars, logged in cases:
         result = world[name](*([log] if logged else scalars))
         expected = snapshot_roots(([log] if logged else []) + [result])
         test = f'Graph.observedBool ((Graph.compare c.snapshot ({data(expected)})).observe 4000) == some true'
-    except (TypeError, ValueError) as error:
+    except (TypeError, ValueError, ZeroDivisionError) as error:
         expected = snapshot_roots([log] if logged else [])
         test = (f'(match c.outcome with | .error e => e.typeName == {json.dumps(type(error).__name__)} | _ => false) && '
                 f'Graph.observedBool ((Graph.compare c.snapshot ({data(expected)})).observe 4000) == some true')

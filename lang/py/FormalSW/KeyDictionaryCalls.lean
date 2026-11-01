@@ -92,6 +92,23 @@ end HeapCalls
 namespace HeapCalls.Evaluates
 variable {globals : Mutable.Globals}
 
+/-- The key reference is retained across value effects and hashed in their resulting heap. -/
+theorem dictionary_singleton
+    (key : Evaluates (globals := globals) module env keyExpr heap (.ref address) afterKey)
+    (value : Evaluates (globals := globals) module env valueExpr afterKey item afterValue)
+    (hashed : Mutable.hashKey (.ref address) afterValue = some (.ok keyHash, afterValue)) :
+    Evaluates (globals := globals) module env (.dict [(keyExpr, valueExpr)]) heap
+      (.ref afterValue.length) (afterValue ++ [.keyDict [(keyHash, .ref address, item)]]) := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply Reaches.next rfl
+  apply (key anchors _).trans
+  apply Reaches.next rfl
+  apply (value anchors _).trans
+  apply Reaches.next rfl
+  exact .next (by simp [argumentsState, step, result, run, primitive,
+    DictionaryDisplay.singleton_result afterValue (.ref address) item keyHash hashed]) .refl
+
 /-- The source binds the receiver before executing the zero-argument in-place clear. -/
 theorem dictionary_clear
     (localName : ∀ name, base = .name name → env name ≠ none)

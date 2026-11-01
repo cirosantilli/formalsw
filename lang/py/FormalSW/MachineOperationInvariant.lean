@@ -9,6 +9,7 @@ import lang.py.FormalSW.MachineListMethods
 import lang.py.FormalSW.MachineSequenceMethods
 import lang.py.FormalSW.MachineStringMethods
 import lang.py.FormalSW.MachineExceptionInvariant
+import lang.py.FormalSW.MachineSingletonDictionary
 
 /-! Complete operation dispatch retains live values, saved callers and source definitions. -/
 namespace FormalSW.PyAst.HeapCalls.Relocation
@@ -120,6 +121,19 @@ theorem step_operation_preserves (module : Module)
   | add address =>
     exact step_setConstruction_preserves module logical physical rename logicalAnchors physicalAnchors
       _ values stack globals layout (.add address) inside globalsInside
+  | dictionarySingleton =>
+    rcases values with _ | ⟨key, _ | ⟨value, _ | ⟨extra, rest⟩⟩⟩
+    case cons.cons.nil =>
+      exact step_dictionarySingleton_preserves module logical physical rename logicalAnchors physicalAnchors
+        key value stack globals layout inside globalsInside
+    all_goals
+      apply Preserves.unchanged layout
+      · rfl
+      · simpa [step, primitive, Mutable.error, result, run, done, protectGenerator,
+          StepWithin, CompletionWithin, Calls.generatorException] using globalsInside
+      · simp [step, primitive, result, run, Mutable.error, done, protectGenerator,
+          relocateState, relocateWork, relocateRuntimeOperation, relocateOperation,
+          relocateStep, relocateCompletion, Calls.generatorException, Except.map]
   | dictionaryGet address =>
     exact step_dictionaryOperation_preserves module logical physical rename logicalAnchors physicalAnchors
       _ values stack globals layout (.get address) inside globalsInside

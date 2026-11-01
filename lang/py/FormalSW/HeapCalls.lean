@@ -4,6 +4,7 @@ import lang.py.FormalSW.ScalarSort
 import lang.py.FormalSW.HeapSort
 import lang.py.FormalSW.Heapq
 import lang.py.FormalSW.DictionaryConstructor
+import lang.py.FormalSW.DictionaryDisplay
 import lang.py.FormalSW.Permutations
 import lang.py.FormalSW.Combinations
 import lang.py.FormalSW.StringReplace
@@ -518,6 +519,7 @@ inductive Operation where
   | splitWhitespace (text : String)
   | join (separator : String)
   | add (address : Nat)
+  | dictionarySingleton
   | dictionaryGet (address : Nat)
   | dictionarySetDefault (address : Nat)
   | dictionaryClear (address : Nat)
@@ -1365,6 +1367,8 @@ private abbrev basePrimitive : Operation → List Value → Eval Value
   | .slice, [base, lower, upper, stride] => Mutable.getSlice base lower upper stride
   | .setItem replacement, [base, index] => Mutable.setItem base index replacement
   | .setSlice replacement, [base, lower, upper, stride] => Mutable.setSlice base lower upper stride replacement
+  | .dictionarySingleton, [key, value] => DictionaryDisplay.singleton key value
+  | .dictionarySingleton, _ => Mutable.error "TypeError"
   | .dictionaryGet address, [key] => Mutable.dictionaryGet address key (.scalar .none)
   | .dictionaryGet address, [key, defaultValue] => Mutable.dictionaryGet address key defaultValue
   | .dictionaryGet _, _ => Mutable.error "TypeError"
@@ -2221,9 +2225,12 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
               dictionaryItemsStart (globals := globals) anchors target body otherwise following env value stack heap
           | .dictionaryKey expression rest entries env => match value with
               | .scalar key => .next ⟨.expr expression env, .dictionaryValue key rest entries env :: stack, heap⟩
-              -- Hashing can interleave with later expressions differently for
-              -- large displays. Stop before these expressions for non-scalar keys.
-              | .ref _ => .unsupported
+              | .ref _ => match rest, entries with
+                  -- A singleton hashes only after its value has been evaluated.
+                  | [], [] => .next ⟨.expr expression env,
+                      .arguments .dictionarySingleton [value] [] env :: stack, heap⟩
+                  -- Larger displays require their own hashing schedule.
+                  | _, _ => .unsupported
           | .dictionaryValue key rest entries env =>
               .next ⟨.dictionary rest (ScalarDict.insert entries key value) env, stack, heap⟩
           | .extremumResume original => .next ⟨.value value, original, heap⟩
@@ -2617,7 +2624,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | isDigit _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionarySingleton | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | isDigit _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>

@@ -161,6 +161,17 @@ theorem preserves_replace (invariant : Heap → Prop) (text : String) (values : 
     | apply Preserves.bind _ _ _ (Preserves.get invariant); intro heap
     | split
 
+theorem preserves_dictionarySingleton (invariant : Heap → Prop) (stable : AppendInvariant invariant)
+    (key value : Value) : Preserves invariant (DictionaryDisplay.singleton key value) := by
+  unfold DictionaryDisplay.singleton
+  apply Preserves.bind _ _ _ (preserves_hashKey invariant key)
+  intro hashed
+  apply Preserves.bind _ _ _ (Preserves.get invariant)
+  intro heap
+  apply Preserves.bind _ _ _ (Preserves.modify invariant _ (fun before held => stable before _ held))
+  intro _
+  exact Preserves.pure invariant _
+
 set_option maxHeartbeats 1200000 in
 /-- The actual primitive may allocate, read any object, and update only its listed receivers. -/
 theorem preserves_primitive (invariant : Heap → Prop) (stable : AppendInvariant invariant)
@@ -195,6 +206,7 @@ theorem preserves_primitive (invariant : Heap → Prop) (stable : AppendInvarian
     | exact preserves_setSlice _ invariant updates _ _ _ _
     | exact preserves_writeField _ invariant updates _ _
     | exact preserves_dictionaryGet invariant _ _ _
+    | exact preserves_dictionarySingleton invariant stable _ _
     | exact preserves_dictionarySetDefault _ invariant updates _ _
     | exact preserves_clearDictionary _ invariant updates
     | exact preserves_appendItem _ invariant updates _
