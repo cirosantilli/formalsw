@@ -361,7 +361,7 @@ Specifications are written as markers inside Python docstrings in lines starting
 
 There are two types of ways to write the specification:
 
-* <<dsl>>: what most people will use. Easy to learn and obvious. Gets translated to an equivalent Lean long form behind the scenes.
+* <<DSL>>: what most people will use. Easy to learn and obvious. Gets translated to an equivalent Lean long form behind the scenes.
 * <<raw-lean-specification>>. Harder to learn but more general than the DSL.
 
 === DSL
@@ -372,7 +372,7 @@ The DSL gets converted to corresponding Lean code behind the scenes.
 
 Each DSL construct includes a raw Lean equivalent, e.g.:
 
-* <<halts>>
+* <<Halts>>
 * <<halts-raw>>
 
 ==== Py
@@ -2056,6 +2056,21 @@ Run all tests under link:tests[]:
 === Coding guidelines
 
 Asciidoc: don't wrap lines.
+
+For internal links, if the header does not have an ID and would resolve correctly, just use the title directly as is, good:
+
+----
+= Halts
+
+<<Halts>>
+----
+
+bad:
+
+----
+<<halts,Halts>>
+<<halts>>
+----
 
 === Publish to Pypi
 

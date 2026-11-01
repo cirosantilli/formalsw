@@ -22,3 +22,5 @@ tmp.*
 /build/
 /*.egg-info/
 /.venv-release/
+
+README.html
