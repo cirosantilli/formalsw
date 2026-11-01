@@ -1,4 +1,5 @@
 import lang.py.FormalSW.MachineExpressionInvariant
+import lang.py.FormalSW.IteratorRules
 
 /-! Exception exits retain shared memory, suspended references, and generator boundaries. -/
 namespace FormalSW.PyAst.HeapCalls.Relocation
@@ -205,3 +206,20 @@ theorem step_raise_scalars (module : Module) (heap : Mutable.Heap) (anchors : Na
 
 end FormalSW.PyAst.HeapCalls.Relocation
 
+namespace FormalSW.PyAst.IteratorCalls
+
+/-- A concrete prefix ending in an explicit raise supplies protocol completion, including TypeError. -/
+theorem OperationCompletes.of_raise {module : Module} {choices : ChoiceSchedule} {used : Nat}
+    {globals : Mutable.Globals} {operation : HeapCalls.Operation} {heap after : Mutable.Heap}
+    {typeName : String} {arguments : List Constant}
+    (before : ∀ anchors, HeapCalls.Reaches module anchors
+      ⟨.operation operation [], [], heap⟩
+      ⟨.operation (.raiseException typeName) (arguments.map Mutable.Value.scalar), [], after⟩
+      (globals := globals)) :
+    OperationCompletes module choices used operation heap (.error ⟨typeName, arguments⟩) after globals := by
+  intro anchors resumes
+  refine ⟨used, (Reaches.of_heap (before anchors) resumes).trans ?_⟩
+  apply Reaches.next (core_done rfl ?_) .refl
+  simp [SetCalls.step, HeapCalls.Relocation.step_raise_scalars, Calls.generatorException, SetCalls.liftStep]
+
+end FormalSW.PyAst.IteratorCalls
