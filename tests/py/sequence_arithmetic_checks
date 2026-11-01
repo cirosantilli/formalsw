@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+Prove parsed sequence arithmetic retains shared references across allocations.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def repeat_join(left, right, count):
+    return (left + right) * count
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace SequenceArithmeticExamples
+set_option Elab.async false
+
+/-- Every primitive is executed on the preceding expression's actual output heap. -/
+theorem source_returns (heap middle after : Mutable.Heap) (left right joined answer : Mutable.Value) (count : Int)
+    (added : Mutable.binary .add left right heap = some (.ok joined, middle))
+    (repeated : Mutable.binary .mult joined (.scalar (.int count)) middle = some (.ok answer, after)) :
+    ReturnsValue Probe.module "repeat_join" [left, right, .scalar (.int count)] heap answer after := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.binary (Evaluates.binary (Evaluates.lookup rfl) (Evaluates.lookup rfl) added)
+    (Evaluates.lookup rfl) repeated
+
+def joinedHeap (heap : Mutable.Heap) (xs ys : List Mutable.Value) := heap ++ [.list (xs ++ ys)]
+def finalHeap (heap : Mutable.Heap) (xs ys : List Mutable.Value) (count : Int) :=
+  joinedHeap heap xs ys ++ [.list (List.replicate count.toNat (xs ++ ys)).flatten]
+
+/-- No bound on the repetition count, container length, or references between input objects. -/
+theorem list_operations (heap : Mutable.Heap) (left right : Nat) (xs ys : List Mutable.Value) (count : Int)
+    (first : heap[left]? = some (.list xs)) (second : heap[right]? = some (.list ys)) :
+    Mutable.binary .add (.ref left) (.ref right) heap = some (.ok (.ref heap.length), joinedHeap heap xs ys) ∧
+      Mutable.binary .mult (.ref heap.length) (.scalar (.int count)) (joinedHeap heap xs ys) =
+        some (.ok (.ref (heap.length + 1)), finalHeap heap xs ys count) := by
+  constructor
+  · rw [binary_add_lists_eval heap left right xs ys first second]
+    rfl
+  · rw [binary_mult_list_eval (joinedHeap heap xs ys) heap.length (xs ++ ys) count (by simp [joinedHeap])]
+    simp [Mutable.allocate, joinedHeap, finalHeap, Except.map]
+
+/-- Both complete source executions are derived, with their final shared objects still related. -/
+theorem paired_sources (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (left right : Nat)
+    (xs ys : List Mutable.Value) (count : Int)
+    (first : logical[left]? = some (.list xs)) (second : logical[right]? = some (.list ys)) :
+    ∃ other nextMap,
+      ReturnsValue Probe.module "repeat_join" [.ref left, .ref right, .scalar (.int count)] logical
+        (.ref (logical.length + 1)) (finalHeap logical xs ys count) ∧
+      ReturnsValue Probe.module "repeat_join" [.ref (rename left), .ref (rename right), .scalar (.int count)] physical
+        (.ref (nextMap (logical.length + 1))) other ∧
+      ExecutionLayout (finalHeap logical xs ys count) other nextMap ∧
+      (∀ address < logical.length, nextMap address = rename address) := by
+  obtain ⟨added, repeated⟩ := list_operations logical left right xs ys count first second
+  obtain ⟨middle, firstMap, otherAdded, middleLayout, firstAgree, _, _⟩ :=
+    layout.binary_add_lists left right xs ys first second _ _ added
+  have joinedFound : (joinedHeap logical xs ys)[logical.length]? = some (.list (xs ++ ys)) := by
+    simp [joinedHeap]
+  obtain ⟨other, nextMap, otherRepeated, finalLayout, secondAgree, _, _⟩ :=
+    middleLayout.binary_mult_list logical.length (xs ++ ys) count joinedFound _ _ repeated
+  refine ⟨other, nextMap, source_returns logical _ _ _ _ _ _ count added repeated, ?_, finalLayout, ?_⟩
+  · exact source_returns physical middle other _ _ _ _ count otherAdded otherRepeated
+  · intro address bound
+    exact (secondAgree address (by simp only [joinedHeap, List.length_append, List.length_singleton]; omega)).trans
+      (firstAgree address bound)
+
+/-- The general machine rule applies under arbitrary bounded saved frames and globals. -/
+theorem repeat_step (module : Module) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (logicalAnchors physicalAnchors address : Nat)
+    (items : List Mutable.Value) (count : Int) (stack : List Frame) (globals : Mutable.Globals)
+    (found : logical[address]? = some (.list items))
+    (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame)
+    (globalsInside : GlobalsWithin logical.length globals) :
+    ∃ other nextMap, ExecutionLayout (logical ++ [.list (List.replicate count.toNat items).flatten]) other nextMap ∧
+      step module physicalAnchors
+          (relocateState rename physical ⟨.value (.scalar (.int count)), .binaryRight .mult (.ref address) false :: stack, logical⟩)
+          (relocateGlobals rename globals) =
+        relocateStep nextMap other physicalAnchors
+          (step module logicalAnchors ⟨.value (.scalar (.int count)), .binaryRight .mult (.ref address) false :: stack, logical⟩ globals) := by
+  have executed : Mutable.binary .mult (.ref address) (.scalar (.int count)) logical =
+      some (.ok (.ref logical.length), logical ++ [.list (List.replicate count.toNat items).flatten]) := by
+    rw [binary_mult_list_eval logical address items count found]
+    rfl
+  obtain ⟨other, nextMap, retained, _, _, _, transported, _⟩ :=
+    step_binary_relocates module logical physical rename logicalAnchors physicalAnchors .mult
+      (.ref address) (.scalar (.int count)) false stack globals (List.getElem?_eq_some_iff.mp found).1
+      stackInside globalsInside (layout.binary_mult_list address items count found) _ _ executed
+  exact ⟨other, nextMap, retained, transported⟩
+
+/-- Tuple identity shortcuts precede allocation, even for empty tuples with negative counts. -/
+theorem tuple_repeat_reuses (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (count : Int)
+    (found : heap[address]? = some (.tuple items)) (reuse : count = 1 ∨ items = []) :
+    Mutable.binary .mult (.ref address) (.scalar (.int count)) heap = some (.ok (.ref address), heap) := by
+  rw [binary_mult_tuple_eval heap address items count found]
+  have condition : count = 1 ∨ items.isEmpty = true := by simpa using reuse
+  simp only [condition, if_true]
+  rfl
+
+end SequenceArithmeticExamples
+'''
+AUDITS = [
+    "SequenceArithmeticExamples.source_returns", "SequenceArithmeticExamples.list_operations",
+    "SequenceArithmeticExamples.paired_sources", "SequenceArithmeticExamples.repeat_step",
+    "SequenceArithmeticExamples.tuple_repeat_reuses", "EvalRelocates.congr",
+    "ExecutionLayout.pure_relocates", "ExecutionLayout.allocate_list_relocates",
+    "ExecutionLayout.allocateTuple_relocates", "ExecutionLayout.allocateBuffer_relocates",
+    "replicated_values_within", "map_replicated_values",
+    "binary_add_lists_eval", "binary_add_tuples_eval", "binary_mult_list_eval", "binary_mult_tuple_eval",
+    "binary_mult_ref_comm", "ExecutionLayout.binary_add_lists", "ExecutionLayout.binary_add_tuples",
+    "ExecutionLayout.binary_mult_list", "ExecutionLayout.binary_mult_tuple", "EvalRelocates.mult_ref_comm",
+    "step_binary_relocates",
+]
+
+with project_temporary_directory(prefix="sequence-arithmetic-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    repeat_join = namespace["repeat_join"]
+    shared = []
+    shared.append(shared)
+    # Native comparisons stay within CPython's index-sized count conversion.
+    # The Lean theorem ranges over every Int in the unbounded sequence model.
+    for count in (-sys.maxsize - 1, -1, 0, 1, 3):
+        left, right = [shared], [shared, shared]
+        result = repeat_join(left, right, count)
+        assert len(result) == max(0, count) * 3
+        assert result is not left and result is not right
+        assert all(item is shared for item in result)
+        assert len(left) == 1 and len(right) == 2
+    assert repeat_join(shared, shared, 2) == [shared] * 4
+    empty = ()
+    nonempty = (shared,)
+    assert repeat_join(empty, nonempty, 1) is nonempty
+    assert repeat_join(nonempty, empty, 1) is nonempty
+    assert repeat_join(empty, empty, -sys.maxsize - 1) is empty
+    assert repeat_join(nonempty, empty, 0) is empty
+    assert 3 * nonempty == nonempty * 3
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineBinary\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"sequence arithmetic: signed counts, aliases, tuple reuse; {len(AUDITS)} axiom audits passed")
