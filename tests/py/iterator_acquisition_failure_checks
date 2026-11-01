@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""
+Check failed acquisition, retained mutations, invalid returns and generator boundaries.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Invalid:
+    def __iter__(self):
+        self.link = self
+        return 17
+
+class Stopped:
+    def __iter__(self):
+        self.link = self
+        raise StopIteration()
+
+class SelfReturning:
+    def __iter__(self):
+        self.link = self
+        return self
+
+class Allocating:
+    def __iter__(self):
+        self.link = [self]
+        return 17
+
+class Missing:
+    pass
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace AcquisitionFailureExamples
+set_option Elab.async false
+
+def className (stopped : Bool) := if stopped then "Stopped" else "Invalid"
+def classInfo (stopped : Bool) := (Probe.module.findClass (className stopped)).getD ("", [])
+def missingInfo := (Probe.module.findClass "Missing").getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def writeSelf : List Stmt := [.assign [.attribute (.name "self") "link"] (.name "self")]
+def tail (stopped : Bool) : List Stmt :=
+  if stopped then [.raise (some (.call (.name "StopIteration") []))]
+  else [.return (.constant (.int 17))]
+def body (stopped : Bool) : List Stmt := writeSelf ++ tail stopped
+
+def outcome (stopped : Bool) : Except ExceptionObject Mutable.Value :=
+  if stopped then .error ⟨"StopIteration", []⟩ else .ok (.scalar (.int 17))
+def error (stopped : Bool) : ExceptionObject :=
+  if stopped then ⟨"StopIteration", []⟩ else ⟨"TypeError", []⟩
+def after (stopped : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value)) :=
+  heap.set address (.instance (classInfo stopped).1 (className stopped)
+    (Mutable.putField fields "link" (.ref address)))
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class (stopped : Bool) : Probe.module.findClass (className stopped) = some (classInfo stopped) := by
+  cases stopped <;> rfl
+theorem source_iter (stopped : Bool) : findFunctionIn (classInfo stopped).2 "__iter__" = some (args, body stopped) := by
+  cases stopped <;> rfl
+
+theorem iter_bound (stopped : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo stopped).1 (className stopped) fields)) :
+    ProtocolCalls.iterMethod Probe.module (.ref address) heap =
+      some (.ok (.method (.ref address) args (body stopped)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address (classInfo stopped).1
+    (className stopped) "__iter__" fields (classInfo stopped).2 found (source_class stopped)
+  simp only [source_iter, Option.map_some] at lookup
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+
+theorem method_trace (stopped : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo stopped).1 (className stopped) fields)) :
+    IteratorCalls.Reaches Probe.module heap.length choices []
+      (.running ⟨⟨.operation (.method (.ref address) args (body stopped)) [], [], heap⟩, used⟩ [])
+      (.completed (.ok ⟨outcome stopped, [], after stopped heap address fields, heap.length⟩) used []) := by
+  let env := functionEnv args (body stopped) [.ref address] []
+  have self : env "self" = some (.ref address) := rfl
+  have written : BlockContinues Probe.module env writeSelf heap env (after stopped heap address fields) :=
+    BlockContinues.setAttribute (Evaluates.lookup self) (Evaluates.lookup self)
+      (Mutable.writeField_result found (by simp))
+  cases stopped with
+  | false =>
+      have returned : MethodReturns Probe.module (.ref address) args (body false) [] heap
+          (.scalar (.int 17)) (after false heap address fields) := by
+        apply MethodReturns.of_body (completed := [.ref address]) rfl
+        exact written.returns (BlockReturns.return_value Evaluates.constant)
+      apply (IteratorCalls.Reaches.of_heap (returned heap.length []) []).trans
+      exact .next (core_done rfl rfl) .refl
+  | true =>
+      have finished : Finishes (HeapCalls.step Probe.module heap.length)
+          ⟨.operation (.method (.ref address) args (body true)) [], [], heap⟩
+          (.ok ⟨outcome true, [], after true heap address fields, heap.length⟩) := by
+        apply Finishes.next (step := HeapCalls.step Probe.module heap.length) (following := ⟨.block (body true) env, [], heap⟩) rfl
+        exact (written (tail true) heap.length []).finishes (.next rfl (.done rfl))
+      exact completion_of_heap finished (by intro completion same; cases same; simp [outcome]) []
+
+theorem acquisition_failure (stopped : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo stopped).1 (className stopped) fields)) :
+    AcquireFailure Probe.module choices (.ref address) heap used (error stopped)
+      (after stopped heap address fields) used := by
+  apply AcquireFailure.checked (receiver := .ref address) (before := heap) (List.getElem?_eq_some_iff.mp found).1 (by simp [isInstance, found])
+    (iter_bound stopped heap address fields found) (method_trace stopped choices used heap address fields found)
+  cases stopped <;> simp [ProtocolCalls.iterFinish, ProtocolCalls.nextMethod, outcome, error]
+
+theorem missing_failure (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance missingInfo.1 "Missing" fields)) :
+    AcquireFailure Probe.module choices (.ref address) heap used ⟨"TypeError", []⟩ heap used := by
+  have iter := ProtocolCalls.lookup_instance Probe.module heap address missingInfo.1 "Missing"
+    "__iter__" fields missingInfo.2 found (show Probe.module.findClass "Missing" = some missingInfo from rfl)
+  have getitem := ProtocolCalls.lookup_instance Probe.module heap address missingInfo.1 "Missing"
+    "__getitem__" fields missingInfo.2 found (show Probe.module.findClass "Missing" = some missingInfo from rfl)
+  have noIter : findFunctionIn missingInfo.2 "__iter__" = none := rfl
+  have noGetitem : findFunctionIn missingInfo.2 "__getitem__" = none := rfl
+  apply AcquireFailure.binding (receiver := .ref address) (before := heap) (List.getElem?_eq_some_iff.mp found).1 (by simp [isInstance, found])
+  simp [ProtocolCalls.iterMethod, Mutable.eval_bind, iter, getitem, noIter, noGetitem, Mutable.error]
+
+theorem isolated_failure (stopped : Bool) (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address privateAddress : Nat)
+    (object : Mutable.Object) (fields : List (String × Mutable.Value))
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance (classInfo stopped).1 (className stopped) fields))
+    (loop : Loop) (resumes : List Resume) (inputName : String)
+    (getInput : loop.env inputName = some (.ref (rename address))) :
+    ∃ other, PrivateLayout (after stopped logical address fields) other rename privateAddress object ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (.forIn (.name loop.name) (.name inputName) loop.body loop.otherwise :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.completed (.ok ⟨.error (Calls.generatorException (loop.stack.any Frame.inGenerator) (error stopped)),
+          [], other, anchors⟩) used resumes) := by
+  have failed := acquisition_failure stopped choices used logical address fields found
+  obtain ⟨other, _, kept, rejected⟩ := failed.for_name_isolated source physical rename layout.layout
+    (by simp [after]) anchors
+  exact ⟨other, kept privateAddress object layout, rejected loop resumes inputName getInput⟩
+
+
+def selfInfo := (Probe.module.findClass "SelfReturning").getD ("", [])
+def selfBody : List Stmt := writeSelf ++ [.return (.name "self")]
+def selfAfter (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :=
+  heap.set address (.instance selfInfo.1 "SelfReturning" (Mutable.putField fields "link" (.ref address)))
+
+/-- Returning an instance without __next__ fails after its mutations, even though __iter__ itself returned normally. -/
+theorem self_return_failure (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance selfInfo.1 "SelfReturning" fields)) :
+    AcquireFailure Probe.module choices (.ref address) heap used ⟨"TypeError", []⟩
+      (selfAfter heap address fields) used := by
+  have defined : Probe.module.findClass "SelfReturning" = some selfInfo := rfl
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address selfInfo.1 "SelfReturning"
+    "__iter__" fields selfInfo.2 found defined
+  have method : findFunctionIn selfInfo.2 "__iter__" = some (args, selfBody) := rfl
+  simp only [method, Option.map_some] at lookup
+  have bound : ProtocolCalls.iterMethod Probe.module (.ref address) heap =
+      some (.ok (.method (.ref address) args selfBody), heap) := by
+    simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+  have returned : MethodReturns Probe.module (.ref address) args selfBody [] heap
+      (.ref address) (selfAfter heap address fields) := by
+    let env := functionEnv args selfBody [.ref address] []
+    have self : env "self" = some (.ref address) := rfl
+    have written : BlockContinues Probe.module env writeSelf heap env (selfAfter heap address fields) :=
+      BlockContinues.setAttribute (Evaluates.lookup self) (Evaluates.lookup self)
+        (Mutable.writeField_result found (by simp))
+    apply MethodReturns.of_body (completed := [.ref address]) rfl
+    exact written.returns (BlockReturns.return_value (Evaluates.lookup self))
+  apply AcquireFailure.checked (receiver := .ref address) (before := heap) (outcome := .ok (.ref address))
+    (List.getElem?_eq_some_iff.mp found).1 (by simp [isInstance, found]) bound
+  · exact (IteratorCalls.Reaches.of_heap (returned heap.length []) []).trans (.next (core_done rfl rfl) .refl)
+  · have next := ProtocolCalls.lookup_instance Probe.module (selfAfter heap address fields) address selfInfo.1
+      "SelfReturning" "__next__" (Mutable.putField fields "link" (.ref address)) selfInfo.2
+      (by simp [selfAfter, (List.getElem?_eq_some_iff.mp found).1]) defined
+    have absent : findFunctionIn selfInfo.2 "__next__" = none := rfl
+    simp only [absent, Option.map_none, selfAfter] at next
+    simp [ProtocolCalls.iterFinish, ProtocolCalls.nextMethod, selfAfter,
+      (List.getElem?_eq_some_iff.mp found).1, next]
+
+theorem self_return_isolated (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address privateAddress : Nat)
+    (object : Mutable.Object) (fields : List (String × Mutable.Value))
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance selfInfo.1 "SelfReturning" fields))
+    (loop : Loop) (resumes : List Resume) (inputName : String)
+    (getInput : loop.env inputName = some (.ref (rename address))) :
+    ∃ other, PrivateLayout (selfAfter logical address fields) other rename privateAddress object ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (.forIn (.name loop.name) (.name inputName) loop.body loop.otherwise :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.completed (.ok ⟨.error ⟨"TypeError", []⟩, [], other, anchors⟩) used resumes) := by
+  have failed := self_return_failure choices used logical address fields found
+  obtain ⟨other, _, kept, rejected⟩ := failed.for_name_isolated source physical rename layout.layout
+    (by simp [selfAfter]) anchors
+  refine ⟨other, kept privateAddress object layout, ?_⟩
+  simpa only [Calls.generatorException, Bool.and_false, Bool.false_eq_true, ↓reduceIte,
+    show ("TypeError" == "StopIteration") = false from rfl] using rejected loop resumes inputName getInput
+
+
+def allocInfo := (Probe.module.findClass "Allocating").getD ("", [])
+def allocWrite : List Stmt := [.assign [.attribute (.name "self") "link"] (.list [.name "self"])]
+def allocBody : List Stmt := allocWrite ++ [.return (.constant (.int 17))]
+def allocAfter (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) : Mutable.Heap :=
+  (heap ++ [Mutable.Object.list [.ref address]]).set address
+    (.instance allocInfo.1 "Allocating" (Mutable.putField fields "link" (.ref heap.length)))
+
+/-- A newly allocated list escapes through a caller field and forms a cycle before invalid acquisition fails. -/
+theorem allocating_failure (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance allocInfo.1 "Allocating" fields)) :
+    AcquireFailure Probe.module choices (.ref address) heap used ⟨"TypeError", []⟩
+      (allocAfter heap address fields) used := by
+  have defined : Probe.module.findClass "Allocating" = some allocInfo := rfl
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address allocInfo.1 "Allocating"
+    "__iter__" fields allocInfo.2 found defined
+  have method : findFunctionIn allocInfo.2 "__iter__" = some (args, allocBody) := rfl
+  simp only [method, Option.map_some] at lookup
+  have bound : ProtocolCalls.iterMethod Probe.module (.ref address) heap =
+      some (.ok (.method (.ref address) args allocBody), heap) := by
+    simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+  have returned : MethodReturns Probe.module (.ref address) args allocBody [] heap
+      (.scalar (.int 17)) (allocAfter heap address fields) := by
+    let env := functionEnv args allocBody [.ref address] []
+    have self : env "self" = some (.ref address) := rfl
+    have retained : (heap ++ [.list [.ref address]])[address]? = some (.instance allocInfo.1 "Allocating" fields) := by
+      rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+      exact found
+    have written : BlockContinues Probe.module env allocWrite heap env (allocAfter heap address fields) :=
+      BlockContinues.setAttribute (Evaluates.list (.cons (Evaluates.lookup self) .nil)) (Evaluates.lookup self)
+        (Mutable.writeField_result retained (by simp))
+    apply MethodReturns.of_body (completed := [.ref address]) rfl
+    exact written.returns (BlockReturns.return_value Evaluates.constant)
+  apply AcquireFailure.checked (receiver := .ref address) (before := heap) (outcome := .ok (.scalar (.int 17)))
+    (List.getElem?_eq_some_iff.mp found).1 (by simp [isInstance, found]) bound
+  · exact (IteratorCalls.Reaches.of_heap (returned heap.length []) []).trans (.next (core_done rfl rfl) .refl)
+  · rfl
+
+theorem allocating_failure_relocates (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address : Nat)
+    (fields : List (String × Mutable.Value)) (layout : ExecutionLayout logical physical rename)
+    (found : logical[address]? = some (.instance allocInfo.1 "Allocating" fields))
+    (loop : Loop) (resumes : List Resume) (inputName : String)
+    (getInput : loop.env inputName = some (.ref (rename address))) :
+    ∃ other nextMap,
+      IteratorCalls.Relocation.ExtendedLayout logical.length physical.length rename
+        (allocAfter logical address fields) other nextMap ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (.forIn (.name loop.name) (.name inputName) loop.body loop.otherwise :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.completed (.ok ⟨.error ⟨"TypeError", []⟩, [], other, anchors⟩) used resumes) := by
+  have failed := allocating_failure choices used logical address fields found
+  obtain ⟨other, nextMap, extended, rejected⟩ := failed.for_name_relocates source physical rename layout anchors
+  refine ⟨other, nextMap, extended, ?_⟩
+  simpa only [Calls.generatorException, Bool.and_false, Bool.false_eq_true, ↓reduceIte,
+    show ("TypeError" == "StopIteration") = false from rfl] using rejected loop resumes inputName getInput
+
+end AcquisitionFailureExamples
+'''
+AUDITS = ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "acquisition_method_effects", "AcquireFailure.effects", "for_name_receiver", "AcquireFailure.for_name_isolated", "AcquireFailure.for_name_relocates",
+)] + ["AcquisitionFailureExamples." + name for name in (
+    "source", "source_class", "source_iter", "iter_bound", "method_trace", "acquisition_failure",
+    "missing_failure", "isolated_failure", "self_return_failure", "self_return_isolated", "allocating_failure", "allocating_failure_relocates",
+)]
+with project_temporary_directory(prefix="acquisition-failure-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name, expected in (("Invalid", TypeError), ("Stopped", StopIteration), ("SelfReturning", TypeError), ("Allocating", TypeError), ("Missing", TypeError)):
+        receiver = namespace[name]()
+        visited = []
+        try:
+            for value in receiver:
+                visited.append(value)
+        except expected:
+            assert visited == []
+            if name == "Allocating":
+                assert receiver.link[0] is receiver
+            elif name != "Missing":
+                assert receiver.link is receiver
+        else:
+            raise AssertionError("acquisition failure was swallowed")
+    def generated(receiver):
+        yield from receiver
+    try:
+        next(generated(namespace["Stopped"]()))
+    except RuntimeError as error:
+        assert isinstance(error.__cause__, StopIteration)
+    else:
+        raise AssertionError("generator swallowed acquisition StopIteration")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAcquisitionFailure\n"
+                     "import lang.py.FormalSW.IteratorPrefix\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"iterator acquisition failures: missing protocol, invalid return, raised StopIteration and retained cycles; {len(AUDITS)} axiom audits passed")
