@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""
+Check generator continuations after eager default mutations and under saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(items, value):
+    items.append(value)
+    return value
+
+
+def consumed(items, value):
+    return next((entry for entry in items), touch(items, value))
+
+
+def explicit(items, value):
+    items.append(value)
+    return items[0]
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineGeneratorExamples
+set_option Elab.async false
+
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) :=
+  heap.set address (.list (items ++ [value]))
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, value] heap value (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem consumed_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "consumed" [.ref address, value] heap (items.headD value) (after heap address items value) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have read : Mutable.sequence (.ref address) (after heap address items value) =
+      some (.ok (items ++ [value]), after heap address items value) := by
+    simp [Mutable.sequence, after, bounded]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.next_generator_sequence
+    (fallback := some (.call (.name "touch") [.name "items", .name "value"]))
+    (by intro arguments impossible; cases impossible)
+    (by intro arguments impossible; cases impossible)
+    (by intro arguments impossible; cases impossible) (Evaluates.lookup rfl)
+    (nextSequence_list heap address items found)
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (touch_returns heap address items value found))
+  apply BlockReturns.sequence_step (source := .ref address) read
+    (show (items ++ [value])[0]? = some (items.headD value) by cases items <;> rfl)
+  exact BlockReturns.return_value (Evaluates.lookup (by simp [setLocal, comprehensionTargetName]))
+
+theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "explicit" [.ref address, value] heap (items.headD value) (after heap address items value) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have read : Mutable.getItem (.ref address) (.scalar (.int 0)) (after heap address items value) =
+      some (.ok (items.headD value), after heap address items value) := by
+    cases items <;> simp [Mutable.getItem, Mutable.index, after, bounded, Mutable.eval_bind, Except.map]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value
+    (Evaluates.subscript (by intros; simp) (Evaluates.lookup rfl) Evaluates.constant read)
+
+/-- The iterator is acquired before the eager default, and reads its live list afterward. -/
+theorem default_mutation_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "consumed" [.ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, value] heap (items.headD value) (after heap address items value)) :
+      ((IteratorCalls.call Probe.module name [.ref address, value] heap).run choices).Finishes
+        ⟨.ok (items.headD value), [], after heap address items value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "consumed" leftChoices (consumed_returns heap address items value found))
+    (finishes "explicit" rightChoices (explicit_returns heap address items value found)) (Or.inl rfl)
+
+/-- Every generator continuation consumes the mutation's proved output invariant. -/
+theorem append_then_generator (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item value : Mutable.Value) (frame : Frame) (generator : GeneratorContinuation frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (valueInside : value.edge.Within logical.length) (frameInside : FrameWithin logical.length frame)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout (after logical address items item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.value value, [frame], after logical address items item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.value value, [frame], after logical address items item⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have continuationInside : StateWithin ⟨.value value, [frame], after logical address items item⟩ := by
+    exact ⟨by simpa [after] using valueInside, by simpa [after] using frameInside⟩
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_generatorContinuation_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used value frame [] resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained generator
+    ⟨continuationInside.1, continuationInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineGeneratorExamples
+'''
+
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "run_readonly_preserves", "step_nextStart_preserves", "step_extremumStart_preserves",
+    "step_extremumResume_preserves", "step_generatorEnd_preserves", "step_generatorConsumer_preserves",
+    "step_sumStart_preserves", "step_generatorReceiver_preserves", "step_generatorContinuation_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_generatorContinuation_preserves"] + ["MachineGeneratorExamples." + name for name in (
+    "touch_returns", "consumed_returns", "explicit_returns", "default_mutation_equiv", "append_then_generator",
+)]
+with project_temporary_directory(prefix="machine-generator-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("consumed", "explicit"):
+        for size in (0, 1, 17):
+            for cyclic in (False, True):
+                items = [object() for _ in range(size)]
+                if cyclic and items:
+                    items[0] = items
+                expected = items[0] if items else items
+                assert namespace[name](items, items) is expected
+                assert len(items) == size + 1 and items[-1] is items
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineGeneratorContinuation\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        "import lang.py.FormalSW.NextCalls\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"generator continuations: eager defaults, live input mutations, cyclic aliases; {len(AUDITS)} axiom audits passed")
