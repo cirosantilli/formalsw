@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+Check sorting snapshots after reverse-argument mutations and key preparation invariants.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def prepare(items, value):
+    items.append(value)
+    return False
+
+
+def nested(items, value):
+    return sorted(items, key=lambda entry: 0, reverse=prepare(items, value))
+
+
+def explicit(items, value):
+    items.append(value)
+    return sorted(items, key=lambda entry: 0)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineSortExamples
+set_option Elab.async false
+
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) :=
+  heap.set address (.list (items ++ [value]))
+def pairs (items : List Mutable.Value) : List (Mutable.Value × Int) := items.map fun value => (value, 0)
+def output (items : List Mutable.Value) := (HeapSort.keyInts (pairs items)).map Prod.fst
+
+theorem keys_result (cursor : SequenceSort) (heap : Mutable.Heap) (remaining done : List Mutable.Value)
+    (direction : cursor.reverse = false)
+    (evaluated : ∀ value, Evaluates Probe.module (setLocal cursor.env cursor.parameter value)
+      cursor.key heap (.scalar (.int 0)) heap) :
+    SortedReturns Probe.module cursor remaining ((pairs done).map HeapSort.intKey) heap (.ref heap.length)
+      (heap ++ [.list (output (done.reverse ++ remaining))]) := by
+  induction remaining generalizing done with
+  | nil =>
+    apply SortedReturns.done
+    have ordered : HeapSort.keyedSortWithReverse heap cursor.reverse ((pairs done).map HeapSort.intKey).reverse =
+        some (.ok ((HeapSort.keyInts (pairs done.reverse)).map HeapSort.intKey)) := by
+      rw [direction]
+      change HeapSort.keyedSort heap ((pairs done).map HeapSort.intKey).reverse = _
+      rw [← List.map_reverse, HeapSort.keyedSort_intkeys]
+      simp only [pairs, List.map_reverse]
+    simp [sortedFinish, ordered, output, HeapSort.intKey, List.map_map, Mutable.allocate, Except.map]
+  | cons value rest ih =>
+    apply SortedReturns.next (evaluated value)
+    simpa [pairs, List.reverse_cons, List.append_assoc] using ih (value :: done)
+
+theorem prepare_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "prepare" [.ref address, value] heap (.scalar (.bool false)) (after heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value Evaluates.constant
+
+theorem acquired (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    sortedStart (.ref address) (.scalar (.bool false)) (after heap address items value) =
+      some (.ok (items ++ [value], false), after heap address items value) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  simp [sortedStart, sortedItems, Mutable.sequence, after, bounded, Mutable.truth, scalarTruth]
+
+theorem nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "nested" [.ref address, value] heap (.ref (after heap address items value).length)
+      (after heap address items value ++ [.list (output (items ++ [value]))]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.sorted_sequence (Evaluates.lookup rfl)
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (prepare_returns heap address items value found)) (acquired heap address items value found)
+  exact keys_result _ _ (items ++ [value]) [] rfl (fun _ => Evaluates.constant)
+
+theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "explicit" [.ref address, value] heap (.ref (after heap address items value).length)
+      (after heap address items value ++ [.list (output (items ++ [value]))]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.sorted_sequence (Evaluates.lookup rfl) Evaluates.constant (acquired heap address items value found)
+  exact keys_result _ _ (items ++ [value]) [] rfl (fun _ => Evaluates.constant)
+
+/-- Materialization follows the reverse argument's append, retaining arbitrary shared values. -/
+theorem reverse_mutation_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "nested" [.ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, value] heap (.ref (after heap address items value).length)
+        (after heap address items value ++ [.list (output (items ++ [value]))])) :
+      ((IteratorCalls.call Probe.module name [.ref address, value] heap).run choices).Finishes
+        ⟨.ok (.ref (after heap address items value).length), [],
+          after heap address items value ++ [.list (output (items ++ [value]))], heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "nested" leftChoices (nested_returns heap address items value found))
+    (finishes "explicit" rightChoices (explicit_returns heap address items value found)) (Or.inl rfl)
+
+/-- Key preparation consumes the append's actual output invariant, including saved callback state. -/
+theorem append_then_key_preparation (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (work : Work) (stack : List Frame) (preparation : KeyPreparation work stack)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨work, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout (after logical address items item) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
+      IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨work, stack, after logical address items item⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨work, stack, after logical address items item⟩, used⟩ resumes))) := by
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, after, Except.map]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_keyPreparation_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used work stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained preparation
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineSortExamples
+'''
+
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "sortedItems_relocates", "sortedItems_keeps_heap", "sortedItems_bounded", "sortedStart_relocates",
+    "sortedStart_keeps_heap", "sortedStart_bounded", "step_sortedSource_preserves", "step_sortedReverse_preserves",
+    "step_sortedKey_preserves", "step_sorted_key_entry_preserves", "step_extremumSource_preserves",
+    "extremumItem_relocates", "extremumItem_effect", "step_extremum_loop_preserves", "step_keyPreparation_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_keyPreparation_preserves"] + ["MachineSortExamples." + name for name in (
+    "keys_result", "prepare_returns", "acquired", "nested_returns", "explicit_returns", "reverse_mutation_equiv", "append_then_key_preparation",
+)]
+with project_temporary_directory(prefix="machine-sort-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("nested", "explicit"):
+        for size in (0, 1, 17):
+            for cyclic in (False, True):
+                items = [object() for _ in range(size)]
+                if cyclic and items:
+                    items[0] = items
+                expected = items.copy() + [items]
+                result = namespace[name](items, items)
+                assert result is not items and len(result) == size + 1
+                assert all(actual is wanted for actual, wanted in zip(result, expected))
+                assert len(items) == size + 1 and items[-1] is items
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineSortAcquisition\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"key preparation: reverse effects, snapshots, cached references, live extrema; {len(AUDITS)} axiom audits passed")

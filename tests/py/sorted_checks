@@ -42,6 +42,10 @@ def data(value):
 source = '''
 def ascending(xs: list[int]):
     return sorted(xs)
+def integer_key(xs: list[int]):
+    return sorted(xs, key=int)
+def reversed_integer_key(xs: list[int]):
+    return sorted(xs, reverse=True, key=int)
 def independent(xs: list[int]):
     result = sorted(xs)
     result.append(9)
@@ -115,17 +119,26 @@ for name, initial in itertools.product(('ascending', 'independent', 'effect', 'n
     value = initial.copy()
     heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
     compare(name, '.ref 0', heap, [value], [value])
+for name, initial in itertools.product(('integer_key', 'reversed_integer_key'), cases):
+    if not all(type(value) in (int, bool) for value in initial):
+        continue
+    value = initial.copy()
+    heap = '[.list [' + ', '.join('.scalar (' + constant(x) + ')' for x in initial) + ']]'
+    compare(name, '.ref 0', heap, [value], [value])
 for values in itertools.product((-2, 0, 3), repeat=3):
     arguments = ', '.join('.scalar (' + constant(x) + ')' for x in values)
     compare('triple', arguments, '[]', list(values), [])
 for name in ('text', 'bytes_value', 'buffer', 'set_value', 'empty_tuple', 'invalid'):
     compare(name, '', '[]', [], [])
 
-# Keyword options still require separate semantics.
-for expression in ('sorted()', 'sorted(xs, xs)', 'sorted(xs, key=int)',
-                   'sorted(xs, reverse=True, key=int)'):
+# Invalid arity and computed callbacks remain outside the modeled call forms.
+for expression in ('sorted()', 'sorted(xs, xs)', 'sorted(xs, key=xs[0])',
+                   'sorted(xs, reverse=True, key=xs[0])'):
     module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
     assert SupportChecker(module).check('f'), expression
+for expression in ('sorted(xs, key=int)', 'sorted(xs, reverse=True, key=int)'):
+    module = ast.parse(f'def f(xs: list[int]):\n    return {expression}\n')
+    assert not SupportChecker(module).check('f'), expression
 for binding in ('sorted = 1\n', 'from somewhere import sorted\n'):
     module = ast.parse(binding + 'def f(xs: list[int]):\n    return sorted(xs)\n')
     assert SupportChecker(module).check('f'), binding

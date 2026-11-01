@@ -158,6 +158,7 @@ roots = [
   "lang.py.FormalSW.MachineExpressionInvariant",
   "lang.py.FormalSW.MachineGeneratorEntry",
   "lang.py.FormalSW.MachineGeneratorContinuation",
+  "lang.py.FormalSW.MachineSortAcquisition",
   "lang.py.FormalSW.MachineStarredInvariant",
   "lang.py.FormalSW.MachineExpressionEntry",
   "lang.py.FormalSW.MethodBindingInvariant",
