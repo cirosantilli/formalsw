@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Check lazy Boolean selection against conditional expressions and explicit branches.
+Check expression entry and lazy Boolean selection with shared mutations.
 """
 from pathlib import Path
 import re
@@ -138,10 +138,10 @@ theorem control_equiv (conjunction : Bool) (heap : Mutable.Heap) (address : Nat)
       (finishes _ leftChoices (choose_returns conjunction flag heap address items test value found valueInside tested))
       (finishes _ rightChoices (branch_returns conjunction flag heap address items test value found tested)) (Or.inl rfl)
 
-/-- Boolean entry consumes the append's actual output invariant under saved iterator consumers. -/
-theorem append_then_boolean (logical physical : Mutable.Heap) (rename : Nat → Nat)
+/-- Every expression entry consumes the append's output invariant under saved iterator consumers. -/
+theorem append_then_expression (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
-    (item : Mutable.Value) (op : BoolOp) (expressions : List Expr) (env : HeapCalls.Env)
+    (item : Mutable.Value) (expression : Expr) (env : HeapCalls.Env)
     (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
     (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
     (envInside : EnvWithin logical.length env)
@@ -154,10 +154,10 @@ theorem append_then_boolean (logical physical : Mutable.Heap) (rename : Nat → 
         .next (relocateState nextMap other ⟨.value (.scalar .none), [], after logical address items item⟩) ∧
       IteratorCalls.Relocation.Preserves (after logical address items item) other nextMap physical.length
         (IteratorCalls.step Probe.module logical.length choices
-          (.running ⟨⟨.expr (.boolOp op expressions) env, [], after logical address items item⟩, used⟩ resumes))
+          (.running ⟨⟨.expr expression env, [], after logical address items item⟩, used⟩ resumes))
         (IteratorCalls.step Probe.module physical.length choices
           (IteratorCalls.Relocation.relocateState nextMap other physical.length
-            (.running ⟨⟨.expr (.boolOp op expressions) env, [], after logical address items item⟩, used⟩ resumes))) := by
+            (.running ⟨⟨.expr expression env, [], after logical address items item⟩, used⟩ resumes))) := by
   have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
   have actual : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
       .next ⟨.value (.scalar .none), [], after logical address items item⟩ := by
@@ -167,27 +167,26 @@ theorem append_then_boolean (logical physical : Mutable.Heap) (rename : Nat → 
     address items item [] [] layout found itemInside (by simp) globalsInside
   rw [actual] at preserved
   obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
-  have booleanInside : StateWithin ⟨.expr (.boolOp op expressions) env, [], after logical address items item⟩ := by
+  have expressionInside : StateWithin ⟨.expr expression env, [], after logical address items item⟩ := by
     exact ⟨envInside.mono larger, by simp⟩
-  have raw := step_boolean_expression_preserves Probe.module _ other nextMap logical.length physical.length
-    op expressions env [] [] retained booleanInside
-  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
-    ⟨⟨.expr (.boolOp op expressions) env, [], after logical address items item⟩, used⟩ other nextMap
-    logical.length physical.length [] retained booleanInside nextGlobals raw
   refine ⟨other, nextMap, agree, retained, paired, ?_⟩
-  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
-    logical.length physical.length choices resumes []
+  exact IteratorCalls.Relocation.step_expression_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used expression env [] resumes []
     (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
-    ⟨booleanInside.1, booleanInside.2,
-      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ rfl wrapped
+    ⟨expressionInside.1, expressionInside.2,
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
 
 end MachineControlExamples
 '''
 AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "arguments_entry_preserves", "expandedArgumentsState_relocates", "expanded_arguments_entry_preserves",
+    "withoutGenerator_within", "withoutGenerator_relocates", "generator_arguments_preserves",
+    "truth_generator_arguments_preserves", "extremum_generator_arguments_preserves", "next_generator_arguments_preserves",
+    "step_generator_entry", "step_generator_expression_preserves", "step_expression_preserves",
     "step_boolean_expression_preserves", "step_conditional_expression_preserves",
     "step_boolean_preserves", "step_conditional_preserves", "step_branch_preserves", "step_if_statement_preserves",
-)] + ["MachineControlExamples." + name for name in (
-    "fallback_returns", "choose_returns", "conditional_returns", "branch_returns", "control_equiv", "append_then_boolean",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_expression_preserves"] + ["MachineControlExamples." + name for name in (
+    "fallback_returns", "choose_returns", "conditional_returns", "branch_returns", "control_equiv", "append_then_expression",
 )]
 with project_temporary_directory(prefix="machine-control-") as temporary:
     directory = Path(temporary)
@@ -217,7 +216,7 @@ with project_temporary_directory(prefix="machine-control-") as temporary:
     document.write_text(api["AstJsonEmitter"](module).emit())
     checked_source = directory / "Checks.lean"
     checked_source.write_text(
-        "import lang.py.FormalSW.MachineControlInvariant\n"
+        "import lang.py.FormalSW.MachineExpressionEntry\n"
         "import lang.py.FormalSW.IteratorRules\n"
         + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
         + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
@@ -235,4 +234,4 @@ with project_temporary_directory(prefix="machine-control-") as temporary:
         assert {name.strip() for name in audit.split(",")} <= {
             "propext", "Classical.choice", "Quot.sound"
         }, checked.stdout
-print(f"control entry: lazy Boolean selection, branch effects, shared results; {len(AUDITS)} axiom audits passed")
+print(f"expression entry: all constructors, generator scopes, lazy shared effects; {len(AUDITS)} axiom audits passed")
