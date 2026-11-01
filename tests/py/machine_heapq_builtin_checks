@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""
+Check heap builtins after argument mutations, partial failures and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+import heapq
+
+
+def touch(items, value):
+    items.append(value)
+    return items
+
+
+def heapify_nested(items, value):
+    return heapq.heapify(touch(items, value))
+
+
+def heapify_explicit(items, value):
+    items.append(value)
+    return heapq.heapify(items)
+
+
+def push_nested(items, value):
+    return heapq.heappush(touch(items, value), value)
+
+
+def push_explicit(items, value):
+    items.append(value)
+    return heapq.heappush(items, value)
+
+
+def pop_nested(items, value):
+    return heapq.heappop(touch(items, value))
+
+
+def pop_explicit(items, value):
+    items.append(value)
+    return heapq.heappop(items)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineHeapqBuiltinExamples
+set_option Elab.async false
+
+def ints (items : List Int) : List Mutable.Value := items.map (fun value => .scalar (.int value))
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [value]))
+def operation (push pop : Bool) : Operation :=
+  .builtin (if push then .heapqPush else if pop then .heapqPop else .heapqHeapify)
+def arguments (push : Bool) (address : Nat) (value : Mutable.Value) : List Mutable.Value :=
+  if push then [.ref address, value] else [.ref address]
+def functionName (push pop nested : Bool) : String :=
+  if push then (if nested then "push_nested" else "push_explicit")
+  else if pop then (if nested then "pop_nested" else "pop_explicit")
+  else (if nested then "heapify_nested" else "heapify_explicit")
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, value] heap (.ref address) (inserted heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem nested_returns (push pop : Bool) (heap after : Mutable.Heap) (address : Nat)
+    (items : List Mutable.Value) (value answer : Mutable.Value) (found : heap[address]? = some (.list items))
+    (completed : primitive (operation push pop) (arguments push address value) (inserted heap address items value) =
+      some (.ok answer, after)) :
+    ReturnsValue Probe.module (functionName push pop true) [.ref address, value] heap answer after := by
+  cases push <;> cases pop <;> apply BlockReturns.function rfl rfl <;> apply BlockReturns.return_value
+  all_goals
+    apply Evaluates.builtin ?_ completed
+    first
+    | exact .cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+        (touch_returns heap address items value found)) .nil
+    | exact .cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+        (touch_returns heap address items value found)) (.cons (Evaluates.lookup rfl) .nil)
+
+theorem explicit_returns (push pop : Bool) (heap after : Mutable.Heap) (address : Nat)
+    (items : List Mutable.Value) (value answer : Mutable.Value) (found : heap[address]? = some (.list items))
+    (completed : primitive (operation push pop) (arguments push address value) (inserted heap address items value) =
+      some (.ok answer, after)) :
+    ReturnsValue Probe.module (functionName push pop false) [.ref address, value] heap answer after := by
+  cases push <;> cases pop <;> apply BlockReturns.function rfl rfl
+  all_goals apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  all_goals apply BlockReturns.return_value
+  all_goals
+    apply Evaluates.builtin ?_ completed
+    first
+    | exact .cons (Evaluates.lookup rfl) .nil
+    | exact .cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)
+
+theorem calls_equiv (left right : String) (arguments : List Mutable.Value) (heap after : Mutable.Heap) (answer : Mutable.Value)
+    (first : ReturnsValue Probe.module left arguments heap answer after)
+    (second : ReturnsValue Probe.module right arguments heap answer after) :
+    (IteratorCalls.call Probe.module left arguments heap).Equiv (IteratorCalls.call Probe.module right arguments heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule) (returned : ReturnsValue Probe.module name arguments heap answer after) :
+      ((IteratorCalls.call Probe.module name arguments heap).run choices).Finishes ⟨.ok answer, [], after, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes (finishes left leftChoices first) (finishes right rightChoices second) (Or.inl rfl)
+
+/-- Totality is derived for arbitrary integer lists; no primitive-completion premise remains. -/
+theorem integer_calls_equiv (push pop : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Int) (value : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    (IteratorCalls.call Probe.module (functionName push pop true) [.ref address, .scalar (.int value)] heap).Equiv
+      (IteratorCalls.call Probe.module (functionName push pop false) [.ref address, .scalar (.int value)] heap) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have updated : (inserted heap address (ints items) (.scalar (.int value)))[address]? =
+      some (.list (ints (items ++ [value]))) := by simp [inserted, ints, valid]
+  have typed : ∀ item ∈ ints (items ++ [value]), ∃ number, item = .scalar (.int number) := by
+    intro item member
+    obtain ⟨number, _, rfl⟩ := List.mem_map.mp member
+    exact ⟨number, rfl⟩
+  have total : ∃ answer after, primitive (operation push pop) (arguments push address (.scalar (.int value)))
+      (inserted heap address (ints items) (.scalar (.int value))) = some (.ok answer, after) := by
+    cases push with
+    | true =>
+      obtain ⟨after, finished⟩ := Heapq.heappush_succeeds _ Heapq.TotalComparison.integers _ address _
+        (.scalar (.int value)) typed ⟨value, rfl⟩ updated
+      exact ⟨.scalar .none, after, finished⟩
+    | false =>
+      cases pop with
+      | false =>
+        obtain ⟨after, finished⟩ := Heapq.heapify_succeeds _ Heapq.TotalComparison.integers _ address _ typed updated
+        exact ⟨.scalar .none, after, finished⟩
+      | true =>
+        cases elements : ints (items ++ [value]) with
+        | nil => have := congrArg List.length elements; simp [ints] at this
+        | cons root rest =>
+          rw [elements] at typed updated
+          obtain ⟨after, finished⟩ := Heapq.heappop_succeeds _ Heapq.TotalComparison.integers _ address root rest typed updated
+          exact ⟨root, after, finished⟩
+  obtain ⟨answer, after, completed⟩ := total
+  exact calls_equiv _ _ _ heap after answer
+    (nested_returns push pop heap after address (ints items) (.scalar (.int value)) answer found completed)
+    (explicit_returns push pop heap after address (ints items) (.scalar (.int value)) answer found completed)
+
+/-- A popped reference remains the same alias, even when it points back to the receiver. -/
+theorem singleton_pop_equiv (heap : Mutable.Heap) (address : Nat) (value : Mutable.Value)
+    (found : heap[address]? = some (.list [])) :
+    (IteratorCalls.call Probe.module "pop_nested" [.ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "pop_explicit" [.ref address, value] heap) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have updated : (inserted heap address [] value)[address]? = some (.list [value]) := by simp [inserted, valid]
+  have completed := Heapq.heappop_singleton _ address value updated
+  exact calls_equiv _ _ _ heap _ value
+    (nested_returns false true heap _ address [] value value found completed)
+    (explicit_returns false true heap _ address [] value value found completed)
+
+/-- A pop that fails after removing its last item still retains the replaced root. -/
+theorem pop_failure (heap : Mutable.Heap) (address : Nat) (root : Mutable.Value) (text : String) (child last : Int)
+    (found : heap[address]? = some (.list [root, .scalar (.string text), .scalar (.int child), .scalar (.int last)])) :
+    Heapq.heappop [.ref address] heap = some (.error ⟨"TypeError", []⟩,
+      heap.set address (.list [.scalar (.int last), .scalar (.string text), .scalar (.int child)])) := by
+  rw [Heapq.heappop_nontrivial heap address root (.scalar (.int last))
+    [.scalar (.string text), .scalar (.int child)] found]
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have current : (heap.set address (.list [.scalar (.int last), .scalar (.string text), .scalar (.int child)]))[address]? =
+      some (.list [.scalar (.int last), .scalar (.string text), .scalar (.int child)]) := by simp [valid]
+  have acquired := Heapq.items_list _ address _ current
+  simp only [Mutable.eval_map, Heapq.siftUp, Mutable.eval_bind, acquired,
+    Option.bind_eq_bind, Option.bind_some, List.length_cons, List.length_nil, Nat.zero_lt_succ, ↓reduceIte]
+  rw [Heapq.siftChildren]
+  simp [Heapq.items, Heapq.atIndex, Heapq.less, valid,
+    HeapSort.compare, scalarCompare, HeapSort.typeError, Except.map]
+
+theorem source_pop_failure (heap : Mutable.Heap) (address : Nat) (root : Mutable.Value)
+    (text : String) (child last : Int)
+    (found : heap[address]? = some (.list [root, .scalar (.string text), .scalar (.int child)])) :
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "pop_nested") [.ref address, .scalar (.int last)], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [],
+        heap.set address (.list [.scalar (.int last), .scalar (.string text), .scalar (.int child)]), heap.length⟩) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have updated : (inserted heap address [root, .scalar (.string text), .scalar (.int child)] (.scalar (.int last)))[address]? =
+      some (.list [root, .scalar (.string text), .scalar (.int child), .scalar (.int last)]) := by simp [inserted, valid]
+  repeat first
+    | apply (Evaluates.arguments_reach (.cons
+        (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+          (touch_returns heap address _ (.scalar (.int last)) found)) .nil)
+        (.builtin .heapqPop) [] heap.length []).finishes
+    | refine .next rfl ?_
+  apply Finishes.done
+  change protectGenerator [] (result heap.length _ (primitive (.builtin .heapqPop) [.ref address]) []) = _
+  have failed := pop_failure _ address root text child last updated
+  simp only [primitive_heapq_pop, result, run, failed]
+  simp [inserted, List.set_set, done]
+  rfl
+
+/-- A preceding mutation feeds all heap builtins under arbitrary saved iterator consumers. -/
+theorem append_then_heapq (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (op : Operation) (covered : HeapqOperation op) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation op values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running ⟨⟨.operation op values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.operation op values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_heapqBuiltin_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used op covered values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineHeapqBuiltinExamples
+'''
+AUDITS = ["FormalSW.PyAst.Heapq.Relocation." + name for name in (
+    "items_success", "receiver_relocates", "receiver_bounded", "receiver_bind_relocates", "items_bind_relocates",
+    "append_relocates", "pop_last_relocates", "pop_last_bounded", "replace_list_relocates",
+    "heapify_relocates", "heappush_relocates", "heappop_relocates", "constant_map_returns",
+    "heapify_returns_none", "heappush_returns_none", "heappop_return_bounded",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "result_mutation_preserves", "heapq_primitive_relocates", "heapq_primitive_bounded",
+    "result_heapqBuiltin_preserves", "step_heapqBuiltin_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_heapqBuiltin_preserves"] + ["MachineHeapqBuiltinExamples." + name for name in (
+    "touch_returns", "nested_returns", "explicit_returns", "calls_equiv", "integer_calls_equiv",
+    "singleton_pop_equiv", "pop_failure", "source_pop_failure", "append_then_heapq",
+)]
+with project_temporary_directory(prefix="machine-heapq-builtin-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for prefix in ("heapify", "push", "pop"):
+        for initial in ([], [0], [True, 1, -10**100, 10**100, 1]):
+            left, right = list(initial), list(initial)
+            a = namespace[prefix + "_nested"](left, -1)
+            b = namespace[prefix + "_explicit"](right, -1)
+            assert a == b and left == right
+            assert type(a) is type(b)
+            assert [type(value) for value in left] == [type(value) for value in right]
+    for variant in ("nested", "explicit"):
+        items = [object(), "bad", 5]
+        try:
+            namespace["pop_" + variant](items, 7)
+        except TypeError:
+            assert items == [7, "bad", 5]
+        else:
+            raise AssertionError("incomparable children accepted")
+        items = []
+        assert namespace["pop_" + variant](items, items) is items
+        assert items == []
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineHeapqBuiltins\n"
+        "import lang.py.FormalSW.HeapqTotal\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"heap builtins: source equivalence, argument mutations, aliases and partial errors; {len(AUDITS)} axiom audits passed")
