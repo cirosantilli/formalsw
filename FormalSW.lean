@@ -24,6 +24,7 @@ import lang.py.FormalSW.SetComprehensionCalls
 import lang.py.FormalSW.SetSumCalls
 import lang.py.FormalSW.SetDifferenceCalls
 import lang.py.FormalSW.DictionaryCalls
+import lang.py.FormalSW.NaturalDictionaryCalls
 import lang.py.FormalSW.DictionaryConstructorCalls
 import lang.py.FormalSW.DictionaryItemsCalls
 import lang.py.FormalSW.KeyDictionaryCalls
