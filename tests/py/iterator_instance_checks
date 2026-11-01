@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""
+Check fresh iterator construction, initializer arguments and arbitrary finite traversal.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Counter:
+    def __init__(self, remaining):
+        self.remaining = remaining
+
+    def __next__(self):
+        if self.remaining:
+            self.remaining = self.remaining - 1
+            return "123"
+        raise StopIteration("finished")
+
+class FailingCounter:
+    def __init__(self, remaining):
+        self.remaining = remaining
+
+    def __next__(self):
+        if self.remaining:
+            self.remaining = self.remaining - 1
+            return "123"
+        raise ValueError("finished")
+
+class Source:
+    def __iter__(self):
+        return Counter(self.remaining)
+
+class FailingSource:
+    def __iter__(self):
+        return FailingCounter(self.remaining)
+
+class EmptyCursor:
+    def __next__(self):
+        raise StopIteration("finished")
+
+class EmptySource:
+    def __iter__(self):
+        return EmptyCursor()
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace InstanceIteratorExamples
+set_option Elab.async false
+
+def className (broken : Bool) := if broken then "FailingCounter" else "Counter"
+def classInfo (broken : Bool) := (Probe.module.findClass (className broken)).getD ("", [])
+def errorName (broken : Bool) := if broken then "ValueError" else "StopIteration"
+def error (broken : Bool) : ExceptionObject := ⟨errorName broken, [.string "finished"]⟩
+def outcome (broken : Bool) : Except ExceptionObject Unit := if broken then .error (error true) else .ok ()
+def args : List Arg := [{name := "self", annotation := none}]
+def remaining : Expr := .attribute (.name "self") "remaining"
+def writeRemaining : List Stmt :=
+  [.assign [remaining] (.binOp remaining .sub (.constant (.int 1)))]
+def yesBody : List Stmt := writeRemaining ++ [.return (.constant (.string "123"))]
+def stopBody (broken : Bool) : List Stmt :=
+  [.raise (some (.call (.name (errorName broken)) [.constant (.string "finished")]))]
+def body (broken : Bool) : List Stmt := .ifThen remaining yesBody [] :: stopBody broken
+def env (broken : Bool) (address : Nat) := functionEnv args (body broken) [.ref address] []
+def text (s : String) : Mutable.Value := .scalar (.string s)
+def nextFields (fields : List (String × Mutable.Value)) (n : Nat) :=
+  Mutable.putField fields "remaining" (.scalar (.int n))
+def nextHeap (broken : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value)) (n : Nat) :=
+  heap.set address (.instance (classInfo broken).1 (className broken) (nextFields fields n))
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class (broken : Bool) : Probe.module.findClass (className broken) = some (classInfo broken) := by
+  cases broken <;> rfl
+theorem source_next (broken : Bool) : findFunctionIn (classInfo broken).2 "__next__" = some (args, body broken) := by
+  cases broken <;> rfl
+
+theorem next_bound (broken : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args (body broken))), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address (classInfo broken).1
+    (className broken) "__next__" fields (classInfo broken).2 found (source_class broken)
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem remaining_read (broken : Bool) (heap : Mutable.Heap) (address n : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n))) :
+    Evaluates Probe.module (env broken address) remaining heap (.scalar (.int n)) heap := by
+  apply Evaluates.field (Evaluates.lookup (show env broken address "self" = some (.ref address) from rfl))
+  simp [getAttribute, Mutable.eval_bind, found, instanceClass, source_class, field]
+
+theorem returns_next (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int (n + 1)))) :
+    OperationCompletes Probe.module choices used (.method (.ref address) args (body broken))
+      heap (.ok (text "123")) (nextHeap broken heap address fields n) := by
+  have read := remaining_read broken heap address (n + 1) fields found field
+  have subtracted : Evaluates Probe.module (env broken address) (.binOp remaining .sub (.constant (.int 1)))
+      heap (.scalar (.int n)) heap := by
+    apply Evaluates.binary read Evaluates.constant
+    change some (Except.ok (Mutable.Value.scalar (.int ((↑(n + 1) : Int) - 1))), heap) = _
+    simp
+  have written : BlockContinues Probe.module (env broken address) writeRemaining heap (env broken address)
+      (nextHeap broken heap address fields n) :=
+    BlockContinues.setAttribute subtracted (Evaluates.lookup rfl) (Mutable.writeField_result found (by simp))
+  apply OperationCompletes.of_method
+  apply MethodReturns.of_body (completed := [.ref address]) rfl
+  apply BlockReturns.branch (flag := true) read
+    (by simp [Mutable.truth, scalarTruth]; omega)
+  exact written.returns (BlockReturns.return_value Evaluates.constant)
+
+theorem stops (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int 0))) :
+    OperationCompletes Probe.module choices used (.method (.ref address) args (body broken))
+      heap (.error (error broken)) heap := by
+  have read := remaining_read broken heap address 0 fields found field
+  have skipped : BlockContinues Probe.module (env broken address) [.ifThen remaining yesBody []]
+      heap (env broken address) heap := BlockContinues.branch read rfl BlockContinues.nil
+  apply OperationCompletes.of_heap (safe := by cases broken <;> simp [error, errorName])
+  intro anchors
+  apply Finishes.next (step := HeapCalls.step Probe.module anchors)
+    (following := ⟨.block (body broken) (env broken address), [], heap⟩) rfl
+  apply (skipped (stopBody broken) anchors []).finishes
+  cases broken <;> exact .next rfl (.next rfl (.next rfl (.done rfl)))
+
+/-- Induction on arbitrary input counts constructs actual executions, without a fuel or yield cutoff. -/
+theorem traversal (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n))) :
+    ∃ after finalUsed,
+      Traversal Probe.module choices (.ref address) text heap used (List.replicate n "123")
+        (outcome broken) after finalUsed ∧ after.length = heap.length := by
+  induction n generalizing heap fields used with
+  | zero =>
+      obtain ⟨finalUsed, executed⟩ := (stops broken choices used heap address fields found field) heap.length []
+      have ran : NextRun Probe.module choices (.ref address) heap used (.error (error broken)) heap finalUsed :=
+        ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found],
+          next_bound broken heap address fields found, executed⟩
+      refine ⟨heap, finalUsed, ?_, rfl⟩
+      cases broken with
+      | false => exact .exhausted ran
+      | true => exact .failed ran (by decide)
+  | succ n ih =>
+      obtain ⟨nextUsed, executed⟩ := (returns_next broken choices used heap address n fields found field) heap.length []
+      have ran : NextRun Probe.module choices (.ref address) heap used (.ok (text "123"))
+          (nextHeap broken heap address fields n) nextUsed :=
+        ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found],
+          next_bound broken heap address fields found, executed⟩
+      obtain ⟨after, finalUsed, later, size⟩ := ih nextUsed (nextHeap broken heap address fields n)
+        (nextFields fields n) (by simp [nextHeap, (List.getElem?_eq_some_iff.mp found).1])
+        (by simp [nextFields, Mutable.putField_lookup])
+      exact ⟨after, finalUsed, by simpa only [List.replicate_succ] using Traversal.yielded ran later,
+        by simpa only [nextHeap, List.length_set] using size⟩
+
+
+def initArgs : List Arg := [{name := "self", annotation := none}, {name := "remaining", annotation := none}]
+def initBody : List Stmt := [.assign [remaining] (.name "remaining")]
+def sourceName (broken : Bool) := if broken then "FailingSource" else "Source"
+def sourceClass (broken : Bool) := (Probe.module.findClass (sourceName broken)).getD ("", [])
+def iterBody (broken : Bool) : List Stmt := [.return (.call (.name (className broken)) [remaining])]
+def constructed (broken : Bool) (heap : Mutable.Heap) (n : Nat) : Mutable.Heap :=
+  heap ++ [.instance (classInfo broken).1 (className broken) [("remaining", .scalar (.int n))]]
+
+theorem source_init (broken : Bool) : findFunctionIn (classInfo broken).2 "__init__" = some (initArgs, initBody) := by
+  cases broken <;> rfl
+
+theorem constructor_trace (broken : Bool) (choices : ChoiceSchedule) (used anchors : Nat)
+    (heap : Mutable.Heap) (n : Nat) (stack : List Frame) (resumes : List Resume) :
+    AllocatingTrace Probe.module anchors choices [] heap
+      (.running ⟨⟨.operation (.call (className broken)) [.scalar (.int n)], stack, heap⟩, used⟩ resumes)
+      (constructed broken heap n)
+      (.running ⟨⟨.value (.ref heap.length), stack, constructed broken heap n⟩, used⟩ resumes) := by
+  let fresh := heap ++ [Mutable.Object.instance (classInfo broken).1 (className broken) []]
+  let initEnv := functionEnv initArgs initBody [.ref heap.length, .scalar (.int n)] []
+  have write : Mutable.writeField (.ref heap.length) "remaining" (.scalar (.int n)) fresh =
+      some (.ok (.scalar .none), constructed broken heap n) := by
+    have found : fresh[heap.length]? = some (.instance (classInfo broken).1 (className broken) []) := by simp [fresh]
+    simpa [fresh, constructed, Mutable.putField] using
+      Mutable.writeField_result (name := "remaining") (value := .scalar (.int n)) found (by simp)
+  have written : BlockContinues Probe.module initEnv initBody fresh initEnv (constructed broken heap n) :=
+    BlockContinues.setAttribute (Evaluates.lookup rfl) (Evaluates.lookup rfl) write
+  refine AllocatingTrace.trans
+    (AllocatingTrace.initializedInstance heap (className broken) (classInfo broken).1 (classInfo broken).2
+      initArgs initBody [.scalar (.int n)] [.ref heap.length, .scalar (.int n)] stack used resumes
+      (by cases broken <;> rfl) (by cases broken <;> rfl) (source_class broken) (source_init broken) rfl) ?_
+  have returned := (written [] anchors (.initialized heap.length :: stack)).trans (.next rfl (.next rfl .refl))
+  exact .stable rfl rfl (by simp [constructed]) (IteratorCalls.Reaches.of_heap returned resumes)
+
+theorem source_iter (broken : Bool) : findFunctionIn (sourceClass broken).2 "__iter__" = some (args, iterBody broken) := by
+  cases broken <;> rfl
+
+theorem factory_trace (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (sourceClass broken).1 (sourceName broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n))) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.method (.ref address) args (iterBody broken)) [], [], heap⟩, used⟩ [])
+      (constructed broken heap n)
+      (.completed (.ok ⟨.ok (.ref heap.length), [], constructed broken heap n, heap.length⟩) used []) := by
+  let inputEnv := functionEnv args (iterBody broken) [.ref address] []
+  have read : Evaluates Probe.module inputEnv remaining heap (.scalar (.int n)) heap := by
+    apply Evaluates.field (Evaluates.lookup rfl)
+    have defined : Probe.module.findClass (sourceName broken) = some (sourceClass broken) := by cases broken <;> rfl
+    simp [getAttribute, Mutable.eval_bind, found, instanceClass, defined, field]
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.method (.ref address) args (iterBody broken)) [], [], heap⟩
+      ⟨.operation (.call (className broken)) [.scalar (.int n)], [], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl
+      (Evaluates.arguments_reach (.cons read .nil) (.call (className broken)) [] heap.length [])))
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.operation (.call (className broken)) [.scalar (.int n)], [], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · refine (constructor_trace broken choices used heap.length heap n [] []).trans ?_
+    exact .stable rfl rfl rfl (.next (core_done rfl rfl) .refl)
+
+theorem acquisition (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (sourceClass broken).1 (sourceName broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n))) :
+    AllocatingAcquireRun Probe.module choices (.ref address) heap used (.ref heap.length) (constructed broken heap n) used := by
+  have defined : Probe.module.findClass (sourceName broken) = some (sourceClass broken) := by cases broken <;> rfl
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address (sourceClass broken).1 (sourceName broken)
+    "__iter__" fields (sourceClass broken).2 found defined
+  simp only [source_iter, Option.map_some] at lookup
+  refine ⟨.method (.ref address) args (iterBody broken), .method (.ref heap.length) args (body broken),
+    (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], ?_,
+    factory_trace broken choices used heap address n fields found field, ?_⟩
+  · simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+  · exact next_bound broken (constructed broken heap n) heap.length
+      [("remaining", .scalar (.int n))] (by simp [constructed])
+
+/-- A fresh initialized iterator produces exactly n values before its configured terminal outcome. -/
+theorem factory_traversal (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (sourceClass broken).1 (sourceName broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n))) :
+    ∃ finalHeap finalUsed,
+      AllocatingAcquireRun Probe.module choices (.ref address) heap used (.ref heap.length) (constructed broken heap n) used ∧
+      Traversal Probe.module choices (.ref heap.length) text (constructed broken heap n) used (List.replicate n "123")
+        (outcome broken) finalHeap finalUsed ∧ finalHeap.length = heap.length + 1 := by
+  obtain ⟨finalHeap, finalUsed, traversed, size⟩ := traversal broken choices used (constructed broken heap n) heap.length n
+    [("remaining", .scalar (.int n))] (by simp [constructed]) (by simp)
+  exact ⟨finalHeap, finalUsed, acquisition broken choices used heap address n fields found field, traversed,
+    by simpa [constructed] using size⟩
+
+/-- The complete factory traversal satisfies the allocating consumer interface. -/
+theorem factory_allocating (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (closed : Closed heap)
+    (found : heap[address]? = some (.instance (sourceClass broken).1 (sourceName broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n))) :
+    ∃ middle nextUsed finalHeap finalUsed error,
+      AllocatingAcquireRun Probe.module choices (.ref address) heap used (.ref heap.length) (constructed broken heap n) used ∧
+      AllocatingYieldPrefix Probe.module choices (.ref heap.length) text (constructed broken heap n) used
+        (List.replicate n "123") middle nextUsed ∧
+      AllocatingNextRun Probe.module choices (.ref heap.length) middle nextUsed (.error error) finalHeap finalUsed ∧
+      exitOutcome error = outcome broken := by
+  obtain ⟨finalHeap, finalUsed, acquired, traversed, size⟩ :=
+    factory_traversal broken choices used heap address n fields found field
+  obtain ⟨middle, nextUsed, error, yielded, last, result⟩ := traversed.decompose
+  have initialClosed := (acquired.acquireRun.effects source closed).1
+  obtain ⟨middleClosed, grows⟩ := yielded.effects source initialClosed
+  have later := (last.effects source middleClosed).2
+  have initialSize : (constructed broken heap n).length = heap.length + 1 := by simp [constructed]
+  exact ⟨middle, nextUsed, finalHeap, finalUsed, error, acquired,
+    yielded.allocating_of_noGrowth source initialClosed (by omega),
+    last.allocating_of_noGrowth (by omega), result⟩
+
+theorem isolated_acquisition (broken : Bool) (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address n privateAddress : Nat)
+    (fields : List (String × Mutable.Value)) (object : Mutable.Object) (nonempty : object ≠ .tuple [])
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance (sourceClass broken).1 (sourceName broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n)))
+    (loop : Loop) (resumes : List Resume) (inputName : String)
+    (getInput : loop.env inputName = some (.ref (rename address))) :
+    ∃ other nextMap, PrivateLayout (constructed broken logical n) other nextMap privateAddress object ∧
+      nextMap logical.length ≠ privateAddress ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (.forIn (.name loop.name) (.name inputName) loop.body loop.otherwise :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (loopCode loop (.ref (nextMap logical.length)) :: loop.following)
+          loop.env, loop.stack, other⟩, used⟩ resumes) := by
+  obtain ⟨other, nextMap, _, kept, entered⟩ :=
+    (acquisition broken choices used logical address n fields found field).for_name_isolated source physical rename layout.layout anchors
+  have saved := kept privateAddress object nonempty layout
+  exact ⟨other, nextMap, saved, saved.excludes logical.length (by simp [constructed]), entered loop resumes inputName getInput⟩
+
+def emptyClass := (Probe.module.findClass "EmptyCursor").getD ("", [])
+def emptySourceClass := (Probe.module.findClass "EmptySource").getD ("", [])
+def emptyIter : List Stmt := [.return (.call (.name "EmptyCursor") [])]
+def emptyNext : List Stmt := [.raise (some (.call (.name "StopIteration") [.constant (.string "finished")]))]
+def emptyHeap (heap : Mutable.Heap) := heap ++ [Mutable.Object.instance emptyClass.1 "EmptyCursor" []]
+
+theorem empty_acquisition (choices : ChoiceSchedule) (used : Nat) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance emptySourceClass.1 "EmptySource" fields)) :
+    AllocatingAcquireRun Probe.module choices (.ref address) heap used (.ref heap.length) (emptyHeap heap) used := by
+  have defined : Probe.module.findClass "EmptySource" = some emptySourceClass := rfl
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address emptySourceClass.1 "EmptySource"
+    "__iter__" fields emptySourceClass.2 found defined
+  have method : findFunctionIn emptySourceClass.2 "__iter__" = some (args, emptyIter) := rfl
+  simp only [method, Option.map_some] at lookup
+  refine ⟨.method (.ref address) args emptyIter, .method (.ref heap.length) args emptyNext,
+    (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], ?_, ?_, ?_⟩
+  · simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+  · refine AllocatingTrace.trans (middle := heap)
+      (next := .running ⟨⟨.operation (.call "EmptyCursor") [], [], heap⟩, used⟩ []) ?_ ?_
+    · exact .stable rfl rfl rfl (.next (core_next rfl rfl) (.next (core_next rfl rfl) (.next (core_next rfl rfl) .refl)))
+    · refine (AllocatingTrace.newInstance heap "EmptyCursor" emptyClass.1 emptyClass.2 [] used [] rfl rfl rfl rfl rfl).trans ?_
+      exact .stable rfl rfl rfl (.next (core_done rfl rfl) .refl)
+  · have cursorFound : (emptyHeap heap)[heap.length]? = some (.instance emptyClass.1 "EmptyCursor" []) := by simp [emptyHeap]
+    have next := ProtocolCalls.lookup_instance Probe.module (emptyHeap heap) heap.length emptyClass.1 "EmptyCursor"
+      "__next__" [] emptyClass.2 cursorFound (show Probe.module.findClass "EmptyCursor" = some emptyClass from rfl)
+    have method : findFunctionIn emptyClass.2 "__next__" = some (args, emptyNext) := rfl
+    simp only [method, Option.map_some] at next
+    simpa [ProtocolCalls.nextMethod, cursorFound] using next
+
+theorem empty_isolated (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address privateAddress : Nat)
+    (fields : List (String × Mutable.Value)) (object : Mutable.Object) (nonempty : object ≠ .tuple [])
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance emptySourceClass.1 "EmptySource" fields))
+    (loop : Loop) (resumes : List Resume) (inputName : String)
+    (getInput : loop.env inputName = some (.ref (rename address))) :
+    ∃ other nextMap, PrivateLayout (emptyHeap logical) other nextMap privateAddress object ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (.forIn (.name loop.name) (.name inputName) loop.body loop.otherwise :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        (.running ⟨⟨.block (loopCode loop (.ref (nextMap logical.length)) :: loop.following)
+          loop.env, loop.stack, other⟩, used⟩ resumes) := by
+  obtain ⟨other, nextMap, _, kept, entered⟩ :=
+    (empty_acquisition choices used logical address fields found).for_name_isolated source physical rename layout.layout anchors
+  exact ⟨other, nextMap, kept privateAddress object nonempty layout, entered loop resumes inputName getInput⟩
+
+end InstanceIteratorExamples
+'''
+AUDITS = ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "AllocatingTrace.heaps", "AllocatingTrace.reaches", "AllocatingTrace.isolated", "AllocatingAcquireRun.for_name_isolated",
+    "YieldPrefix.allocating_of_noGrowth",
+)] + ["InstanceIteratorExamples." + name for name in (
+    "source", "source_class", "source_next", "next_bound", "remaining_read", "returns_next", "stops", "traversal",
+    "source_init", "constructor_trace", "source_iter", "factory_trace", "acquisition", "factory_traversal",
+    "factory_allocating", "isolated_acquisition", "empty_acquisition", "empty_isolated",
+)]
+with project_temporary_directory(prefix="iterator-instance-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name, exception in (("Source", StopIteration), ("FailingSource", ValueError)):
+        for count in (0, 1, 2, 10):
+            receiver = namespace[name]()
+            receiver.remaining = count
+            cursor = iter(receiver)
+            assert cursor is not receiver and cursor.remaining == count
+            assert iter(receiver) is not cursor
+            for remaining in range(count, 0, -1):
+                assert next(cursor) == "123" and cursor.remaining == remaining - 1
+            try:
+                next(cursor)
+            except exception as error:
+                assert error.args == ("finished",) and cursor.remaining == 0
+            else:
+                raise AssertionError("expected the terminal exception")
+            assert receiver.remaining == count
+    receiver = namespace["EmptySource"]()
+    cursor = iter(receiver)
+    assert iter(receiver) is not cursor
+    try:
+        next(cursor)
+    except StopIteration as error:
+        assert error.args == ("finished",)
+    else:
+        raise AssertionError("expected fresh empty iterator to exhaust")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAllocatingAcquisition\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"fresh iterators: default and argument-taking constructors, private cells, arbitrary finite traversal; {len(AUDITS)} axiom audits passed")

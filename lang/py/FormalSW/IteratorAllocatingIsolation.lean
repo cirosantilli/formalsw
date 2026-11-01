@@ -85,6 +85,77 @@ theorem AllocatingTrace.isolated {module : Module} {logicalAnchors : Nat} {choic
         relocateWork, relocateRuntimeOperation, relocateOperation, relocateValue, same, stackSame, resumesSame]
       apply core_next rfl
       simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, primitive, result, run, rightRun]
+  | newInstance heap name origin classBody stack used resumes noFunction noLibrary defined noInitializer noDataclass =>
+    let nextMap := extendMap rename heap.length physical.length
+    let other := physical ++ [Mutable.Object.instance origin name []]
+    have agree : ∀ index < heap.length, nextMap index = rename index := extendMap_old _ _ _
+    have retained := layout.append_existing (.instance origin name []) (by simp) (by simp [ObjectWithin, objectValues])
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree inside.2.1
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    refine ⟨other, nextMap, ⟨retained, by simp, by simp [other], agree⟩, ?_, ?_, ?_⟩
+    · exact ⟨by simp [WorkWithin, Mutable.Value.edge, Graph.Edge.Within],
+        fun frame member => (inside.2.1 frame member).mono (by simp),
+        fun pending member => (inside.2.2 pending member).mono (by simp)⟩
+    · intro address object _ saved
+      exact (saved.allocateInstance origin name).2.2
+    · apply Reaches.next ?_ .refl
+      simp only [Relocation.relocateState, Relocation.relocateCore, HeapCalls.Relocation.relocateState,
+        relocateWork, relocateRuntimeOperation, relocateOperation, relocateValue, nextMap, extendMap_new,
+        List.map_nil, stackSame, resumesSame]
+      apply core_next rfl
+      simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, noFunction, noLibrary,
+        construct, defined, noInitializer, noDataclass, result, run, Mutable.allocateInstance_result, other]
+  | initializedInstance heap name origin classBody args body values completed stack used resumes noFunction noLibrary defined initializer arguments =>
+    let nextMap := extendMap rename heap.length physical.length
+    let logicalAfter := heap ++ [Mutable.Object.instance origin name []]
+    let other := physical ++ [Mutable.Object.instance origin name []]
+    have agree : ∀ index < heap.length, nextMap index = rename index := extendMap_old _ _ _
+    have larger : heap.length ≤ logicalAfter.length := by simp [logicalAfter]
+    have bodySource := findFunctionIn_within 0 classBody "__init__" args body
+      (findClass_within 0 module name origin classBody source defined) initializer
+    have retained := layout.append_existing (.instance origin name []) (by simp) (by simp [ObjectWithin, objectValues])
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree inside.2.1
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    have valuesSame : values.map (relocateValue nextMap) = values.map (relocateValue rename) := by
+      apply List.map_congr_left
+      intro value member
+      exact relocateValue_congr nextMap rename heap.length value agree (inside.1.2 value member)
+    have entered : invokeMethod logicalAnchors (.ref heap.length) args body values
+        (.initialized heap.length :: stack) logicalAfter globals =
+        .next ⟨.block (executableBody body) (functionEnv args body completed globals),
+          .initialized heap.length :: stack, logicalAfter⟩ := by
+      simp [invokeMethod, arguments]
+    have localInside := invokeMethod_within logicalAfter logicalAnchors (.ref heap.length) args body values
+      (.initialized heap.length :: stack) globals _
+      (by simp [logicalAfter, Mutable.Value.edge, Graph.Edge.Within])
+      (fun value member => valueWithin_mono _ _ value larger (inside.1.2 value member))
+      (fun statement member => (bodySource statement member).mono (Nat.zero_le _))
+      (by intro frame member; rcases List.mem_cons.mp member with rfl | member
+          · simp [FrameWithin, logicalAfter]
+          · exact (inside.2.1 frame member).mono larger)
+      (globalsInside.mono larger) entered
+    have paired := invokeMethod_relocate nextMap logicalAfter other logicalAnchors physicalAnchors
+      (.ref heap.length) args body values (.initialized heap.length :: stack) globals
+    rw [entered] at paired
+    have invoked : invokeMethod physicalAnchors (.ref physical.length) args body (values.map (relocateValue rename))
+        (.initialized physical.length :: stack.map (relocateFrame rename)) other (relocateGlobals rename globals) =
+        .next (HeapCalls.Relocation.relocateState nextMap other
+          ⟨.block (executableBody body) (functionEnv args body completed globals),
+            .initialized heap.length :: stack, logicalAfter⟩) := by
+      simpa only [relocateValue, nextMap, extendMap_new, relocateBody_source _ body bodySource,
+        List.map_cons, relocateFrame, stackSame, relocateGlobals_congr _ rename heap.length globals agree globalsInside,
+        valuesSame, HeapCalls.Relocation.relocateStep] using paired
+    refine ⟨other, nextMap, ⟨retained, larger, by simp [other], agree⟩,
+      ⟨localInside.1, localInside.2, fun pending member => (inside.2.2 pending member).mono larger⟩, ?_, ?_⟩
+    · intro address object _ saved
+      exact (saved.allocateInstance origin name).2.2
+    · apply Reaches.next ?_ .refl
+      simp only [Relocation.relocateState, Relocation.relocateCore, resumesSame]
+      apply core_next rfl
+      simp only [SetCalls.step, HeapCalls.Relocation.relocateState, relocateWork, relocateRuntimeOperation,
+        relocateOperation, HeapCalls.step, noFunction, noLibrary, construct, defined, initializer]
+      rw [invoked]
+      rfl
   | @trans before middle after first next final left right leftIH rightIH =>
     obtain ⟨middlePhysical, middleMap, middleLayout, middleInside, firstKept, firstRan⟩ :=
       leftIH physical rename layout inside globalsInside

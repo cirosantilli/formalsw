@@ -1,6 +1,6 @@
 import lang.py.FormalSW.IteratorExecutionIsolation
 
-/-! Composable source traces with list and tuple allocations preserve private consumer objects. -/
+/-! Composable source traces with explicit allocations preserve private consumer objects. -/
 namespace FormalSW.PyAst.IteratorCalls
 open HeapCalls HeapCalls.Relocation Mutable.Relocation
 set_option Elab.async false
@@ -47,6 +47,30 @@ inductive AllocatingTrace (module : Module) (anchors : Nat) (choices : ChoiceSch
       AllocatingTrace module anchors choices globals heap
         (.running ⟨⟨.operation .tuple items, stack, heap⟩, used⟩ resumes) after
         (.running ⟨⟨.value (.ref address), stack, after⟩, used⟩ resumes)
+  | newInstance (heap : Mutable.Heap) (name origin : String) (classBody : List Stmt)
+      (stack : List Frame) (used : Nat) (resumes : List Resume)
+      (noFunction : findFunctionIn module.body name = none)
+      (noLibrary : libraryFunction module name = none)
+      (defined : module.findClass name = some (origin, classBody))
+      (noInitializer : findFunctionIn classBody "__init__" = none)
+      (noDataclass : dataclassFields classBody = none) :
+      AllocatingTrace module anchors choices globals heap
+        (.running ⟨⟨.operation (.call name) [], stack, heap⟩, used⟩ resumes)
+        (heap ++ [.instance origin name []])
+        (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [.instance origin name []]⟩, used⟩ resumes)
+  | initializedInstance (heap : Mutable.Heap) (name origin : String) (classBody : List Stmt)
+      (args : List Arg) (body : List Stmt) (values completed : List Mutable.Value)
+      (stack : List Frame) (used : Nat) (resumes : List Resume)
+      (noFunction : findFunctionIn module.body name = none)
+      (noLibrary : libraryFunction module name = none)
+      (defined : module.findClass name = some (origin, classBody))
+      (initializer : findFunctionIn classBody "__init__" = some (args, body))
+      (arguments : completeArguments args (.ref heap.length :: values) = some completed) :
+      AllocatingTrace module anchors choices globals heap
+        (.running ⟨⟨.operation (.call name) values, stack, heap⟩, used⟩ resumes)
+        (heap ++ [.instance origin name []])
+        (.running ⟨⟨.block (executableBody body) (functionEnv args body completed globals),
+          .initialized heap.length :: stack, heap ++ [.instance origin name []]⟩, used⟩ resumes)
   | trans {before middle after first next final}
       (left : AllocatingTrace module anchors choices globals before first middle next)
       (right : AllocatingTrace module anchors choices globals middle next after final) :
@@ -58,7 +82,7 @@ theorem AllocatingTrace.heaps {module : Module} {anchors : Nat} {choices : Choic
     HeapAt before first ∧ HeapAt after final := by
   induction trace with
   | stable firstHeap finalHeap => exact ⟨firstHeap, finalHeap⟩
-  | list | tuple => exact ⟨rfl, rfl⟩
+  | list | tuple | newInstance | initializedInstance => exact ⟨rfl, rfl⟩
   | trans _ _ left right => exact ⟨left.1, right.2⟩
 
 theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : ChoiceSchedule}
@@ -71,6 +95,14 @@ theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : Cho
   | tuple heap after items address stack used resumes allocated =>
     apply Reaches.next (core_next rfl ?_) .refl
     simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, primitive, result, run, allocated]
+  | newInstance heap name origin classBody stack used resumes noFunction noLibrary defined noInitializer noDataclass =>
+    apply Reaches.next (core_next rfl ?_) .refl
+    simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, noFunction, noLibrary,
+      construct, defined, noInitializer, noDataclass, result, run, Mutable.allocateInstance_result]
+  | initializedInstance heap name origin classBody args body values completed stack used resumes noFunction noLibrary defined initializer arguments =>
+    apply Reaches.next (core_next rfl ?_) .refl
+    simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, noFunction, noLibrary,
+      construct, defined, initializer, invokeMethod, arguments]
   | trans _ _ left right => exact left.trans right
 
 end FormalSW.PyAst.IteratorCalls

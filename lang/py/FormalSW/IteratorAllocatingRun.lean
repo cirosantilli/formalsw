@@ -124,4 +124,18 @@ theorem AllocatingYieldPrefix.yieldPrefix {α : Type} {module : Module} {choices
   | nil => exact .nil
   | cons ran _ ih => exact .cons ran.nextRun ih
 
+theorem YieldPrefix.allocating_of_noGrowth {α : Type} {module : Module} {choices : ChoiceSchedule}
+    {iterator : Mutable.Value} {encode : α → Mutable.Value} {before after : Mutable.Heap}
+    {used finalUsed : Nat} {values : List α}
+    (trace : YieldPrefix module choices iterator encode before used values after finalUsed)
+    (source : Relocation.ModuleSource module) (closed : Closed before)
+    (noGrowth : after.length = before.length) :
+    AllocatingYieldPrefix module choices iterator encode before used values after finalUsed := by
+  induction trace with
+  | nil => exact .nil
+  | cons ran rest ih =>
+      obtain ⟨middleClosed, grows⟩ := ran.effects source closed
+      have later := (rest.effects source middleClosed).2
+      exact .cons (ran.allocating_of_noGrowth (by omega)) (ih middleClosed (by omega))
+
 end FormalSW.PyAst.IteratorCalls
