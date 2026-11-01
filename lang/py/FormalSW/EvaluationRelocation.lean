@@ -35,6 +35,21 @@ theorem ExecutionLayout.pure_relocates {logical physical : Heap} {rename : Nat �
   cases equal
   exact inside
 
+theorem ExecutionLayout.throw_relocates {logical physical : Heap} {rename : Nat → Nat}
+    (layout : ExecutionLayout logical physical rename) (exception : ExceptionObject) :
+    EvalRelocates logical physical rename (throw exception) (throw exception) := by
+  intro outcome after executed
+  have same : Except.error exception = outcome ∧ logical = after := by simpa using executed
+  obtain ⟨rfl, rfl⟩ := same
+  refine ⟨physical, rename, rfl, layout, fun _ _ => rfl, Nat.le_refl _, ?_⟩
+  intro value impossible
+  cases impossible
+
+theorem unsupported_relocates (logical physical : Heap) (rename : Nat → Nat) :
+    EvalRelocates logical physical rename unsupported unsupported := by
+  intro outcome after executed
+  simp [unsupported] at executed
+
 /-- A read-only conversion can feed an allocating or mutating action, retaining early exceptions. -/
 theorem EvalRelocates.readonly_bind {α : Type} {logical physical : Heap} {rename : Nat → Nat}
     (layout : ExecutionLayout logical physical rename) (read otherRead : Eval α) (next otherNext : α → Eval Value)

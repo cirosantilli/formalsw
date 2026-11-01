@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""
+Check unified binary dispatch against every parsed ordinary and augmented operator form.
+"""
+from pathlib import Path
+import operator
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+OPERATORS = [
+    ("add", "+", operator.add), ("sub", "-", operator.sub), ("mult", "*", operator.mul),
+    ("bit_and", "&", operator.and_), ("bit_or", "|", operator.or_), ("bit_xor", "^", operator.xor),
+    ("left_shift", "<<", operator.lshift), ("right_shift", ">>", operator.rshift),
+    ("pow", "**", operator.pow), ("floor_div", "//", operator.floordiv), ("mod", "%", operator.mod),
+]
+SOURCE = "\n".join(
+    f"def plain_{name}(left, right):\n"
+    f"    result = left {symbol} right\n"
+    "    return [left, right, result]\n\n"
+    f"def aug_{name}(left, right):\n"
+    "    before = left\n"
+    f"    left {symbol}= right\n"
+    "    return [before, right, left]\n"
+    for name, symbol, _ in OPERATORS
+)
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace BinaryDispatchExamples
+set_option Elab.async false
+
+def operatorName : BinOp → String
+  | .add => "add" | .sub => "sub" | .mult => "mult" | .bitAnd => "bit_and" | .bitOr => "bit_or"
+  | .bitXor => "bit_xor" | .leftShift => "left_shift" | .rightShift => "right_shift"
+  | .pow => "pow" | .floorDiv => "floor_div" | .mod => "mod"
+def functionName (op : BinOp) (augmented : Bool) := (if augmented then "aug_" else "plain_") ++ operatorName op
+def args : List Arg := [{name := "left", annotation := none}, {name := "right", annotation := none}]
+def body (op : BinOp) (augmented : Bool) : List Stmt :=
+  if augmented then [.assign [.name "before"] (.name "left"), .augAssign (.name "left") op (.name "right"),
+    .return (.list [.name "before", .name "right", .name "left"])]
+  else [.assign [.name "result"] (.binOp (.name "left") op (.name "right")),
+    .return (.list [.name "left", .name "right", .name "result"])]
+def operation (op : BinOp) (left right : Mutable.Value) (augmented : Bool) : Mutable.Eval Mutable.Value :=
+  if augmented then HeapCalls.inplace op left right else Mutable.binary op left right
+
+theorem source_function (op : BinOp) (augmented : Bool) :
+    findFunctionIn Probe.module.body (functionName op augmented) = some (args, body op augmented) := by
+  cases op <;> cases augmented <;> rfl
+
+/-- The returned list retains both original operands and the actual primitive result. -/
+theorem source_returns (heap after : Mutable.Heap) (op : BinOp) (left right answer : Mutable.Value) (augmented : Bool)
+    (executed : operation op left right augmented heap = some (.ok answer, after)) :
+    ReturnsValue Probe.module (functionName op augmented) [left, right] heap (.ref after.length)
+      (after ++ [.list [left, right, answer]]) := by
+  apply BlockReturns.function (source_function op augmented) (completed := [left, right]) rfl
+  cases augmented with
+  | false =>
+    apply BlockReturns.assign (Evaluates.binary (Evaluates.lookup rfl) (Evaluates.lookup rfl) executed)
+    exact BlockReturns.return_value (Evaluates.list
+      (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))))
+  | true =>
+    apply BlockReturns.assign (Evaluates.lookup rfl)
+    apply BlockReturns.augAssign rfl (Evaluates.lookup rfl) executed
+    exact BlockReturns.return_value (Evaluates.list
+      (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))))
+
+/-- One completed primitive derives both complete source calls and their final layouts for all 22 forms. -/
+theorem paired_returns (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (op : BinOp) (left right answer : Mutable.Value) (augmented : Bool)
+    (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length)
+    (after : Mutable.Heap) (executed : operation op left right augmented logical = some (.ok answer, after)) :
+    ∃ other nextMap,
+      ReturnsValue Probe.module (functionName op augmented) [left, right] logical (.ref after.length)
+        (after ++ [.list [left, right, answer]]) ∧
+      ReturnsValue Probe.module (functionName op augmented) [relocateValue rename left, relocateValue rename right]
+        physical (.ref (nextMap after.length)) other ∧
+      ExecutionLayout (after ++ [.list [left, right, answer]]) other nextMap ∧
+      (∀ address < logical.length, nextMap address = rename address) := by
+  obtain ⟨middle, firstMap, paired, middleLayout, agree, larger, bounded⟩ :=
+    layout.binary_operation op left right augmented leftInside rightInside _ _ executed
+  have leftSame := relocateValue_congr firstMap rename logical.length left agree leftInside
+  have rightSame := relocateValue_congr firstMap rename logical.length right agree rightInside
+  have inside : ∀ value ∈ [left, right, answer], value.edge.Within after.length := by
+    intro value member
+    rcases List.mem_cons.mp member with rfl | member
+    · exact valueWithin_mono logical.length after.length value larger leftInside
+    rcases List.mem_cons.mp member with rfl | member
+    · exact valueWithin_mono logical.length after.length value larger rightInside
+    have same : value = answer := List.mem_singleton.mp member
+    subst value
+    exact bounded answer rfl
+  have retained := (middleLayout.allocate_list [left, right, answer] inside).2.2
+  let nextMap := extendMap firstMap after.length middle.length
+  refine ⟨middle ++ [.list [relocateValue rename left, relocateValue rename right, relocateValue firstMap answer]], nextMap,
+    source_returns logical after op left right answer augmented executed, ?_, ?_, ?_⟩
+  · rw [show nextMap after.length = middle.length from extendMap_new _ _ _]
+    exact source_returns physical middle op _ _ _ augmented paired
+  · simpa only [List.map_cons, List.map_nil, leftSame, rightSame, nextMap] using retained
+  · intro address old
+    exact (extendMap_old firstMap after.length middle.length address (Nat.lt_of_lt_of_le old larger)).trans (agree address old)
+
+/-- Exceptions exit before allocating the result list; the primitive's actual final heap is retained. -/
+theorem source_raises (heap after : Mutable.Heap) (op : BinOp) (left right : Mutable.Value) (augmented : Bool)
+    (exception : ExceptionObject) (failed : operation op left right augmented heap = some (.error exception, after)) :
+    (HeapCalls.call Probe.module (functionName op augmented) [left, right] heap).Finishes
+      ⟨.error exception, [], after, heap.length⟩ := by
+  change Finishes (HeapCalls.step Probe.module heap.length) _ _
+  apply Finishes.next (step := HeapCalls.step Probe.module heap.length)
+    (following := ⟨.block (executableBody (body op augmented))
+      (functionEnv args (body op augmented) [left, right] []), [], heap⟩)
+  · change HeapCalls.step Probe.module heap.length
+      ⟨.operation (.call (functionName op augmented)) [left, right], [], heap⟩ [] = _
+    simp [HeapCalls.step, source_function, show completeArguments args [left, right] = some [left, right] from rfl]
+  · cases augmented <;> simp only [operation, Bool.false_eq_true, if_false, if_true] at failed
+    all_goals repeat' apply Finishes.next (step := HeapCalls.step Probe.module heap.length) rfl
+    all_goals exact .done (by simp [HeapCalls.step, HeapCalls.result, HeapCalls.run, failed, HeapCalls.done,
+      HeapCalls.protectGenerator, Frame.inGenerator, Calls.generatorException])
+
+theorem paired_exceptions (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (op : BinOp) (left right : Mutable.Value) (augmented : Bool)
+    (leftInside : left.edge.Within logical.length) (rightInside : right.edge.Within logical.length)
+    (exception : ExceptionObject) (after : Mutable.Heap)
+    (failed : operation op left right augmented logical = some (.error exception, after)) :
+    ∃ other nextMap,
+      (HeapCalls.call Probe.module (functionName op augmented) [left, right] logical).Finishes
+        ⟨.error exception, [], after, logical.length⟩ ∧
+      (HeapCalls.call Probe.module (functionName op augmented) [relocateValue rename left, relocateValue rename right]
+        physical).Finishes ⟨.error exception, [], other, physical.length⟩ ∧ ExecutionLayout after other nextMap := by
+  obtain ⟨other, nextMap, paired, retained, _, _, _⟩ :=
+    layout.binary_operation op left right augmented leftInside rightInside _ _ failed
+  exact ⟨other, nextMap, source_raises logical after op left right augmented exception failed,
+    source_raises physical other op _ _ augmented exception paired, retained⟩
+
+/-- A mixed sequence-kind error is an actual exception, not an unsupported result. -/
+theorem list_tuple_add_error (heap : Mutable.Heap) (left right : Nat) (xs ys : List Mutable.Value)
+    (first : heap[left]? = some (.list xs)) (second : heap[right]? = some (.tuple ys)) :
+    (HeapCalls.call Probe.module (functionName .add false) [.ref left, .ref right] heap).Finishes
+      ⟨.error {typeName := "TypeError", args := []}, [], heap, heap.length⟩ := by
+  apply source_raises
+  simp [operation, Mutable.binary, first, second, show (BinOp.add == BinOp.add) = true from rfl, Mutable.error]
+
+/-- False tuple repetition uses the real empty-tuple allocator, including interning. -/
+theorem tuple_false (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.tuple items)) (nonempty : items ≠ []) :
+    Mutable.binary .mult (.ref address) (.scalar (.bool false)) heap = Mutable.allocateTuple [] heap := by
+  change Mutable.binary .mult (.ref address) (.scalar (.int 0)) heap = Mutable.allocateTuple [] heap
+  rw [binary_mult_tuple_eval heap address items 0 found]
+  simp [nonempty]
+
+end BinaryDispatchExamples
+'''
+AUDITS = [
+    "BinaryDispatchExamples.source_function", "BinaryDispatchExamples.source_returns", "BinaryDispatchExamples.paired_returns",
+    "BinaryDispatchExamples.source_raises", "BinaryDispatchExamples.paired_exceptions", "BinaryDispatchExamples.list_tuple_add_error",
+    "BinaryDispatchExamples.tuple_false", "ExecutionLayout.throw_relocates", "unsupported_relocates",
+    "ExecutionLayout.scalar_result", "ExecutionLayout.invalid_binary", "binary_mult_convert",
+    "ExecutionLayout.binary_mult_ref_int", "ExecutionLayout.binary_mult_ref", "ExecutionLayout.binary_add_refs",
+    "ExecutionLayout.binary_add_ref_bytes", "ExecutionLayout.binary_add_bytes_ref", "ExecutionLayout.binary_refs",
+    "ExecutionLayout.binary_ref_scalar", "ExecutionLayout.binary_scalar_ref", "ExecutionLayout.binary",
+    "ExecutionLayout.inplace_binary", "inplace_list_fallback", "inplace_buffer_fallback", "ExecutionLayout.inplace",
+    "ExecutionLayout.binary_operation", "step_binary_operation_relocates",
+]
+
+with project_temporary_directory(prefix="binary-dispatch-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name, _, calculate in OPERATORS:
+        for prefix in ("plain_", "aug_"):
+            assert namespace[prefix + name](-13, 3) == [-13, 3, calculate(-13, 3)]
+    for prefix in ("plain_", "aug_"):
+        for name, right, exception in (("floor_div", 0, ZeroDivisionError), ("mod", 0, ZeroDivisionError),
+                                       ("left_shift", -1, ValueError), ("right_shift", -1, ValueError)):
+            try:
+                namespace[prefix + name](5, right)
+            except exception:
+                pass
+            else:
+                raise AssertionError("operator exception was lost")
+        for count in (False, True, -1, 0, 3):
+            value = (object(),)
+            result = namespace[prefix + "mult"](value, count)
+            assert result[0] is value and result[1] is count
+            assert len(result[2]) == max(0, count)
+            if count == 1:
+                assert result[2] is value
+        left, right = {1, 2}, {2, 3}
+        result = namespace[prefix + "bit_or"](left, right)
+        assert result[0] is left and result[1] is right and result[2] == {1, 2, 3}
+        assert (result[2] is left) == (prefix == "aug_")
+        cyclic = []
+        cyclic.append(cyclic)
+        result = namespace[prefix + "add"](cyclic, cyclic)
+        assert result[0] is cyclic and result[1] is cyclic
+        assert len(result[2]) == 2 and all(item is cyclic for item in result[2])
+        assert (result[2] is cyclic) == (prefix == "aug_")
+        value = bytearray(b"ab")
+        result = namespace[prefix + "mult"](value, False)
+        assert result[0] is value and result[2] == bytearray()
+        assert (result[2] is value) == (prefix == "aug_")
+    try:
+        namespace["plain_add"]([1], (2,))
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("mixed sequence concatenation accepted")
+    left = [1]
+    assert namespace["aug_add"](left, (2,))[2] is left and left == [1, 2]
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.BinaryDispatchRelocation\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"binary dispatch: 22 parsed operator forms, paired results and errors; {len(AUDITS)} axiom audits passed")
