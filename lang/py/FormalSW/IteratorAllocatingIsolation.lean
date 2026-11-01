@@ -60,6 +60,27 @@ theorem AllocatingTrace.isolated {module : Module} {logicalAnchors : Nat} {choic
         relocateWork, relocateRuntimeOperation, relocateOperation, relocateValue, nextMap, extendMap_new,
         stackSame, resumesSame]
       exact core_next rfl rfl
+  | dictionary heap entries env stack used resumes =>
+    let nextMap := extendMap rename heap.length physical.length
+    let other := physical ++ [Mutable.Object.dict (entries.map fun entry => (entry.1, relocateValue rename entry.2))]
+    have agree : ∀ index < heap.length, nextMap index = rename index := extendMap_old _ _ _
+    have bounded : ObjectWithin heap.length (.dict entries) := by
+      intro value member
+      obtain ⟨entry, present, rfl⟩ := List.mem_map.mp member
+      exact inside.1.2 entry present
+    have retained := (layout.allocateDict entries bounded).2.2
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree inside.2.1
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    refine ⟨other, nextMap, ⟨retained, by simp, by simp [other], agree⟩, ?_, ?_, ?_⟩
+    · exact ⟨by simp [WorkWithin, Mutable.Value.edge, Graph.Edge.Within],
+        fun frame member => (inside.2.1 frame member).mono (by simp),
+        fun pending member => (inside.2.2 pending member).mono (by simp)⟩
+    · intro address object _ saved
+      exact (saved.allocateDict entries bounded).2.2
+    · apply Reaches.next ?_ .refl
+      simp only [Relocation.relocateState, Relocation.relocateCore, HeapCalls.Relocation.relocateState,
+        relocateWork, relocateValue, nextMap, extendMap_new, stackSame, resumesSame]
+      exact core_next rfl rfl
   | tuple heap after items address stack used resumes allocated =>
     obtain ⟨left, right, logicalAfter, other, nextMap, leftRun, rightRun, retained, bounded, same, agree⟩ :=
       layout.allocateTuple items inside.1.2

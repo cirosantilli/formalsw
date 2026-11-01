@@ -41,6 +41,12 @@ inductive AllocatingTrace (module : Module) (anchors : Nat) (choices : ChoiceSch
         (.running ⟨⟨.operation .list items, stack, heap⟩, used⟩ resumes)
         (heap ++ [.list items])
         (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [.list items]⟩, used⟩ resumes)
+  | dictionary (heap : Mutable.Heap) (entries : List (Constant × Mutable.Value)) (env : HeapCalls.Env)
+      (stack : List Frame) (used : Nat) (resumes : List Resume) :
+      AllocatingTrace module anchors choices globals heap
+        (.running ⟨⟨.dictionary [] entries env, stack, heap⟩, used⟩ resumes)
+        (heap ++ [.dict entries])
+        (.running ⟨⟨.value (.ref heap.length), stack, heap ++ [.dict entries]⟩, used⟩ resumes)
   | tuple (heap after : Mutable.Heap) (items : List Mutable.Value) (address : Nat)
       (stack : List Frame) (used : Nat) (resumes : List Resume)
       (allocated : Mutable.allocateTuple items heap = some (.ok (.ref address), after)) :
@@ -96,7 +102,7 @@ theorem AllocatingTrace.heaps {module : Module} {anchors : Nat} {choices : Choic
     HeapAt before first ∧ HeapAt after final := by
   induction trace with
   | stable firstHeap finalHeap => exact ⟨firstHeap, finalHeap⟩
-  | list | tuple | newInstance | initializedInstance | dataInstance => exact ⟨rfl, rfl⟩
+  | list | dictionary | tuple | newInstance | initializedInstance | dataInstance => exact ⟨rfl, rfl⟩
   | trans _ _ left right => exact ⟨left.1, right.2⟩
 
 theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : ChoiceSchedule}
@@ -105,7 +111,7 @@ theorem AllocatingTrace.reaches {module : Module} {anchors : Nat} {choices : Cho
     Reaches module anchors choices globals first final := by
   induction trace with
   | stable _ _ _ ran => exact ran
-  | list => exact .next (core_next rfl rfl) .refl
+  | list | dictionary => exact .next (core_next rfl rfl) .refl
   | tuple heap after items address stack used resumes allocated =>
     apply Reaches.next (core_next rfl ?_) .refl
     simp [SetCalls.step, SetCalls.liftStep, HeapCalls.step, primitive, result, run, allocated]

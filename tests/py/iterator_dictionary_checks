@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""
+Check dictionary allocation on every iterator yield and terminal exception.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Counter:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = {"self": self}
+        if self.remaining:
+            self.remaining = self.remaining - 1
+            return "123"
+        raise StopIteration("finished")
+
+class FailingCounter:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = {"self": self}
+        if self.remaining:
+            self.remaining = self.remaining - 1
+            return "123"
+        raise ValueError("finished")
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace DictionaryIteratorExamples
+set_option Elab.async false
+
+def className (broken : Bool) := if broken then "FailingCounter" else "Counter"
+def classInfo (broken : Bool) := (Probe.module.findClass (className broken)).getD ("", [])
+def errorName (broken : Bool) := if broken then "ValueError" else "StopIteration"
+def error (broken : Bool) : ExceptionObject := ⟨errorName broken, [.string "finished"]⟩
+def outcome (broken : Bool) : Except ExceptionObject Unit := if broken then .error (error true) else .ok ()
+def args : List Arg := [{name := "self", annotation := none}]
+def iterBody : List Stmt := [.return (.name "self")]
+def remaining : Expr := .attribute (.name "self") "remaining"
+def writeRemaining : List Stmt :=
+  [.assign [remaining] (.binOp remaining .sub (.constant (.int 1)))]
+def yesBody : List Stmt := writeRemaining ++ [.return (.constant (.string "123"))]
+def stopBody (broken : Bool) : List Stmt :=
+  [.raise (some (.call (.name (errorName broken)) [.constant (.string "finished")]))]
+def body (broken : Bool) : List Stmt := .ifThen remaining yesBody [] :: stopBody broken
+def writeLink : List Stmt := [.assign [.attribute (.name "self") "link"] (.dict [(.constant (.string "self"), .name "self")])]
+def methodBody (broken : Bool) := writeLink ++ body broken
+def linkedFields (fields : List (String × Mutable.Value)) (fresh : Nat) := Mutable.putField fields "link" (.ref fresh)
+def linked (broken : Bool) (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value)) :=
+  (heap ++ [Mutable.Object.dict [(.string "self", .ref address)]]).set address
+    (.instance (classInfo broken).1 (className broken) (linkedFields fields heap.length))
+def env (broken : Bool) (address : Nat) := functionEnv args (body broken) [.ref address] []
+def text (s : String) : Mutable.Value := .scalar (.string s)
+def nextFields (fields : List (String × Mutable.Value)) (n : Nat) :=
+  Mutable.putField fields "remaining" (.scalar (.int n))
+def nextHeap (broken : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value)) (n : Nat) :=
+  heap.set address (.instance (classInfo broken).1 (className broken) (nextFields fields n))
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class (broken : Bool) : Probe.module.findClass (className broken) = some (classInfo broken) := by
+  cases broken <;> rfl
+theorem source_next (broken : Bool) : findFunctionIn (classInfo broken).2 "__next__" = some (args, methodBody broken) := by
+  cases broken <;> rfl
+
+theorem next_bound (broken : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args (methodBody broken))), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address (classInfo broken).1
+    (className broken) "__next__" fields (classInfo broken).2 found (source_class broken)
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem acquisition (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields)) :
+    AllocatingAcquireRun Probe.module choices (.ref address) heap used (.ref address) heap used := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address (classInfo broken).1 (className broken)
+    "__iter__" fields (classInfo broken).2 found (source_class broken)
+  have method : findFunctionIn (classInfo broken).2 "__iter__" = some (args, iterBody) := by cases broken <;> rfl
+  simp only [method, Option.map_some] at lookup
+  let inputEnv := functionEnv args iterBody [.ref address] []
+  have returned : BlockReturns Probe.module inputEnv iterBody heap (.ref address) heap :=
+    BlockReturns.return_value (Evaluates.lookup rfl)
+  refine ⟨.method (.ref address) args iterBody, .method (.ref address) args (methodBody broken),
+    (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found], ?_,
+    .stable rfl rfl rfl ?_, next_bound broken heap address fields found⟩
+  · simp [ProtocolCalls.iterMethod, Mutable.eval_bind, lookup]
+  · exact .next (core_next rfl rfl)
+      ((IteratorCalls.Reaches.of_heap (returned heap.length []) []).trans (.next (core_done rfl rfl) .refl))
+
+theorem remaining_read (broken : Bool) (heap : Mutable.Heap) (address n : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n))) :
+    Evaluates Probe.module (env broken address) remaining heap (.scalar (.int n)) heap := by
+  apply Evaluates.field (Evaluates.lookup (show env broken address "self" = some (.ref address) from rfl))
+  simp [getAttribute, Mutable.eval_bind, found, instanceClass, source_class, field]
+
+theorem returns_next (broken : Bool)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int (n + 1)))) :
+    BlockReturns Probe.module (env broken address) (body broken) heap (text "123") (nextHeap broken heap address fields n) := by
+  have read := remaining_read broken heap address (n + 1) fields found field
+  have subtracted : Evaluates Probe.module (env broken address) (.binOp remaining .sub (.constant (.int 1)))
+      heap (.scalar (.int n)) heap := by
+    apply Evaluates.binary read Evaluates.constant
+    change some (Except.ok (Mutable.Value.scalar (.int ((↑(n + 1) : Int) - 1))), heap) = _
+    simp
+  have written : BlockContinues Probe.module (env broken address) writeRemaining heap (env broken address)
+      (nextHeap broken heap address fields n) :=
+    BlockContinues.setAttribute subtracted (Evaluates.lookup rfl) (Mutable.writeField_result found (by simp))
+  apply BlockReturns.branch (flag := true) read
+    (by simp [Mutable.truth, scalarTruth]; omega)
+  exact written.returns (BlockReturns.return_value Evaluates.constant)
+
+theorem stops (broken : Bool) (anchors : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int 0))) :
+    Finishes (HeapCalls.step Probe.module anchors)
+      ⟨.block (body broken) (env broken address), [], heap⟩
+      (.ok ⟨.error (error broken), [], heap, anchors⟩) := by
+  have read := remaining_read broken heap address 0 fields found field
+  have skipped : BlockContinues Probe.module (env broken address) [.ifThen remaining yesBody []]
+      heap (env broken address) heap := BlockContinues.branch read rfl BlockContinues.nil
+  apply (skipped (stopBody broken) anchors []).finishes
+  cases broken <;> exact .next rfl (.next rfl (.next rfl (.done rfl)))
+
+
+theorem linked_found (broken : Bool) (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields)) :
+    (linked broken heap address fields)[address]? =
+      some (.instance (classInfo broken).1 (className broken) (linkedFields fields heap.length)) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  simp [linked, show address < heap.length + 1 by omega]
+
+theorem method_prefix (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields)) :
+    AllocatingTrace Probe.module heap.length choices [] heap
+      (.running ⟨⟨.operation (.method (.ref address) args (methodBody broken)) [], [], heap⟩, used⟩ [])
+      (linked broken heap address fields)
+      (.running ⟨⟨.block (body broken) (env broken address), [], linked broken heap address fields⟩, used⟩ []) := by
+  let frame := Frame.assignAttribute (.name "self") "link" (body broken) (env broken address)
+  have entered : HeapCalls.Reaches Probe.module heap.length
+      ⟨.operation (.method (.ref address) args (methodBody broken)) [], [], heap⟩
+      ⟨.dictionary [] [(.string "self", .ref address)] (env broken address), [frame], heap⟩ := by
+    exact .next rfl (.next rfl (.next rfl (.next rfl (.next rfl (.next rfl (.next rfl (.next rfl .refl)))))))
+  have retained : (heap ++ [.dict [(.string "self", .ref address)]])[address]? =
+      some (.instance (classInfo broken).1 (className broken) fields) := by
+    rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+    exact found
+  have write := Mutable.writeField_result (name := "link") (value := Mutable.Value.ref heap.length) retained (by simp)
+  have assigned : HeapCalls.Reaches Probe.module heap.length
+      ⟨.value (.ref heap.length), [frame], heap ++ [.dict [(.string "self", .ref address)]]⟩
+      ⟨.block (body broken) (env broken address), [], linked broken heap address fields⟩ := by
+    apply HeapCalls.Reaches.next rfl
+    apply (Evaluates.arguments_reach (.cons (Evaluates.lookup rfl) .nil)
+      (.setField "link" (.ref heap.length)) [] heap.length _).trans
+    exact .next (following := ⟨.value (.scalar .none), [.discard (body broken) (env broken address)], linked broken heap address fields⟩)
+      (by simp [HeapCalls.step, result, run, primitive, write, linked, linkedFields]) (.next rfl .refl)
+  refine AllocatingTrace.trans (middle := heap)
+    (next := .running ⟨⟨.dictionary [] [(.string "self", .ref address)] (env broken address), [frame], heap⟩, used⟩ []) ?_ ?_
+  · exact .stable rfl rfl rfl (IteratorCalls.Reaches.of_heap entered [])
+  · exact (AllocatingTrace.dictionary heap [(.string "self", .ref address)] (env broken address) [frame] used []).trans
+      (.stable rfl rfl (by simp [linked]) (IteratorCalls.Reaches.of_heap assigned []))
+
+theorem yielded_next (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int (n + 1)))) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (.ok (text "123"))
+      (nextHeap broken (linked broken heap address fields) address (linkedFields fields heap.length) n) used := by
+  have readField : (linkedFields fields heap.length).lookup "remaining" = some (.scalar (.int (n + 1))) := by
+    simpa [linkedFields, Mutable.putField_lookup_other] using field
+  have returned := returns_next broken (linked broken heap address fields) address n (linkedFields fields heap.length)
+    (linked_found broken heap address fields found) readField
+  refine ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found],
+    next_bound broken heap address fields found, (method_prefix broken choices used heap address fields found).trans ?_⟩
+  exact .stable rfl rfl (by simp [nextHeap])
+    ((IteratorCalls.Reaches.of_heap (returned heap.length []) []).trans (.next (core_done rfl rfl) .refl))
+
+theorem stopped_next (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int 0))) :
+    AllocatingNextRun Probe.module choices (.ref address) heap used (.error (error broken))
+      (linked broken heap address fields) used := by
+  have readField : (linkedFields fields heap.length).lookup "remaining" = some (.scalar (.int 0)) := by
+    simpa [linkedFields, Mutable.putField_lookup_other] using field
+  have finished := stops broken heap.length (linked broken heap address fields) address (linkedFields fields heap.length)
+    (linked_found broken heap address fields found) readField
+  refine ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found],
+    next_bound broken heap address fields found, (method_prefix broken choices used heap address fields found).trans ?_⟩
+  exact .stable rfl rfl rfl
+    (completion_of_heap finished (by intro completion same; cases same; cases broken <;> simp [error, errorName]) [])
+
+/-- Every yield and the final exception allocate a new cyclic dictionary, for arbitrary n. -/
+theorem allocating_traversal (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n))) :
+    ∃ middle after,
+      AllocatingYieldPrefix Probe.module choices (.ref address) text heap used (List.replicate n "123") middle used ∧
+      AllocatingNextRun Probe.module choices (.ref address) middle used (.error (error broken)) after used ∧
+      after.length = heap.length + n + 1 := by
+  induction n generalizing heap fields with
+  | zero => exact ⟨heap, linked broken heap address fields, .nil,
+      stopped_next broken choices used heap address fields found field, by simp [linked]⟩
+  | succ n ih =>
+      have ran := yielded_next broken choices used heap address n fields found field
+      have current := linked_found broken heap address fields found
+      have bounded := (List.getElem?_eq_some_iff.mp current).1
+      obtain ⟨middle, after, later, last, size⟩ := ih
+        (nextHeap broken (linked broken heap address fields) address (linkedFields fields heap.length) n)
+        (nextFields (linkedFields fields heap.length) n)
+        (by simp [nextHeap, bounded]) (by simp [nextFields, Mutable.putField_lookup])
+      refine ⟨middle, after, .cons ran later, last, ?_⟩
+      simp only [nextHeap, linked, List.length_set, List.length_append, List.length_singleton] at size
+      omega
+
+theorem traversal (broken : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address n : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int n))) :
+    ∃ after, Traversal Probe.module choices (.ref address) text heap used (List.replicate n "123")
+      (outcome broken) after used ∧ after.length = heap.length + n + 1 := by
+  obtain ⟨middle, after, first, last, size⟩ := allocating_traversal broken choices used heap address n fields found field
+  have terminal : Traversal Probe.module choices (.ref address) text middle used [] (outcome broken) after used := by
+    cases broken with
+    | false => exact .exhausted last.nextRun
+    | true => exact .failed last.nextRun (by decide)
+  exact ⟨after, by simpa only [List.append_nil] using first.yieldPrefix.then_traversal terminal, size⟩
+
+/-- Dictionary allocation leaves arbitrary private consumer storage intact at exhaustion. -/
+theorem isolated_stop (broken : Bool) (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address privateAddress : Nat)
+    (fields : List (String × Mutable.Value)) (object : Mutable.Object) (nonempty : object ≠ .tuple [])
+    (layout : PrivateLayout logical physical rename privateAddress object)
+    (found : logical[address]? = some (.instance (classInfo broken).1 (className broken) fields))
+    (field : fields.lookup "remaining" = some (.scalar (.int 0))) :
+    ∃ other nextMap, PrivateLayout (linked broken logical address fields) other nextMap privateAddress object ∧
+      ∀ loop resumes, ExitResult Probe.module choices anchors
+        (.running ⟨⟨.block (loopCode loop (.ref (rename address)) :: loop.following)
+          loop.env, loop.stack, physical⟩, used⟩ resumes)
+        loop resumes other used (outcome broken) := by
+  obtain ⟨other, nextMap, _, kept, ended⟩ :=
+    (stopped_next broken choices used logical address fields found field).exit_isolated source physical rename layout.layout anchors
+  refine ⟨other, nextMap, kept privateAddress object nonempty layout, ?_⟩
+  intro loop resumes
+  have finished := ended loop resumes
+  cases broken <;> exact finished
+
+end DictionaryIteratorExamples
+'''
+AUDITS = ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "AllocatingTrace.reaches", "AllocatingTrace.isolated",
+)] + ["DictionaryIteratorExamples." + name for name in (
+    "source", "source_class", "source_next", "next_bound", "acquisition", "remaining_read",
+    "returns_next", "stops", "linked_found", "method_prefix", "yielded_next", "stopped_next",
+    "allocating_traversal", "traversal", "isolated_stop",
+)]
+
+with project_temporary_directory(prefix="iterator-dictionary-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name, exception in (("Counter", StopIteration), ("FailingCounter", ValueError)):
+        for count in (0, 1, 2, 10):
+            counter = namespace[name]()
+            counter.remaining = count
+            assert iter(counter) is counter
+            dictionaries = []
+            for remaining in range(count, 0, -1):
+                assert next(counter) == "123" and counter.remaining == remaining - 1
+                assert counter.link["self"] is counter
+                assert all(counter.link is not previous for previous in dictionaries)
+                dictionaries.append(counter.link)
+            try:
+                next(counter)
+            except exception as error:
+                assert error.args == ("finished",) and counter.remaining == 0
+                assert counter.link["self"] is counter
+                assert all(counter.link is not previous for previous in dictionaries)
+                assert all(previous["self"] is counter for previous in dictionaries)
+            else:
+                raise AssertionError("expected the terminal exception")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorAllocatingAcquisition\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"dictionary iterators: arbitrary finite traversal, allocation before every yield and exit, private cells; {len(AUDITS)} axiom audits passed")
