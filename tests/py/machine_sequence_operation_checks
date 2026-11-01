@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""
+Check sequence acquisition after mutations and eager sum argument ordering.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def start(items, amount):
+    items.append(amount)
+    return 0
+
+
+def nested(items, amount):
+    return sum(items, start(items, amount))
+
+
+def explicit(items, amount):
+    items.append(amount)
+    return sum(items)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineSequenceOperationExamples
+set_option Elab.async false
+
+def ints (items : List Int) := items.map (fun item => Mutable.Value.scalar (.int item))
+def after (heap : Mutable.Heap) (address : Nat) (items : List Int) (amount : Int) :=
+  heap.set address (.list (ints (items ++ [amount])))
+
+theorem updated (heap : Mutable.Heap) (address : Nat) (items : List Int) (amount : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    (after heap address items amount)[address]? = some (.list (ints (items ++ [amount]))) := by
+  simp [after, (List.getElem?_eq_some_iff.mp found).1]
+
+theorem start_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (amount : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    ReturnsValue Probe.module "start" [.ref address, .scalar (.int amount)] heap (.scalar (.int 0))
+      (after heap address items amount) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  simpa [after, ints] using (BlockReturns.return_value (module := Probe.module)
+    (heap := heap.set address (.list (ints items ++ [.scalar (.int amount)]))) Evaluates.constant)
+
+theorem nested_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (amount : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    ReturnsValue Probe.module "nested" [.ref address, .scalar (.int amount)] heap
+      (.scalar (.int ((items ++ [amount]).foldl Int.add 0))) (after heap address items amount) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.sum_integers (values := items ++ [amount])
+    (.cons (Evaluates.lookup rfl)
+      (.cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+        (start_returns heap address items amount found)) .nil))
+  simp [Mutable.sequence, updated heap address items amount found, ints]
+
+theorem explicit_returns (heap : Mutable.Heap) (address : Nat) (items : List Int) (amount : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    ReturnsValue Probe.module "explicit" [.ref address, .scalar (.int amount)] heap
+      (.scalar (.int ((items ++ [amount]).foldl Int.add 0))) (after heap address items amount) := by
+  simp only [after, ints, List.map_append, List.map_cons, List.map_nil]
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  apply BlockReturns.return_value
+  apply Evaluates.sum_integers (values := items ++ [amount])
+    (.cons (Evaluates.lookup rfl) (.cons Evaluates.constant .nil))
+  simp [Mutable.sequence, (List.getElem?_eq_some_iff.mp found).1, ints]
+
+theorem returns_finishes (name : String) (values : List Mutable.Value) (heap final : Mutable.Heap)
+    (value : Mutable.Value) (choices : ChoiceSchedule)
+    (returned : ReturnsValue Probe.module name values heap value final) :
+    ((IteratorCalls.call Probe.module name values heap).run choices).Finishes ⟨.ok value, [], final, heap.length⟩ := by
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+  exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+
+/-- The start argument's append is included in the subsequent sum for every finite integer list. -/
+theorem sum_argument_equiv (heap : Mutable.Heap) (address : Nat) (items : List Int) (amount : Int)
+    (found : heap[address]? = some (.list (ints items))) :
+    (IteratorCalls.call Probe.module "nested" [.ref address, .scalar (.int amount)] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit" [.ref address, .scalar (.int amount)] heap) := by
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (returns_finishes _ _ _ _ _ leftChoices (nested_returns heap address items amount found))
+    (returns_finishes _ _ _ _ _ rightChoices (explicit_returns heap address items amount found)) (Or.inl rfl)
+
+/-- Sequence acquisition uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_sequence_operation (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (operation : Operation) (covered : SequenceOperation operation) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation operation values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_sequenceOperation_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used operation values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained covered
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineSequenceOperationExamples
+'''
+
+AUDITS = ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "step_permutation_start_preserves", "step_combination_start_preserves", "step_zip_start_preserves",
+    "sumEnter_preserves", "sumSequenceStart_preserves", "step_sumSequence_preserves",
+    "truthSequenceStart_preserves", "step_truthSequence_preserves", "step_sequenceOperation_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_sequenceOperation_preserves"] + ["MachineSequenceOperationExamples." + name for name in (
+    "updated", "start_returns", "nested_returns", "explicit_returns", "returns_finishes", "sum_argument_equiv",
+    "append_then_sequence_operation",
+)]
+with project_temporary_directory(prefix="machine-sequence-operation-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for items in ([], [0], [-3, 4, -5], list(range(-100, 101))):
+        for amount in (-10**100, -1, 0, 1, 10**100):
+            left, right = list(items), list(items)
+            nested = namespace["nested"](left, amount)
+            explicit = namespace["explicit"](right, amount)
+            assert nested == explicit == sum(items) + amount
+            assert left == right == items + [amount]
+    for name in ("nested", "explicit"):
+        items = []
+        try:
+            namespace[name](items, items)
+        except TypeError:
+            assert len(items) == 1 and items[0] is items
+        else:
+            raise AssertionError("sum accepted a list item")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineSequenceOperationInvariant\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"sequence operations: acquisition after mutation, sum argument equivalence; {len(AUDITS)} axiom audits passed")
