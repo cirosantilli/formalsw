@@ -1,7 +1,7 @@
 import lang.py.FormalSW.ClassCalls
 
 /-! Implicit protocol lookup bypasses instance fields and executes the class method body.
-Acquisition and advancement are separate from the unfinished stored-iterator for-loop support. -/
+Acquisition and advancement expose method calls independently of loop consumers. -/
 namespace FormalSW.PyAst.ProtocolCalls
 open HeapCalls
 set_option Elab.async false

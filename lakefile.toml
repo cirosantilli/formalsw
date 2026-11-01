@@ -85,6 +85,8 @@ roots = [
   "lang.py.FormalSW.LoopProgress",
   "lang.py.FormalSW.ClassCalls",
   "lang.py.FormalSW.ProtocolCalls",
+  "lang.py.FormalSW.IteratorCalls",
+  "lang.py.FormalSW.IteratorLifting",
   "lang.py.FormalSW.DataRuntime",
   "lang.py.FormalSW.GraphEquivalence",
   "lang.py.FormalSW.GraphPreservation",

@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""
+Compare actual source loops over class iterators with Python, including nested protocol calls.
+This exercises the raw interpreter independently of frontend class admission.
+"""
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import textwrap
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+acquire = '''
+def __iter__(self):
+    self.acquisitions += 1
+    self.items.append(-10)
+    return self
+'''
+advance = '''
+def __next__(self):
+    self.reads += 1
+    if self.position >= self.limit:
+        self.items.append(-20)
+        raise StopIteration(self.position)
+    value = self.position
+    self.position += 1
+    self.items.append(value)
+    return value
+'''
+classes_source = {
+    'Plain': (acquire, advance),
+    'Delegating': (acquire.replace('return self', 'return self.other'), advance),
+    'BadIterator': (acquire.replace('return self', 'return self.items'), advance),
+    'AcquireStopped': (acquire.replace('return self', 'raise StopIteration("acquire")'), advance),
+    'NextFailed': (acquire, advance.replace('return value', 'raise ValueError("next", value)')),
+    'NestedAcquire': (acquire.replace('return self',
+        'for value in self.other:\n        self.items.append(value + 10)\n    return self'), advance),
+    'NestedNext': (acquire, advance.replace('self.reads += 1',
+        'for value in self.other:\n        self.items.append(value + 100)\n    self.reads += 1')),
+}
+source = ''.join(f'class {name}:\n' + textwrap.indent(first + second, '    ')
+                 for name, (first, second) in classes_source.items())
+source += '''
+def collect(iterator):
+    out = []
+    for value in iterator:
+        out.append(value)
+    else:
+        out.append(999)
+    return out
+
+def controlled(iterator):
+    out = []
+    for value in iterator:
+        if value == 1:
+            continue
+        if value == 3:
+            break
+        out.append(value)
+    else:
+        out.append(999)
+    return out
+
+def early_return(iterator):
+    for value in iterator:
+        return value
+    return -1
+
+def nested(iterator):
+    out = []
+    for value in iterator:
+        out.append(value)
+        for other in iterator:
+            out.append(other)
+            break
+    else:
+        out.append(999)
+    return out
+
+def rebound(iterator):
+    out = []
+    for value in iterator:
+        iterator = None
+        out.append(value)
+    return out
+
+def body_error(iterator):
+    for value in iterator:
+        iterator.items.append(80)
+        raise StopIteration("body", value)
+    return -1
+
+def else_error(iterator):
+    for value in iterator:
+        pass
+    else:
+        raise StopIteration("else")
+
+def set_body(iterator):
+    total = 0
+    for value in iterator:
+        for member in {2, 3}:
+            total += member
+        total += value
+    return total
+
+def generator_error(iterator):
+    return sum(body_error(iterator) for ignored in range(1))
+
+def generator_return(iterator):
+    return sum(early_return(iterator) for ignored in range(1))
+
+def marked(iterator):
+    iterator.items.append(-30)
+    return iterator
+
+def expression(iterator):
+    out = []
+    for value in marked(iterator):
+        out.append(value)
+    return out
+'''
+
+
+def constant(value):
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is str:
+        return f'.string {json.dumps(value, ensure_ascii=False)}'
+    raise AssertionError(value)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return f'.scalar ({constant(value)})'
+
+
+def fields(limit, other=False, shadowed=False):
+    entries = [('position', '.scalar (.int 0)'), ('limit', f'.scalar (.int {limit})'),
+               ('acquisitions', '.scalar (.int 0)'), ('reads', '.scalar (.int 0)'),
+               ('items', '.ref 1')]
+    if other:
+        entries.append(('other', '.ref 2'))
+    if shadowed:
+        entries += [(name, '.scalar (.int 777)') for name in ('__iter__', '__next__')]
+    return ', '.join(f'({json.dumps(name)}, {value})' for name, value in entries)
+
+
+with project_temporary_directory(prefix='iterator-loops-') as temporary:
+    directory = Path(temporary)
+    path = directory / 'source.py'
+    path.write_text(source)
+    module = api['source_module'](path)
+    namespace = {}
+    exec(compile(source, str(path), 'exec'), namespace)
+    class_names = {id(value): name for name, value in namespace.items() if isinstance(value, type)}
+    origin = json.dumps(str(path.resolve()))
+    checks = []
+    labels = []
+    for name in classes_source:
+        for function in ('collect', 'controlled', 'early_return', 'nested', 'rebound',
+                         'body_error', 'else_error', 'set_body', 'generator_error',
+                         'generator_return', 'expression'):
+            for limit in (0, 1, 4):
+                for shadowed in (False, True):
+                    instance = namespace[name].__new__(namespace[name])
+                    other = namespace['Plain'].__new__(namespace['Plain'])
+                    items = []
+                    for value, bound in ((instance, limit), (other, 2)):
+                        value.position = 0
+                        value.limit = bound
+                        value.acquisitions = 0
+                        value.reads = 0
+                        value.items = items
+                    instance.other = other
+                    if shadowed:
+                        instance.__iter__ = 777
+                        instance.__next__ = 777
+                    roots = [instance, items, other]
+                    try:
+                        result = namespace[function](instance)
+                    except Exception as error:
+                        if type(error) in (TypeError, RuntimeError):
+                            expected = (f'completion.outcome matches .error '
+                                        f'{{typeName := {json.dumps(type(error).__name__)}, args := _}}')
+                        else:
+                            args = ', '.join(constant(arg) for arg in error.args)
+                            expected = (f'decide (completion.outcome = Except.error {{typeName := '
+                                        f'{json.dumps(type(error).__name__)}, args := [{args}]}})')
+                        observed = snapshot_roots(roots)
+                    else:
+                        expected = 'completion.outcome matches .ok _'
+                        observed = snapshot_roots([*roots, result])
+                    for node in observed[1]:
+                        if type(node[0]) is list:
+                            node[0] = ['static_object', str(path.resolve()), class_names[node[0][1]]]
+                    labels.append(f'{function}: {name}, limit={limit}, shadowed={shadowed}')
+                    checks.append(f'''
+#eval (show Bool from match ((IteratorCalls.call Probe.module {json.dumps(function)} [.ref 0]
+    [.instance {origin} {json.dumps(name)} [{fields(limit, True, shadowed)}], .list [],
+     .instance {origin} "Plain" [{fields(2)}]]).run (fun _ => 0)).execution.observe 10000 with
+  | .done (.ok completion) =>
+      ({expected}) && (Graph.observedBool
+        ((Graph.compare completion.snapshot ({data(observed)})).observe 10000) == some true)
+  | _ => false)
+''')
+    document = directory / 'source.json'
+    document.write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('import lang.py.FormalSW.IteratorCalls\n'
+                     + api['AstLeanBridgeEmitter'](document, 'Probe', module).emit()
+                     + '\nopen FormalSW.PyAst\nset_option maxRecDepth 16384\n'
+                     + '\n'.join(checks))
+    checked = subprocess.run(['lake', 'env', 'lean', '-M4096', '-j1', '-DElab.async=false',
+                    '-DwarningAsError=true', str(proof)], cwd=ROOT, capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    results = checked.stdout.splitlines()
+    assert len(results) == len(labels), checked.stdout
+    for label, result in zip(labels, results):
+        assert result == 'true', (label, result)
+print(f'iterator loops: {len(labels)} source comparisons passed')
