@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""
+Check heap sifts across layouts, including completed swaps before errors and cycles.
+"""
+from pathlib import Path
+import re
+import subprocess
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+PROOF = r'''
+import lang.py.FormalSW.HeapqRelocation
+open FormalSW.PyAst Mutable.Relocation Heapq Heapq.Relocation
+namespace HeapqRelocationExamples
+set_option Elab.async false
+
+/-- The first swap succeeds, then the comparison with the root raises. -/
+theorem failure_after_swap (heap : Mutable.Heap) (address : Nat) (text : String)
+    (high low : Int) (side : Mutable.Value) (smaller : low < high)
+    (found : heap[address]? = some (.list [.scalar (.string text), .scalar (.int high), side, .scalar (.int low)])) :
+    siftDown address 0 3 heap = some (.error ⟨"TypeError", []⟩,
+      heap.set address (.list [.scalar (.string text), .scalar (.int low), side, .scalar (.int high)])) := by
+  have valid := (List.getElem?_eq_some_iff.mp found).1
+  have selected := (List.getElem?_eq_some_iff.mp found).2
+  simp [siftDown, atIndex, items, less, HeapSort.compare, scalarCompare, evalCmpOp, HeapSort.typeError,
+    swap, valid, selected, smaller, Mutable.error]
+
+/-- Every relocated error retains the completed swap and the surrounding aliases. -/
+theorem paired_failure (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (text : String)
+    (high low : Int) (side : Mutable.Value) (smaller : low < high)
+    (found : logical[address]? = some (.list [.scalar (.string text), .scalar (.int high), side, .scalar (.int low)])) :
+    ∃ after, siftDown (rename address) 0 3 physical = some (.error ⟨"TypeError", []⟩, after) ∧
+      ExecutionLayout
+        (logical.set address (.list [.scalar (.string text), .scalar (.int low), side, .scalar (.int high)]))
+        after rename ∧ after.length = physical.length := by
+  have related := siftDown_relocates layout address 0 3 (List.getElem?_eq_some_iff.mp found).1
+  obtain ⟨after, paired, retained, _, length⟩ := related.completed _ _
+    (failure_after_swap logical address text high low side smaller found)
+  exact ⟨after, paired, retained, length⟩
+
+/-- Two distinct leading cycles cannot be resolved by increasing comparison depth. -/
+theorem cyclic_comparison (heap : Mutable.Heap) (left right : Nat) (different : left ≠ right)
+    (first : heap[left]? = some (.list [.ref left]))
+    (second : heap[right]? = some (.list [.ref right])) (fuel : Nat) (equality : Bool) :
+    HeapSort.compare fuel heap equality (.ref left) (.ref right) = none := by
+  induction fuel generalizing equality with
+  | zero => rfl
+  | succ fuel ih =>
+    cases equality <;> simp [HeapSort.compare, first, second, different, HeapSort.lex, ih]
+
+theorem cyclic_sift (heap : Mutable.Heap) (address left right : Nat) (different : left ≠ right)
+    (found : heap[address]? = some (.list [.ref right, .ref left]))
+    (first : heap[left]? = some (.list [.ref left]))
+    (second : heap[right]? = some (.list [.ref right])) :
+    siftDown address 0 1 heap = none := by
+  have compared := cyclic_comparison heap left right different first second (HeapSort.comparisonFuel heap) false
+  conv => lhs; rw [siftDown]
+  simp [atIndex, items, found, less, compared, Mutable.unsupported]
+
+/-- Extra private objects cannot turn an unsupported sift into a completed result. -/
+theorem relocated_cycle (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address left right : Nat) (different : left ≠ right)
+    (found : logical[address]? = some (.list [.ref right, .ref left]))
+    (first : logical[left]? = some (.list [.ref left]))
+    (second : logical[right]? = some (.list [.ref right])) :
+    siftDown (rename address) 0 1 physical = none := by
+  exact (siftDown_relocates layout address 0 1 (List.getElem?_eq_some_iff.mp found).1).unsupported_iff.mp
+    (cyclic_sift logical address left right different found first second)
+
+/-- The cache-sensitive traversal needs no restriction on the list size or comparison values. -/
+theorem heapify_sifts (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address size : Nat) (inside : address < logical.length) :
+    MutationRelocates logical physical rename id (siftAll address (heapifyOrder size))
+      (siftAll (rename address) (heapifyOrder size)) :=
+  siftAll_relocates layout address (heapifyOrder size) inside
+
+end HeapqRelocationExamples
+'''
+AUDITS = ["FormalSW.PyAst.Mutable.Relocation.MutationRelocates." + name for name in (
+    "completed", "unsupported_iff", "pure", "error", "readonly", "bind", "readonly_bind",
+)] + ["FormalSW.PyAst.Heapq.Relocation." + name for name in (
+    "items_relocates", "atIndex_relocates", "atIndex_bounded", "less_relocates", "swap_relocates",
+    "atIndex_bind_relocates", "less_bind_relocates", "siftDown_relocates", "siftChildren_relocates",
+    "siftUp_relocates", "siftAll_relocates",
+)] + ["HeapqRelocationExamples." + name for name in (
+    "failure_after_swap", "paired_failure", "cyclic_comparison", "cyclic_sift", "relocated_cycle", "heapify_sifts",
+)]
+with project_temporary_directory(prefix="heapq-relocation-") as temporary:
+    source = Path(temporary) / "Checks.lean"
+    source.write_text(PROOF + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"heap sifts: relocation, partial errors and unsupported cycles; {len(AUDITS)} axiom audits passed")

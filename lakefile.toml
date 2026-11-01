@@ -99,6 +99,8 @@ roots = [
   "lang.py.FormalSW.TupleRelocation",
   "lang.py.FormalSW.RuntimeEffects",
   "lang.py.FormalSW.SequenceRelocation",
+  "lang.py.FormalSW.MutationRelocation",
+  "lang.py.FormalSW.HeapqRelocation",
   "lang.py.FormalSW.KeyRelocation",
   "lang.py.FormalSW.DictionaryRelocation",
   "lang.py.FormalSW.ItemRelocation",
