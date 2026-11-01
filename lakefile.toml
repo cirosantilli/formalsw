@@ -214,6 +214,7 @@ roots = [
   "lang.py.FormalSW.IteratorExecutionIsolation",
   "lang.py.FormalSW.IteratorTraversal",
   "lang.py.FormalSW.IteratorPrefix",
+  "lang.py.FormalSW.IteratorTerminal",
   "lang.py.FormalSW.IteratorAcquisitionIsolation",
   "lang.py.FormalSW.IteratorAcquisitionFailure",
   "lang.py.FormalSW.RuntimeExceptionObservation",

@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""
+Check allocating iterator calls followed by method failure or consumer rejection.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+class Yielding:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = [self]
+        return "bad"
+
+class Failing:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.link = [self]
+        raise ValueError("next")
+
+def reject(iterator):
+    for value in iterator:
+        raise ValueError(value)
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation IteratorCalls
+namespace IteratorTerminalExamples
+set_option Elab.async false
+
+def className (fails : Bool) := if fails then "Failing" else "Yielding"
+def classInfo (fails : Bool) := (Probe.module.findClass (className fails)).getD ("", [])
+def args : List Arg := [{name := "self", annotation := none}]
+def writeSelf : List Stmt := [.assign [.attribute (.name "self") "link"] (.list [.name "self"])]
+def tail (fails : Bool) : List Stmt :=
+  if fails then [.raise (some (.call (.name "ValueError") [.constant (.string "next")]))]
+  else [.return (.constant (.string "bad"))]
+def body (fails : Bool) := writeSelf ++ tail fails
+def outcome (fails : Bool) : Except ExceptionObject Mutable.Value :=
+  if fails then .error ⟨"ValueError", [.string "next"]⟩ else .ok (.scalar (.string "bad"))
+def after (fails : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value)) : Mutable.Heap :=
+  (heap ++ [Mutable.Object.list [.ref address]]).set address
+    (.instance (classInfo fails).1 (className fails) (Mutable.putField fields "link" (.ref heap.length)))
+def rejection : List Stmt := [.raise (some (.call (.name "ValueError") [.name "value"]))]
+def loop (env : HeapCalls.Env) (following : List Stmt) (stack : List HeapCalls.Frame) : Loop :=
+  ⟨"value", rejection, [], following, env, stack⟩
+
+theorem source : IteratorCalls.Relocation.ModuleSource Probe.module := by
+  simp [IteratorCalls.Relocation.ModuleSource, Probe.module, HeapCalls.Relocation.StmtWithin]
+theorem source_class (fails : Bool) : Probe.module.findClass (className fails) = some (classInfo fails) := by
+  cases fails <;> rfl
+theorem source_next (fails : Bool) : findFunctionIn (classInfo fails).2 "__next__" = some (args, body fails) := by
+  cases fails <;> rfl
+theorem source_reject : findFunctionIn Probe.module.body "reject" =
+    some ([{name := "iterator", annotation := none}],
+      [.forIn (.name "value") (.name "iterator") rejection []]) := rfl
+
+theorem next_bound (fails : Bool) (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo fails).1 (className fails) fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args (body fails))), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address (classInfo fails).1
+    (className fails) "__next__" fields (classInfo fails).2 found (source_class fails)
+  simp only [source_next, Option.map_some] at lookup
+  simpa [ProtocolCalls.nextMethod, found] using lookup
+
+theorem method_trace (fails : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo fails).1 (className fails) fields)) :
+    IteratorCalls.Reaches Probe.module heap.length choices []
+      (.running ⟨⟨.operation (.method (.ref address) args (body fails)) [], [], heap⟩, used⟩ [])
+      (.completed (.ok ⟨outcome fails, [], after fails heap address fields, heap.length⟩) used []) := by
+  let env := functionEnv args (body fails) [.ref address] []
+  have self : env "self" = some (.ref address) := rfl
+  have retained : (heap ++ [.list [.ref address]])[address]? =
+      some (.instance (classInfo fails).1 (className fails) fields) := by
+    rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1]
+    exact found
+  have written : BlockContinues Probe.module env writeSelf heap env (after fails heap address fields) :=
+    BlockContinues.setAttribute (Evaluates.list (.cons (Evaluates.lookup self) .nil)) (Evaluates.lookup self)
+      (Mutable.writeField_result retained (by simp))
+  cases fails with
+  | false =>
+      have returned : MethodReturns Probe.module (.ref address) args (body false) [] heap
+          (.scalar (.string "bad")) (after false heap address fields) := by
+        apply MethodReturns.of_body (completed := [.ref address]) rfl
+        exact written.returns (BlockReturns.return_value Evaluates.constant)
+      exact (IteratorCalls.Reaches.of_heap (returned heap.length []) []).trans (.next (core_done rfl rfl) .refl)
+  | true =>
+      have finished : Finishes (HeapCalls.step Probe.module heap.length)
+          ⟨.operation (.method (.ref address) args (body true)) [], [], heap⟩
+          (.ok ⟨outcome true, [], after true heap address fields, heap.length⟩) := by
+        apply Finishes.next (step := HeapCalls.step Probe.module heap.length)
+          (following := ⟨.block (body true) env, [], heap⟩) rfl
+        apply (written (tail true) heap.length []).finishes
+        exact .next rfl (.next rfl (.next rfl (.done rfl)))
+      exact completion_of_heap finished (by intro completion same; cases same; simp [outcome]) []
+
+theorem next_run (fails : Bool) (choices : ChoiceSchedule) (used : Nat)
+    (heap : Mutable.Heap) (address : Nat) (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance (classInfo fails).1 (className fails) fields)) :
+    NextRun Probe.module choices (.ref address) heap used (outcome fails) (after fails heap address fields) used := by
+  exact ⟨_, (List.getElem?_eq_some_iff.mp found).1, by simp [isInstance, found],
+    next_bound fails heap address fields found, method_trace fails choices used heap address fields found⟩
+
+theorem failure_relocates (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address : Nat)
+    (fields : List (String × Mutable.Value)) (layout : ExecutionLayout logical physical rename)
+    (found : logical[address]? = some (.instance (classInfo true).1 (className true) fields))
+    (consumer : Loop) (resumes : List Resume) :
+    ∃ other nextMap, IteratorCalls.Relocation.ExtendedLayout logical.length physical.length rename
+        (after true logical address fields) other nextMap ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode consumer (.ref (rename address)) :: consumer.following)
+          consumer.env, consumer.stack, physical⟩, used⟩ resumes)
+        (.completed (.ok ⟨.error ⟨"ValueError", [.string "next"]⟩, [], other, anchors⟩) used resumes) := by
+  obtain ⟨other, nextMap, extended, failed⟩ :=
+    (next_run true choices used logical address fields found).failure_relocates (by decide) source physical rename layout anchors
+  exact ⟨other, nextMap, extended, failed consumer resumes⟩
+
+theorem reject_body (env : HeapCalls.Env) (heap : Mutable.Heap) (s : String)
+    (following : List Stmt) (anchors : Nat) (stack : List HeapCalls.Frame) :
+    Finishes (HeapCalls.step Probe.module anchors)
+      ⟨.block (rejection ++ following) (setLocal env "value" (.scalar (.string s))), stack, heap⟩
+      (.ok ⟨.error ⟨"ValueError", [.string s]⟩, [], heap, anchors⟩) := by
+  exact .next rfl (.next rfl (.next rfl (.done (by
+    simp [HeapCalls.step, argumentsState, result, run, primitive, done, protectGenerator,
+      Calls.generatorException]))))
+
+theorem rejection_relocates (choices : ChoiceSchedule) (used anchors : Nat)
+    (logical physical : Mutable.Heap) (rename : Nat → Nat) (address : Nat)
+    (fields : List (String × Mutable.Value)) (layout : ExecutionLayout logical physical rename)
+    (found : logical[address]? = some (.instance (classInfo false).1 (className false) fields))
+    (env : HeapCalls.Env) (following : List Stmt) (stack : List HeapCalls.Frame) (resumes : List Resume) :
+    ∃ other nextMap, IteratorCalls.Relocation.ExtendedLayout logical.length physical.length rename
+        (after false logical address fields) other nextMap ∧
+      IteratorCalls.Reaches Probe.module anchors choices []
+        (.running ⟨⟨.block (loopCode (loop env following stack) (.ref (rename address)) :: following)
+          env, stack, physical⟩, used⟩ resumes)
+        (.completed (.ok ⟨.error ⟨"ValueError", [.string "bad"]⟩, [], other, anchors⟩) used resumes) := by
+  obtain ⟨other, nextMap, extended, advanced⟩ := (next_run false choices used logical address fields found).scalar_relocates
+    source physical rename layout anchors
+  have rejected := completion_of_heap (choices := choices) (used := used)
+    (reject_body env other "bad" (loopCode (loop env following stack) (.ref (rename address)) :: following) anchors stack)
+    (by intro completion same; cases same; simp) resumes
+  refine ⟨other, nextMap, extended, (advanced (loop env following stack) resumes).trans ?_⟩
+  simpa only [loop, Calls.loopContinuation, show Calls.loopControl rejection = false from rfl,
+    Bool.false_eq_true, ↓reduceIte, relocateValue, List.append_assoc, List.singleton_append] using rejected
+
+end IteratorTerminalExamples
+'''
+AUDITS = ["FormalSW.PyAst.IteratorCalls." + name for name in (
+    "NextRun.failure_relocates", "NextRun.scalar_relocates",
+)] + ["IteratorTerminalExamples." + name for name in (
+    "source", "source_class", "source_next", "source_reject", "next_bound", "method_trace",
+    "next_run", "failure_relocates", "reject_body", "rejection_relocates",
+)]
+with project_temporary_directory(prefix="iterator-terminal-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name, message in (("Yielding", "bad"), ("Failing", "next")):
+        receiver = namespace[name]()
+        try:
+            namespace["reject"](receiver)
+        except ValueError as error:
+            assert error.args == (message,) and receiver.link[0] is receiver
+        else:
+            raise AssertionError("expected terminal failure")
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.IteratorTerminal\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"iterator terminal calls: method failure and consumer rejection retain allocated cycles; {len(AUDITS)} axiom audits passed")
