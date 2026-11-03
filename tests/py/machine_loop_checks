@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+Check live sequence cursors and loop transfers across allocation layouts.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def drain(items):
+    for value in items:
+        items *= 0
+        continue
+    else:
+        return items
+    return value
+
+def take(items):
+    for value in items:
+        items *= 0
+        break
+    else:
+        return items
+    return value
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineLoopExamples
+set_option Elab.async false
+
+def functionName (breaking : Bool) := if breaking then "take" else "drain"
+def args : List Arg := [{name := "items", annotation := none}]
+def loopBody (breaking : Bool) : List Stmt :=
+  [.augAssign (.name "items") .mult (.constant (.int 0)), if breaking then .breakLoop else .continueLoop]
+def otherwise : List Stmt := [.return (.name "items")]
+def following : List Stmt := [.return (.name "value")]
+def body (breaking : Bool) : List Stmt :=
+  [.forIn (.name "value") (.name "items") (loopBody breaking) otherwise] ++ following
+def answer (breaking : Bool) (address : Nat) (items : List Mutable.Value) : Mutable.Value :=
+  if breaking then items.headD (.ref address) else .ref address
+def after (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) : Mutable.Heap :=
+  if items.isEmpty then heap else heap.set address (.list [])
+
+theorem source_function (breaking : Bool) :
+    findFunctionIn Probe.module.body (functionName breaking) = some (args, body breaking) := by
+  cases breaking <;> rfl
+
+theorem loop_returns (breaking : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (env : HeapCalls.Env) (lookup : env "items" = some (.ref address))
+    (found : heap[address]? = some (.list items)) :
+    BlockReturns Probe.module env (body breaking) heap (answer breaking address items) (after heap address items) := by
+  have read : Mutable.sequence (.ref address) heap = some (.ok items, heap) := by
+    simp [Mutable.sequence, found]
+  apply BlockReturns.for_sequence (by intro expressions equal; cases equal) (Evaluates.lookup lookup) read
+  cases items with
+  | nil =>
+    apply BlockReturns.sequence_done (source := .ref address) read rfl
+    have returned := BlockReturns.return_value (globals := []) (module := Probe.module) (heap := heap) (rest := following) (Evaluates.lookup lookup)
+    simpa [otherwise, answer, after] using returned
+  | cons first rest =>
+    have bound := (List.getElem?_eq_some_iff.mp found).1
+    have clear : inplace .mult (.ref address) (.scalar (.int 0)) heap =
+        some (.ok (.ref address), heap.set address (.list [])) := by
+      simpa using inplace_mult_list_eval heap address (first :: rest) 0 found
+    have cleared : Mutable.sequence (.ref address) (heap.set address (.list [])) =
+        some (.ok [], heap.set address (.list [])) := by
+      simp [Mutable.sequence, bound]
+    apply BlockReturns.sequence_step (source := .ref address) read rfl
+    apply BlockReturns.augAssign (by simpa [setLocal] using lookup) Evaluates.constant clear
+    cases breaking with
+    | false =>
+      apply BlockReturns.continue_loop (by rfl)
+      apply BlockReturns.sequence_done (source := .ref address) cleared rfl
+      apply BlockReturns.return_value
+      exact Evaluates.lookup (by simp [setLocal, answer])
+    | true =>
+      apply BlockReturns.break_loop (by rfl)
+      apply BlockReturns.return_value
+      exact Evaluates.lookup (by simp [setLocal, answer])
+
+theorem source_returns (breaking : Bool) (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module (functionName breaking) [.ref address] heap
+      (answer breaking address items) (after heap address items) := by
+  apply BlockReturns.function (source_function breaking) (completed := [.ref address]) rfl
+  exact loop_returns breaking heap address items _ (by simp [functionEnv, HeapCalls.argumentEnv, args]) found
+
+theorem paired_returns (breaking : Bool) (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (found : logical[address]? = some (.list items)) :
+    ReturnsValue Probe.module (functionName breaking) [.ref address] logical
+        (answer breaking address items) (after logical address items) ∧
+    ReturnsValue Probe.module (functionName breaking) [.ref (rename address)] physical
+        (relocateValue rename (answer breaking address items))
+        (after physical (rename address) (items.map (relocateValue rename))) ∧
+    ExecutionLayout (after logical address items)
+      (after physical (rename address) (items.map (relocateValue rename))) rename := by
+  have moved := layout.runtime.lookup address _ found
+  simp only [relocateObject] at moved
+  refine ⟨source_returns breaking logical address items found, ?_, ?_⟩
+  · have returned := source_returns breaking physical (rename address) (items.map (relocateValue rename)) moved
+    cases breaking <;> cases items <;> simpa [answer, relocateValue] using returned
+  · cases items with
+    | nil => exact layout
+    | cons first rest =>
+      simpa [after] using layout.set_list address (first :: rest) [] found (by simp)
+
+/-- The relocated live cursor takes the same step, including exhausted and unsupported sources. -/
+theorem paired_cursor (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : RuntimeLayout logical physical rename) (source : SequenceSource) (position : Nat)
+    (breaking : Bool) (env : HeapCalls.Env) (stack : List Frame) (globals : Mutable.Globals)
+    (inside : SourceWithin logical.length source) (logicalAnchors physicalAnchors : Nat) :
+    step Probe.module physicalAnchors
+        (relocateState rename physical
+          ⟨.block [.sequenceStepLoop "value" source position (loopBody breaking) otherwise] env, stack, logical⟩)
+        (relocateGlobals rename globals) =
+      relocateStep rename physical physicalAnchors
+        (step Probe.module logicalAnchors
+          ⟨.block [.sequenceStepLoop "value" source position (loopBody breaking) otherwise] env, stack, logical⟩ globals) :=
+  step_sequence_loop_relocates Probe.module logical physical rename logicalAnchors physicalAnchors
+    layout "value" source position (loopBody breaking) otherwise [] env stack globals inside
+
+end MachineLoopExamples
+'''
+AUDITS = [
+    "MachineLoopExamples.source_returns",
+    "MachineLoopExamples.paired_returns",
+    "MachineLoopExamples.paired_cursor",
+] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "loopControlStmt_relocate", "loopContinuation_relocate", "loopTarget_relocate", "loopTarget_within",
+    "step_while_relocates", "step_range_loop_relocates", "step_loopResume_relocates",
+    "step_break_relocates", "step_continue_relocates", "step_sequence_loop_relocates",
+    "StateWithin.while_loop", "StateWithin.range_loop", "StateWithin.loopResume",
+    "StateWithin.break_loop", "StateWithin.continue_loop", "StateWithin.sequence_loop",
+)]
+
+with project_temporary_directory(prefix="machine-loop-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("take", "drain"):
+        empty = []
+        assert namespace[name](empty) is empty
+        for length in (1, 2, 17):
+            first = object()
+            items = [first] * length
+            result = namespace[name](items)
+            assert items == []
+            assert result is (first if name == "take" else items)
+        cycle = []
+        cycle.append(cycle)
+        assert namespace[name](cycle) is cycle and cycle == []
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineLoops\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine loops: live mutation, break, continue, else; {len(AUDITS)} axiom audits passed")
