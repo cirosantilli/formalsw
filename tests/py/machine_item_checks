@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+Check indexed access across allocation layouts and shared mutations.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def append_read(items, value):
+    items.append(value)
+    return items[-1]
+
+def append_return(items, value):
+    items.append(value)
+    return value
+'''
+PROOF = r'''
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineItemExamples
+set_option Elab.async false
+
+def appended (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) :=
+  heap.set address (.list (items ++ [value]))
+
+theorem last_item (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    Mutable.getItem (.ref address) (.scalar (.int (-1))) (appended heap address items value) =
+      some (.ok value, appended heap address items value) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have normalized : (-1 : Int) + (items.length + 1) = items.length := by omega
+  have valid : ¬ ((items.length : Int) < 0 ∨ (items.length : Int) + 1 ≤ items.length) := by omega
+  simp [Mutable.getItem, Mutable.index, appended, bounded, Mutable.eval_bind, Except.map, normalized, valid]
+
+theorem read_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "append_read" [.ref address, value] heap value (appended heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value
+    (Evaluates.subscript (by intros; simp) (Evaluates.lookup rfl)
+      (Evaluates.unary Evaluates.constant rfl) (last_item heap address items value found))
+
+theorem direct_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "append_return" [.ref address, value] heap value (appended heap address items value) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard
+    (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem append_equiv (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "append_read" [.ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "append_return" [.ref address, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (returned : ReturnsValue Probe.module name [.ref address, value] heap value (appended heap address items value)) :
+      ((IteratorCalls.call Probe.module name [.ref address, value] heap).run choices).Finishes
+        ⟨.ok value, [], appended heap address items value, heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (returned heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "append_read" leftChoices (read_returns heap address items value found))
+    (finishes "append_return" rightChoices (direct_returns heap address items value found)) (Or.inl rfl)
+
+/-- Use the append's actual output invariant for any indexed read under saved consumers. -/
+theorem append_then_read (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (value index : Mutable.Value) (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items))
+    (valueInside : value.edge.Within logical.length) (indexInside : index.edge.Within logical.length)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    ∃ other nextMap,
+      (∀ old < logical.length, nextMap old = rename old) ∧
+      ExecutionLayout (appended logical address items value) other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [value], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], appended logical address items value⟩) ∧
+      IteratorCalls.Relocation.Preserves (appended logical address items value) other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices
+          (.running ⟨⟨.operation .subscript [.ref address, index], [], appended logical address items value⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length
+            (.running ⟨⟨.operation .subscript [.ref address, index], [], appended logical address items value⟩, used⟩ resumes))) := by
+  have bounded := (List.getElem?_eq_some_iff.mp found).1
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items value [] [] layout found valueInside (by simp) globalsInside
+  have actual := (step_append_list_relocates Probe.module logical physical rename layout logical.length physical.length
+    address items value [] [] found valueInside (by simp) globalsInside).2.1
+  rw [actual] at preserved
+  obtain ⟨other, nextMap, agree, _, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  have inside : StateWithin ⟨.operation .subscript [.ref address, index], [], appended logical address items value⟩ := by
+    refine ⟨⟨by simp [OperationWithin], ?_⟩, by simp⟩
+    intro selected member
+    rcases List.mem_cons.mp member with rfl | member
+    · simpa [appended] using bounded
+    · have same : selected = index := by simpa using member
+      subst selected
+      simpa [appended] using indexInside
+  have raw := step_subscript_preserves Probe.module (appended logical address items value) other nextMap
+    logical.length physical.length (.ref address) index [] [] retained inside nextGlobals
+  have wrapped := SetCalls.Relocation.step_preserves_of_heap Probe.module choices
+    ⟨⟨.operation .subscript [.ref address, index], [], appended logical address items value⟩, used⟩ other nextMap
+    logical.length physical.length [] retained inside nextGlobals raw
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_ordinary_preserves Probe.module _ other nextMap
+    logical.length physical.length choices resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained
+    ⟨inside.1, inside.2, by simpa [appended] using saved⟩ rfl wrapped
+
+end MachineItemExamples
+'''
+AUDITS = [
+    "Mutable.Relocation.RuntimeLayout.getItem", "getItem_bounded", "getItem_effect",
+    "step_subscript_preserves", "step_subscript_expression_preserves", "step_augmentItemIndex_preserves",
+    "step_augmentItemReceiver_preserves", "step_assignItem_preserves",
+    "MachineItemExamples.last_item", "MachineItemExamples.read_returns", "MachineItemExamples.direct_returns",
+    "MachineItemExamples.append_equiv", "MachineItemExamples.append_then_read",
+]
+
+with project_temporary_directory(prefix="machine-item-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("append_read", "append_return"):
+        for self_reference in (False, True):
+            items = [object()]
+            items.append(items)
+            value = items if self_reference else object()
+            assert namespace[name](items, value) is value
+            assert items[-1] is value and items[1] is items
+        items = []
+        assert namespace[name](items, items) is items
+        assert items[0] is items
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("import lang.py.FormalSW.MachineItemInvariant\nimport lang.py.FormalSW.IteratorRules\n"
+                     + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+                     + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n")
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(proof)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"machine items: indexed reads, mutation composition, and source equivalence; {len(AUDITS)} axiom audits passed")
