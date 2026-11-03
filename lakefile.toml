@@ -95,6 +95,7 @@ roots = [
   "lang.py.FormalSW.MutableRelocation",
   "lang.py.FormalSW.RuntimeRelocation",
   "lang.py.FormalSW.TupleRelocation",
+  "lang.py.FormalSW.RuntimeEffects",
   "lang.py.FormalSW.HeapRelocation",
   "lang.py.FormalSW.Sorting",
   "lang.py.FormalSW.Syntax",

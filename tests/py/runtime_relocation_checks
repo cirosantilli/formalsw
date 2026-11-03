@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prove an allocating iterator method preserves runtime relocation for arbitrary caller heaps.
+Prove allocating iterator methods preserve runtime invariants for arbitrary caller heaps.
 The source bridge and structural proofs run without whole-program evaluation.
 """
 from pathlib import Path
@@ -21,6 +21,11 @@ class Allocating:
 
 class Interning:
     def __next__(self):
+        return ()
+
+class Composed:
+    def __next__(self):
+        self.link = [self]
         return ()
 '''
 PROOF = r'''
@@ -188,6 +193,95 @@ theorem layout_without_interning :
 
 end EmptyTuple
 
+
+namespace Composed
+
+def classInfo := (Probe.module.findClass "Composed").getD ("", [])
+def body : List Stmt := [
+  .assign [.attribute (.name "self") "link"] (.list [.name "self"]),
+  .return (.tuple [])]
+
+theorem source_class : Probe.module.findClass "Composed" = some classInfo := rfl
+theorem source_body : findFunctionIn classInfo.2 "__next__" = some (args, body) := rfl
+
+theorem next_bound (heap : Mutable.Heap) (address : Nat)
+    (fields : List (String × Mutable.Value))
+    (found : heap[address]? = some (.instance classInfo.1 "Composed" fields)) :
+    ProtocolCalls.nextMethod Probe.module (.ref address) heap =
+      some (.ok (some (.method (.ref address) args body)), heap) := by
+  have lookup := ProtocolCalls.lookup_instance Probe.module heap address classInfo.1
+    "Composed" "__next__" fields classInfo.2 found source_class
+  simpa [ProtocolCalls.nextMethod, found, source_body] using lookup
+
+theorem method_returns (heap written after : Mutable.Heap) (receiver address : Nat)
+    (stored : Mutable.writeField (.ref receiver) "link" (.ref heap.length)
+      (heap ++ [.list [.ref receiver]]) = some (.ok (.scalar .none), written))
+    (allocated : Mutable.allocateTuple [] written = some (.ok (.ref address), after)) :
+    MethodReturns Probe.module (.ref receiver) args body [] heap (.ref address) after := by
+  have self : functionEnv args body [.ref receiver] [] "self" = some (.ref receiver) := by
+    simp [functionEnv, HeapCalls.argumentEnv, args]
+  apply MethodReturns.of_body (completed := [.ref receiver]) (by rfl)
+  apply BlockContinues.returns
+      (body := [.assign [.attribute (.name "self") "link"] (.list [.name "self"])])
+  · exact BlockContinues.setAttribute
+      (Evaluates.list (.cons (Evaluates.lookup self) .nil)) (Evaluates.lookup self) stored
+  · exact BlockReturns.return_value (Evaluates.tuple_result .nil allocated)
+
+/-- A field write produces the closed layout required by the next allocator. -/
+theorem paired_methods (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename)
+    (address : Nat) (fields : List (String × Mutable.Value))
+    (found : logical[address]? = some (.instance classInfo.1 "Composed" fields))
+    (choices : ChoiceSchedule) (used : Nat) :
+    ∃ left right leftAfter rightAfter nextMap,
+      ProtocolCalls.nextMethod Probe.module (.ref address) logical =
+        some (.ok (some (.method (.ref address) args body)), logical) ∧
+      ProtocolCalls.nextMethod Probe.module (.ref (rename address)) physical =
+        some (.ok (some (.method (.ref (rename address)) args body)), physical) ∧
+      IteratorCalls.OperationCompletes Probe.module choices used (.method (.ref address) args body)
+        logical (.ok (.ref left)) leftAfter ∧
+      IteratorCalls.OperationCompletes Probe.module choices used
+        (.method (.ref (rename address)) args body) physical (.ok (.ref right)) rightAfter ∧
+      ExecutionLayout leftAfter rightAfter nextMap ∧
+      left < leftAfter.length ∧ nextMap left = right ∧
+      (∀ index < logical.length, nextMap index = rename index) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have allocated := (layout.allocate_list [.ref address]
+    (by intro value member; simpa only [List.mem_singleton.mp member] using inside)).2.2
+  let written := (logical ++ [Mutable.Object.list [.ref address]]).set address
+    (.instance classInfo.1 "Composed" (Mutable.putField fields "link" (.ref logical.length)))
+  have stored : Mutable.writeField (.ref address) "link" (.ref logical.length)
+      (logical ++ [.list [.ref address]]) = some (.ok (.scalar .none), written) :=
+    Mutable.writeField_result
+      (by simpa [List.getElem?_append_left inside] using found) (by simp)
+  obtain ⟨other, otherWrite, related, size, _⟩ := allocated.writeField (.ref address) "link"
+    (.ref logical.length) (by change address < _; simp; omega)
+    (by change logical.length < _; simp) _ written stored
+  have rightWrite : Mutable.writeField (.ref (rename address)) "link" (.ref physical.length)
+      (physical ++ [.list [.ref (rename address)]]) = some (.ok (.scalar .none), other) := by
+    simpa only [List.map_cons, List.map_nil, relocateValue, extendMap_old _ _ _ _ inside,
+      extendMap_new, Except.map] using otherWrite
+  obtain ⟨left, right, leftAfter, rightAfter, nextMap, leftTuple, rightTuple,
+      finalLayout, resultInside, resultSame, agrees⟩ := related.allocateTuple [] (by simp)
+  refine ⟨left, right, leftAfter, rightAfter, nextMap,
+    next_bound logical address fields found,
+    next_bound physical (rename address) _ (layout.runtime.lookup address _ found),
+    .of_method (method_returns logical written leftAfter address left stored leftTuple),
+    .of_method (method_returns physical other rightAfter (rename address) right rightWrite rightTuple),
+    finalLayout, resultInside, resultSame, ?_⟩
+  intro index old
+  rw [agrees index (by rw [size]; simp; omega)]
+  exact extendMap_old _ _ _ _ old
+
+end Composed
+
+#print axioms Composed.paired_methods
+#print axioms FormalSW.PyAst.Mutable.Relocation.ExecutionLayout.writeField
+#print axioms FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.truth
+#print axioms FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.length
+#print axioms FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.sequence
+#print axioms FormalSW.PyAst.Mutable.Relocation.readField_bounded
+
 #print axioms EmptyTuple.paired_methods
 #print axioms EmptyTuple.layout_without_interning
 #print axioms FormalSW.PyAst.Mutable.Relocation.RuntimeLayout.allocateTuple
@@ -219,10 +313,16 @@ with project_temporary_directory(prefix="runtime-relocation-") as temporary:
     empty = ()
     assert next(interning) is empty
     assert next(interning) is next(interning)
+    composed = namespace["Composed"]()
+    assert next(composed) is empty
+    first_link = composed.link
+    assert first_link[0] is composed
+    assert next(composed) is empty
+    assert composed.link is not first_link and composed.link[0] is composed
     document = directory / "source.json"
     document.write_text(api["AstJsonEmitter"](module).emit())
     proof = directory / "Checks.lean"
-    proof.write_text("import lang.py.FormalSW.TupleRelocation\n"
+    proof.write_text("import lang.py.FormalSW.RuntimeEffects\n"
                      "import lang.py.FormalSW.HeapRelocation\n"
                      "import lang.py.FormalSW.IteratorRules\n"
                      + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF)
@@ -233,8 +333,8 @@ with project_temporary_directory(prefix="runtime-relocation-") as temporary:
     )
     assert checked.returncode == 0, checked.stdout + checked.stderr
     audits = checked.stdout.split("depends on axioms:")[1:]
-    assert len(audits) == 9, checked.stdout
+    assert len(audits) == 15, checked.stdout
     for audit in audits:
         names = {name.strip() for name in audit.split("[", 1)[1].split("]", 1)[0].split(",")}
         assert names <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
-print("runtime relocation: allocating and interning source methods; nine axiom audits passed")
+print("runtime relocation: composed allocating and interning source methods; fifteen axiom audits passed")
