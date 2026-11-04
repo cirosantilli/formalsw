@@ -195,6 +195,35 @@ theorem partial_failure_source (heap : Mutable.Heap) (source row : Nat) (key : C
   simp [result, run, partial_insertion heap source row key value invalid found rowFound]
   rfl
 
+/-- A failed constructor retains the partially filled new dictionary and every original cell. -/
+theorem partial_failure_private_cell (heap : Mutable.Heap) (source row privateAddress : Nat)
+    (key : Constant) (value : Mutable.Value) (invalid : Int) (privateObject : Mutable.Object)
+    (found : heap[source]? = some (.list [.ref row, .scalar (.int invalid)]))
+    (rowFound : heap[row]? = some (.tuple [.scalar key, value]))
+    (saved : SavedCell privateAddress privateObject heap) :
+    SavedCell privateAddress privateObject ((heap ++ [Mutable.Object.dict []]).set heap.length (.dict [(key, value)])) ∧
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "build") [.ref source], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], (heap ++ [Mutable.Object.dict []]).set heap.length (.dict [(key, value)]), heap.length⟩) := by
+  exact ⟨Heapq.preserves_dictionaryConstruct _ (SavedCell.allocates privateAddress privateObject) [.ref source]
+    heap _ _ saved (partial_insertion heap source row key value invalid found rowFound),
+    partial_failure_source heap source row key value invalid found rowFound⟩
+
+theorem mutation_failure_private_cell (heap : Mutable.Heap) (address privateAddress : Nat)
+    (items : List Mutable.Value) (value : Mutable.Value) (privateObject : Mutable.Object)
+    (found : heap[address]? = some (.list items)) (saved : SavedCell privateAddress privateObject heap)
+    (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (inserted heap address items value ++ [.dict []]) ∧
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "nested") [.ref address, value, .scalar .none], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], inserted heap address items value ++ [.dict []], heap.length⟩) := by
+  have kept := appendItem_preserves_cell privateAddress address privateObject value separate
+    heap (.ok (.scalar .none)) (inserted heap address items value) saved
+    (by simp [Mutable.appendItem, found, inserted, Except.map])
+  exact ⟨Heapq.preserves_dictionaryConstruct _ (SavedCell.allocates privateAddress privateObject) [.scalar .none]
+    (inserted heap address items value) (.error ⟨"TypeError", []⟩) _ kept (by rfl),
+    failure_retains_mutation_and_allocation heap address items value found⟩
+
 /-- Dictionary construction uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
 theorem append_then_dictionary (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
@@ -263,6 +292,8 @@ AUDITS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
     "failure_retains_mutation_and_allocation",
     "partial_insertion",
     "partial_failure_source",
+    "partial_failure_private_cell",
+    "mutation_failure_private_cell",
     "append_then_dictionary",
 )]
 with project_temporary_directory(prefix="machine-dictionary-construction-") as temporary:
@@ -299,6 +330,7 @@ with project_temporary_directory(prefix="machine-dictionary-construction-") as t
     checked_source = directory / "Checks.lean"
     checked_source.write_text(
         "import lang.py.FormalSW.MachineDictionaryConstruction\n"
+        "import lang.py.FormalSW.ConstructionMachineFrame\n"
         "import lang.py.FormalSW.IteratorRules\n"
         "import lang.py.FormalSW.DictionaryConstructorCalls\n"
         + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF

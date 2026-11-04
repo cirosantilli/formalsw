@@ -26,6 +26,10 @@ def nested(source, item):
 def explicit(source, item):
     source.add(item)
     return set(source)
+
+
+def display(key, unhashable):
+    return {key, unhashable}
 '''
 PROOF = r'''
 
@@ -92,6 +96,54 @@ theorem inline_equiv (heap : Mutable.Heap) (address : Nat) (items : List Constan
     (finishes "nested" leftChoices (nested_returns heap address items item found))
     (finishes "explicit" rightChoices (explicit_returns heap address items item found)) (Or.inl rfl)
 
+theorem source_private_copy (choices : ChoiceSchedule) (heap : Mutable.Heap) (address privateAddress : Nat)
+    (items : List Constant) (item : Constant) (privateObject : Mutable.Object)
+    (found : heap[address]? = some (.set items)) (saved : SavedCell privateAddress privateObject heap)
+    (separate : address ≠ privateAddress) :
+    SavedCell privateAddress privateObject (copied heap address items item) ∧
+    ((IteratorCalls.call Probe.module "explicit" [.ref address, .scalar item] heap).run choices).Finishes
+      ⟨.ok (.ref heap.length), [], copied heap address items item, heap.length⟩ := by
+  have kept := Heapq.preserves_addItem address _ (SavedCell.update privateAddress address privateObject separate) (.scalar item)
+    heap (.ok (.scalar .none)) (inserted heap address items item) saved
+    (by simp [Mutable.addItem, found, inserted, Except.map])
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have updated : (inserted heap address items item)[address]? = some (.set (ScalarSet.insert items item)) := by
+    simp [inserted, inside]
+  have built := Heapq.preserves_setConstruct _ (SavedCell.allocates privateAddress privateObject) [.ref address]
+    (inserted heap address items item) (.ok (.ref (inserted heap address items item).length))
+    (copied heap address items item) kept (set_from_set _ address _ updated)
+  have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0)
+    (explicit_returns heap address items item found heap.length []) []
+  exact ⟨built, reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))⟩
+
+theorem display_partial (heap : Mutable.Heap) (address : Nat) (key : Constant) (items : List Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    Mutable.allocateSetValues [.scalar key, .ref address] heap =
+      some (.error ⟨"TypeError", []⟩, heap ++ [.set [key]]) := by
+  have inside := (List.getElem?_eq_some_iff.mp found).1
+  have retained : (heap ++ [.set [key]])[address]? = some (.list items) := by
+    rw [List.getElem?_append_left inside]
+    exact found
+  rw [allocateSetValues_eq]
+  simp [scalarValues, Mutable.allocateSet, Mutable.addItem, Mutable.hashKey, Mutable.keyOf,
+    Mutable.keyOfFuel, ScalarSet.insert, ScalarSet.contains, Mutable.eval_bind, Mutable.eval_get, Mutable.eval_modify,
+    Mutable.error, Except.map, List.set_append_right, retained]
+
+theorem display_failure_private_cell (heap : Mutable.Heap) (address privateAddress : Nat)
+    (key : Constant) (items : List Mutable.Value) (privateObject : Mutable.Object)
+    (found : heap[address]? = some (.list items)) (saved : SavedCell privateAddress privateObject heap) :
+    SavedCell privateAddress privateObject (heap ++ [.set [key]]) ∧
+    Finishes (HeapCalls.step Probe.module heap.length)
+      ⟨.operation (.call "display") [.scalar key, .ref address], [], heap⟩
+      (.ok ⟨.error ⟨"TypeError", []⟩, [], heap ++ [.set [key]], heap.length⟩) := by
+  refine ⟨Heapq.preserves_allocateSetValues _ (SavedCell.allocates privateAddress privateObject) _
+    heap _ _ saved (display_partial heap address key items found), ?_⟩
+  repeat (refine .next rfl ?_)
+  apply Finishes.done
+  change protectGenerator [] (result heap.length heap (Mutable.allocateSetValues [.scalar key, .ref address]) []) = _
+  simp [result, run, display_partial heap address key items found]
+  rfl
+
 /-- Set construction uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
 theorem append_then_set (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
@@ -138,6 +190,17 @@ AUDITS = ["FormalSW.PyAst.Mutable.Relocation.HeapGrows." + name for name in (
     "result_addItem_preserves", "result_allocateSetValues_preserves", "result_setFrom_preserves", "step_setConstruction_preserves",
 )] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_setConstruction_preserves"] + ["MachineSetConstructionExamples." + name for name in (
     "set_from_set", "touch_returns", "nested_returns", "explicit_returns", "inline_equiv", "append_then_set",
+    "source_private_copy", "display_partial", "display_failure_private_cell",
+)] + ["FormalSW.PyAst.Heapq." + name for name in (
+    "prefix_append_invariant", "prefix_fresh_update", "AppendInvariant.append_list",
+    "Preserves.of_prefix", "PreservesPrefix.readonly", "PreservesPrefix.bind", "Preserves.mapM",
+    "preserves_setKey", "allocateSetValues_prefix", "preserves_allocateSetValues",
+    "preserves_setSourceItems", "preserves_setFrom", "preserves_dictionaryIterable",
+    "preserves_dictionaryInsertRow", "preserves_dictionaryInsertRows", "dictionaryFromIterable_prefix",
+    "preserves_dictionaryFromIterable", "preserves_dictionaryConstruct", "dictionaryConstruct_prefix",
+    "preserves_setConstruct",
+)] + ["FormalSW.PyAst.HeapCalls.Framing." + name for name in (
+    "step_setDisplay_cell", "step_setConstruct_cell", "step_dictionaryConstruct_cell",
 )]
 with project_temporary_directory(prefix="machine-set-construction-") as temporary:
     directory = Path(temporary)
@@ -146,6 +209,16 @@ with project_temporary_directory(prefix="machine-set-construction-") as temporar
     module = api["source_module"](path)
     namespace = {}
     exec(compile(SOURCE, str(path), "exec"), namespace)
+    private = []
+    private.append(private)
+    for key in (0, True, -10**100, "key", (1, (2, 3))):
+        try:
+            namespace["display"](key, private)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("set display accepted an unhashable item")
+        assert len(private) == 1 and private[0] is private
     for name in ("nested", "explicit"):
         for size in (0, 1, 17):
             for item in (0, True, -10**100, "key", (1, (2, 3))):
@@ -174,6 +247,7 @@ with project_temporary_directory(prefix="machine-set-construction-") as temporar
     checked_source = directory / "Checks.lean"
     checked_source.write_text(
         "import lang.py.FormalSW.MachineSetConstruction\n"
+        "import lang.py.FormalSW.ConstructionMachineFrame\n"
         "import lang.py.FormalSW.IteratorRules\n"
         + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
         + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
