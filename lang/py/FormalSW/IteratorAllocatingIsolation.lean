@@ -85,6 +85,21 @@ theorem AllocatingTrace.isolated {module : Module} {logicalAnchors : Nat} {choic
         physical other builtin (values.map (relocateValue rename)) (items.map (relocateValue rename)) (stack.map (relocateFrame rename))
         (resumes.map (Relocation.relocateResume rename)) (outcome.map (relocateValue nextMap))
         (input.relocates layout inside.1.2) paired
+  | sequenceConstruction heap after operation values items asTuple address stack used resumes input allocated =>
+    obtain ⟨other, nextMap, paired, retained, agree, grows, physicalGrows, bounded, kept⟩ :=
+      layout.allocateSequence asTuple items (input.within layout.closed inside.1.2) address after allocated
+    have stackSame := relocateStack_congr nextMap rename heap.length stack agree inside.2.1
+    have resumesSame := Relocation.relocateResumes_congr nextMap rename heap.length resumes agree inside.2.2
+    refine ⟨other, nextMap, ⟨retained, grows, physicalGrows, agree⟩,
+      ⟨bounded, fun frame member => (inside.2.1 frame member).mono grows,
+        fun pending member => (inside.2.2 pending member).mono grows⟩, kept, ?_⟩
+    apply Reaches.next ?_ .refl
+    simp only [Relocation.relocateState, Relocation.relocateCore, HeapCalls.Relocation.relocateState,
+      relocateWork, input.operation_relocates rename, relocateValue, stackSame, resumesSame]
+    exact sequenceAllocation_step module physicalAnchors used choices (relocateGlobals rename globals)
+      physical other operation (values.map (relocateValue rename)) (items.map (relocateValue rename)) asTuple
+      (nextMap address) (stack.map (relocateFrame rename)) (resumes.map (Relocation.relocateResume rename))
+      (input.relocates layout inside.1.2) paired
   | dictionaryConstruct heap after values stack used resumes outcome arity allocated =>
     let nextMap := extendMap rename heap.length physical.length
     have agree : ∀ index < heap.length, nextMap index = rename index := extendMap_old _ _ _
