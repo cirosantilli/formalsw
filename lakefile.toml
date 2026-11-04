@@ -161,6 +161,8 @@ roots = [
   "lang.py.FormalSW.MachineGeneratorConsumers",
   "lang.py.FormalSW.MachineCollectorAllocation",
   "lang.py.FormalSW.MachineCollectorInvariant",
+  "lang.py.FormalSW.DictionaryMethodRelocation",
+  "lang.py.FormalSW.MachineDictionaryMethods",
   "lang.py.FormalSW.MachineLoopInvariant",
   "lang.py.FormalSW.MachineLoopAcquisition",
   "lang.py.FormalSW.MachineExpressionInvariant",

@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""
+Check dictionary defaults, retained argument effects, shared values and saved consumers.
+"""
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def touch(items, value):
+    items.append(value)
+    return items
+
+
+def nested_default(table, key, items, value):
+    return table.setdefault(key, touch(items, value))
+
+
+def explicit_default(table, key, items, value):
+    items.append(value)
+    return table.setdefault(key, items)
+
+
+def nested_get(table, key, items, value):
+    return table.get(key, touch(items, value))
+
+
+def explicit_get(table, key, items, value):
+    items.append(value)
+    return table.get(key, items)
+'''
+PROOF = r'''
+
+open FormalSW.PyAst HeapCalls Mutable.Relocation HeapCalls.Relocation
+namespace MachineDictionaryExamples
+set_option Elab.async false
+
+def appended (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value) : Mutable.Heap :=
+  heap.set address (.list (items ++ [value]))
+
+def returned (entries : List (Constant × Mutable.Value)) (key : Constant) (fallback : Mutable.Value) : Mutable.Value :=
+  (ScalarDict.lookup entries key).getD fallback
+
+def finished (insert : Bool) (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (fallback : Mutable.Value) : Mutable.Heap :=
+  match insert, ScalarDict.lookup entries key with
+  | true, none => heap.set address (.dict (ScalarDict.insert entries key fallback))
+  | _, _ => heap
+
+theorem table_after_append (heap : Mutable.Heap) (table address : Nat) (entries : List (Constant × Mutable.Value))
+    (items : List Mutable.Value) (value : Mutable.Value)
+    (tableFound : heap[table]? = some (.dict entries)) (itemsFound : heap[address]? = some (.list items)) :
+    (appended heap address items value)[table]? = some (.dict entries) := by
+  have different : address ≠ table := by
+    intro same
+    subst address
+    rw [tableFound] at itemsFound
+    cases itemsFound
+  simpa [appended, List.getElem?_set, different] using tableFound
+
+theorem execute (insert : Bool) (heap : Mutable.Heap) (address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (fallback : Mutable.Value) (found : heap[address]? = some (.dict entries)) :
+    primitive (if insert then .dictionarySetDefault address else .dictionaryGet address) [.scalar key, fallback] heap =
+      some (.ok (returned entries key fallback), finished insert heap address entries key fallback) := by
+  cases insert <;> cases selected : ScalarDict.lookup entries key <;>
+    simp [primitive, Mutable.dictionaryGet, Mutable.dictionarySetDefault, found, selected, returned, finished, Except.map]
+
+theorem touch_returns (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (value : Mutable.Value)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "touch" [.ref address, value] heap (.ref address) (appended heap address items value) := by
+  unfold appended
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem nested_default_returns (heap : Mutable.Heap) (table address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (items : List Mutable.Value) (value : Mutable.Value)
+    (tableFound : heap[table]? = some (.dict entries)) (itemsFound : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "nested_default" [.ref table, .scalar key, .ref address, value] heap
+      (returned entries key (.ref address)) (finished true (appended heap address items value) table entries key (.ref address)) := by
+  have retained := table_after_append heap table address entries items value tableFound itemsFound
+  simp only [appended] at retained
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.dictionary_method true (Evaluates.lookup rfl)
+  · simp [bindMethod, tableFound]
+  · exact .cons (Evaluates.lookup rfl)
+      (.cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+        (touch_returns heap address items value itemsFound)) .nil)
+  · exact execute true _ table entries key (.ref address) retained
+  · intro name same; cases same; rfl
+
+theorem explicit_default_returns (heap : Mutable.Heap) (table address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (items : List Mutable.Value) (value : Mutable.Value)
+    (tableFound : heap[table]? = some (.dict entries)) (itemsFound : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "explicit_default" [.ref table, .scalar key, .ref address, value] heap
+      (returned entries key (.ref address)) (finished true (appended heap address items value) table entries key (.ref address)) := by
+  have retained := table_after_append heap table address entries items value tableFound itemsFound
+  simp only [appended] at retained
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) itemsFound (Evaluates.lookup rfl) itemsFound)
+  apply BlockReturns.return_value
+  apply Evaluates.dictionary_method true (Evaluates.lookup rfl)
+  · simp [bindMethod, retained]
+  · exact .cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)
+  · exact execute true _ table entries key (.ref address) retained
+  · intro name same; cases same; rfl
+
+theorem default_equiv (heap : Mutable.Heap) (table address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (items : List Mutable.Value) (value : Mutable.Value)
+    (tableFound : heap[table]? = some (.dict entries)) (itemsFound : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "nested_default" [.ref table, .scalar key, .ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit_default" [.ref table, .scalar key, .ref address, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (result : ReturnsValue Probe.module name [.ref table, .scalar key, .ref address, value] heap
+        (returned entries key (.ref address)) (finished true (appended heap address items value) table entries key (.ref address))) :
+      ((IteratorCalls.call Probe.module name [.ref table, .scalar key, .ref address, value] heap).run choices).Finishes
+        ⟨.ok (returned entries key (.ref address)), [], finished true (appended heap address items value) table entries key (.ref address), heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (result heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "nested_default" leftChoices (nested_default_returns heap table address entries key items value tableFound itemsFound))
+    (finishes "explicit_default" rightChoices (explicit_default_returns heap table address entries key items value tableFound itemsFound)) (Or.inl rfl)
+
+theorem nested_get_returns (heap : Mutable.Heap) (table address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (items : List Mutable.Value) (value : Mutable.Value)
+    (tableFound : heap[table]? = some (.dict entries)) (itemsFound : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "nested_get" [.ref table, .scalar key, .ref address, value] heap
+      (returned entries key (.ref address)) (finished false (appended heap address items value) table entries key (.ref address)) := by
+  have retained := table_after_append heap table address entries items value tableFound itemsFound
+  simp only [appended] at retained
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  apply Evaluates.dictionary_method false (Evaluates.lookup rfl)
+  · simp [bindMethod, tableFound]
+  · exact .cons (Evaluates.lookup rfl)
+      (.cons (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+        (touch_returns heap address items value itemsFound)) .nil)
+  · exact execute false _ table entries key (.ref address) retained
+  · intro name same; cases same; rfl
+
+theorem explicit_get_returns (heap : Mutable.Heap) (table address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (items : List Mutable.Value) (value : Mutable.Value)
+    (tableFound : heap[table]? = some (.dict entries)) (itemsFound : heap[address]? = some (.list items)) :
+    ReturnsValue Probe.module "explicit_get" [.ref table, .scalar key, .ref address, value] heap
+      (returned entries key (.ref address)) (finished false (appended heap address items value) table entries key (.ref address)) := by
+  have retained := table_after_append heap table address entries items value tableFound itemsFound
+  simp only [appended] at retained
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) itemsFound (Evaluates.lookup rfl) itemsFound)
+  apply BlockReturns.return_value
+  apply Evaluates.dictionary_method false (Evaluates.lookup rfl)
+  · simp [bindMethod, retained]
+  · exact .cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil)
+  · exact execute false _ table entries key (.ref address) retained
+  · intro name same; cases same; rfl
+
+theorem get_equiv (heap : Mutable.Heap) (table address : Nat) (entries : List (Constant × Mutable.Value))
+    (key : Constant) (items : List Mutable.Value) (value : Mutable.Value)
+    (tableFound : heap[table]? = some (.dict entries)) (itemsFound : heap[address]? = some (.list items)) :
+    (IteratorCalls.call Probe.module "nested_get" [.ref table, .scalar key, .ref address, value] heap).Equiv
+      (IteratorCalls.call Probe.module "explicit_get" [.ref table, .scalar key, .ref address, value] heap) := by
+  have finishes (name : String) (choices : ChoiceSchedule)
+      (result : ReturnsValue Probe.module name [.ref table, .scalar key, .ref address, value] heap
+        (returned entries key (.ref address)) (finished false (appended heap address items value) table entries key (.ref address))) :
+      ((IteratorCalls.call Probe.module name [.ref table, .scalar key, .ref address, value] heap).run choices).Finishes
+        ⟨.ok (returned entries key (.ref address)), [], finished false (appended heap address items value) table entries key (.ref address), heap.length⟩ := by
+    have reached := IteratorCalls.Reaches.of_heap (choices := choices) (used := 0) (result heap.length []) []
+    exact reached.finishes (.next (IteratorCalls.core_done rfl rfl) (.done rfl))
+  intro leftChoices rightChoices
+  exact Mutable.Call.equiv_of_finishes
+    (finishes "nested_get" leftChoices (nested_get_returns heap table address entries key items value tableFound itemsFound))
+    (finishes "explicit_get" rightChoices (explicit_get_returns heap table address entries key items value tableFound itemsFound)) (Or.inl rfl)
+
+/-- Dictionary execution uses the proved output of an earlier mutation, under arbitrary saved consumers. -/
+theorem append_then_dictionary (logical physical : Mutable.Heap) (rename : Nat → Nat)
+    (layout : ExecutionLayout logical physical rename) (address : Nat) (items : List Mutable.Value)
+    (item : Mutable.Value) (operation : Operation) (covered : DictionaryOperation operation) (values : List Mutable.Value) (stack : List Frame)
+    (used : Nat) (choices : ChoiceSchedule) (resumes : List IteratorCalls.Resume)
+    (found : logical[address]? = some (.list items)) (itemInside : item.edge.Within logical.length)
+    (inside : StateWithin ⟨.operation operation values, stack, logical⟩)
+    (saved : ∀ pending ∈ resumes, IteratorCalls.Relocation.ResumeWithin logical.length pending) :
+    let updated := logical.set address (.list (items ++ [item]))
+    ∃ other nextMap,
+      (∀ previous < logical.length, nextMap previous = rename previous) ∧
+      ExecutionLayout updated other nextMap ∧
+      HeapCalls.step Probe.module physical.length
+        (relocateState rename physical ⟨.operation (.append address) [item], [], logical⟩) =
+        .next (relocateState nextMap other ⟨.value (.scalar .none), [], updated⟩) ∧
+      IteratorCalls.Relocation.Preserves updated other nextMap physical.length
+        (IteratorCalls.step Probe.module logical.length choices (.running
+          ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))
+        (IteratorCalls.step Probe.module physical.length choices
+          (IteratorCalls.Relocation.relocateState nextMap other physical.length (.running
+            ⟨⟨.operation operation values, stack, updated⟩, used⟩ resumes))) := by
+  dsimp only
+  have globalsInside : GlobalsWithin logical.length [] := by simp [GlobalsWithin]
+  have preserved := step_append_list_preserves Probe.module logical physical rename logical.length physical.length
+    address items item [] [] layout found itemInside (by simp) globalsInside
+  have stepped : HeapCalls.step Probe.module logical.length ⟨.operation (.append address) [item], [], logical⟩ =
+      .next ⟨.value (.scalar .none), [], logical.set address (.list (items ++ [item]))⟩ := by
+    change protectGenerator [] (result logical.length logical (Mutable.appendItem address item) []) = _
+    simp [result, HeapCalls.run, Mutable.appendItem, found, Except.map]
+  rw [stepped] at preserved
+  obtain ⟨other, nextMap, agree, larger, _, retained, _, nextGlobals, _, paired⟩ := preserved.next [] globalsInside
+  refine ⟨other, nextMap, agree, retained, paired, ?_⟩
+  exact IteratorCalls.Relocation.step_dictionaryOperation_preserves Probe.module choices _ other nextMap
+    logical.length physical.length used operation values stack resumes []
+    (by simp [IteratorCalls.Relocation.ModuleSource, Probe.module, StmtWithin]) retained covered
+    ⟨inside.1.mono larger, (fun frame member => (inside.2 frame member).mono larger),
+      fun pending member => IteratorCalls.Relocation.ResumeWithin.mono (saved pending member) larger⟩ nextGlobals
+
+end MachineDictionaryExamples
+'''
+AUDITS = ["FormalSW.PyAst.Mutable.Relocation." + name for name in (
+    "dictionaryGet_lookup", "dictionarySetDefault_lookup", "RuntimeLayout.dictionaryLookup_relocates", "dictionaryLookup_effect",
+)] + ["FormalSW.PyAst.HeapCalls.Relocation." + name for name in (
+    "result_bind", "result_pure_preserves", "result_setItem_return_preserves", "result_dictionaryGet_preserves",
+    "result_dictionarySetDefault_preserves", "result_clearDictionary_preserves", "step_dictionaryOperation_preserves",
+)] + ["FormalSW.PyAst.IteratorCalls.Relocation.step_dictionaryOperation_preserves", "FormalSW.PyAst.HeapCalls.Evaluates.dictionary_method"] + ["MachineDictionaryExamples." + name for name in (
+    "table_after_append", "execute", "touch_returns", "nested_default_returns", "explicit_default_returns", "default_equiv",
+    "nested_get_returns", "explicit_get_returns", "get_equiv", "append_then_dictionary",
+)]
+with project_temporary_directory(prefix="machine-dictionary-method-") as temporary:
+    directory = Path(temporary)
+    path = directory / "source.py"
+    path.write_text(SOURCE)
+    module = api["source_module"](path)
+    namespace = {}
+    exec(compile(SOURCE, str(path), "exec"), namespace)
+    for name in ("nested_default", "explicit_default", "nested_get", "explicit_get"):
+        for size in (0, 1, 17):
+            for key in (0, "key", (1, (2, 3))):
+                for existing in (False, True):
+                    items = [object() for _ in range(size)]
+                    table = {key: None} if existing else {}
+                    result = namespace[name](table, key, items, items)
+                    assert len(items) == size + 1 and items[-1] is items
+                    assert result is (None if existing else items)
+                    if existing:
+                        assert table[key] is None
+                    elif name.endswith("default"):
+                        assert table[key] is items
+                    else:
+                        assert key not in table
+        items = []
+        try:
+            namespace[name]({}, [], items, items)
+        except TypeError:
+            assert items[0] is items
+        else:
+            raise AssertionError(name)
+    document = directory / "source.json"
+    document.write_text(api["AstJsonEmitter"](module).emit())
+    checked_source = directory / "Checks.lean"
+    checked_source.write_text(
+        "import lang.py.FormalSW.MachineDictionaryMethods\n"
+        "import lang.py.FormalSW.IteratorRules\n"
+        + api["AstLeanBridgeEmitter"](document, "Probe", module).emit() + PROOF
+        + "\n".join(f"#print axioms {name}" for name in AUDITS) + "\n"
+    )
+    checked = subprocess.run(
+        ["lake", "env", "lean", "-M4096", "-j1", "-DElab.async=false",
+         "-DwarningAsError=true", "-DrelaxedAutoImplicit=false", str(checked_source)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    audits = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    independent = checked.stdout.count("does not depend on any axioms")
+    assert len(audits) + independent == len(AUDITS), checked.stdout
+    for audit in audits:
+        assert {name.strip() for name in audit.split(",")} <= {
+            "propext", "Classical.choice", "Quot.sound"
+        }, checked.stdout
+print(f"dictionary methods: eager defaults, shared mutations and optional lookup; {len(AUDITS)} axiom audits passed")
