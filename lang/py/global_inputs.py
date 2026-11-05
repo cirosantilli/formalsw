@@ -39,7 +39,9 @@ def structured_kind(kind):
     """Select the recursive heap domain without changing existing flat domains."""
     scalar_kinds = ('int', 'str', 'bytes', 'bool', 'None')
     flat_dictionaries = {f'dict[{key},{value}]' for key in scalar_kinds for value in scalar_kinds}
-    return bool(kind and ('tuple[' in kind or 'dict[' in kind and kind not in flat_dictionaries))
+    flat_sets = {'set[int]', 'set[str]', 'set[bool]'}
+    return bool(kind and ('tuple[' in kind or 'dict[' in kind and kind not in flat_dictionaries
+                          or 'set[' in kind and kind not in flat_sets))
 
 
 def _structured_annotation_kind(annotation):
@@ -55,12 +57,17 @@ def _structured_annotation_kind(annotation):
     if container == 'list':
         element = _structured_annotation_kind(annotation.slice)
         return f'list[{element}]' if element is not None else None
+    if container == 'set':
+        element = _structured_annotation_kind(annotation.slice)
+        if element is None or any(token in element for token in ('list[', 'dict[', 'set[')):
+            return None
+        return f'set[{element}]'
     if container == 'dict':
         fields = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else []
         if len(fields) != 2:
             return None
         key, value = (_structured_annotation_kind(field) for field in fields)
-        if key is None or value is None or any(token in key for token in ('list[', 'dict[')):
+        if key is None or value is None or any(token in key for token in ('list[', 'dict[', 'set[')):
             return None
         return f'dict[{key},{value}]'
     if container != 'tuple':
@@ -89,8 +96,8 @@ def container_type_term(kind):
             return f'.scalar "{node.id}"'
         if isinstance(node, ast.Constant):
             return '.scalar "None"'
-        if node.value.id == 'list':
-            return f'.list ({render(node.slice)})'
+        if node.value.id in ('list', 'set'):
+            return f'.{node.value.id} ({render(node.slice)})'
         if node.value.id == 'dict':
             key, value = node.slice.elts
             return f'.dictionary ({render(key)}) ({render(value)})'

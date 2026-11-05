@@ -50,7 +50,7 @@ theorem comprehensionStart_heap (heap : Mutable.Heap) (target iterable : Expr) (
   | none => trivial
   | some object => cases object <;> trivial
 
-theorem iterator_sequence_invariant (heap : Mutable.Heap) (choices : ChoiceSchedule)
+theorem iterator_sequence_invariant (heap : Mutable.Heap) (closed : Closed heap) (choices : ChoiceSchedule)
     (anchors used address : Nat) (name : String) (body otherwise following : List Stmt)
     (env : HeapCalls.Env) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
     (inside : HeapCalls.Relocation.StateWithin
@@ -73,6 +73,14 @@ theorem iterator_sequence_invariant (heap : Mutable.Heap) (choices : ChoiceSched
       · simp only [StmtWithin]
         exact ⟨inside.1, saved.2.1, saved.2.2.1⟩
       · exact saved.2.2.2 statement member
+    | keySet items =>
+      simp only [iteratorStep, found, StepHeap, StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin]
+      refine ⟨trivial, ⟨saved.1, ?_⟩, fun frame member => inside.2 frame (List.mem_cons_of_mem _ member)⟩
+      intro statement member
+      rcases List.mem_cons.mp member with rfl | member
+      · simp only [StmtWithin]
+        exact ⟨inside.1, keySources_within heap closed address items (by simp [found, Mutable.keyEntries]), saved.2.1, saved.2.2.1⟩
+      · exact saved.2.2.2 statement member
     | _ => simp [iteratorStep, found, StepHeap, StepWithin]
 
 theorem iterator_cursor_heap (heap : Mutable.Heap) (choices : ChoiceSchedule)
@@ -94,6 +102,78 @@ theorem iterator_cursor_heap (heap : Mutable.Heap) (choices : ChoiceSchedule)
         | cons first rest =>
           cases (first :: rest)[choices used % (first :: rest).length]? <;> trivial
     | _ => simp [iteratorStep, found, StepHeap]
+
+theorem iterator_key_cursor_invariant (heap : Mutable.Heap) (choices : ChoiceSchedule)
+    (anchors used address originalSize : Nat) (name : String) (remaining : List SequenceSource)
+    (body otherwise following : List Stmt) (env : HeapCalls.Env) (stack : List HeapCalls.Frame)
+    (globals : Mutable.Globals)
+    (inside : HeapCalls.Relocation.StateWithin
+      ⟨.block (.keySetStepLoop name address originalSize remaining body otherwise :: following) env, stack, heap⟩)
+    (globalsInside : GlobalsWithin heap.length globals) :
+    let transition := iteratorStep choices anchors
+      ⟨⟨.block (.keySetStepLoop name address originalSize remaining body otherwise :: following) env, stack, heap⟩, used⟩ globals
+    StepHeap heap transition ∧ StepWithin transition := by
+  dsimp only
+  have cursorInside := inside.1.2 _ (List.mem_cons_self ..)
+  simp only [StmtWithin] at cursorInside
+  have followingInside : ∀ statement ∈ following, StmtWithin heap.length statement :=
+    fun statement member => inside.1.2 statement (List.mem_cons_of_mem _ member)
+  simp only [iteratorStep]
+  cases found : (heap[address]?).bind Mutable.keyEntries with
+  | none => trivial
+  | some current =>
+    by_cases changed : current.length != originalSize
+    · simp only [changed, if_true, liftStep, done, StepHeap, StepWithin, CompletionWithin]
+      exact ⟨trivial, globalsInside, by intro _ impossible; cases impossible⟩
+    · simp only [changed, Bool.false_eq_true, if_false]
+      cases remaining with
+      | nil =>
+        simp only [StepHeap, StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin]
+        exact ⟨trivial, ⟨inside.1.1, fun statement member => (List.mem_append.mp member).elim
+          (cursorInside.2.2.2 statement) (followingInside statement)⟩, inside.2⟩
+      | cons first rest =>
+        cases selected : (first :: rest)[choices used % (first :: rest).length]? with
+        | none => trivial
+        | some item =>
+          simp only [StepHeap, StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin]
+          refine ⟨trivial, ⟨inside.1.1.setLocal name (sequenceValue item)
+            (cursorInside.2.1 item (List.mem_of_getElem? selected)).value, ?_⟩, inside.2⟩
+          intro statement member
+          rcases List.mem_append.mp member with member | member
+          · rcases List.mem_append.mp member with member | member
+            · exact cursorInside.2.2.1 statement member
+            · have same := List.mem_singleton.mp member
+              subst statement
+              apply loopContinuation_within
+              simp only [StmtWithin]
+              refine ⟨cursorInside.1, ?_, cursorInside.2.2⟩
+              intro source member
+              exact cursorInside.2.1 source (List.mem_of_mem_eraseIdx member)
+          · exact followingInside statement member
+
+theorem iterator_unpack_invariant (heap : Mutable.Heap) (closed : Closed heap) (choices : ChoiceSchedule)
+    (anchors used address : Nat) (names : List String) (body otherwise following : List Stmt)
+    (env : HeapCalls.Env) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
+    (inside : HeapCalls.Relocation.StateWithin
+      ⟨.value (.ref address), .unpackSequence names body otherwise following env :: stack, heap⟩) :
+    let transition := iteratorStep choices anchors
+      ⟨⟨.value (.ref address), .unpackSequence names body otherwise following env :: stack, heap⟩, used⟩ globals
+    StepHeap heap transition ∧ StepWithin transition := by
+  dsimp only
+  have saved := inside.2 _ (List.mem_cons_self ..)
+  simp only [FrameWithin] at saved
+  simp only [iteratorStep]
+  cases found : (heap[address]?).bind Mutable.keyEntries with
+  | none => trivial
+  | some items =>
+    simp only [StepHeap, StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin]
+    refine ⟨trivial, ⟨saved.1, ?_⟩, fun frame member => inside.2 frame (List.mem_cons_of_mem _ member)⟩
+    intro statement member
+    rcases List.mem_cons.mp member with rfl | member
+    · simp only [StmtWithin]
+      exact ⟨inside.1, keySources_within heap closed address items found,
+        comprehensionTargetBody_within _ _ _ saved.2.1, saved.2.2.1⟩
+    · exact saved.2.2.2 statement member
 
 theorem comprehensionEnv_within (limit : Nat) (env : HeapCalls.Env) (generators : List (String × Expr × List Expr))
     (inside : EnvWithin limit env) : EnvWithin limit (comprehensionEnv env generators) := by
@@ -144,7 +224,7 @@ theorem sumEnter_invariant (heap : Mutable.Heap) (anchors used : Nat) (loop : St
       refine ⟨trivial, ⟨envInside.setLocal _ value valueInside, ?_⟩, stackInside⟩
       simpa [StmtWithin] using loopInside
 
-theorem iterator_sum_generator_invariant (heap : Mutable.Heap) (choices : ChoiceSchedule)
+theorem iterator_sum_generator_invariant (heap : Mutable.Heap) (closed : Closed heap) (choices : ChoiceSchedule)
     (name : String) (element iterable start : Expr) (filters : List Expr) (generators : List (String × Expr × List Expr))
     (env : HeapCalls.Env) (address used anchors : Nat) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
     (addressInside : address < heap.length) (envInside : EnvWithin heap.length env)
@@ -160,16 +240,21 @@ theorem iterator_sum_generator_invariant (heap : Mutable.Heap) (choices : Choice
   | none => trivial
   | some object =>
     cases object <;> try trivial
-    simp only [StepHeap, StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin]
-    refine ⟨trivial, envInside, ?_⟩
-    intro frame member
-    rcases List.mem_cons.mp member with rfl | member
-    · simp only [FrameWithin, StmtWithin]
-      refine ⟨comprehensionEnv_within heap.length env _ envInside, addressInside, ?_, by simp⟩
-      exact fun statement member => (comprehensionFilters_within 0 filters _ (sumBody_source element generators) statement member).mono (Nat.zero_le _)
-    · exact stackInside frame member
+    all_goals
+      simp only [StepHeap, StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin]
+      refine ⟨trivial, envInside, ?_⟩
+      intro frame member
+      rcases List.mem_cons.mp member with rfl | member
+      · simp only [FrameWithin, StmtWithin]
+        have body : ∀ statement ∈ comprehensionFilters filters (sumBody element generators), StmtWithin heap.length statement :=
+          fun statement member => (comprehensionFilters_within 0 filters _ (sumBody_source element generators) statement member).mono (Nat.zero_le _)
+        refine ⟨comprehensionEnv_within heap.length env _ envInside, addressInside, ?_⟩
+        first
+        | exact ⟨body, by simp⟩
+        | exact ⟨keySources_within heap closed address _ (by simp [found, Mutable.keyEntries]), body, by simp⟩
+      · exact stackInside frame member
 
-theorem iterator_extremum_generator_invariant (heap : Mutable.Heap) (choices : ChoiceSchedule)
+theorem iterator_extremum_generator_invariant (heap : Mutable.Heap) (closed : Closed heap) (choices : ChoiceSchedule)
     (target : Expr) (maximum : Bool) (fallback : Option Expr) (element iterable : Expr) (filters : List Expr)
     (generators : List (Expr × Expr × List Expr)) (env : HeapCalls.Env)
     (address used anchors : Nat) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
@@ -186,18 +271,24 @@ theorem iterator_extremum_generator_invariant (heap : Mutable.Heap) (choices : C
   | none => trivial
   | some object =>
     cases object <;> try trivial
-    simp only [StepHeap, StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin]
-    refine ⟨trivial, envInside, ?_⟩
-    intro frame member
-    rcases List.mem_cons.mp member with rfl | member
-    · simp only [FrameWithin, StmtWithin]
-      refine ⟨comprehensionTargetsEnv_within heap.length env _ envInside, addressInside, ?_, by simp⟩
-      have body := comprehensionTargetBody_within 0 target _ (comprehensionFilters_within 0 filters _
-        (comprehensionTargetsBody_within 0 _ generators (extremumBody_source maximum element)))
-      exact fun statement member => (body statement member).mono (Nat.zero_le _)
-    · exact stackInside frame member
+    all_goals
+      simp only [StepHeap, StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin]
+      refine ⟨trivial, envInside, ?_⟩
+      intro frame member
+      rcases List.mem_cons.mp member with rfl | member
+      · simp only [FrameWithin, StmtWithin]
+        have body := comprehensionTargetBody_within 0 target _ (comprehensionFilters_within 0 filters _
+          (comprehensionTargetsBody_within 0 _ generators (extremumBody_source maximum element)))
+        have bounded : ∀ statement ∈ comprehensionTargetBody target (comprehensionFilters filters
+            (comprehensionTargetsBody (extremumBody maximum element) generators)), StmtWithin heap.length statement :=
+          fun statement member => (body statement member).mono (Nat.zero_le _)
+        refine ⟨comprehensionTargetsEnv_within heap.length env _ envInside, addressInside, ?_⟩
+        first
+        | exact ⟨bounded, by simp⟩
+        | exact ⟨keySources_within heap closed address _ (by simp [found, Mutable.keyEntries]), bounded, by simp⟩
+      · exact stackInside frame member
 
-theorem iterator_sum_sequence_invariant (heap : Mutable.Heap) (choices : ChoiceSchedule)
+theorem iterator_sum_sequence_invariant (heap : Mutable.Heap) (closed : Closed heap) (choices : ChoiceSchedule)
     (address used anchors : Nat) (value : Mutable.Value) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
     (addressInside : address < heap.length) (valueInside : value.edge.Within heap.length)
     (stackInside : ∀ frame ∈ stack, FrameWithin heap.length frame) (globalsInside : GlobalsWithin heap.length globals) :
@@ -209,10 +300,16 @@ theorem iterator_sum_sequence_invariant (heap : Mutable.Heap) (choices : ChoiceS
   | none => trivial
   | some object =>
     cases object <;> try trivial
-    apply sumEnter_invariant heap anchors used _ (fun _ => none) value stack globals _ _ valueInside stackInside globalsInside
-    · simp only [StmtWithin]
-      exact ⟨addressInside, fun statement member => (sumBody_source (.name sumItem) [] statement member).mono (Nat.zero_le _), by simp⟩
-    · intro _ _ impossible; cases impossible
+    all_goals
+      apply sumEnter_invariant heap anchors used _ (fun _ => none) value stack globals _ _ valueInside stackInside globalsInside
+      · simp only [StmtWithin]
+        have body : ∀ statement ∈ sumBody (.name sumItem) [], StmtWithin heap.length statement :=
+          fun statement member => (sumBody_source (.name sumItem) [] statement member).mono (Nat.zero_le _)
+        refine ⟨addressInside, ?_⟩
+        first
+        | exact ⟨body, by simp⟩
+        | exact ⟨keySources_within heap closed address _ (by simp [found, Mutable.keyEntries]), body, by simp⟩
+      · intro _ _ impossible; cases impossible
 
 theorem iterator_list_comprehension_preserves {logical physical : Mutable.Heap} {rename : Nat → Nat}
     (layout : ExecutionLayout logical physical rename) (choices : ChoiceSchedule) (name : String)
@@ -227,9 +324,9 @@ theorem iterator_list_comprehension_preserves {logical physical : Mutable.Heap} 
         (relocateGlobals rename globals)) := by
   apply Preserves.allocated layout (.list []) (by simp) (by simp [ObjectWithin, objectValues])
   · exact comprehensionStart_heap logical (.name name) iterable _ (.list []) env address used stack
-  · exact comprehensionStart_within logical (.name name) iterable _ (.list []) env address used stack addressInside envInside
+  · exact comprehensionStart_within logical layout.closed (.name name) iterable _ (.list []) env address used stack addressInside envInside
       (comprehensionFilters_within (logical.length + 1) filters _ (comprehensionBody_within (logical.length + 1) logical.length element generators (by omega))) stackInside
-  · simpa only [relocateObject, List.map_nil] using iterator_list_comprehension_relocates layout.runtime choices name
+  · simpa only [relocateObject, List.map_nil] using iterator_list_comprehension_relocates layout.runtime layout.closed choices name
       element iterable filters generators env address used logicalAnchors physicalAnchors stack globals addressInside envInside stackInside
 
 theorem iterator_targets_comprehension_preserves {logical physical : Mutable.Heap} {rename : Nat → Nat}
@@ -245,9 +342,9 @@ theorem iterator_targets_comprehension_preserves {logical physical : Mutable.Hea
         (relocateGlobals rename globals)) := by
   apply Preserves.allocated layout (.list []) (by simp) (by simp [ObjectWithin, objectValues])
   · exact comprehensionStart_heap logical target iterable _ (.list []) env address used stack
-  · exact comprehensionStart_within logical target iterable _ (.list []) env address used stack addressInside envInside
+  · exact comprehensionStart_within logical layout.closed target iterable _ (.list []) env address used stack addressInside envInside
       (comprehensionFilters_within (logical.length + 1) filters _ (comprehensionTargetsBody_within (logical.length + 1) _ generators (by simp [StmtWithin]))) stackInside
-  · simpa only [relocateObject, List.map_nil] using iterator_targets_comprehension_relocates layout.runtime choices target
+  · simpa only [relocateObject, List.map_nil] using iterator_targets_comprehension_relocates layout.runtime layout.closed choices target
       element iterable filters generators env address used logicalAnchors physicalAnchors stack globals addressInside envInside stackInside
 
 theorem iterator_set_comprehension_preserves {logical physical : Mutable.Heap} {rename : Nat → Nat}
@@ -263,9 +360,9 @@ theorem iterator_set_comprehension_preserves {logical physical : Mutable.Heap} {
         (relocateGlobals rename globals)) := by
   apply Preserves.allocated layout (.set []) (by simp) (by simp [ObjectWithin, objectValues])
   · exact comprehensionStart_heap logical target iterable _ (.set []) env address used stack
-  · exact comprehensionStart_within logical target iterable _ (.set []) env address used stack addressInside envInside
+  · exact comprehensionStart_within logical layout.closed target iterable _ (.set []) env address used stack addressInside envInside
       (comprehensionFilters_within (logical.length + 1) filters _ (comprehensionTargetsBody_within (logical.length + 1) _ generators (by simp [StmtWithin]))) stackInside
-  · simpa only [relocateObject, List.map_nil] using iterator_set_comprehension_relocates layout.runtime choices target
+  · simpa only [relocateObject, List.map_nil] using iterator_set_comprehension_relocates layout.runtime layout.closed choices target
       element iterable filters generators env address used logicalAnchors physicalAnchors stack globals addressInside envInside stackInside
 
 theorem iterator_dict_comprehension_preserves {logical physical : Mutable.Heap} {rename : Nat → Nat}
@@ -281,9 +378,9 @@ theorem iterator_dict_comprehension_preserves {logical physical : Mutable.Heap} 
         (relocateGlobals rename globals)) := by
   apply Preserves.allocated layout (.dict []) (by simp) (by simp [ObjectWithin, objectValues])
   · exact comprehensionStart_heap logical target iterable _ (.dict []) env address used stack
-  · exact comprehensionStart_within logical target iterable _ (.dict []) env address used stack addressInside envInside
+  · exact comprehensionStart_within logical layout.closed target iterable _ (.dict []) env address used stack addressInside envInside
       (comprehensionFilters_within (logical.length + 1) filters _ (comprehensionTargetsBody_within (logical.length + 1) _ generators (by simp [StmtWithin]))) stackInside
-  · simpa only [relocateObject, List.map_nil] using iterator_dict_comprehension_relocates layout.runtime choices target key
+  · simpa only [relocateObject, List.map_nil] using iterator_dict_comprehension_relocates layout.runtime layout.closed choices target key
       element iterable filters generators env address used logicalAnchors physicalAnchors stack globals addressInside envInside stackInside
 
 /-- Every modeled fallback preserves the invariant needed by the next interpreter step. -/
@@ -316,8 +413,13 @@ theorem iteratorStep_preserves (choices : ChoiceSchedule) (core : SetCalls.State
       | cons frame stack =>
         cases frame with
         | sequence name body otherwise following env =>
-          exact unchanged (iterator_sequence_invariant logical choices logicalAnchors used address name body otherwise following env stack globals inside)
+          exact unchanged (iterator_sequence_invariant logical layout.closed choices logicalAnchors used address name body otherwise following env stack globals inside)
             (iterator_sequence_relocates layout.runtime choices logicalAnchors physicalAnchors used address name body otherwise following env stack globals inside.1)
+        | unpackSequence names body otherwise following env =>
+          exact unchanged (iterator_unpack_invariant logical layout.closed choices logicalAnchors used address names
+            body otherwise following env stack globals inside)
+            (iterator_unpack_relocates layout.runtime choices logicalAnchors physicalAnchors used address names
+              body otherwise following env stack globals inside.1)
         | _ =>
           apply unsupported <;> simp [relocateCore, HeapCalls.Relocation.relocateState, relocateWork, relocateValue, relocateFrame, iteratorStep]
   | block statements env =>
@@ -332,6 +434,14 @@ theorem iteratorStep_preserves (choices : ChoiceSchedule) (core : SetCalls.State
           ⟨iterator_cursor_heap logical choices logicalAnchors used address name original remaining body otherwise following env stack globals,
             iterator_cursor_within logical choices logicalAnchors used address name original remaining body otherwise following env stack globals inside globalsInside⟩
           (iterator_cursor_relocates layout.runtime choices logicalAnchors physicalAnchors used address name original remaining body otherwise following env stack globals cursorInside.1)
+      | keySetStepLoop name address originalSize remaining body otherwise =>
+        have cursorInside := inside.1.2 _ (List.mem_cons_self ..)
+        simp only [StmtWithin] at cursorInside
+        exact unchanged
+          (iterator_key_cursor_invariant logical choices logicalAnchors used address originalSize name remaining
+            body otherwise following env stack globals inside globalsInside)
+          (iterator_key_cursor_relocates layout.runtime choices logicalAnchors physicalAnchors used address originalSize name
+            remaining body otherwise following env stack globals cursorInside.1)
       | _ =>
         apply unsupported <;> simp [relocateCore, HeapCalls.Relocation.relocateState, relocateWork, relocateStmt, iteratorStep]
   | operation operation values =>
@@ -363,10 +473,10 @@ theorem iteratorStep_preserves (choices : ChoiceSchedule) (core : SetCalls.State
                 | exact iterator_dict_comprehension_preserves layout choices target key element iterable filters generators env
                     address used logicalAnchors physicalAnchors stack globals addressInside inside.1.1 inside.2
                 | exact unchanged
-                    (iterator_sum_generator_invariant logical choices target element iterable start filters generators env address used logicalAnchors stack globals addressInside inside.1.1 inside.2)
+                    (iterator_sum_generator_invariant logical layout.closed choices target element iterable start filters generators env address used logicalAnchors stack globals addressInside inside.1.1 inside.2)
                     (iterator_sum_generator_relocates layout.runtime choices target element iterable start filters generators env address used logicalAnchors physicalAnchors stack globals addressInside)
                 | exact unchanged
-                    (iterator_extremum_generator_invariant logical choices target maximum fallback element iterable filters generators env address used logicalAnchors stack globals addressInside inside.1.1 inside.2)
+                    (iterator_extremum_generator_invariant logical layout.closed choices target maximum fallback element iterable filters generators env address used logicalAnchors stack globals addressInside inside.1.1 inside.2)
                     (iterator_extremum_generator_relocates layout.runtime choices target maximum fallback element iterable filters generators env address used logicalAnchors physicalAnchors stack globals addressInside)
     | sumSequence =>
       cases values with
@@ -382,7 +492,7 @@ theorem iteratorStep_preserves (choices : ChoiceSchedule) (core : SetCalls.State
             | cons => exact unsupported rfl rfl
             | nil =>
               exact unchanged
-                (iterator_sum_sequence_invariant logical choices address used logicalAnchors start stack globals
+                (iterator_sum_sequence_invariant logical layout.closed choices address used logicalAnchors start stack globals
                   (inside.1.2 (.ref address) (by simp)) (inside.1.2 start (by simp)) inside.2 globalsInside)
                 (iterator_sum_sequence_relocates layout.runtime choices address used logicalAnchors physicalAnchors start stack globals
                   (inside.1.2 (.ref address) (by simp)) (inside.1.2 start (by simp)))

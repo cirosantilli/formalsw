@@ -129,6 +129,7 @@ theorem changed_size_fails (choices : ChoiceSchedule) (heap : Mutable.Heap)
 theorem fallback_correspondence (choices : ChoiceSchedule) (core : SetCalls.State)
     (physical : Mutable.Heap) (rename : Nat → Nat) (logicalAnchors physicalAnchors : Nat)
     (globals : Mutable.Globals) (layout : RuntimeLayout core.core.heap physical rename)
+    (closed : Closed core.core.heap)
     (inside : HeapCalls.Relocation.StateWithin core.core) :
     ∃ physicalAfter nextMap,
       (∀ address < core.core.heap.length, nextMap address = rename address) ∧
@@ -136,7 +137,7 @@ theorem fallback_correspondence (choices : ChoiceSchedule) (core : SetCalls.Stat
           (relocateGlobals rename globals) =
         SetCalls.Relocation.relocateStep nextMap physicalAfter physicalAnchors
           (SetCalls.iteratorStep choices logicalAnchors core globals) :=
-  iteratorStep_relocates choices core physical rename logicalAnchors physicalAnchors globals layout inside
+  iteratorStep_relocates choices core physical rename logicalAnchors physicalAnchors globals layout closed inside
 
 theorem filtered_entry_layout (choices : ChoiceSchedule) (logical physical : Mutable.Heap) (rename : Nat → Nat)
     (address used logicalAnchors physicalAnchors : Nat) (items : List Constant)
@@ -154,7 +155,7 @@ theorem filtered_entry_layout (choices : ChoiceSchedule) (logical physical : Mut
       ExecutionLayout (logical ++ [.list []]) (physical ++ [.list []]) nextMap := by
   dsimp only
   constructor
-  · have paired := iterator_list_comprehension_relocates layout.runtime choices "value" (.name "value")
+  · have paired := iterator_list_comprehension_relocates layout.runtime layout.closed choices "value" (.name "value")
       (.name "items") [.constant (.bool false)] [] env address used logicalAnchors physicalAnchors stack globals
       (List.getElem?_eq_some_iff.mp found).1 envInside stackInside
     simpa only [generators, SetCalls.iteratorStep, SetCalls.comprehensionStart, found,

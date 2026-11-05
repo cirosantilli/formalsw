@@ -98,4 +98,58 @@ theorem select_item (module : Module) (choices : ChoiceSchedule) (anchors used a
   exact select_item_mod module choices anchors used address index heap original remaining item env target
     body otherwise following stack found selected (by rw [choice]; exact Nat.mod_eq_of_lt (List.getElem?_eq_some_iff.mp selected).1)
 
+/-- Tuple-key traversal retains the original representatives, including their heap identities. -/
+theorem for_key_set_name (module : Module) (choices : ChoiceSchedule) (anchors used address : Nat)
+    (heap : Mutable.Heap) (items : List (HashKey × Mutable.Value)) (env : HeapCalls.Env) (target source : String)
+    (body otherwise following : List Stmt) (stack : List HeapCalls.Frame)
+    (lookup : env source = some (.ref address)) (found : heap[address]? = some (.keySet items)) :
+    Reaches choices module anchors
+      ⟨⟨.block (.forIn (.name target) (.name source) body otherwise :: following) env, stack, heap⟩, used⟩
+      ⟨⟨.block (.keySetStepLoop target address items.length (items.map (fun item => sequenceSource item.2))
+        body otherwise :: following) env, stack, heap⟩, used⟩ := by
+  apply Reaches.next (following := ⟨⟨.expr (.name source) env,
+    .sequence target body otherwise following env :: stack, heap⟩, used⟩) rfl
+  apply (Reaches.of_heap (Evaluates.lookup lookup anchors _) choices used).trans
+  exact .next (by simp [step, HeapCalls.step, HeapCalls.run, Mutable.sequence, found, iteratorStep, Mutable.unsupported]) .refl
+
+/-- Unpacking retains a live source set and assigns fields before executing the body. -/
+theorem unpack_key_set_start (module : Module) (choices : ChoiceSchedule) (anchors used address : Nat)
+    (heap : Mutable.Heap) (items : List (HashKey × Mutable.Value)) (env : HeapCalls.Env) (names : List String)
+    (body otherwise following : List Stmt) (stack : List HeapCalls.Frame)
+    (found : heap[address]? = some (.keySet items)) :
+    step module anchors choices
+      ⟨⟨.value (.ref address), .unpackSequence names body otherwise following env :: stack, heap⟩, used⟩ =
+      .next ⟨⟨.block (.keySetStepLoop "$formalsw.unpack" address items.length
+        (items.map (fun item => sequenceSource item.2))
+        (comprehensionTargetBody (.tuple (names.map Expr.name)) body) otherwise :: following) env, stack, heap⟩, used⟩ := by
+  simp [step, HeapCalls.step, HeapCalls.run, Mutable.sequence, found, iteratorStep, Mutable.unsupported,
+    Mutable.keyEntries]
+
+/-- Any unvisited representative may be selected; tuple keys are never copied or canonicalized here. -/
+theorem select_key_item_mod (module : Module) (choices : ChoiceSchedule) (anchors used address index : Nat)
+    (heap : Mutable.Heap) (items : List (HashKey × Mutable.Value)) (remaining : List SequenceSource)
+    (item : SequenceSource) (env : HeapCalls.Env) (target : String)
+    (body otherwise following : List Stmt) (stack : List HeapCalls.Frame)
+    (found : heap[address]? = some (.keySet items)) (selected : remaining[index]? = some item)
+    (choice : choices used % remaining.length = index) :
+    step module anchors choices
+      ⟨⟨.block (.keySetStepLoop target address items.length remaining body otherwise :: following) env, stack, heap⟩, used⟩ =
+      .next ⟨⟨.block (body ++ [Calls.loopContinuation body
+        (.keySetStepLoop target address items.length (remaining.eraseIdx index) body otherwise)] ++ following)
+        (setLocal env target (sequenceValue item)), stack, heap⟩, used + 1⟩ := by
+  cases remaining with
+  | nil => simp at selected
+  | cons head tail =>
+      change choices used % (tail.length + 1) = index at choice
+      simp [step, HeapCalls.step, iteratorStep, Mutable.keyEntries, found, choice, selected]
+
+theorem key_set_done (module : Module) (choices : ChoiceSchedule) (anchors used address : Nat)
+    (heap : Mutable.Heap) (items : List (HashKey × Mutable.Value)) (env : HeapCalls.Env) (target : String)
+    (body otherwise following : List Stmt) (stack : List HeapCalls.Frame)
+    (found : heap[address]? = some (.keySet items)) :
+    step module anchors choices
+      ⟨⟨.block (.keySetStepLoop target address items.length [] body otherwise :: following) env, stack, heap⟩, used⟩ =
+      .next ⟨⟨.block (otherwise ++ following) env, stack, heap⟩, used⟩ := by
+  simp [step, HeapCalls.step, iteratorStep, Mutable.keyEntries, found]
+
 end FormalSW.PyAst.SetCalls

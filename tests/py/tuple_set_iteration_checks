@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""
+Compare tuple-set traversal with Python, preserving aliases and every permitted order.
+"""
+import ast
+import itertools
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+
+
+def constant(value):
+    if type(value) is int:
+        return f'.int ({value})'
+    if type(value) is bool:
+        return '.bool ' + str(value).lower()
+    if value is None:
+        return '.none'
+    return '.string ' + json.dumps(value, ensure_ascii=False)
+
+
+def data(value):
+    if type(value) is list:
+        return '.list [' + ', '.join(map(data, value)) + ']'
+    return '.scalar (' + constant(value) + ')'
+
+
+bodies = {
+    'total': 'out = 0\nfor a, b in values:\n    out += a + b\nreturn out',
+    'indexed': 'out = 0\nfor pair in values:\n    out += pair[0] + pair[1]\nreturn out',
+    'nested': 'out = 0\nfor a, b in values:\n    for c, d in values:\n        out += a + b + c + d\nreturn out',
+    'duplicate': 'for pair in values:\n    values.add((pair[0], pair[1]))\nreturn len(values)',
+    'grow': 'for pair in values:\n    values.add((len(values) * 0 + 100, 200))\nreturn len(values)',
+    'continue_grow': 'for pair in values:\n    values.add((len(values) * 0 + 100, 200))\n    continue\nreturn len(values)',
+    'break_grow': 'for pair in values:\n    values.add((len(values) * 0 + 100, 200))\n    break\nelse:\n    return -1\nreturn len(values)',
+    'rebind': 'out = 0\nfor a, b in values:\n    values = set()\n    out += a + b\nreturn out',
+    'count_else': 'out = 0\nfor pair in values:\n    out += 1\nelse:\n    out += 100\nreturn out',
+    'skip': 'out = 0\nfor a, b in values:\n    if a < 0:\n        continue\n    out += b\nreturn out',
+    'first': 'for pair in values:\n    return pair\nreturn None',
+    'collect': 'out = []\nfor pair in values:\n    out.append(pair)\nreturn out',
+    'wrong_arity': 'for a, b, c in values:\n    return a\nreturn None',
+    'set_comp': 'return {a + b for a, b in values}',
+    'list_comp': 'return sorted([a + b for a, b in values])',
+    'dict_comp': 'return sorted({a: b for a, b in values})',
+    'min_comp': 'return min((pair[0] + pair[1] for pair in values), default=100)',
+    'sum_comp': 'return sum(pair[0] + pair[1] for pair in values)',
+    'max_comp': 'return max((pair[0] + pair[1] for pair in values), default=-100)',
+}
+source = ''.join(f'\ndef {name}(values: set[tuple[int, int]]):\n'
+                 + ''.join('    ' + line + '\n' for line in body.splitlines())
+                 for name, body in bodies.items())
+program = ast.parse(source)
+checker = SupportChecker(program)
+for name in bodies:
+    assert not checker.check(name, heap_calls=True), (name, checker.check(name, heap_calls=True))
+world = {}
+exec(source, world)
+lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
+         'def source : Module := pyast_from_json% (include_str "source.json")']
+schedules = [('fun _ => 0', lambda _: 0), ('fun _ => 17', lambda _: 17),
+             ('fun n => n + 1', lambda n: n + 1)]
+count = 0
+
+
+def check(name, initial, schedule, choose):
+    global count
+    pairs = [tuple(list(pair)) for pair in initial]
+    values = set(pairs)
+    representatives = list(dict.fromkeys(pairs))
+    remaining, ordered = representatives.copy(), []
+    while remaining:
+        ordered.append(remaining.pop(choose(len(ordered)) % len(remaining)))
+    try:
+        result = world[name](ordered if name in ('collect', 'first') else values)
+        error = None
+    except (RuntimeError, ValueError, TypeError) as exc:
+        result, error = None, type(exc).__name__
+    expected = data(snapshot_roots(pairs + [values] + ([result] if error is None else [])))
+    objects = ['.tuple [' + ', '.join('.scalar (' + constant(v) + ')' for v in pair) + ']' for pair in pairs]
+    entries = ['(.tuple [' + ', '.join('.scalar (' + constant(v) + ')' for v in pair) + f'], .ref {i})'
+               for i, pair in enumerate(pairs) if any(pair is representative for representative in representatives)]
+    objects.append('.keySet [' + ', '.join(entries) + ']')
+    heap = '[' + ', '.join(objects) + ']'
+    call = f'(SetCalls.call source "{name}" [.ref {len(pairs)}] {heap}).run ({schedule})'
+    outcome = ('match c.outcome with | .ok _ => true | _ => false' if error is None else
+               f'match c.outcome with | .error e => decide (e = ⟨"{error}", []⟩) | _ => false')
+    lines.extend([f'-- {name}, {initial!r}, {schedule}',
+                  f'example : (match ({call}).execution.observe 5000 with',
+                  f'  | .done (.ok c) => ({outcome}) &&',
+                  f'      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 8000) == some true)',
+                  '  | _ => false) = true := by native_decide'])
+    count += 1
+
+
+for name, initial, (schedule, choose) in itertools.product(
+        bodies, ([], [(1, 2)], [(3, 4), (-2, 5), (1, 6)], [(True, 2), (1, 2)], [(1, 2), (True, 2)]), schedules):
+    check(name, initial, schedule, choose)
+
+for order in itertools.permutations(range(3)):
+    remaining, indices = list(range(3)), []
+    for item in order:
+        index = remaining.index(item)
+        indices.append(index)
+        remaining.pop(index)
+    schedule = 'fun n => ([' + ', '.join(map(str, indices)) + '] : List Nat)[n]?.getD 0'
+    check('collect', [(3, 4), (-2, 5), (1, 6)], schedule, lambda n: indices[n])
+
+with project_temporary_directory(prefix='tuple-set-iteration-checks-') as directory:
+    directory = Path(directory)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](program).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'{count} tuple-set iteration comparisons passed, including all orders, aliases, unpacking and mutation errors')

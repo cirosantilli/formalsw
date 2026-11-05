@@ -44,6 +44,9 @@ def relocateStmt (rename : Nat → Nat) : Stmt → Stmt
   | .setStepLoop name address original remaining body otherwise =>
       .setStepLoop name (rename address) original remaining
         (body.map (relocateStmt rename)) (otherwise.map (relocateStmt rename))
+  | .keySetStepLoop name address originalSize remaining body otherwise =>
+      .keySetStepLoop name (rename address) originalSize (remaining.map (relocateSource rename))
+        (body.map (relocateStmt rename)) (otherwise.map (relocateStmt rename))
   | .unpackStepLoop names source position body otherwise =>
       .unpackStepLoop names (relocateSource rename source) position
         (body.map (relocateStmt rename)) (otherwise.map (relocateStmt rename))

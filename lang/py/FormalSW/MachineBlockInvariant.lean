@@ -40,7 +40,7 @@ theorem step_block_preserves (body : List Stmt) (env : Env) (stack : List Frame)
     | loopResume => apply step_loopResume_preserves <;> assumption
     | «assert» => apply step_assert_preserves <;> assumption
     | expr => apply step_expression_statement_preserves <;> assumption
-    | classDef | dataclassFields | functionDef | globalDecl | rangeLoop | setStepLoop | unsupported | importFrom | importModules =>
+    | classDef | dataclassFields | functionDef | globalDecl | rangeLoop | setStepLoop | keySetStepLoop | unsupported | importFrom | importModules =>
       apply Preserves.unchanged layout <;> simp only [step, relocateState, relocateWork, List.map_cons, relocateStmt, protectGenerator, relocateStep, StepHeap, StepWithin]
     | forDictionaryItems =>
       apply Preserves.unchanged layout

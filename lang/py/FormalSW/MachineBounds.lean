@@ -76,6 +76,10 @@ def StmtWithin (limit : Nat) : Stmt → Prop
       address < limit ∧
       (∀ statement ∈ body, StmtWithin limit statement) ∧
       (∀ statement ∈ otherwise, StmtWithin limit statement)
+  | .keySetStepLoop _ address _ remaining body otherwise =>
+      address < limit ∧ (∀ source ∈ remaining, SourceWithin limit source) ∧
+      (∀ statement ∈ body, StmtWithin limit statement) ∧
+      (∀ statement ∈ otherwise, StmtWithin limit statement)
   | .unpackStepLoop _ source _ body otherwise =>
       SourceWithin limit source ∧
       (∀ statement ∈ body, StmtWithin limit statement) ∧

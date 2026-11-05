@@ -27,6 +27,9 @@ def kind_of(annotation, prefix='', suffix=''):
 
 
 cases = {
+    'set[tuple[int, int]]': ('set[tuple[int,int]]', '.set (.tuple [.scalar "int", .scalar "int"])'),
+    'set[tuple[int, ...]]': ('set[tuple[int,...]]', '.set (.tupleOf (.scalar "int"))'),
+    'tuple[set[int]]': ('tuple[set[int]]', '.tuple [.set (.scalar "int")]'),
     'dict[str, tuple[int, int]]': ('dict[str,tuple[int,int]]',
         '.dictionary (.scalar "str") (.tuple [.scalar "int", .scalar "int"])'),
     'list[tuple[int, int]]': ('list[tuple[int,int]]', '.list (.tuple [.scalar "int", .scalar "int"])'),
@@ -48,6 +51,10 @@ for annotation, (kind, term) in cases.items():
     assert container_type_term(actual) == term
     assert not SupportChecker(module).check('f'), annotation
 
+set_kind, set_module = kind_of('Set[Tuple[int, int]]', 'from typing import Set, Tuple')
+assert set_kind == 'set[tuple[int,int]]'
+assert not SupportChecker(set_module).check('f')
+
 for prefix, annotation in (
     ('from typing import List, Tuple', 'List[Tuple[int, int]]'),
     ('from typing import Tuple as Pair', 'list[Pair[int, int]]'),
@@ -59,12 +66,14 @@ for prefix, annotation in (
     assert not SupportChecker(module).check('f'), (prefix, annotation)
 
 for annotation in ('tuple[int, ..., str]', 'tuple[...]', 'tuple[float]',
-                   'list[tuple[int, object]]', 'tuple[set[int]]', 'dict[list[int], str]'):
+                   'list[tuple[int, object]]', 'set[tuple[list[int]]]', 'set[set[int]]',
+                   'dict[set[int], str]', 'dict[list[int], str]'):
     kind, _ = kind_of(annotation)
     assert kind is None, (annotation, kind)
 
 for prefix, annotation, suffix in (
     ('', 'tuple[int, int]', '\ntuple = list\n'),
+    ('', 'set[tuple[int, int]]', '\nset = list\n'),
     ('', 'tuple[list[int]]', '\nlist = tuple\n'),
     ('', 'dict[str, tuple[int]]', '\ndict = list\n'),
     ('from other import Tuple', 'Tuple[int, int]', ''),

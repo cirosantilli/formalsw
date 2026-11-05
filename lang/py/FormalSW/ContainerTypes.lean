@@ -1,6 +1,6 @@
 import lang.py.FormalSW.Choices
 
-/-! Structural annotation domains for nested lists and immutable tuples.
+/-! Structural annotation domains for nested containers and immutable tuple keys.
 
 Every container retains its original heap address. The domain does not require
 distinct addresses, copy elements, or turn a tuple into a mathematical list at
@@ -11,6 +11,7 @@ namespace FormalSW.PyAst.Mutable
 inductive ContainerType where
   | scalar (kind : String)
   | list (element : ContainerType)
+  | set (element : ContainerType)
   | tuple (fields : List ContainerType)
   | tupleOf (element : ContainerType)
   | dictionary (key value : ContainerType)
@@ -23,6 +24,14 @@ inductive Value.HasContainerType (heap : Heap) : Value → ContainerType → Pro
       heap[address]? = some (.list items) →
       (∀ item ∈ items, HasContainerType heap item element) →
       HasContainerType heap (.ref address) (.list element)
+  | scalarSet {address : Nat} {items : List Constant} {element : ContainerType} :
+      heap[address]? = some (.set items) →
+      (∀ item ∈ items, HasContainerType heap (.scalar item) element) →
+      HasContainerType heap (.ref address) (.set element)
+  | keyedSet {address : Nat} {items : List (HashKey × Value)} {element : ContainerType} :
+      heap[address]? = some (.keySet items) →
+      (∀ item ∈ items, HasContainerType heap item.2 element) →
+      HasContainerType heap (.ref address) (.set element)
   | fixedTuple {address : Nat} {items : List Value} {fields : List ContainerType} :
       heap[address]? = some (.tuple items) → items.length = fields.length →
       (∀ pair ∈ items.zip fields, HasContainerType heap pair.1 pair.2) →
@@ -51,6 +60,8 @@ theorem Value.HasContainerType.of_heap_preserved
   induction typed with
   | scalar same => exact .scalar same
   | list found _ ih => exact .list (preserved _ _ found) ih
+  | scalarSet found _ ih => exact .scalarSet (preserved _ _ found) ih
+  | keyedSet found _ ih => exact .keyedSet (preserved _ _ found) ih
   | fixedTuple found length _ ih => exact .fixedTuple (preserved _ _ found) length ih
   | variadicTuple found _ ih => exact .variadicTuple (preserved _ _ found) ih
   | scalarDictionary found _ _ keys values => exact .scalarDictionary (preserved _ _ found) keys values

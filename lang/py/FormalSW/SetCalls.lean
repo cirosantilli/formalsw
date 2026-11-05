@@ -31,6 +31,10 @@ def comprehensionStart (target iterable : Expr) (body : List Stmt) (collector : 
           [.setStepLoop (comprehensionTargetName target) address items items
             (comprehensionTargetBody target body) []] env,
           .comprehensionResult heap.length :: stack, heap ++ [collector]⟩, used⟩
+      | some (.keySet items) => .next ⟨⟨.block
+          [.keySetStepLoop (comprehensionTargetName target) address items.length
+            (items.map (fun item => sequenceSource item.2)) (comprehensionTargetBody target body) []] env,
+          .comprehensionResult heap.length :: stack, heap ++ [collector]⟩, used⟩
       | _ => .unsupported
 
 def iteratorStep (choices : ChoiceSchedule) (anchors : Nat) (state : State)
@@ -70,6 +74,11 @@ def iteratorStep (choices : ChoiceSchedule) (anchors : Nat) (state : State)
                 (comprehensionFilters filters (sumBody element generators)) [])
                 (comprehensionEnv env ((name, iterable, filters) :: generators)) :: stack,
               heap⟩, used⟩
+          | some (.keySet items) => .next ⟨⟨.expr start env,
+              .sumStart (.keySetStepLoop name address items.length (items.map (fun item => sequenceSource item.2))
+                (comprehensionFilters filters (sumBody element generators)) [])
+                (comprehensionEnv env ((name, iterable, filters) :: generators)) :: stack,
+              heap⟩, used⟩
           | _ => .unsupported
   | .operation (.extremumGenerator maximum fallback element
       ((target, iterable, filters) :: generators) env) [.ref address], stack =>
@@ -85,6 +94,15 @@ def iteratorStep (choices : ChoiceSchedule) (anchors : Nat) (state : State)
                   (.setStepLoop (comprehensionTargetName target) address items items body [])
                   (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)) :: stack,
                 heap⟩, used⟩
+          | some (.keySet items) =>
+              let body := comprehensionTargetBody target
+                (comprehensionFilters filters (comprehensionTargetsBody (extremumBody maximum element) generators))
+              .next ⟨⟨.expr (fallback.getD (.constant .none)) env,
+                .extremumStart fallback.isSome
+                  (.keySetStepLoop (comprehensionTargetName target) address items.length
+                    (items.map (fun item => sequenceSource item.2)) body [])
+                  (comprehensionTargetsEnv env ((target, iterable, filters) :: generators)) :: stack,
+                heap⟩, used⟩
           | _ => .unsupported
   | .operation .sumSequence [.ref address, start], stack =>
       match heap[address]? with
@@ -92,12 +110,42 @@ def iteratorStep (choices : ChoiceSchedule) (anchors : Nat) (state : State)
           (sumEnter (globals := globals) anchors
             (.setStepLoop sumItem address items items (sumBody (.name sumItem) []) [])
             (fun _ => none) start stack heap)
+      | some (.keySet items) => liftStep used
+          (sumEnter (globals := globals) anchors
+            (.keySetStepLoop sumItem address items.length (items.map (fun item => sequenceSource item.2))
+              (sumBody (.name sumItem) []) []) (fun _ => none) start stack heap)
       | _ => .unsupported
   | .value (.ref address), .sequence name body otherwise following env :: stack =>
       match heap[address]? with
       | some (.set items) => .next ⟨⟨.block
           (.setStepLoop name address items items body otherwise :: following) env, stack, heap⟩, used⟩
+      | some (.keySet items) => .next ⟨⟨.block
+          (.keySetStepLoop name address items.length (items.map (fun item => sequenceSource item.2))
+            body otherwise :: following) env, stack, heap⟩, used⟩
       | _ => .unsupported
+  | .value (.ref address), .unpackSequence names body otherwise following env :: stack =>
+      match (heap[address]?).bind Mutable.keyEntries with
+      | some items => .next ⟨⟨.block
+          (.keySetStepLoop "$formalsw.unpack" address items.length (items.map (fun item => sequenceSource item.2))
+            (comprehensionTargetBody (.tuple (names.map Expr.name)) body) otherwise :: following) env,
+          stack, heap⟩, used⟩
+      | none => .unsupported
+  | .block (.keySetStepLoop name address originalSize remaining body otherwise :: following) env, stack =>
+      match (heap[address]?).bind Mutable.keyEntries with
+      | some current =>
+          if current.length != originalSize then
+            liftStep used (done (globals := globals) anchors heap
+              (.error { typeName := "RuntimeError", args := [] }))
+          else match remaining with
+          | [] => .next ⟨⟨.block (otherwise ++ following) env, stack, heap⟩, used⟩
+          | _ :: _ =>
+              let index := choices used % remaining.length
+              match remaining[index]? with
+              | none => .unsupported
+              | some item => .next ⟨⟨.block (body ++ [Calls.loopContinuation body
+                  (.keySetStepLoop name address originalSize (remaining.eraseIdx index) body otherwise)] ++ following)
+                  (setLocal env name (sequenceValue item)), stack, heap⟩, used + 1⟩
+      | none => .unsupported
   | .block (.setStepLoop name address original remaining body otherwise :: following) env, stack =>
       match heap[address]? with
       | some (.set current) =>

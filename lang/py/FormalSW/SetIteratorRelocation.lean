@@ -15,6 +15,36 @@ def StepWithin : Step SetCalls.State Mutable.Completion → Prop
   | .done (.ok completion) => CompletionWithin completion
   | .done (.error _) | .unsupported => True
 
+theorem keyEntries_relocates (rename : Nat → Nat) (object : Mutable.Object) :
+    Mutable.keyEntries (relocateObject rename object) =
+      (Mutable.keyEntries object).map (List.map fun entry => (entry.1, relocateValue rename entry.2)) := by
+  cases object <;> simp [Mutable.keyEntries, relocateObject, List.map_map, Function.comp_def, relocateValue]
+
+theorem keyEntries_within (heap : Mutable.Heap) (closed : Closed heap) (address : Nat)
+    (items : List (HashKey × Mutable.Value))
+    (found : (heap[address]?).bind Mutable.keyEntries = some items) :
+    ∀ entry ∈ items, entry.2.edge.Within heap.length := by
+  cases lookup : heap[address]? with
+  | none => simp [lookup] at found
+  | some object =>
+    have bounded := closed object (List.mem_of_getElem? lookup)
+    cases object <;> simp [lookup, Mutable.keyEntries] at found
+    · subst items
+      intro entry member
+      rcases List.mem_map.mp member with ⟨value, _, rfl⟩
+      trivial
+    · subst items
+      intro entry member
+      exact bounded entry.2 (List.mem_map.mpr ⟨entry, member, rfl⟩)
+
+theorem keySources_within (heap : Mutable.Heap) (closed : Closed heap) (address : Nat)
+    (items : List (HashKey × Mutable.Value))
+    (found : (heap[address]?).bind Mutable.keyEntries = some items) :
+    ∀ source ∈ items.map (fun entry => sequenceSource entry.2), SourceWithin heap.length source := by
+  intro source member
+  rcases List.mem_map.mp member with ⟨entry, entryMember, rfl⟩
+  exact sequenceSource_within _ _ (keyEntries_within heap closed address items found entry entryMember)
+
 theorem iterator_sequence_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
     (layout : RuntimeLayout logical physical rename) (choices : ChoiceSchedule)
     (logicalAnchors physicalAnchors used address : Nat) (name : String) (body otherwise following : List Stmt)
@@ -31,6 +61,70 @@ theorem iterator_sequence_relocates {logical physical : Mutable.Heap} {rename : 
     simp [iteratorStep, relocateCore, HeapCalls.Relocation.relocateState, relocateWork, relocateValue,
       relocateFrame, found, object, relocateObject] at moved ⊢ <;>
     simp [moved, relocateStep, Step.map, relocateCore, HeapCalls.Relocation.relocateState, relocateWork, relocateStmt]
+  intro key value _
+  cases value <;> rfl
+
+theorem iterator_unpack_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
+    (layout : RuntimeLayout logical physical rename) (choices : ChoiceSchedule)
+    (logicalAnchors physicalAnchors used address : Nat) (names : List String) (body otherwise following : List Stmt)
+    (env : HeapCalls.Env) (stack : List HeapCalls.Frame) (globals : Mutable.Globals)
+    (inside : address < logical.length) :
+    iteratorStep choices physicalAnchors
+      (relocateCore rename physical ⟨⟨.value (.ref address), .unpackSequence names body otherwise following env :: stack, logical⟩, used⟩)
+      (relocateGlobals rename globals) =
+      relocateStep rename physical physicalAnchors (iteratorStep choices logicalAnchors
+        ⟨⟨.value (.ref address), .unpackSequence names body otherwise following env :: stack, logical⟩, used⟩ globals) := by
+  have found : logical[address]? = some logical[address] := List.getElem?_eq_getElem inside
+  have moved := layout.lookup address _ found
+  simp only [relocateCore, HeapCalls.Relocation.relocateState, relocateWork, relocateValue, List.map_cons,
+    relocateFrame, iteratorStep, found, moved, Option.bind_some, keyEntries_relocates]
+  cases entries : Mutable.keyEntries logical[address] <;>
+    simp [relocateStep, Step.map, relocateCore, HeapCalls.Relocation.relocateState, relocateWork,
+      relocateStmt, ← comprehensionTargetBody_relocates]
+  intro key value _
+  cases value <;> rfl
+
+private theorem eraseIdx_map_sources (rename : Nat → Nat) (items : List SequenceSource) (index : Nat) :
+    (items.map (relocateSource rename)).eraseIdx index =
+      (items.eraseIdx index).map (relocateSource rename) := by
+  induction items generalizing index with
+  | nil => simp
+  | cons first rest ih => cases index <;> simp [List.eraseIdx, ih]
+
+theorem iterator_key_cursor_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
+    (layout : RuntimeLayout logical physical rename) (choices : ChoiceSchedule)
+    (logicalAnchors physicalAnchors used address originalSize : Nat) (name : String) (remaining : List SequenceSource)
+    (body otherwise following : List Stmt) (env : HeapCalls.Env) (stack : List HeapCalls.Frame)
+    (globals : Mutable.Globals) (inside : address < logical.length) :
+    iteratorStep choices physicalAnchors
+      (relocateCore rename physical ⟨⟨.block
+        (.keySetStepLoop name address originalSize remaining body otherwise :: following) env, stack, logical⟩, used⟩)
+      (relocateGlobals rename globals) =
+      relocateStep rename physical physicalAnchors (iteratorStep choices logicalAnchors
+        ⟨⟨.block (.keySetStepLoop name address originalSize remaining body otherwise :: following) env, stack, logical⟩, used⟩ globals) := by
+  have found : logical[address]? = some logical[address] := List.getElem?_eq_getElem inside
+  have moved := layout.lookup address _ found
+  simp only [relocateCore, HeapCalls.Relocation.relocateState, relocateWork, List.map_cons, relocateStmt,
+    iteratorStep, found, moved, Option.bind_some, keyEntries_relocates]
+  cases entries : Mutable.keyEntries logical[address] with
+  | none => rfl
+  | some current =>
+    simp only [Option.map_some, List.length_map]
+    by_cases changed : current.length != originalSize
+    · simp [changed, liftStep, done, relocateStep, Step.map, relocateCompletion, Except.map]
+    · simp only [changed, Bool.false_eq_true, if_false]
+      cases remaining with
+      | nil => simp [relocateStep, Step.map, relocateCore, HeapCalls.Relocation.relocateState, relocateWork]
+      | cons first rest =>
+        simp only [List.length_cons]
+        rw [List.getElem?_map]
+        simp only [List.map_cons]
+        cases selected : (first :: rest)[choices used % (rest.length + 1)]? with
+        | none => simp [relocateStep, Step.map]
+        | some item =>
+          simp [relocateStep, Step.map, relocateCore, HeapCalls.Relocation.relocateState,
+            relocateWork, relocateEnv_set, sequenceValue_relocate, ← List.map_cons, eraseIdx_map_sources]
+          simp [← loopContinuation_relocate, relocateStmt]
 
 theorem iterator_cursor_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
     (layout : RuntimeLayout logical physical rename) (choices : ChoiceSchedule)
@@ -175,7 +269,7 @@ theorem comprehensionTargetsBody_within (limit : Nat) (terminal : List Stmt)
       exact ⟨by assumption, by simp⟩
 
 theorem comprehensionStart_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
-    (layout : RuntimeLayout logical physical rename) (target iterable : Expr) (body : List Stmt)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical) (target iterable : Expr) (body : List Stmt)
     (collector : Mutable.Object) (env : HeapCalls.Env) (address used anchors : Nat) (stack : List HeapCalls.Frame)
     (addressInside : address < logical.length) (envInside : EnvWithin logical.length env)
     (stackInside : ∀ frame ∈ stack, FrameWithin logical.length frame) :
@@ -190,6 +284,16 @@ theorem comprehensionStart_relocates {logical physical : Mutable.Heap} {rename :
   have agree := extendMap_old rename logical.length physical.length
   have envSame := relocateEnv_congr _ rename logical.length env agree envInside
   have stackSame := relocateStack_congr _ rename logical.length stack agree stackInside
+  have sourceSame (key : HashKey) (value : Mutable.Value)
+      (items : List (HashKey × Mutable.Value)) (object : logical[address] = .keySet items)
+      (member : (key, value) ∈ items) :
+      sequenceSource (relocateValue rename value) =
+        relocateSource (extendMap rename logical.length physical.length) (sequenceSource value) := by
+    rw [← sequenceSource_relocate]
+    congr 1
+    apply (relocateValue_congr _ rename logical.length value agree _).symm
+    exact keyEntries_within logical closed address items (by simp [found, object, Mutable.keyEntries])
+      (key, value) member
   unfold comprehensionStart
   split <;> try rfl
   cases object : logical[address] <;>
@@ -197,8 +301,10 @@ theorem comprehensionStart_relocates {logical physical : Mutable.Heap} {rename :
     simp [found, object, moved, relocateStep, Step.map, relocateCore, HeapCalls.Relocation.relocateState,
       relocateWork, relocateStmt, relocateFrame, comprehensionTargetBody_relocates,
       extendMap_new, agree address addressInside, envSame, stackSame]
+  intro key value member
+  exact sourceSame key value _ object member
 
-theorem comprehensionStart_within (heap : Mutable.Heap) (target iterable : Expr) (body : List Stmt)
+theorem comprehensionStart_within (heap : Mutable.Heap) (closed : Closed heap) (target iterable : Expr) (body : List Stmt)
     (collector : Mutable.Object) (env : HeapCalls.Env) (address used : Nat) (stack : List HeapCalls.Frame)
     (addressInside : address < heap.length) (envInside : EnvWithin heap.length env)
     (bodyInside : ∀ statement ∈ body, StmtWithin (heap.length + 1) statement)
@@ -211,17 +317,23 @@ theorem comprehensionStart_within (heap : Mutable.Heap) (target iterable : Expr)
   | none => trivial
   | some object =>
     cases object <;> try trivial
-    simp only [StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin, List.length_append, List.length_singleton]
-    refine ⟨⟨envInside.mono (by omega), ?_⟩, ?_⟩
-    · simpa only [List.mem_cons, List.not_mem_nil, or_false, forall_eq, StmtWithin] using
-        And.intro (show address < heap.length + 1 by omega) (And.intro bodyBound (by simp))
-    · intro frame member
-      rcases List.mem_cons.mp member with rfl | member
-      · simp [FrameWithin]
-      · exact (stackInside frame member).mono (by omega)
+    all_goals
+      simp only [StepWithin, HeapCalls.Relocation.StateWithin, WorkWithin, List.length_append, List.length_singleton]
+      refine ⟨⟨envInside.mono (by omega), ?_⟩, ?_⟩
+      · simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq, StmtWithin]
+        refine ⟨by omega, ?_⟩
+        first
+        | exact ⟨bodyBound, by simp⟩
+        | refine ⟨?_, bodyBound, by simp⟩
+          intro source member
+          exact (keySources_within heap closed address _ (by simp [found, Mutable.keyEntries]) source member).mono (by omega)
+      · intro frame member
+        rcases List.mem_cons.mp member with rfl | member
+        · simp [FrameWithin]
+        · exact (stackInside frame member).mono (by omega)
 
 theorem iterator_list_comprehension_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
-    (layout : RuntimeLayout logical physical rename) (choices : ChoiceSchedule) (name : String)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical) (choices : ChoiceSchedule) (name : String)
     (element iterable : Expr) (filters : List Expr) (generators : List (String × Expr × List Expr))
     (env : HeapCalls.Env) (address used logicalAnchors physicalAnchors : Nat) (stack : List HeapCalls.Frame)
     (globals : Mutable.Globals) (addressInside : address < logical.length) (envInside : EnvWithin logical.length env)
@@ -231,7 +343,7 @@ theorem iterator_list_comprehension_relocates {logical physical : Mutable.Heap} 
       (relocateGlobals rename globals) =
       relocateStep (extendMap rename logical.length physical.length) (physical ++ [.list []]) physicalAnchors
         (iteratorStep choices logicalAnchors ⟨⟨.operation (.comprehension element ((name, iterable, filters) :: generators) env) [.ref address], stack, logical⟩, used⟩ globals) := by
-  have paired := comprehensionStart_relocates layout (.name name) iterable
+  have paired := comprehensionStart_relocates layout closed (.name name) iterable
     (comprehensionFilters filters (comprehensionBody logical.length element generators)) (.list [])
     env address used physicalAnchors stack addressInside envInside stackInside
   simpa only [iteratorStep, relocateCore, HeapCalls.Relocation.relocateState, relocateWork,
@@ -240,7 +352,7 @@ theorem iterator_list_comprehension_relocates {logical physical : Mutable.Heap} 
     relocateStmt, extendMap_new, relocateObject] using paired
 
 theorem iterator_targets_comprehension_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
-    (layout : RuntimeLayout logical physical rename) (choices : ChoiceSchedule) (target : Expr)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical) (choices : ChoiceSchedule) (target : Expr)
     (element iterable : Expr) (filters : List Expr) (generators : List (Expr × Expr × List Expr))
     (env : HeapCalls.Env) (address used logicalAnchors physicalAnchors : Nat) (stack : List HeapCalls.Frame)
     (globals : Mutable.Globals) (addressInside : address < logical.length) (envInside : EnvWithin logical.length env)
@@ -250,7 +362,7 @@ theorem iterator_targets_comprehension_relocates {logical physical : Mutable.Hea
       (relocateGlobals rename globals) =
       relocateStep (extendMap rename logical.length physical.length) (physical ++ [.list []]) physicalAnchors
         (iteratorStep choices logicalAnchors ⟨⟨.operation (.comprehensionTargets element ((target, iterable, filters) :: generators) env) [.ref address], stack, logical⟩, used⟩ globals) := by
-  have paired := comprehensionStart_relocates layout target iterable
+  have paired := comprehensionStart_relocates layout closed target iterable
     (comprehensionFilters filters (comprehensionTargetsBody [.comprehensionAppend logical.length element] generators)) (.list [])
     env address used physicalAnchors stack addressInside envInside stackInside
   simpa only [iteratorStep, relocateCore, HeapCalls.Relocation.relocateState, relocateWork,
@@ -259,7 +371,7 @@ theorem iterator_targets_comprehension_relocates {logical physical : Mutable.Hea
     relocateStmt, extendMap_new, relocateObject] using paired
 
 theorem iterator_set_comprehension_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
-    (layout : RuntimeLayout logical physical rename) (choices : ChoiceSchedule) (target : Expr)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical) (choices : ChoiceSchedule) (target : Expr)
     (element iterable : Expr) (filters : List Expr) (generators : List (Expr × Expr × List Expr))
     (env : HeapCalls.Env) (address used logicalAnchors physicalAnchors : Nat) (stack : List HeapCalls.Frame)
     (globals : Mutable.Globals) (addressInside : address < logical.length) (envInside : EnvWithin logical.length env)
@@ -269,7 +381,7 @@ theorem iterator_set_comprehension_relocates {logical physical : Mutable.Heap} {
       (relocateGlobals rename globals) =
       relocateStep (extendMap rename logical.length physical.length) (physical ++ [.set []]) physicalAnchors
         (iteratorStep choices logicalAnchors ⟨⟨.operation (.setComprehension element ((target, iterable, filters) :: generators) env) [.ref address], stack, logical⟩, used⟩ globals) := by
-  have paired := comprehensionStart_relocates layout target iterable
+  have paired := comprehensionStart_relocates layout closed target iterable
     (comprehensionFilters filters (comprehensionTargetsBody [.comprehensionAdd logical.length element] generators)) (.set [])
     env address used physicalAnchors stack addressInside envInside stackInside
   simpa only [iteratorStep, relocateCore, HeapCalls.Relocation.relocateState, relocateWork,
@@ -278,7 +390,7 @@ theorem iterator_set_comprehension_relocates {logical physical : Mutable.Heap} {
     relocateStmt, extendMap_new, relocateObject] using paired
 
 theorem iterator_dict_comprehension_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
-    (layout : RuntimeLayout logical physical rename) (choices : ChoiceSchedule) (target key : Expr)
+    (layout : RuntimeLayout logical physical rename) (closed : Closed logical) (choices : ChoiceSchedule) (target key : Expr)
     (element iterable : Expr) (filters : List Expr) (generators : List (Expr × Expr × List Expr))
     (env : HeapCalls.Env) (address used logicalAnchors physicalAnchors : Nat) (stack : List HeapCalls.Frame)
     (globals : Mutable.Globals) (addressInside : address < logical.length) (envInside : EnvWithin logical.length env)
@@ -288,7 +400,7 @@ theorem iterator_dict_comprehension_relocates {logical physical : Mutable.Heap} 
       (relocateGlobals rename globals) =
       relocateStep (extendMap rename logical.length physical.length) (physical ++ [.dict []]) physicalAnchors
         (iteratorStep choices logicalAnchors ⟨⟨.operation (.dictionaryComprehension key element ((target, iterable, filters) :: generators) env) [.ref address], stack, logical⟩, used⟩ globals) := by
-  have paired := comprehensionStart_relocates layout target iterable
+  have paired := comprehensionStart_relocates layout closed target iterable
     (comprehensionFilters filters (comprehensionTargetsBody [.comprehensionStore logical.length key element] generators)) (.dict [])
     env address used physicalAnchors stack addressInside envInside stackInside
   simpa only [iteratorStep, relocateCore, HeapCalls.Relocation.relocateState, relocateWork,
@@ -342,7 +454,7 @@ theorem iterator_sum_generator_relocates {logical physical : Mutable.Heap} {rena
   split <;> try rfl
   cases object : logical[address] <;> simp only [object, relocateObject] at moved <;>
     simp [found, object, moved, relocateStep, Step.map, relocateCore, HeapCalls.Relocation.relocateState,
-      relocateWork, relocateFrame, relocateStmt, comprehensionEnv_relocates, bodySame]
+      relocateWork, relocateFrame, relocateStmt, comprehensionEnv_relocates, bodySame, sequenceSource_relocate]
 
 theorem iterator_extremum_generator_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
     (layout : RuntimeLayout logical physical rename) (choices : ChoiceSchedule) (target : Expr)
@@ -366,7 +478,7 @@ theorem iterator_extremum_generator_relocates {logical physical : Mutable.Heap} 
   split <;> try rfl
   cases object : logical[address] <;> simp only [object, relocateObject] at moved <;>
     simp [found, object, moved, relocateStep, Step.map, relocateCore, HeapCalls.Relocation.relocateState,
-      relocateWork, relocateFrame, relocateStmt, comprehensionTargetsEnv_relocates, bodySame]
+      relocateWork, relocateFrame, relocateStmt, comprehensionTargetsEnv_relocates, bodySame, sequenceSource_relocate]
 
 theorem sumInitial_relocates {logical physical : Mutable.Heap} {rename : Nat → Nat}
     (layout : RuntimeLayout logical physical rename) (value : Mutable.Value) (inside : value.edge.Within logical.length) :
@@ -427,6 +539,22 @@ theorem iterator_sum_sequence_relocates {logical physical : Mutable.Heap} {renam
     have lifted := congrArg (liftStep used) paired
     rw [IteratorCalls.Relocation.set_lift_relocates] at lifted
     simpa [relocateStep, relocateStmt, sumBody, relocateEnv] using lifted
+  | keySet items =>
+    simp only [object, relocateObject] at moved
+    have paired := sumEnter_relocates layout logicalAnchors physicalAnchors
+      (.keySetStepLoop sumItem address items.length (items.map (fun item => sequenceSource item.2)) (sumBody (.name sumItem) []) []) (fun _ => none) value stack globals valueInside
+    simp only [relocateCore, HeapCalls.Relocation.relocateState, relocateWork, relocateRuntimeOperation, relocateOperation,
+      List.map_cons, List.map_nil, relocateValue, iteratorStep, found, object, moved]
+    have lifted := congrArg (liftStep used) paired
+    rw [IteratorCalls.Relocation.set_lift_relocates] at lifted
+    refine Eq.trans ?_ lifted
+    congr 2
+    simp only [relocateStmt, List.length_map, List.map_map, Function.comp_def]
+    congr 1
+    · apply List.map_congr_left
+      intro entry _
+      exact sequenceSource_relocate rename entry.2
+    · simp [sumBody, relocateStmt]
   | _ =>
     simp only [object, relocateObject] at moved
     simp [relocateCore, HeapCalls.Relocation.relocateState, relocateWork, relocateRuntimeOperation, relocateOperation,
@@ -436,7 +564,7 @@ theorem iterator_sum_sequence_relocates {logical physical : Mutable.Heap} {renam
 Allocation may extend the map; saved old references keep their addresses. -/
 theorem iteratorStep_relocates (choices : ChoiceSchedule) (core : SetCalls.State)
     (physical : Mutable.Heap) (rename : Nat → Nat) (logicalAnchors physicalAnchors : Nat)
-    (globals : Mutable.Globals) (layout : RuntimeLayout core.core.heap physical rename)
+    (globals : Mutable.Globals) (layout : RuntimeLayout core.core.heap physical rename) (closed : Closed core.core.heap)
     (inside : HeapCalls.Relocation.StateWithin core.core) :
     ∃ physicalAfter nextMap,
       (∀ address < core.core.heap.length, nextMap address = rename address) ∧
@@ -465,6 +593,9 @@ theorem iteratorStep_relocates (choices : ChoiceSchedule) (core : SetCalls.State
         | sequence name body otherwise following env =>
           exact iterator_sequence_relocates layout choices logicalAnchors physicalAnchors used address name
             body otherwise following env stack globals inside.1
+        | unpackSequence names body otherwise following env =>
+          exact iterator_unpack_relocates layout choices logicalAnchors physicalAnchors used address names
+            body otherwise following env stack globals inside.1
         | _ => simp [relocateCore, HeapCalls.Relocation.relocateState, relocateWork, relocateValue,
             relocateFrame, iteratorStep, relocateStep, Step.map]
   | block statements env =>
@@ -478,6 +609,11 @@ theorem iteratorStep_relocates (choices : ChoiceSchedule) (core : SetCalls.State
         simp only [StmtWithin] at cursorInside
         exact iterator_cursor_relocates layout choices logicalAnchors physicalAnchors used address name
           original remaining body otherwise following env stack globals cursorInside.1
+      | keySetStepLoop name address originalSize remaining body otherwise =>
+        have cursorInside := inside.1.2 _ (List.mem_cons_self ..)
+        simp only [StmtWithin] at cursorInside
+        exact iterator_key_cursor_relocates layout choices logicalAnchors physicalAnchors used address originalSize name
+          remaining body otherwise following env stack globals cursorInside.1
       | _ => simp [relocateCore, HeapCalls.Relocation.relocateState, relocateWork, relocateStmt,
           iteratorStep, relocateStep, Step.map]
   | operation operation values =>
@@ -504,19 +640,19 @@ theorem iteratorStep_relocates (choices : ChoiceSchedule) (core : SetCalls.State
               first
                 | exact ⟨physical ++ [.list []], extendMap rename logical.length physical.length,
                     extendMap_old rename logical.length physical.length,
-                    iterator_list_comprehension_relocates layout choices target element iterable filters generators env
+                    iterator_list_comprehension_relocates layout closed choices target element iterable filters generators env
                       address used logicalAnchors physicalAnchors stack globals addressInside inside.1.1 inside.2⟩
                 | exact ⟨physical ++ [.list []], extendMap rename logical.length physical.length,
                     extendMap_old rename logical.length physical.length,
-                    iterator_targets_comprehension_relocates layout choices target element iterable filters generators env
+                    iterator_targets_comprehension_relocates layout closed choices target element iterable filters generators env
                       address used logicalAnchors physicalAnchors stack globals addressInside inside.1.1 inside.2⟩
                 | exact ⟨physical ++ [.set []], extendMap rename logical.length physical.length,
                     extendMap_old rename logical.length physical.length,
-                    iterator_set_comprehension_relocates layout choices target element iterable filters generators env
+                    iterator_set_comprehension_relocates layout closed choices target element iterable filters generators env
                       address used logicalAnchors physicalAnchors stack globals addressInside inside.1.1 inside.2⟩
                 | exact ⟨physical ++ [.dict []], extendMap rename logical.length physical.length,
                     extendMap_old rename logical.length physical.length,
-                    iterator_dict_comprehension_relocates layout choices target key element iterable filters generators env
+                    iterator_dict_comprehension_relocates layout closed choices target key element iterable filters generators env
                       address used logicalAnchors physicalAnchors stack globals addressInside inside.1.1 inside.2⟩
                 | exact unchanged (iterator_sum_generator_relocates layout choices target element iterable start filters generators env
                     address used logicalAnchors physicalAnchors stack globals addressInside)
