@@ -291,6 +291,62 @@ def solve(digits: list[int]) -> int:
         else:
             raise AssertionError(f"Invalid list measure accepted: {marker}")
 
+    for index, (container, integer, reversed_args, policy) in enumerate([
+        ("list[int]", "k", False, "fixed"),
+        ("list[int]", "_formalsw_heap", True, "bits"),
+        ("list[list[int]]", "k", False, "fixed"),
+        ("list[list[int]]", "input", True, "bits"),
+    ]):
+        arguments = [f"values: {container}", f"{integer}: int"]
+        if reversed_args:
+            arguments.reverse()
+        source = Path(directory) / f"window{index}.py"
+        source.write_text(f'''def solve({", ".join(arguments)}) -> int:
+    """
+    @formalsw: Requires({integer} >= -5)
+    @formalsw: BigO(1, n = abs({integer}) + 1, arithmetic={policy})
+    """
+    return len(values)
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Window", "WindowAst")
+        runtime = next(item for item in requirements if item.marker.startswith("BigO("))
+        assert not runtime.unsupported, runtime.unsupported
+        claim = runtime.property_type
+        family = "List (List Int) × Int" if container == "list[list[int]]" else "List Int × Int"
+        assert f"(fun input : {family} => input.2.natAbs + 1) (fun _ : Nat => 1)" in claim, claim
+        assert f"Runtime.IsBigO .{'word' if policy == 'fixed' else 'bits'}" in claim, claim
+        assert "requires_solve_0" in claim and "«" not in claim, claim
+        assert ("[.scalar (.int input.2), .ref 0]" if reversed_args else "[.ref 0, .scalar (.int input.2)]") in claim, claim
+        semantic = frontend["module_with_python_builtins"](source, module)
+        emitter = frontend["AstJsonEmitter"](semantic)
+        lean_checks.append(f"namespace WindowCase{index}\nnamespace WindowAst\nopen FormalSW.PyAst\n")
+        lean_checks.append(f"def module : Module := pyast_from_json% {frontend['lean_string'](emitter.emit())}\n")
+        for name, condition in module.formalsw_conditions.items():
+            lean_checks.append(f"def {name} : Expr := pyexpr_from_json% {frontend['lean_string'](json.dumps(emitter.expr(condition)))}\n")
+        lean_checks.append(f"end WindowAst\nexample : Prop := {claim}\nend WindowCase{index}\n")
+    lean_checks.append("example : (fun input : List (List Int) × Int => input.2.natAbs + 1) ([[], [-100]], -5) = 6 := rfl\n")
+
+    for kind, container in enumerate(("list[int]", "list[list[int]]")):
+        for index, measure in enumerate([
+            "abs(k)", "abs(k) + True", "abs(missing) + 1", "abs(values) + 1",
+            "abs(k, 2) + 1", "abs(value=k) + 1", "mutate(k) + 1",
+        ]):
+            source = Path(directory) / f"invalid_window{kind}_{index}.py"
+            source.write_text(f'''def solve(values: {container}, k: int) -> int:
+    """
+    @formalsw: BigO(n, n = {measure})
+    """
+    return len(values)
+''')
+            module = frontend["source_module"](source)
+            try:
+                frontend["collect_requirements"](source, module, "Invalid", "InvalidAst")
+            except InvalidRequirement as error:
+                assert "require" in str(error), error
+            else:
+                raise AssertionError(f"Invalid auxiliary-integer measure accepted: {measure}")
+
     for index, (first, second, heap, policy, guarded) in enumerate([
         ("start", "end", False, "fixed", True),
         ("start", "end", False, "bits", False),

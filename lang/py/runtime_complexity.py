@@ -10,6 +10,28 @@ from lang.py.global_inputs import annotation_kind
 from lang.py.contracts import heap_input_name
 
 
+def absolute_argument(node, name):
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "abs" and len(node.args) == 1 and not node.keywords
+            and isinstance(node.args[0], ast.Name) and node.args[0].id == name)
+
+
+def integer_argument_measure(expression, integers):
+    """Recognize an auxiliary integer's magnitude; other inputs stay quantified."""
+    if len(integers) != 1:
+        return None
+    try:
+        node = ast.parse(expression, mode="eval").body
+    except SyntaxError:
+        return None
+    if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+            and absolute_argument(node.left, integers[0].arg)
+            and isinstance(node.right, ast.Constant) and type(node.right.value) is int
+            and node.right.value == 1):
+        return "input.2.natAbs + 1"
+    return None
+
+
 def nested_list_measure(expression, name, values):
     """Recognize row count or total rows and cells without evaluating Python."""
     try:
@@ -50,7 +72,7 @@ def nested_list_input_family(function, arguments, args, conditions):
         raise ValueError("runtime BigO nested lists require an explicit size binding")
     family = "List (List Int) × Int" if integers else "List (List Int)"
     values = "input.1" if integers else "input"
-    size = nested_list_measure(args[1], lists[0].arg, values)
+    size = integer_argument_measure(args[1], integers) or nested_list_measure(args[1], lists[0].arg, values)
     heap = f"(FormalSW.PyAst.HeapCalls.Runtime.NestedIntList.heap {values})"
     replacements = {lists[0].arg: "(0 : Nat)", heap_input_name(function): heap}
     if integers:
@@ -107,7 +129,7 @@ def list_input_family(function, arguments, args, conditions):
         raise ValueError(f"runtime BigO list inputs require an explicit n = len({name}) binding")
     family = "List Int × Int" if integers else "List Int"
     values = "input.1" if integers else "input"
-    size = integer_list_measure(args[1], name, values)
+    size = integer_argument_measure(args[1], integers) or integer_list_measure(args[1], name, values)
     heap = f"[.list ({values}.map (fun value => .scalar (.int value)))]"
     replacements = {name: "(0 : Nat)", heap_input_name(function): heap}
     if integers:
@@ -135,16 +157,11 @@ def integer_pair_input_family(function, arguments, args, conditions, heap):
     except SyntaxError:
         node = None
 
-    def absolute(node, name):
-        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "abs" and len(node.args) == 1 and not node.keywords
-                and isinstance(node.args[0], ast.Name) and node.args[0].id == name)
-
     if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
             and isinstance(node.right, ast.Constant) and type(node.right.value) is int
             and node.right.value == 1 and isinstance(node.left, ast.BinOp)
             and isinstance(node.left.op, ast.Add)
-            and absolute(node.left.left, names[0]) and absolute(node.left.right, names[1])):
+            and absolute_argument(node.left.left, names[0]) and absolute_argument(node.left.right, names[1])):
         raise ValueError(f"runtime BigO integer pairs require {expected}")
     replacements = {names[0]: "input.1", names[1]: "input.2", heap_input_name(function): "[]"}
     predicate = " ∧ ".join(f"({condition})" for condition in conditions) or "True"

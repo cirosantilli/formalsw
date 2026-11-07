@@ -76,4 +76,31 @@ theorem chain (left : EvaluatesIn arithmetic module env expression heap ca value
       ⟨.expr right env, .chainRight op value (next :: rest) env :: stack, middle⟩ := advance rfl rfl rfl
   exact (((first.trans (left anchors _)).trans ready).trans (following anchors stack)).mono (by omega)
 
+/-- A chained index guard evaluates the bound only when the index is nonnegative. -/
+theorem nonnegative_below
+    (index : EvaluatesIn .word module env indexExpr heap ci (.scalar (.int value)) heap)
+    (bound : EvaluatesIn .word module env boundExpr heap cb (.scalar (.int size)) heap) :
+    EvaluatesIn .word module env
+      (.compare (.constant (.int 0)) [(.ltE, indexExpr), (.lt, boundExpr)]) heap
+      (ci+cb+11) (.scalar (.bool (decide (0 ≤ value ∧ value < size)))) heap := by
+  by_cases nonnegative : 0 ≤ value
+  · simp only [nonnegative, true_and]
+    apply EvaluatesIn.mono (small := 1+(ci+(cb+4)+4)+2) (larger := by omega)
+    apply chain (ca := 1) (cb := ci+(cb+4)+4) constant
+    apply ComparesIn.next (ca := ci) (cb := cb+4) (work := 2)
+      (comparisonResult := .bool true) index
+    · simp [HeapCalls.compare, scalarCompare, evalCmpOp, nonnegative]
+    · rfl
+    · rfl
+    · apply ComparesIn.last (cost := cb) (work := 2) bound
+      · simp [HeapCalls.compare, scalarCompare, evalCmpOp]
+      · rfl
+  · simp only [nonnegative, false_and, decide_false]
+    apply EvaluatesIn.mono (small := 1+(ci+4)+2) (larger := by omega)
+    apply chain (ca := 1) (cb := ci+4) constant
+    apply ComparesIn.stop (cost := ci) (work := 2) (answer := .bool false) index
+    · simp [HeapCalls.compare, scalarCompare, evalCmpOp, nonnegative]
+    · rfl
+    · rfl
+
 end FormalSW.PyAst.HeapCalls.Runtime.EvaluatesIn

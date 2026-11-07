@@ -30,6 +30,15 @@ def sequenceLength (heap : Heap) : Value → Option Nat
       | _ => none
   | _ => none
 
+/-- Shallow extension reads the source and writes through a grow-only array.
+The read allowance also covers snapshotting a receiver extended with itself. -/
+def listExtension (heap : Heap) (address : Nat) : Value → Option Nat
+  | .ref source => match heap[address]?, heap[source]? with
+      | some (.list items), some (.list additional) =>
+          some (DynamicArray.appendMany items.length additional.length + additional.length + 1)
+      | _, _ => none
+  | _ => none
+
 /-- Zip retains its builtin receivers. Each advance reads up to one item from
 each receiver and allocates a tuple containing the obtained references. -/
 def zipIteration (arithmetic : Arithmetic) (heap : Heap)
@@ -181,6 +190,8 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .attribute name :: _ => (RecordWork.field state.heap value name).map (· + 1)
       | .binaryRight .add (.ref address) false :: _ =>
           (SequenceWork.concatenate arithmetic state.heap (.ref address) value).map (· + 1)
+      | .binaryRight .add (.ref address) true :: _ =>
+          (listExtension state.heap address value).map (· + 1)
       | .binaryRight op (.scalar left) _ :: _ => match value with
           | .scalar right => (PrimitiveWork.binary arithmetic op left right).map (· + 1)
           | _ => (BufferWork.repetition arithmetic state.heap op (.scalar left) value).map (· + 1)

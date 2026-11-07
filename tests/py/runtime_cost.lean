@@ -102,13 +102,12 @@ example : HeapCalls.SequenceWork.slice .word 10 (.scalar .none) (.scalar .none) 
 example : HeapCalls.SequenceWork.slice .word 10 (.scalar .none) (.scalar (.string "bad")) (.scalar .none) =
     none := rfl
 
-/-- Concatenation copies both lists. Its fresh-allocation tariff cannot justify
-in-place growth, whose capacity accounting is a different operation. -/
+/-- Concatenation copies both lists; in-place growth has its own resizing tariff. -/
 example : HeapCalls.Runtime.charge .word emptyModule
     ⟨.value (.ref 1), [.binaryRight .add (.ref 0) false],
       [.list (List.replicate 2 (.scalar (.int 7))), .list (List.replicate 3 (.ref 0))]⟩ = some 9 := by decide
 example : HeapCalls.Runtime.charge .word emptyModule
-    ⟨.value (.ref 1), [.binaryRight .add (.ref 0) true], [.list [], .list []]⟩ = none := rfl
+    ⟨.value (.ref 1), [.binaryRight .add (.ref 0) true], [.list [], .list []]⟩ = some 2 := rfl
 
 /-- A list iterator pays for each bounds check, pointer read and cursor update;
 bit arithmetic also charges cursor width. Setup does not copy the list. -/

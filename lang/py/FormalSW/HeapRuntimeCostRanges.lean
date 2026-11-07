@@ -112,6 +112,26 @@ theorem range_done (finished : Calls.rangeContinues next stop stride = false)
       ⟨.block (otherwise ++ following) env, stack, heap⟩ := advance (by simp [step, finished]) rfl rfl
   simpa only [Nat.add_comm] using initial.trans (rest following anchors stack)
 
+/-- A one-bound range evaluates its endpoint once before entering the loop. -/
+theorem for_range_bound
+    (bound : EvaluatesIn .word module env expression heap ce (.scalar (.int stop)) middle)
+    (body : BlockContinuesIn .word module env [.rangeStepLoop name 0 stop 1 loop otherwise]
+      middle cb finalEnv finalHeap) :
+    BlockContinuesIn .word module env [.forIn (.name name) (.call (.name "range") [expression]) loop otherwise]
+      heap (ce+cb+4) finalEnv finalHeap := by
+  intro following anchors stack
+  have initial : Reaches .word module anchors
+      ⟨.block ([.forIn (.name name) (.call (.name "range") [expression]) loop otherwise] ++ following) env, stack, heap⟩ 1
+      ⟨.expr expression env, .rangeArguments name [] [] loop otherwise following env :: stack, heap⟩ :=
+    advance rfl rfl rfl
+  have argument : Reaches .word module anchors
+      ⟨.value (.scalar (.int stop)), .rangeArguments name [] [] loop otherwise following env :: stack, middle⟩ 1
+      ⟨.startRange name [.scalar (.int stop)] loop otherwise following env, stack, middle⟩ := advance rfl rfl rfl
+  have enter : Reaches .word module anchors
+      ⟨.startRange name [.scalar (.int stop)] loop otherwise following env, stack, middle⟩ 2
+      ⟨.block ([.rangeStepLoop name 0 stop 1 loop otherwise] ++ following) env, stack, middle⟩ := advance rfl rfl rfl
+  exact ((((initial.trans (bound anchors _)).trans argument).trans enter).trans (body following anchors stack)).mono (by omega)
+
 theorem for_range_pair (left : EvaluatesIn .word module env a heap ca (.scalar (.int start)) middle)
     (right : EvaluatesIn .word module env b middle cb (.scalar (.int stop)) afterBounds)
     (body : BlockContinuesIn .word module env [.rangeStepLoop name start stop 1 loop otherwise]
