@@ -1,4 +1,5 @@
 import lang.py.FormalSW.HeapMapWork
+import lang.py.FormalSW.HeapRecordWork
 import lang.py.FormalSW.HeapSetWork
 import lang.py.FormalSW.HeapSortWork
 import lang.py.FormalSW.HeapBufferWork
@@ -130,9 +131,11 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
   | .operation (.call name) values =>
       match findFunctionIn module.body name with
       | some (args, _) => some (values.length + args.length + 1)
-      | none => do
-          let values ← scalarValues values
-          (Calls.Runtime.library arithmetic module name values).map (· + 1)
+      | none => match libraryFunction module name with
+          | some _ => do
+              let scalar ← scalarValues values
+              (Calls.Runtime.library arithmetic module name scalar).map (· + 1)
+          | none => (RecordWork.construct module name values).map (· + 1)
   | .operation op values => (operation arithmetic state.heap op values maps).map (· + 1)
   | .startRange _ values _ _ _ _ => do
       return Calls.Runtime.argumentWork arithmetic (← scalarValues values)
@@ -167,12 +170,13 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .boolOp _ _ | .ifExp _ _ _ | .call (.name _) _
       | .builtinCall _ _
       | .list _ | .tuple _ | .reversedList _ | .subscript _ _ | .sumSequence _ _
-      | .membership _ _ _ => some 1
+      | .membership _ _ _ | .attribute _ _ => some 1
       | .sumGenerator _ [_] _ => some 1
       | .listComp _ (_ :: _) | .listCompTargets _ (_ :: _) => some 1
       | .call (.attribute (.name _) _) _ => some 1
       | _ => none
   | .value value => match state.stack with
+      | .attribute name :: _ => (RecordWork.field state.heap value name).map (· + 1)
       | .binaryRight .add (.ref address) false :: _ =>
           (SequenceWork.concatenate arithmetic state.heap (.ref address) value).map (· + 1)
       | .binaryRight op (.scalar left) _ :: _ => match value with

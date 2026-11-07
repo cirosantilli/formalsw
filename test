@@ -359,7 +359,7 @@ def main() -> int:
         if output:
             print(textwrap.indent(output.rstrip(), "  "))
     execution_cost_passed = True
-    for cost_test in ("execution_cost", "runtime_cost", "runtime_sums", "runtime_comprehensions", "runtime_strings", "runtime_membership"):
+    for cost_test in ("execution_cost", "runtime_cost", "runtime_sums", "runtime_comprehensions", "runtime_strings", "runtime_membership", "runtime_records"):
         execution_cost = subprocess.run(
             ["lake", "env", "lean", "-j1", "-M2048", "-DwarningAsError=true", f"tests/py/{cost_test}.lean"],
             cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,

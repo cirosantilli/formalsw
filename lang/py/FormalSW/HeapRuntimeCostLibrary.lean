@@ -19,7 +19,7 @@ theorem ReturnsIn.library
   intro anchors stack
   apply advance
   · simp [step, notLocal, imported, result, run, evaluated]
-  · simp [charge, notLocal, priced]
+  · simp [charge, notLocal, imported, priced]
   · rfl
 
 end FormalSW.PyAst.HeapCalls.Runtime
