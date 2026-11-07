@@ -26,6 +26,15 @@ theorem step_for_unpack_dispatch (asList : Bool) (targets : List Expr) (iterable
               .enumerateSource index name (.constant (.int 0)) body otherwise following env :: stack, logical⟩
           | [.name index, .name name], .call (.name "enumerate") [source, start] => .next ⟨.expr source env,
               .enumerateSource index name start body otherwise following env :: stack, logical⟩
+          | [left, right], .call (.name "enumerate") arguments =>
+              match left, right with
+              | .name _, .name _ => .unsupported
+              | _, _ => .next ⟨.block
+                  (.forIn (.tuple [.name "$formalsw.enumerate.index", .name "$formalsw.enumerate.value"])
+                    (.call (.name "enumerate") arguments)
+                    (UnpackingTargets.lower left (.name "$formalsw.enumerate.index") "$formalsw.enumerate.left" ++
+                      UnpackingTargets.lower right (.name "$formalsw.enumerate.value") "$formalsw.enumerate.right" ++ body)
+                    otherwise :: following) env, stack, logical⟩
           | _, _ => match Calls.targetNames targets with
               | some names => .next ⟨.expr iterable env, .unpackSequence names body otherwise following env :: stack, logical⟩
               | none => .next ⟨.block (.forIn (.name "$formalsw.unpack") iterable
@@ -41,14 +50,17 @@ theorem step_for_unpack_dispatch (asList : Bool) (targets : List Expr) (iterable
           cases targets with
           | nil => rfl
           | cons first rest =>
-            cases first <;> try rfl
             cases rest with
-            | nil => rfl
+            | nil => cases first <;> rfl
             | cons second tail =>
-              cases second <;> try rfl
               cases tail with
-              | cons _ _ => simp only [step]; split <;> simp_all
+              | cons _ _ =>
+                cases first <;> try rfl
+                all_goals cases second <;> try rfl
+                all_goals simp only [step]; split <;> simp_all
               | nil =>
+                cases first <;> try rfl
+                cases second <;> try rfl
                 cases expressions with
                 | nil => rfl
                 | cons source rest =>
@@ -68,6 +80,12 @@ theorem step_for_unpack_relocates (asList : Bool) (targets : List Expr) (iterabl
       relocateStep rename physical physicalAnchors
         (step module logicalAnchors
           ⟨.block (.forIn (if asList then .list targets else .tuple targets) iterable body otherwise :: following) env, stack, logical⟩ globals) := by
+  have lower_fixed (target source : Expr) (stem : String) :
+      (UnpackingTargets.lower target source stem).map (relocateStmt rename) =
+        UnpackingTargets.lower target source stem := by
+    have fixed := UnpackingTargets.lower_forall (fun statement => relocateStmt rename statement = statement)
+      (fun _ _ => by simp [relocateStmt]) (fun _ => by simp [relocateStmt]) target source stem
+    exact (List.map_congr_left fixed).trans (List.map_id _)
   simp only [relocateState, relocateWork, List.map_cons, relocateStmt, step_for_unpack_dispatch]
   split
   · simp only [relocateStep, relocateState, relocateWork, List.map_cons, relocateFrame]
@@ -80,6 +98,8 @@ theorem step_for_unpack_relocates (asList : Bool) (targets : List Expr) (iterabl
   · split
     · simp only [relocateStep, relocateState, relocateWork, List.map_cons, relocateFrame]
     · simp only [relocateStep, relocateState, relocateWork, List.map_cons, relocateFrame]
+    · split <;> simp only [relocateStep, relocateState, relocateWork, List.map_cons,
+        relocateStmt, List.map_append, lower_fixed]
     · split <;> simp only [relocateStep, relocateState, relocateWork, List.map_cons, relocateFrame,
         comprehensionTargetBody, relocateStmt]
 
@@ -153,6 +173,10 @@ theorem StateWithin.for_unpack (asList : Bool) (targets : List Expr) (iterable :
     fun statement member => inside.1.2 statement (List.mem_cons_of_mem _ member)
   have envInside := inside.1.1
   have stackInside := inside.2
+  have lower_inside (target source : Expr) (stem : String) :
+      ∀ statement ∈ UnpackingTargets.lower target source stem, StmtWithin heap.length statement :=
+    UnpackingTargets.lower_forall (StmtWithin heap.length)
+      (fun _ _ => by simp [StmtWithin]) (fun _ => by simp [StmtWithin]) target source stem
   rw [step_for_unpack_dispatch]
   split
   · simpa only [StepWithin, StateWithin, WorkWithin, List.mem_cons, forall_eq_or_imp, FrameWithin] using
@@ -170,6 +194,20 @@ theorem StateWithin.for_unpack (asList : Bool) (targets : List Expr) (iterable :
         And.intro envInside (And.intro (And.intro envInside (And.intro loopInside.1 (And.intro loopInside.2 restInside))) stackInside)
     · simpa only [StepWithin, StateWithin, WorkWithin, List.mem_cons, forall_eq_or_imp, FrameWithin] using
         And.intro envInside (And.intro (And.intro envInside (And.intro loopInside.1 (And.intro loopInside.2 restInside))) stackInside)
+    · split
+      · trivial
+      · refine ⟨⟨envInside, ?_⟩, stackInside⟩
+        intro statement member
+        rcases List.mem_cons.mp member with rfl | member
+        · simp only [StmtWithin]
+          refine ⟨?_, loopInside.2⟩
+          intro statement member
+          rcases List.mem_append.mp member with member | member
+          · rcases List.mem_append.mp member with member | member
+            · exact lower_inside _ _ _ statement member
+            · exact lower_inside _ _ _ statement member
+          · exact loopInside.1 statement member
+        · exact restInside statement member
     · split
       · simpa only [StepWithin, StateWithin, WorkWithin, List.mem_cons, forall_eq_or_imp, FrameWithin] using
           And.intro envInside (And.intro (And.intro envInside (And.intro loopInside.1 (And.intro loopInside.2 restInside))) stackInside)

@@ -2239,6 +2239,16 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
       | .forIn (.tuple [.name index, .name name]) (.call (.name "enumerate") [iterable, start]) body otherwise :: rest
         | .forIn (.list [.name index, .name name]) (.call (.name "enumerate") [iterable, start]) body otherwise :: rest =>
           .next ⟨.expr iterable env, .enumerateSource index name start body otherwise rest env :: stack, heap⟩
+      | .forIn (.tuple [left, right]) (.call (.name "enumerate") arguments) body otherwise :: rest
+        | .forIn (.list [left, right]) (.call (.name "enumerate") arguments) body otherwise :: rest =>
+          match left, right with
+          | .name _, .name _ => .unsupported
+          | _, _ => .next ⟨.block
+              (.forIn (.tuple [.name "$formalsw.enumerate.index", .name "$formalsw.enumerate.value"])
+                (.call (.name "enumerate") arguments)
+                (UnpackingTargets.lower left (.name "$formalsw.enumerate.index") "$formalsw.enumerate.left" ++
+                  UnpackingTargets.lower right (.name "$formalsw.enumerate.value") "$formalsw.enumerate.right" ++ body)
+                otherwise :: rest) env, stack, heap⟩
       | .enumerateStepLoop index name source position counter body otherwise :: rest =>
           run (globals := globals) anchors heap (Mutable.sequence (sequenceValue source)) fun items heap =>
             match items[position]? with

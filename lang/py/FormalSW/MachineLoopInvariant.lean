@@ -275,6 +275,7 @@ theorem step_for_heap (target iterable : Expr) (body otherwise following : List 
       · rfl
       · rfl
       · split <;> trivial
+      · split <;> trivial
   have other (target : Expr) (notFlat : flatForTarget target = false) :
       StepHeap logical (step module logicalAnchors
         ⟨.block (.forIn target iterable body otherwise :: following) env, stack, logical⟩ globals) := by
@@ -312,4 +313,3 @@ theorem step_for_preserves (target iterable : Expr) (body otherwise following : 
     (step_for_relocates module logical physical rename logicalAnchors physicalAnchors target iterable body otherwise following env stack globals)
 
 end FormalSW.PyAst.HeapCalls.Relocation
-

@@ -69,6 +69,20 @@ def scalar_annotation(n: int) -> int:
     return value
 '''
 bodies = {
+    'enumerate_nested': 'for i, (a, b) in enumerate([[n, 2], [3, 4]], n):\n    out.append([i, a, b])',
+    'enumerate_nested_list': 'for [i, [a, [b]]] in enumerate([[n, [2]], [3, [4]]], start=n):\n    out.append([i, a, b])',
+    'enumerate_duplicate': 'for i, (i, b) in enumerate([[n, 2], [3, 4]]):\n    out.append([i, b])',
+    'enumerate_alias': 'for i, (a, b) in enumerate([[xs, xs]]):\n    a.append(n)\n    out.append([i, a is b, b])',
+    'enumerate_skip': 'for i, (a, b) in enumerate([[n, 2], [3, 4]]):\n    if a < 0:\n        continue\n    out.append([i, a, b])\nelse:\n    out.append(9)',
+    'enumerate_stop': 'for i, (a, b) in enumerate([[n, 2], [3, 4]]):\n    out.append([i, a, b])\n    break\nelse:\n    out.append(9)',
+    'enumerate_return': 'for i, (a, b) in enumerate([[n, 2], [3, 4]], n):\n    return [i, a, b]',
+    'enumerate_start_effect': 'for i, (a, b) in enumerate([[n, 2]], touch(xs, n)):\n    out.append([i, a, b])',
+    'enumerate_inner_short': 'for i, (a, b) in enumerate([[touch(xs, n)]]):\n    out.append([i, a, b])',
+    'enumerate_inner_long': 'for i, (a, b) in enumerate([[touch(xs, n), 2, 3]]):\n    out.append([i, a, b])',
+    'enumerate_inner_type': 'for i, (a, b) in enumerate([touch(xs, n)]):\n    out.append([i, a, b])',
+    'enumerate_index_type': 'for (i, j), (a, b) in enumerate([[touch(xs, n), 2]]):\n    out.append([i, a, b])',
+    'enumerate_empty': 'for (i, j), (a, b) in enumerate([]):\n    out.append([i, a, b])\nelse:\n    out.append(n)',
+    'enumerate_live': 'values = [[n, 2]]\nfor i, (a, b) in enumerate(values):\n    out.append([i, a, b])\n    if i < 2:\n        values.append([i + 1, b + 1])',
     'nested_zip': 'for (a, b), c in zip([[n, 2], [3, 4]], [5, 6]):\n    out.append([a, b, c])',
     'nested_combinations': 'for (a, b), (c, d) in combinations([[n, 2], [3, 4]], 2):\n    out.append([a, b, c, d])',
     'nested_permutations': 'for (a, b), (c, d) in permutations([[n, 2], [3, 4]], 2):\n    out.append([a, b, c, d])',
@@ -198,7 +212,7 @@ for target in ('a, (b, *c)', 'a, *rest', 'a, xs[0]', '(a, xs[0]), b'):
     assert SupportChecker(ast.parse(text)).check('f'), target
 for iterable in ('enumerate([[1, 2]])', 'enumerate([[1, 2]], start=3)'):
     text = f'def f():\n    for a, (b, c) in {iterable}:\n        pass\n'
-    assert SupportChecker(ast.parse(text)).check('f'), iterable
+    assert not SupportChecker(ast.parse(text)).check('f'), iterable
 nested_literal = 'def f(n: int):\n    table = [((1, 2), 3)]\n    for a, b in table:\n        return a\n'
 assert SupportChecker(ast.parse(nested_literal)).check('f')
 # A parameter's entry value may already expose the constant table.

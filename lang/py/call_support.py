@@ -1468,8 +1468,8 @@ def check_calls(module, function, reject, *, heap=False):
                     if 'enumerate' in locals_ or bindings(module, 'enumerate'):
                         reject(node, 'enumerate loops require the unshadowed builtin enumerate')
                     if (not isinstance(node.target, (ast.Tuple, ast.List)) or len(node.target.elts) != 2
-                            or not all(isinstance(target, ast.Name) for target in node.target.elts)):
-                        reject(node, 'enumerate loops require immediate unpacking into two local names')
+                            or not all(unpacking_target(target) for target in node.target.elts)):
+                        reject(node, 'enumerate loops require two name or nested tuple/list targets')
                     arguments = enumerate_arguments(node.iter)
                     if arguments is None:
                         reject(node, 'enumerate loops support an iterable and optional positional or keyword start')
