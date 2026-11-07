@@ -1,5 +1,6 @@
 """Module bindings used as explicit call-entry inputs by the stateful models."""
 import ast
+import copy
 from dataclasses import dataclass
 import symtable
 from lang.py.call_graph import call_targets
@@ -218,8 +219,25 @@ def function_globals(module, function, *, heap_calls=False):
     List declarations establish an element domain, not distinct object identities.
     Aliases in declarations are accepted; entry aliases are universally quantified.
     """
+    class AnnotationReads(ast.NodeTransformer):
+        def visit_Name(self, node):
+            return ast.Constant(None) if isinstance(node.ctx, ast.Load) else node
+
+    class LocalAnnotations(ast.NodeTransformer):
+        def visit_AnnAssign(self, node):
+            # Python records these names in its symbol table even though local
+            # variable annotations are never evaluated. Keep all bindings,
+            # including assignment-expression targets inside the annotation.
+            node.annotation = AnnotationReads().visit(node.annotation)
+            return self.generic_visit(node)
+
+        def visit_ClassDef(self, node):
+            # Class annotations have different evaluation rules.
+            return node
+
+    runtime = LocalAnnotations().visit(copy.deepcopy(function))
     try:
-        table = next(child for child in symtable.symtable(ast.unparse(function), '<function>', 'exec').get_children()
+        table = next(child for child in symtable.symtable(ast.unparse(runtime), '<function>', 'exec').get_children()
                      if child.get_type() == 'function' and child.get_name() == function.name)
     except SyntaxError as error:
         raise GlobalInputError(function, f'invalid Python scope: {error.msg}') from None

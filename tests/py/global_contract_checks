@@ -64,6 +64,15 @@ assert footprint('table = {0: "zero"}\ndef f(n: int):\n    if False: table, n = 
 assert footprint('table = {0: "zero"}\ndef f(n: int): return [table for table in range(n)]') == {}
 assert footprint('table = {0: "zero"}\nclass Box:\n    def read(self, n: int): return table.get(n, "")\ndef f(n: int): return Box().read(n)') == {'table': 'dict[int,str]'}
 assert footprint('table = {0: 1}\ndef f(n: int): return g(n)\ndef g(n: int): return f(n-1) if n else table[0]') == {'table': 'dict[int,int]'}
+# Local variable annotations are not executed, but bindings and actual reads remain.
+assert footprint('Signature = tuple[int, ...]\ndef f(n: int):\n    groups: dict[Signature, list[int]] = {}\n    return n') == {}
+assert footprint('table = {0: 1}\ndef f(n: int):\n    table: MissingType\n    return table') == {}
+assert footprint('LIMIT = 7\ndef f(n: int):\n    value: MissingType = LIMIT\n    return value') == {'LIMIT': 'int'}
+assert footprint('LIMIT = 7\ndef f(n: int):\n    value: LIMIT = n\n    return LIMIT') == {'LIMIT': 'int'}
+assert footprint('local = 7\ndef f(n: int):\n    value: (local := MissingType)\n    return local') == {}
+# Nested function signatures and class annotations still execute in their scopes.
+assert footprint('LIMIT = 7\ndef f(n: int):\n    def inner(value: LIMIT): return value\n    return n') == {'LIMIT': 'int'}
+assert footprint('LIMIT = 7\ndef f(n: int):\n    class Inner:\n        value: LIMIT\n    return n') == {'LIMIT': 'int'}
 for declaration, expected in (
     ('table: dict[bytes, bool] = {}', 'dict[bytes,bool]'),
     ('table = {None: b"value"}', 'dict[None,bytes]'),

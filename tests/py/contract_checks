@@ -169,4 +169,21 @@ end solver
     (project / 'reference' / '__init__.py').write_text('raise RuntimeError("side effect")\n')
     check(1, 'package initialization is unsupported')
 
+    # Adjacent Lean contracts need no duplicate theorem declaration in Python.
+    marker_free = 'def solve(n: int) -> int:\n    return n\n'
+    marker_free_proof = '''import «.formalsw».«solver.py.ast»
+import lang.py.FormalSW.Syntax
+open FormalSW.PyAst
+theorem solve_result (n : Int) :
+    (scalarFunction SolverAst.module "solve" [.int n]).Returns := ⟨.int n, .done rfl⟩
+'''
+    solver.write_text(marker_free)
+    solver.with_suffix('.py.lean').write_text(marker_free_proof)
+    check()
+    solver.write_text(marker_free.replace('return n', 'return n + 1'))
+    check(1, 'proof check failed')
+    solver.write_text(marker_free)
+    solver.with_suffix('.py.lean').write_text(marker_free_proof.replace('⟨.int n, .done rfl⟩', 'by sorry'))
+    check(1, 'proof check failed')
+
 print('Guarded contracts and imported equivalence checks passed')
