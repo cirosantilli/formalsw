@@ -46,7 +46,10 @@ with tempfile.TemporaryDirectory(prefix="formalsw-project-") as temporary:
             text=True, capture_output=True,
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        assert f"All {1 if directory == 'left' else 2} properties proved" in result.stdout, result.stdout
+        expected = "All 1 property proved"
+        if directory == "right":
+            expected += " plus 1 property proved in dependency files"
+        assert result.stdout.strip() == expected, result.stdout
     compiler_check = project / "compiler_check.lean"
     compiler_check.write_text(
         'import FormalSW\n'

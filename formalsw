@@ -72,6 +72,7 @@ class CheckReport:
     """Aggregate successful obligations and rejected source coverage across files."""
 
     passed: int = 0
+    dependency_passed: int = 0
     unsupported: int = 0
     failed_files: int = 0
 
@@ -2448,6 +2449,7 @@ def proof_dependencies(source: Path) -> list[Path]:
 
 def check_sources(sources: list[Path], report: CheckReport) -> None:
     """Check imported Python proofs first, once per invocation, without stale fallbacks."""
+    requested = {source.resolve() for source in sources}
     checked: dict[Path, bool] = {}
     visiting: list[Path] = []
     compilation: dict = {}
@@ -2467,7 +2469,11 @@ def check_sources(sources: list[Path], report: CheckReport) -> None:
             for dependency in proof_dependencies(source):
                 if not visit(dependency):
                     raise SystemExit(f"error: {source}: imported Python proof failed: {dependency}")
-            report.passed += check_source(source, report, compilation=compilation)
+            passed = check_source(source, report, compilation=compilation)
+            if source in requested:
+                report.passed += passed
+            else:
+                report.dependency_passed += passed
         except (UnsupportedSyntax, InvalidRequirement, ScenarioError, SyntaxError) as error:
             print_diagnostic(f"error: {source}: {error}", file=sys.stderr)
             report.failed_files += 1
@@ -2505,7 +2511,12 @@ def finish_report(report: CheckReport, *, stub: bool = False) -> None:
     if report.unsupported or report.failed_files:
         raise SystemExit(1)
     if not stub:
-        print(f"All {report.passed} properties proved")
+        noun = 'property' if report.passed == 1 else 'properties'
+        message = f"All {report.passed} {noun} proved"
+        if report.dependency_passed:
+            noun = 'property' if report.dependency_passed == 1 else 'properties'
+            message += f" plus {report.dependency_passed} {noun} proved in dependency files"
+        print(message)
 
 
 def main() -> None:

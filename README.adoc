@@ -230,6 +230,8 @@ it will ouptut:
 All 3 properties proved
 ----
 
+When imported Python files also have proof obligations, the summary reports them separately, for example: `All 3 properties proved plus 4 properties proved in dependency files`. For a directory input, properties in all Python files under that directory count as directly requested; only dependencies outside that set count separately.
+
 You can check this with the following example contained in-tree:
 
 link:tests/py/range_sum.py[]

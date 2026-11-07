@@ -31,7 +31,11 @@ with tempfile.TemporaryDirectory(prefix='formalsw-link-') as temporary:
         assert message in output, output
         return output
 
-    check(0, 'All 2 properties proved')
+    check(0, 'All 1 property proved plus 1 property proved in dependency files')
+    directory_result = subprocess.run([str(REPO / 'formalsw'), str(project)],
+                                      cwd=project, text=True, capture_output=True)
+    assert directory_result.returncode == 0, directory_result.stdout + directory_result.stderr
+    assert directory_result.stdout.strip() == 'All 2 properties proved', directory_result.stdout
     check(0, 'import «link_reference.py»', stub=True)
     reference.write_text(original_reference.replace('n + n', 'n + n + 1'))
     check(1, 'imported Python proof failed')
