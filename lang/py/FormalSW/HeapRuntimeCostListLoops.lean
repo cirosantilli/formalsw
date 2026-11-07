@@ -25,6 +25,26 @@ theorem for_list_subscript
     advance (by simp [step, run, Mutable.sequence, found, sequenceSource]) (by simp [charge, found]) rfl
   exact (((first.trans (evaluated anchors _)).trans next).trans (rest anchors stack)).mono (by omega)
 
+/-- A stored list field is evaluated before the iterator retains its identity. -/
+theorem for_list_field
+    (evaluated : EvaluatesIn arithmetic module env (.attribute receiver fieldName) heap cost (.ref address) middle)
+    (found : middle[address]? = some (.list items))
+    (rest : BlockReturnsIn arithmetic module env
+      (.sequenceStepLoop name (.ref address) 0 body otherwise :: following) middle budget answer finalHeap) :
+    BlockReturnsIn arithmetic module env
+      (.forIn (.name name) (.attribute receiver fieldName) body otherwise :: following)
+      heap (cost+budget+2) answer finalHeap := by
+  intro anchors stack
+  have first : Reaches arithmetic module anchors
+      ⟨.block (.forIn (.name name) (.attribute receiver fieldName) body otherwise :: following) env, stack, heap⟩ 1
+      ⟨.expr (.attribute receiver fieldName) env, .sequence name body otherwise following env :: stack, heap⟩ :=
+    advance rfl rfl rfl
+  have next : Reaches arithmetic module anchors
+      ⟨.value (.ref address), .sequence name body otherwise following env :: stack, middle⟩ 1
+      ⟨.block (.sequenceStepLoop name (.ref address) 0 body otherwise :: following) env, stack, middle⟩ :=
+    advance (by simp [step, run, Mutable.sequence, found, sequenceSource]) (by simp [charge, found]) rfl
+  exact (((first.trans (evaluated anchors _)).trans next).trans (rest anchors stack)).mono (by omega)
+
 theorem for_list_name (lookup : env receiver = some (.ref address))
     (found : heap[address]? = some (.list items))
     (rest : BlockReturnsIn arithmetic module env

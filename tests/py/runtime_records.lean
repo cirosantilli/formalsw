@@ -42,4 +42,4 @@ example : RecordWork.construct program "Unknown" [] = none := rfl
 private def custom : Module :=
   { body := [.classDef "Point" [.dataclassFields true fields, .functionDef "__init__" [] none []]],
     classOrigins := [("Point", "example")] }
-example : RecordWork.construct custom "Point" [.scalar (.int 1), .scalar (.int 2)] = none := rfl
+example : RecordWork.construct custom "Point" [.scalar (.int 1), .scalar (.int 2)] = some 4 := rfl

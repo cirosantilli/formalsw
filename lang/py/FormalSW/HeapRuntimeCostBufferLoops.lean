@@ -55,7 +55,7 @@ theorem qualified_single (notAppend : field ≠ "append") (notAdd : field ≠ "a
   have initial : Reaches arithmetic module anchors
       ⟨.expr (.call (.attribute (.name alias) field) [expression]) env, stack, heap⟩ 1
       ⟨.expr expression env, .arguments (.call (alias ++ "." ++ field)) [] [] env :: stack, heap⟩ :=
-    advance (by simp [step, notAppend, notAdd, unbound, argumentsState]) (by simp [charge, notAppend, notAdd]) rfl
+    advance (by simp [step, notAppend, notAdd, unbound, argumentsState]) (by simp [charge]) rfl
   have ready : Reaches arithmetic module anchors
       ⟨.value value, .arguments (.call (alias ++ "." ++ field)) [] [] env :: stack, middle⟩ 1
       ⟨.operation (.call (alias ++ "." ++ field)) [value], stack, middle⟩ := advance rfl rfl rfl

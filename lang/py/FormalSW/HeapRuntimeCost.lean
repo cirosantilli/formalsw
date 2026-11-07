@@ -100,6 +100,8 @@ def truth (heap : Heap) : Value → Option Nat
 def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values : List Value)
     (maps : MapRepresentation := .collisionChain) : Option Nat :=
   match op, values with
+  | .method _ args _, values => some (values.length + args.length + 1)
+  | .setField name _, [receiver] => RecordWork.write heap receiver name
   | .list, values | .tuple, values => some (sequenceCopy values.length)
   | .comprehension _ ((_, .call (.name "range") _, _) :: _) _, values =>
       (scalarValues values).map (fun values => Calls.Runtime.argumentWork arithmetic values + 1)
@@ -160,6 +162,14 @@ def unpackEntry (targets : List Expr) (iterable : Expr) : Option Nat :=
       | _ => (Calls.targetNames targets).map (fun _ => targets.length + 1)
   | _ => (Calls.targetNames targets).map (fun _ => targets.length + 1)
 
+def attributeCallEntry (base : Expr) (name : String) (args : List Expr) : Option Nat :=
+  if (name = "append" ∨ name = "add") ∧ args.length = 1 then some 1
+  else match base with | .name _ => some 1 | _ => none
+
+@[simp] theorem attributeCallEntry_name (receiver name : String) (args : List Expr) :
+    attributeCallEntry (.name receiver) name args = some 1 := by
+  simp [attributeCallEntry]
+
 def charge (arithmetic : Arithmetic) (module : Module) (state : State)
     (maps : MapRepresentation := .collisionChain) : Option Nat :=
   match state.work with
@@ -194,6 +204,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .raise (some (.call (.name _) _)) :: _ | .raise (some (.name _)) :: _ => some 1
       | [] | .assign [.name _] _ :: _ | .augAssign (.name _) _ _ :: _
       | .annAssign (.name _) _ _ :: _
+      | .assign [.attribute _ _] _ :: _ | .annAssign (.attribute _ _) _ _ :: _
       | .assign [.subscript _ _] _ :: _
       | .return _ :: _ | .ifThen _ _ _ :: _ | .whileDo _ _ _ :: _
       | .assert _ _ :: _
@@ -205,7 +216,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .comprehensionAppend _ _ :: _ => some 1
       | _ => none
   | .expr expression _ => match expression with
-      | .call (.attribute _ "append") [_] | .call (.attribute _ "add") [_] => some 1
+      | .call (.attribute base name) args => attributeCallEntry base name args
       | .constant _ | .name _ | .binOp _ _ _ | .unaryOp _ _ | .compare _ _
       | .boolOp _ _ | .ifExp _ _ _ | .call (.name _) _
       | .builtinCall _ _
@@ -213,9 +224,10 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .membership _ _ _ | .attribute _ _ => some 1
       | .sumGenerator _ [_] _ | .sumRange _ _ _ _ => some 1
       | .listComp _ (_ :: _) | .listCompTargets _ (_ :: _) => some 1
-      | .call (.attribute (.name _) _) _ => some 1
       | _ => none
   | .value value => match state.stack with
+      | .methodReceiver name _ _ :: _ => (RecordWork.method module state.heap value name).map (· + 1)
+      | .assignAttribute _ _ _ _ :: _ | .initialized _ :: _ => some 1
       | .unpackSequence _ _ _ _ _ :: _ => (sequenceLength state.heap value).map (fun _ => 1)
       | .attribute name :: _ => (RecordWork.field state.heap value name).map (· + 1)
       | .binaryRight .add (.ref address) false :: _ =>
