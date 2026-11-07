@@ -46,6 +46,19 @@ theorem bindings_row (rows : List (List Int)) (pair : Nat × List Int) (member :
   obtain ⟨valid, same⟩ := List.mem_zipIdx' indexed
   simpa only [same] using row rows index valid
 
+theorem typed (rows : List (List Int)) :
+    Mutable.Value.HasType (heap rows) (.ref 0) "list[list[int]]" := by
+  refine ⟨(bindings rows).map (fun pair => .ref pair.1), bindings_root rows,
+    Or.inr ⟨"list[int]", rfl, ?_⟩⟩
+  intro item member
+  obtain ⟨pair, pairMember, rfl⟩ := List.mem_map.mp member
+  refine ⟨by rw [String.startsWith_string_iff]; decide, ?_⟩
+  rw [Mutable.Value.ListHasType]
+  refine ⟨encode pair.2, bindings_row rows pair pairMember, Or.inr ⟨"int", rfl, ?_⟩⟩
+  intro value member
+  obtain ⟨integer, _, rfl⟩ := List.mem_map.mp member
+  rfl
+
 theorem rows_le_size (rows : List (List Int)) : rows.length ≤ size rows := by
   simp [size]
 

@@ -128,8 +128,11 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
   | .builtin .set, [] => SetWork.operation maps arithmetic heap op values
   | .builtin .sorted, values => SortWork.operation arithmetic heap values
   | .add _, _ => SetWork.operation maps arithmetic heap op values
-  | .builtin .max, [.ref _] | .builtin .min, [.ref _] =>
-      SetWork.operation maps arithmetic heap op values
+  | .builtin .max, [.ref address] | .builtin .min, [.ref address] =>
+      match heap[address]? with
+      | some (.list items) | some (.tuple items) =>
+          (scalarValues items).map (SetWork.extremum arithmetic)
+      | _ => SetWork.operation maps arithmetic heap op values
   | .builtin builtin, values => do
       Calls.Runtime.primitive arithmetic (.builtin builtin) (← scalarValues values)
   | .raiseException name, values => do
