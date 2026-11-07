@@ -39,6 +39,20 @@ def listExtension (heap : Heap) (address : Nat) : Value → Option Nat
       | _, _ => none
   | _ => none
 
+/-- A destructuring iterator reads one live item, copies its fields and assigns
+the targets. Exhaustion only reads the receiver's length. -/
+def unpackIteration (arithmetic : Arithmetic) (heap : Heap) (names : List String)
+    (address position : Nat) : Option Nat := do
+  let items ← match heap[address]? with
+    | some (.list items) | some (.tuple items) => some items
+    | _ => none
+  let traversal := 2 + 2*integer arithmetic position + integer arithmetic items.length
+  match items[position]? with
+  | none => return traversal
+  | some value =>
+      let fields ← sequenceLength heap value
+      return traversal + fields + names.length + integer arithmetic fields + 1
+
 /-- Zip retains its builtin receivers. Each advance reads up to one item from
 each receiver and allocates a tuple containing the obtained references. -/
 def zipIteration (arithmetic : Arithmetic) (heap : Heap)
@@ -139,6 +153,13 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
       Calls.Runtime.primitive arithmetic (.raiseException name) (← scalarValues values)
   | _, _ => BufferWork.operation arithmetic heap op values <|> MapWork.operation maps arithmetic heap op values
 
+def unpackEntry (targets : List Expr) (iterable : Expr) : Option Nat :=
+  match iterable with
+  | .call (.name "enumerate") [_] => match targets with
+      | [.name _, .name _] => some 1
+      | _ => (Calls.targetNames targets).map (fun _ => targets.length + 1)
+  | _ => (Calls.targetNames targets).map (fun _ => targets.length + 1)
+
 def charge (arithmetic : Arithmetic) (module : Module) (state : State)
     (maps : MapRepresentation := .collisionChain) : Option Nat :=
   match state.work with
@@ -154,6 +175,8 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
   | .startRange _ values _ _ _ _ => do
       return Calls.Runtime.argumentWork arithmetic (← scalarValues values)
   | .block body _ => match body with
+      | .unpackStepLoop names (.ref address) position _ _ :: _ =>
+          unpackIteration arithmetic state.heap names address position
       | .zipStepLoop _ sources position _ _ :: _ => zipIteration arithmetic state.heap sources position
       | .rangeStepLoop _ next stop stride _ _ :: _ => some (Calls.Runtime.rangeWork arithmetic next stop stride)
       | .sequenceStepLoop _ (.ref address) position _ _ :: _ => match state.heap[address]? with
@@ -170,12 +193,15 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
           (Calls.targetNames targets).map (fun _ => targets.length + 1)
       | .raise (some (.call (.name _) _)) :: _ | .raise (some (.name _)) :: _ => some 1
       | [] | .assign [.name _] _ :: _ | .augAssign (.name _) _ _ :: _
+      | .annAssign (.name _) _ _ :: _
       | .assign [.subscript _ _] _ :: _
       | .return _ :: _ | .ifThen _ _ _ :: _ | .whileDo _ _ _ :: _
       | .assert _ _ :: _
       | .forIn (.name _) _ _ _ :: _
-      | .forIn (.tuple [.name _, .name _]) (.call (.name "enumerate") [_]) _ _ :: _
       | .expr _ :: _ | .loopResume _ :: _ | .breakLoop :: _ | .continueLoop :: _ => some 1
+      | .forIn (.tuple targets) iterable _ _ :: _ => unpackEntry targets iterable
+      | .forIn (.list targets) _ _ _ :: _ =>
+          (Calls.targetNames targets).map (fun _ => targets.length+1)
       | .comprehensionAppend _ _ :: _ => some 1
       | _ => none
   | .expr expression _ => match expression with
@@ -190,6 +216,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .call (.attribute (.name _) _) _ => some 1
       | _ => none
   | .value value => match state.stack with
+      | .unpackSequence _ _ _ _ _ :: _ => (sequenceLength state.heap value).map (fun _ => 1)
       | .attribute name :: _ => (RecordWork.field state.heap value name).map (· + 1)
       | .binaryRight .add (.ref address) false :: _ =>
           (SequenceWork.concatenate arithmetic state.heap (.ref address) value).map (· + 1)
