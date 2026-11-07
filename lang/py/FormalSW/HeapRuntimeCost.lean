@@ -140,6 +140,13 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
           let index ← scalarNumber index
           return integer arithmetic index + integer arithmetic items.length + 1
       | _ => BufferWork.operation arithmetic heap op values <|> MapWork.operation maps arithmetic heap op values
+  | .setItem _, [.ref address, .scalar index] =>
+      match heap[address]? with
+      | some (.list items) => do
+          let index ← scalarNumber index
+          -- Signed-index normalization and a reference write do not resize the array.
+          return integer arithmetic index + integer arithmetic items.length + 1
+      | _ => BufferWork.operation arithmetic heap op values <|> MapWork.operation maps arithmetic heap op values
   | .builtin .bytearray, values => BufferWork.operation arithmetic heap op values
   | .builtin .set, [] => SetWork.operation maps arithmetic heap op values
   | .builtin .sorted, values => SortWork.operation arithmetic heap values
@@ -194,6 +201,14 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
           unpackIteration arithmetic state.heap names address position
       | .zipStepLoop _ sources position _ _ :: _ => zipIteration arithmetic state.heap sources position
       | .rangeStepLoop _ next stop stride _ _ :: _ => some (Calls.Runtime.rangeWork arithmetic next stop stride)
+      | .reverseSequenceStepLoop _ source position _ _ :: _ =>
+          if position < 0 then some (1 + integer arithmetic position)
+          else match source with
+            | .ref address => match state.heap[address]? with
+                | some (.list items) | some (.tuple items) =>
+                    some (2 + 2 * integer arithmetic position + integer arithmetic items.length)
+                | _ => none
+            | _ => none
       | .sequenceStepLoop _ (.ref address) position _ _ :: _ => match state.heap[address]? with
           | some (.list items) | some (.tuple items) =>
               some (2 + 2 * integer arithmetic position + integer arithmetic items.length)
@@ -214,6 +229,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .return _ :: _ | .ifThen _ _ _ :: _ | .whileDo _ _ _ :: _
       | .assert _ _ :: _
       | .forIn (.name _) _ _ _ :: _
+      | .forReversed _ _ _ _ :: _
       | .expr _ :: _ | .loopResume _ :: _ | .breakLoop :: _ | .continueLoop :: _ => some 1
       | .forIn (.tuple targets) iterable _ _ :: _ => unpackEntry targets iterable
       | .forIn (.list targets) _ _ _ :: _ =>
@@ -251,11 +267,13 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
           (SequenceWork.concatenate arithmetic state.heap (.ref address) value).map (· + 1)
       | .binaryRight .add (.ref address) true :: _ =>
           (listExtension state.heap address value).map (· + 1)
-      | .binaryRight op (.scalar left) _ :: _ => match value with
+      | .binaryRight op (.scalar left) inplace :: _ => match value with
           | .scalar right => (PrimitiveWork.binary arithmetic op left right).map (· + 1)
-          | _ => (BufferWork.repetition arithmetic state.heap op (.scalar left) value).map (· + 1)
-      | .binaryRight op (.ref address) _ :: _ =>
-          (BufferWork.repetition arithmetic state.heap op (.ref address) value).map (· + 1)
+          | _ => ((BufferWork.repetition arithmetic state.heap op (.scalar left) value) <|>
+              (if inplace then none else SequenceWork.repetition arithmetic state.heap op (.scalar left) value)).map (· + 1)
+      | .binaryRight op (.ref address) inplace :: _ =>
+          ((BufferWork.repetition arithmetic state.heap op (.ref address) value) <|>
+            (if inplace then none else SequenceWork.repetition arithmetic state.heap op (.ref address) value)).map (· + 1)
       | .compareRight op left :: _ | .chainRight op left _ _ :: _ =>
           (comparison arithmetic state.heap op left value).map (· + 1)
       | .unary .not :: _ => truth state.heap value
@@ -286,6 +304,12 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
           | _ => none
       | .generatorEnd :: _ => some 1
       | .comprehensionResult _ :: _ => some 1
+      | .reverseSequence _ _ _ _ _ :: _ => match value with
+          | .ref address => match state.heap[address]? with
+              | some (.list items) | some (.tuple items) =>
+                  some (2 + integer arithmetic items.length)
+              | _ => none
+          | _ => none
       | .sequence _ _ _ _ _ :: _ => match value with
           | .ref address => match state.heap[address]? with
               | some (.list _) | some (.tuple _) => some 1

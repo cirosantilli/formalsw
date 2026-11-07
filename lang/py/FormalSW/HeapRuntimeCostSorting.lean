@@ -20,6 +20,29 @@ theorem EvaluatesIn.tuple
     · simp [potential, heapPotential, objectPotential]
   exact ((first.trans (arguments.reaches .tuple anchors stack)).trans allocated).mono (by omega)
 
+theorem EvaluatesIn.tuple_subscript (ordinary : ∀ a b c, index ≠ .slice a b c)
+    (receiver : EvaluatesIn arithmetic module env base heap ca (.ref address) middle)
+    (position : EvaluatesIn arithmetic module env index middle cb (.scalar (.int offset)) afterIndex)
+    (found : afterIndex[address]? = some (.tuple items))
+    (evaluated : Mutable.getItem (.ref address) (.scalar (.int offset)) afterIndex =
+      some (.ok answer, afterIndex)) :
+    EvaluatesIn arithmetic module env (.subscript base index) heap
+      (ca + cb + integer arithmetic offset + integer arithmetic items.length + 6) answer afterIndex := by
+  intro anchors stack
+  have initial : Reaches arithmetic module anchors
+      ⟨.expr (.subscript base index) env, stack, heap⟩ 1
+      (argumentsState .subscript env [] [base, index] stack heap) :=
+    advance (by cases index <;> simp_all [step, argumentsState]) rfl rfl
+  have args := (ArgumentsIn.cons receiver (ArgumentsIn.cons position ArgumentsIn.nil)).reaches
+    (completed := []) .subscript anchors stack
+  have last : Reaches arithmetic module anchors
+      ⟨.operation .subscript [.ref address, .scalar (.int offset)], stack, afterIndex⟩
+      (integer arithmetic offset + integer arithmetic items.length + 2)
+      ⟨.value answer, stack, afterIndex⟩ :=
+    advance (by simp [step, primitive, result, run, evaluated])
+      (by simp [charge, operation, scalarNumber, found]) rfl
+  exact ((initial.trans args).trans last).mono (by simp; omega)
+
 theorem EvaluatesIn.sorted
     (argument : EvaluatesIn arithmetic module env expression heap ca source middle)
     (evaluated : primitive (.builtin .sorted) [source] middle =

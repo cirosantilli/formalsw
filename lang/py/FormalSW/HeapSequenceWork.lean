@@ -26,6 +26,18 @@ def concatenate (arithmetic : Arithmetic) (heap : Heap) (left right : Value) : O
       | _, _ => none
   | _, _ => none
 
+/-- Repetition copies element references into a fresh array. Negative counts
+produce an empty array, but still pay to inspect the integer count. -/
+def repetition (arithmetic : Arithmetic) (heap : Heap) (op : BinOp)
+    (left right : Value) : Option Nat :=
+  match op, left, right with
+  | .mult, .ref address, .scalar count | .mult, .scalar count, .ref address => do
+      let count ← scalarNumber count
+      match heap[address]? with
+      | some (.list items) => some (items.length * count.toNat + integer arithmetic count + 1)
+      | _ => none
+  | _, _, _ => none
+
 theorem slice_prefix (length : Nat) (stop : Int) :
     slice .word length (.scalar .none) (.scalar (.int stop)) (.scalar .none) =
       some (6 * Py.Builtin.Slice.prefixLength length stop + 201) := by
