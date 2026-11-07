@@ -104,9 +104,11 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State) : Option 
       else (library arithmetic module name values).map (· + 1)
   | .startRange _ values _ _ _ _ | .startSum _ _ _ values _ =>
       some (argumentWork arithmetic values)
-  | .startExtremum _ _ _ => none
+  | .startExtremum _ _ values =>
+      -- Range indices must be numeric, including Boolean indices.
+      (values.mapM (integerWork arithmetic)).map (fun costs => 1 + costs.sum)
   | .sumLoop sum next _ => some (rangeWork arithmetic next sum.stop sum.stride)
-  | .extremumLoop _ _ _ => none
+  | .extremumLoop range next _ => some (rangeWork arithmetic next range.stop range.stride)
   | .block (.rangeStepLoop _ next stop stride _ _ :: _) _ =>
       some (rangeWork arithmetic next stop stride)
   | .block _ _ => some 1
@@ -128,7 +130,16 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State) : Option 
           let value ← scalarNumber value
           return integer arithmetic next + integer arithmetic sum.stride +
             integer arithmetic total + integer arithmetic value + 1
-      | .extremumKey _ _ _ :: _ => none
+      | .extremumKey range next best :: _ => do
+          let advance ← integerBinary arithmetic .add next range.stride
+          -- The first key is only retained; subsequent keys must support ordering.
+          -- Key execution itself is charged by the separate invoke transition.
+          let compareWork ← match best with
+            | none => some 0
+            | some (_, previous) =>
+                (scalarCompare (if range.maximum then .gt else .lt) value previous).map
+                  (fun _ => PrimitiveWork.comparison arithmetic value previous)
+          return 1 + advance + compareWork
       | .arguments _ done _ _ :: _ | .primitiveArguments _ done _ _ :: _
       | .rangeArguments _ done _ _ _ _ _ :: _ | .sumArguments _ _ _ done _ _ :: _
       | .extremumArguments _ _ done _ _ :: _ => some (done.length + 1)

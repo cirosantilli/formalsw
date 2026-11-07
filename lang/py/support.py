@@ -607,10 +607,10 @@ class SupportChecker:
             if uses_calls_model(self.module, function) and property_name not in ('Returns', 'Halts', 'BigO') and not marker.startswith('theorem '):
                 issues.append(UnsupportedConstruct(name, function.lineno,
                     'call execution requires a raw theorem for this property; legacy abstract properties do not model calls'))
-            if property_name == 'BigO' and (uses_memoized(self.module, function)
+            if property_name == 'BigO' and (uses_memoized(self.module, function) and uses_heap_calls(self.module, function)
                                           or uses_heap_memoized(self.module, function)):
                 issues.append(UnsupportedConstruct(name, function.lineno,
-                    'runtime BigO does not yet model memoized execution'))
+                    'runtime BigO does not yet model heap memoized execution'))
             try:
                 global_targets = re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', marker)
                 stateful = bool(function_globals(self.module, function)) or any(

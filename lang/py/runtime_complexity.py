@@ -223,7 +223,11 @@ def global_heap_input_family(function, arguments, args, conditions, domains, glo
 
 
 def runtime_complexity_type(namespace, function, args, conditions, *, heap=False,
-                            globals_domain=(), globals_value=None):
+                            memoized=False, globals_domain=(), globals_value=None):
+    if memoized and heap:
+        raise ValueError("runtime BigO does not yet model heap memoization")
+    runtime = "MemoCalls" if memoized else "HeapCalls" if heap else "Calls"
+    cache_names = f" {namespace}.module.memoizedFunctions" if memoized else ""
     args = list(args)
     arithmetic = "fixed"
     if args and args[-1].startswith("arithmetic="):
@@ -261,9 +265,8 @@ def runtime_complexity_type(namespace, function, args, conditions, *, heap=False
     if len(arguments) == 2 and kinds == {"int"}:
         inputs, domain, size = integer_pair_input_family(function, arguments, args, conditions, heap)
         parameter = "n" if re.search(r"\bn\b", args[0]) else "_"
-        runtime = "HeapCalls" if heap else "Calls"
         return (
-            f"FormalSW.PyAst.{runtime}.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module {json.dumps(function.name)}\n"
+            f"FormalSW.PyAst.{runtime}.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module{cache_names} {json.dumps(function.name)}\n"
             f"  {inputs}\n"
             f"  {domain} {size} (fun {parameter} : Nat => {args[0]})"
         )
@@ -280,10 +283,9 @@ def runtime_complexity_type(namespace, function, args, conditions, *, heap=False
     predicate = predicate.replace(f"«{argument}»", "(input : Int)")
     domain = f"(fun (input : Nat) => {predicate})" if conditions else "(fun _ => True)"
     parameter = variable if re.search(rf"\b{re.escape(variable)}\b", args[0]) else "_"
-    runtime = "HeapCalls" if heap else "Calls"
     inputs = "(fun input : Nat => [.scalar (.int input)]) (fun _ => [])" if heap else "(fun input : Nat => [.int input])"
     return (
-        f"FormalSW.PyAst.{runtime}.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module {json.dumps(function.name)}\n"
+        f"FormalSW.PyAst.{runtime}.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module{cache_names} {json.dumps(function.name)}\n"
         f"  {inputs}\n"
         f"  {domain} id (fun {parameter} : Nat => {args[0]})"
     )

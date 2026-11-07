@@ -17,7 +17,7 @@ InvalidRequirement = frontend["InvalidRequirement"]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--lean-output", type=Path, help="write generated obligations for separate Lean type checking")
 options = parser.parse_args()
-lean_checks = ["import lang.py.FormalSW.HeapRuntimeCostSequences\nimport lang.py.FormalSW.HeapRuntimeInputs\nimport lang.py.FormalSW.IntegerListWork\n"]
+lean_checks = ["import lang.py.FormalSW.HeapRuntimeCostSequences\nimport lang.py.FormalSW.HeapRuntimeInputs\nimport lang.py.FormalSW.IntegerListWork\nimport lang.py.FormalSW.MemoRuntimeCost\n"]
 
 with TemporaryDirectory() as directory:
     for index, marker in enumerate([
@@ -100,6 +100,37 @@ with TemporaryDirectory() as directory:
         assert bound in requirement.property_type, requirement.property_type
         assert requirement.theorem_name == f"Option.solve.«{marker}»"
         assert "«value»" not in requirement.property_type
+
+    for mode, policy in [("", "word"), (", arithmetic=bits", "bits")]:
+        source = Path(directory) / f"memo_{policy}.py"
+        source.write_text(f'''from functools import lru_cache
+
+@lru_cache(None)
+def cached(n: int) -> int:
+    """
+    @formalsw: BigO(n + 1{mode})
+    """
+    return n + 1
+
+def solve(n: int) -> int:
+    """
+    @formalsw: BigO(n + 1{mode})
+    """
+    return cached(n) + cached(n)
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Memo", "MemoAst")
+        claims = [item for item in requirements if item.marker.startswith("BigO(")]
+        assert len(claims) == 2, claims
+        emitter = frontend["AstJsonEmitter"](module)
+        lean_checks.append(f"namespace Memo{policy}\nnamespace MemoAst\nopen FormalSW.PyAst\n")
+        lean_checks.append(f"def module : Module := pyast_from_json% {frontend['lean_string'](emitter.emit())}\nend MemoAst\n")
+        for claim in claims:
+            assert not claim.unsupported, claim.unsupported
+            assert claim.property_type.startswith(f"FormalSW.PyAst.MemoCalls.Runtime.IsBigO .{policy}"), claim
+            assert "MemoAst.module MemoAst.module.memoizedFunctions" in claim.property_type, claim
+            lean_checks.append(f"example : Prop := {claim.property_type}\n")
+        lean_checks.append(f"end Memo{policy}\n")
 
     for mode, policy in [("", "word"), (", arithmetic=bits", "bits")]:
         source = Path(directory) / f"heap_{policy}.py"
