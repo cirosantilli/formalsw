@@ -83,7 +83,8 @@ theorem step_value_cell (module : Module) (address anchors : Nat) (object : Obje
       | exact Heapq.preserves_enumerateStart _ _
       | intro result after retained
       | exact retained
-      | (solve | simp only [RetainsCell, done, argumentsState_heap, expandedArgumentsState_heap, generatorArguments] <;> assumption)
+      | (solve | simp only [RetainsCell, done, argumentsState_heap, expandedArgumentsState_heap,
+          generatorArguments, dictionaryDisplayContinue] <;> assumption)
       | split
 
 end FormalSW.PyAst.HeapCalls.Framing

@@ -136,6 +136,28 @@ def literal_unhashable(log: list[int]):
 def literal_value_raises(log: list[int]):
     return {literal_bad_key(log): literal_fail(log)}
 
+def literal_multiple(n: int):
+    saved = (True, n)
+    bucket = [n]
+    table = {saved: [0], (2, n): bucket, (1, n): bucket}
+    return (table, saved, bucket)
+
+def literal_scalar_tail(n: int):
+    saved = (n,)
+    return ({saved: [2], True: [1], 1: [3], None: [4]}, saved)
+
+def literal_multiple_order(log: list[int]):
+    return {literal_key(log): record(log, 2), literal_key(log): record(log, 4)}
+
+def literal_first_bad(log: list[int]):
+    return {literal_bad_key(log): record(log, 2), literal_key(log): record(log, 4)}
+
+def literal_later_bad(log: list[int]):
+    return {literal_key(log): record(log, 2), literal_bad_key(log): record(log, 4), 9: record(log, 5)}
+
+def literal_later_value_raises(log: list[int]):
+    return {literal_key(log): record(log, 2), literal_bad_key(log): literal_fail(log), 9: record(log, 5)}
+
 def map_digits(text: str):
     return list(map(int, text))
 
@@ -145,13 +167,20 @@ def map_lengths():
 def map_range(n: int):
     return list(map(str, range(n)))
 '''
+source += '\ndef literal_fifteen(log: list[int]):\n    return {' + ', '.join(
+    f'literal_key(log): record(log, {2 * i + 2})' for i in range(15)) + '}\n'
+source += '\ndef literal_sixteen():\n    return {' + ', '.join(
+    f'({i},): {i}' for i in range(16)) + '}\n'
+source += '\ndef literal_mixed_prefix():\n    return {0: 1, (2,): 3}\n'
 program = ast.parse(source)
 world = {}
 exec(source, world)
 for name in ('push_pair', 'retained_key', 'missing_default', 'nested_key', 'eager', 'late_read',
              'promoted', 'unhashable', 'map_digits', 'map_lengths', 'map_range',
              'literal_alias', 'literal_nested', 'literal_empty', 'literal_order',
-             'literal_unhashable', 'literal_value_raises'):
+             'literal_unhashable', 'literal_value_raises', 'literal_multiple', 'literal_scalar_tail',
+             'literal_multiple_order', 'literal_first_bad', 'literal_later_bad',
+             'literal_later_value_raises', 'literal_fifteen'):
     rejected = SupportChecker(program).check(name)
     assert not rejected, (name, rejected)
 
@@ -167,11 +196,14 @@ cases = []
 for a, b in ((-1, 0), (0, 0), (1, 2), (2**130 + 7, -(2**130))):
     cases.extend([('push_pair', [a, b], False), ('nested_key', [a, b], False),
                   ('missing_default', [a], False), ('late_read', [a], False),
-                  ('literal_alias', [a], False), ('literal_nested', [a], False)])
+                  ('literal_alias', [a], False), ('literal_nested', [a], False),
+                  ('literal_multiple', [a], False), ('literal_scalar_tail', [a], False)])
 cases += [('retained_key', [7], False), ('promoted', [], False), ('eager', [], True),
           ('unhashable', [], True), ('map_lengths', [], False),
           ('literal_empty', [], False), ('literal_order', [], True),
           ('literal_unhashable', [], True), ('literal_value_raises', [], True)]
+cases += [(name, [], True) for name in ('literal_multiple_order', 'literal_first_bad',
+          'literal_later_bad', 'literal_later_value_raises', 'literal_fifteen')]
 cases += [('map_digits', [text], False) for text in ('', '0123456789', '١٢٣', '7x')]
 cases += [('map_range', [n], False) for n in (-2, 0, 4)]
 lines = ['import FormalSW', 'open FormalSW.PyAst', 'set_option maxRecDepth 8192',
@@ -191,6 +223,9 @@ for name, scalars, logged in cases:
     call = f'HeapCalls.call source "{name}" {arguments} {heap}'
     lines += [f'example : (match ({call}).execution.observe 4000 with',
               f'  | .done (.ok c) => {test}', '  | _ => false) = true := by native_decide']
+
+for name in ('literal_sixteen', 'literal_mixed_prefix'):
+    lines.append(f'example : (HeapCalls.call source "{name}" [] []).execution.observe 4000 = .unsupported := by native_decide')
 
 with project_temporary_directory(prefix='key-dictionaries-') as temporary:
     directory = Path(temporary)

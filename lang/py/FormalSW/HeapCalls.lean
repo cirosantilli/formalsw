@@ -1942,6 +1942,16 @@ def dictionaryItemsNext (address : Nat) (keys : List SequenceSource) (position :
   else if entries.map (fun entry => sequenceSource entry.1) ≠ keys then Mutable.unsupported
   else return entries[position]?
 
+/-- Small displays evaluate all pairs before hashing, as CPython's BUILD_MAP does.
+The temporary pair tuples and list retain the original key/value references. -/
+def dictionaryDisplayContinue (key : Value) (value : Expr) (rest : List (Expr × Expr))
+    (env : Env) (stack : List Frame) (heap : Heap) : State :=
+  ⟨.expr value env,
+    .arguments .tuple [key] [] env ::
+      .arguments .list [] (rest.map fun (key, value) => .tuple [key, value]) env ::
+      .arguments (.builtin .dict) [] [] env :: stack,
+    heap⟩
+
 def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Globals := []) : Step State Completion :=
   let ⟨work, stack, heap⟩ := state
   protectGenerator stack <|
@@ -2295,7 +2305,10 @@ def step (module : Module) (anchors : Nat) (state : State) (globals : Mutable.Gl
                   -- A singleton hashes only after its value has been evaluated.
                   | [], [] => .next ⟨.expr expression env,
                       .arguments .dictionarySingleton [value] [] env :: stack, heap⟩
-                  -- Larger displays require their own hashing schedule.
+                  | _, [] =>
+                      if rest.length < 15 then .next (dictionaryDisplayContinue value expression rest env stack heap)
+                      else .unsupported
+                  -- Larger and mixed-prefix displays need their compiler-dependent batching schedule.
                   | _, _ => .unsupported
           | .dictionaryValue key rest entries env =>
               .next ⟨.dictionary rest (ScalarDict.insert entries key value) env, stack, heap⟩

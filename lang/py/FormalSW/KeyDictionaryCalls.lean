@@ -109,6 +109,41 @@ theorem dictionary_singleton
   exact .next (by simp [argumentsState, step, result, run, primitive,
     DictionaryDisplay.singleton_result afterValue (.ref address) item keyHash hashed]) .refl
 
+/-- A small display retains its first reference key and evaluates every remaining pair before hashing. -/
+theorem dictionary_reference_cons
+    (small : (first :: rest).length < 15)
+    (key : Evaluates (globals := globals) module env keyExpr heap (.ref address) afterKey)
+    (value : Evaluates (globals := globals) module env valueExpr afterKey item afterValue)
+    (tail : Arguments (globals := globals) module env
+      ((first :: rest).map fun (key, value) => .tuple [key, value])
+      (afterValue ++ [.tuple [.ref address, item]]) pairs afterPairs)
+    (constructed : DictionaryConstructor.construct [.ref afterPairs.length]
+      (afterPairs ++ [.list (.ref afterValue.length :: pairs)]) = some (.ok answer, finalHeap)) :
+    Evaluates (globals := globals) module env (.dict ((keyExpr, valueExpr) :: first :: rest)) heap
+      answer finalHeap := by
+  intro anchors stack
+  apply Reaches.next rfl
+  apply Reaches.next rfl
+  apply (key anchors _).trans
+  apply Reaches.next (following := dictionaryDisplayContinue (.ref address) valueExpr (first :: rest) env stack afterKey)
+    (by simp only [step, if_pos small, protectGenerator_next])
+  dsimp only [dictionaryDisplayContinue]
+  apply (value anchors _).trans
+  apply Reaches.next rfl
+  apply Reaches.next (following := ⟨.value (.ref afterValue.length),
+    .arguments .list [] ((first :: rest).map fun (key, value) => .tuple [key, value]) env ::
+      .arguments (.builtin .dict) [] [] env :: stack,
+    afterValue ++ [.tuple [.ref address, item]]⟩)
+    (by simp [argumentsState, step, primitive, result, run, Mutable.allocateTuple, Except.map])
+  apply Reaches.next rfl
+  apply (arguments_reach tail .list [.ref afterValue.length] anchors _).trans
+  apply Reaches.next (following := ⟨.value (.ref afterPairs.length),
+    .arguments (.builtin .dict) [] [] env :: stack,
+    afterPairs ++ [.list (.ref afterValue.length :: pairs)]⟩)
+    (by simp [step, primitive, result, run, Mutable.allocate, Except.map])
+  apply Reaches.next rfl
+  exact .next (by simp [argumentsState, step, primitive, result, run, constructed]) .refl
+
 /-- The source binds the receiver before executing the zero-argument in-place clear. -/
 theorem dictionary_clear
     (localName : ∀ name, base = .name name → env name ≠ none)
