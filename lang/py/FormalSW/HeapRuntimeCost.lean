@@ -88,6 +88,8 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
       -- Iterator acquisition uses builtin metadata. The lowered loop separately
       -- charges each element read and addition, without copying the input.
       (sequenceLength heap source).map (fun _ => integer arithmetic initial + 1)
+  | .sumGenerator _ [(_, .call (.name "range") _, _)] _ _, values =>
+      (scalarValues values).map (fun values => Calls.Runtime.argumentWork arithmetic values + 1)
   | .sumGenerator _ [(_, _, [])] _ _, [source] =>
       (sequenceLength heap source).map (fun _ => 2)
   | .append address, [_] => match heap[address]? with
@@ -171,7 +173,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .builtinCall _ _
       | .list _ | .tuple _ | .reversedList _ | .subscript _ _ | .sumSequence _ _
       | .membership _ _ _ | .attribute _ _ => some 1
-      | .sumGenerator _ [_] _ => some 1
+      | .sumGenerator _ [_] _ | .sumRange _ _ _ _ => some 1
       | .listComp _ (_ :: _) | .listCompTargets _ (_ :: _) => some 1
       | .call (.attribute (.name _) _) _ => some 1
       | _ => none
