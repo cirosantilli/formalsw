@@ -143,6 +143,9 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
   | .builtin .bytearray, values => BufferWork.operation arithmetic heap op values
   | .builtin .set, [] => SetWork.operation maps arithmetic heap op values
   | .builtin .sorted, values => SortWork.operation arithmetic heap values
+  | .builtin .divmod, [.scalar (.int left), .scalar (.int right)] => do
+      return (← PrimitiveWork.binary arithmetic .floorDiv (.int left) (.int right)) +
+        (← PrimitiveWork.binary arithmetic .mod (.int left) (.int right)) + sequenceCopy 2
   | .add _, _ => SetWork.operation maps arithmetic heap op values
   | .builtin .max, [.ref address] | .builtin .min, [.ref address] =>
       match heap[address]? with
@@ -163,7 +166,7 @@ def unpackEntry (targets : List Expr) (iterable : Expr) : Option Nat :=
   | _ => (Calls.targetNames targets).map (fun _ => targets.length + 1)
 
 def attributeCallEntry (base : Expr) (name : String) (args : List Expr) : Option Nat :=
-  if (name = "append" ∨ name = "add") ∧ args.length = 1 then some 1
+  if name = "get" ∨ ((name = "append" ∨ name = "add") ∧ args.length = 1) then some 1
   else match base with | .name _ => some 1 | _ => none
 
 @[simp] theorem attributeCallEntry_name (receiver name : String) (args : List Expr) :
@@ -173,6 +176,8 @@ def attributeCallEntry (base : Expr) (name : String) (args : List Expr) : Option
 def charge (arithmetic : Arithmetic) (module : Module) (state : State)
     (maps : MapRepresentation := .collisionChain) : Option Nat :=
   match state.work with
+  | .dictionary [] entries _ => some (entries.length + 1)
+  | .dictionary (_ :: _) _ _ => some 1
   | .operation (.call name) values =>
       match findFunctionIn module.body name with
       | some (args, _) => some (values.length + args.length + 1)
@@ -220,13 +225,25 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .constant _ | .name _ | .binOp _ _ _ | .unaryOp _ _ | .compare _ _
       | .boolOp _ _ | .ifExp _ _ _ | .call (.name _) _
       | .builtinCall _ _
-      | .list _ | .tuple _ | .reversedList _ | .subscript _ _ | .sumSequence _ _
+      | .list _ | .tuple _ | .dict _ | .reversedList _ | .subscript _ _ | .sumSequence _ _
       | .membership _ _ _ | .attribute _ _ => some 1
       | .sumGenerator _ [_] _ | .sumRange _ _ _ _ => some 1
       | .listComp _ (_ :: _) | .listCompTargets _ (_ :: _) => some 1
       | _ => none
   | .value value => match state.stack with
-      | .methodReceiver name _ _ :: _ => (RecordWork.method module state.heap value name).map (· + 1)
+      | .methodReceiver name _ _ :: _ =>
+          (RecordWork.method module state.heap value name).map (· + 1) <|>
+            (match name, value with
+            | "get", .ref address => match state.heap[address]? with
+                | some (.dict _) => some 1
+                | _ => none
+            | _, _ => none)
+      | .dictionaryKey _ _ _ _ :: _ => match value with
+          | .scalar _ => some 1
+          | _ => none
+      | .dictionaryValue key _ entries _ :: _ =>
+          -- Search the current table, write the reference, and advance the frame.
+          some (mapLookup maps entries.length (MapWork.keyWork arithmetic entries key) + 2)
       | .assignAttribute _ _ _ _ :: _ | .initialized _ :: _ => some 1
       | .unpackSequence _ _ _ _ _ :: _ => (sequenceLength state.heap value).map (fun _ => 1)
       | .attribute name :: _ => (RecordWork.field state.heap value name).map (· + 1)
