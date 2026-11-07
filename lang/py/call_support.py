@@ -162,7 +162,8 @@ def sequence_sort(node):
         return None
     reverse = next((keyword.value for keyword in node.keywords if keyword.arg == 'reverse'),
                    ast.Constant(value=False))
-    return SequenceSort(node.args[0], parameter, body, reverse)
+    iterable = materialized_range_iterable(node.args[0])
+    return SequenceSort(iterable if iterable is not None else node.args[0], parameter, body, reverse)
 
 @dataclass(frozen=True)
 class GeneratorExtremum:
@@ -232,7 +233,11 @@ def materialized_range(node):
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and node.func.id == 'list' and len(node.args) == 1 and not node.keywords):
         return None
-    iterable = node.args[0]
+    return materialized_range_iterable(node.args[0])
+
+
+def materialized_range_iterable(iterable):
+    """Capture a consumed builtin range without exposing a first-class range object."""
     if not (isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
             and iterable.func.id == 'range'):
         return None
@@ -240,7 +245,7 @@ def materialized_range(node):
     return ast.copy_location(ast.ListComp(
         elt=ast.Name(id=name, ctx=ast.Load()),
         generators=[ast.comprehension(target=ast.Name(id=name, ctx=ast.Store()),
-                                      iter=iterable, ifs=[], is_async=0)]), node)
+                                      iter=iterable, ifs=[], is_async=0)]), iterable)
 
 
 def mapped_list(node):

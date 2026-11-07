@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Compare consumed range sorting, callback order and failures with Python."""
+import ast
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / 'formalsw'))
+source = '''
+def one(stop: int) -> list[int]:
+    return sorted(range(stop), key=lambda value: -value)
+def two(start: int, stop: int) -> list[int]:
+    return sorted(range(start, stop), key=lambda value: value % 2)
+def three(start: int, stop: int, step: int) -> list[int]:
+    return sorted(range(start, stop, step), key=lambda value: -value, reverse=True)
+def tick(log: list[int], tag: int, value: int) -> int:
+    log.append(tag)
+    return value
+def ordered(log: list[int], step: int) -> list[int]:
+    return sorted(range(tick(log, 10, 3), tick(log, 20, -1), tick(log, 30, step)),
+                  reverse=tick(log, 40, 1), key=lambda value: tick(log, value, value % 2))
+def invalid_bound(log: list[int]) -> list[int]:
+    return sorted(range(tick(log, 10, 0), 'bad', tick(log, 30, 1)),
+                  key=lambda value: tick(log, value, value), reverse=tick(log, 40, 1))
+def failing_argument(log: list[int]) -> list[int]:
+    return sorted(range(tick(log, 10, 0), 1 // 0, tick(log, 30, 1)),
+                  key=lambda value: tick(log, value, value), reverse=tick(log, 40, 1))
+def failing_reverse(log: list[int]) -> list[int]:
+    return sorted(range(3, -1, -1), key=lambda value: tick(log, value, value),
+                  reverse=tick(log, 40, 1) // 0)
+def failing_key(log: list[int]) -> list[int]:
+    return sorted(range(3, -1, -1), key=lambda value: 10 // tick(log, value, value),
+                  reverse=tick(log, 40, 1))
+'''
+module = ast.parse(source)
+world = {}
+exec(source, world)
+for name in world:
+    if name != '__builtins__':
+        assert not SupportChecker(module).check(name), name
+
+
+def scalar(value):
+    if type(value) is bool:
+        return f'(.scalar (.bool {str(value).lower()}))'
+    if type(value) is int:
+        return f'(.scalar (.int ({value})))'
+    if type(value) is str:
+        return f'(.scalar (.string "{value}"))'
+    return '(.scalar .none)'
+
+
+def list_object(values):
+    return '.list [' + ', '.join(map(scalar, values)) + ']'
+
+
+lines = ['import lang.py.FormalSW.HeapCalls', 'open FormalSW.PyAst',
+         'def source : Module := pyast_from_json% (include_str "source.json")',
+         'set_option maxRecDepth 8192']
+checks = 0
+
+
+def check(name, arguments, result, objects, error=None, initial='[]', initial_size=0):
+    global checks
+    values = '[' + ', '.join(arguments) + ']'
+    outcome = (f'.error {{ typeName := "{type(error).__name__}", args := [] }}'
+               if error else f'.ok (.ref {len(objects)})')
+    if error is None:
+        objects = objects + [result]
+    heap = '[' + ', '.join(map(list_object, objects)) + ']'
+    lines.append(f'example : (HeapCalls.call source "{name}" {values} {initial}).execution.observe 4000 = '
+                 f'.done (.ok ⟨{outcome}, [], {heap}, {initial_size}⟩) := by decide')
+    checks += 1
+
+
+for name, cases in (
+    ('one', [(stop,) for stop in (-3, 0, 1, 5, True, False, None, 'bad')]),
+    ('two', [(start, stop) for start in (-2, 3) for stop in (-3, 0, 4)]),
+    ('three', [(start, stop, step) for start in (-2, 3) for stop in (-3, 4)
+               for step in (-2, -1, 0, 2)] + [(False, True, True), (0, 4, False), (0, 3, 'bad')]),
+):
+    for args in cases:
+        try:
+            result = world[name](*args)
+        except (TypeError, ValueError) as error:
+            check(name, list(map(scalar, args)), None, [], error)
+        else:
+            check(name, list(map(scalar, args)), result, [list(range(*args))])
+
+for name, args in [('ordered', [step]) for step in (-2, 0, 1)] + [
+        (name, []) for name in ('invalid_bound', 'failing_argument', 'failing_reverse', 'failing_key')]:
+    log = []
+    caught = None
+    try:
+        result = world[name](log, *args)
+    except (TypeError, ValueError, ZeroDivisionError) as error:
+        result, caught = None, error
+    objects = [log]
+    if name in ('failing_reverse', 'failing_key'):
+        objects.append(list(range(3, -1, -1)))
+    elif name == 'ordered' and args[0] != 0:
+        objects.append(list(range(3, -1, args[0])))
+    check(name, ['.ref 0', *map(scalar, args)], result, objects, caught, '[.list []]', 1)
+
+base = 'def f(n: int) -> list[int]:\n    return sorted(range(n), key=lambda value: value)\n'
+for builtin in ('sorted', 'range'):
+    for extra in (f'{builtin} = 1\n', f'def {builtin}(n: int) -> int:\n    return n\n'):
+        assert SupportChecker(ast.parse(base + extra)).check('f'), extra
+    local = base.replace('    return', f'    {builtin} = n\n    return')
+    assert SupportChecker(ast.parse(local)).check('f'), local
+    parameter = base.replace('n: int', f'n: int, {builtin}: int')
+    assert SupportChecker(ast.parse(parameter)).check('f'), parameter
+for replacement in ('range()', 'range(0, n, 1, 2)', 'range(stop=n)', 'range(*n)'):
+    assert SupportChecker(ast.parse(base.replace('range(n)', replacement))).check('f'), replacement
+# No call to the list builtin is introduced by the private snapshot.
+assert not SupportChecker(ast.parse(base.replace(' -> list[int]', '') + 'list = 1\n')).check('f')
+
+with project_temporary_directory(prefix='sorted-range-') as temporary:
+    directory = Path(temporary)
+    (directory / 'source.json').write_text(api['AstJsonEmitter'](module).emit())
+    proof = directory / 'Checks.lean'
+    proof.write_text('\n'.join(lines) + '\n')
+    subprocess.run(['lake', 'env', 'lean', '-DwarningAsError=true', str(proof)], cwd=ROOT, check=True)
+
+print(f'Sorted ranges: {checks} Python/Lean comparisons, callback order, failures, and shadowing checks passed')
