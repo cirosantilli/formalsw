@@ -3,6 +3,7 @@ import lang.py.builtin.type.sequence
 import lang.py.builtin.type.bytes
 import lang.py.builtin.function
 import lang.py.builtin.type.unicode
+import lang.py.builtin.type.str
 
 /-! Scalar sequence operations distinguish Unicode characters from raw bytes.
 As with the unbounded call stack, decimal conversion has no configurable
@@ -25,6 +26,14 @@ def stripWhitespace (text : String) : String :=
 /-- Zero-argument split coalesces whitespace and omits empty boundary fields. -/
 def splitWhitespace (text : String) : List String :=
   ((text.toList.splitOnP isWhitespace).filter (fun word => !word.isEmpty)).map String.ofList
+
+/-- Python's Unicode line boundaries, including CRLF as one separator and no final empty field. -/
+def splitLines (text : String) : List String :=
+  (Py.Builtin.Str.splitLines (text.toList.map Char.toNat)).map fun line => String.ofList (line.map Char.ofNat)
+
+/-- The one-string-prefix form, without optional slice bounds or a tuple of alternatives. -/
+def startsWith (text expected : String) : Bool :=
+  Py.Builtin.Str.startsWith (text.toList.map Char.toNat) (expected.toList.map Char.toNat)
 
 private def typeError : ExceptionObject := { typeName := "TypeError", args := [] }
 private def valueError : ExceptionObject := { typeName := "ValueError", args := [] }

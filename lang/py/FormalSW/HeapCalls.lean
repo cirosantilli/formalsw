@@ -521,6 +521,8 @@ inductive Operation where
   | upper (text : String)
   | strip (text : String)
   | splitWhitespace (text : String)
+  | splitLines (text : String)
+  | startsWith (text : String)
   | join (separator : String)
   | add (address : Nat)
   | dictionarySingleton
@@ -1475,6 +1477,10 @@ private abbrev basePrimitive : Operation → List Value → Eval Value
   | .strip _, _ => Mutable.unsupported
   | .splitWhitespace text, [] => Mutable.allocate ((Strings.splitWhitespace text).map fun word => .scalar (.string word))
   | .splitWhitespace _, _ => Mutable.unsupported
+  | .splitLines text, [] => Mutable.allocate ((Strings.splitLines text).map fun line => .scalar (.string line))
+  | .splitLines _, _ => Mutable.unsupported
+  | .startsWith text, [.scalar (.string expected)] => pure (.scalar (.bool (Strings.startsWith text expected)))
+  | .startsWith _, _ => Mutable.unsupported
   | .replace text, [.scalar old, .scalar new] =>
       scalarResult (some (Strings.replaceCall text [old, new]))
   | .replace text, [.scalar old, .scalar new, .scalar count] =>
@@ -1841,6 +1847,14 @@ def bindMethod (module : Module) (receiver : Value) (name : String) : Eval Opera
           | _ => Mutable.error "AttributeError"
         else if name = "split" then match value with
           | .string text => pure (.splitWhitespace text)
+          | .bytes _ => Mutable.unsupported
+          | _ => Mutable.error "AttributeError"
+        else if name = "splitlines" then match value with
+          | .string text => pure (.splitLines text)
+          | .bytes _ => Mutable.unsupported
+          | _ => Mutable.error "AttributeError"
+        else if name = "startswith" then match value with
+          | .string text => pure (.startsWith text)
           | .bytes _ => Mutable.unsupported
           | _ => Mutable.error "AttributeError"
         else if name = "replace" then match value with
@@ -2713,7 +2727,7 @@ theorem step_extend (extension : Extends target source) (state : State)
               rcases declaration with ⟨args, body⟩
               simp only [step, found, extension.functions name args body found]
       | builtin name => cases name <;> rfl
-      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | extendList _ | updateSet _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | join _ | add _ | dictionarySingleton | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | isDigit _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
+      | list | tuple | subscript | slice | setItem _ | setSlice _ | append _ | extendList _ | updateSet _ | pop _ | count _ | sort _ | sortReverse _ | replace _ | zfill _ | upper _ | strip _ | splitWhitespace _ | splitLines _ | startsWith _ | join _ | add _ | dictionarySingleton | dictionaryGet _ | dictionarySetDefault _ | dictionaryClear _ | reversedList | sumSequence | membership _ | sumGenerator _ _ _ _ | raiseException _ | comprehension _ _ _ | comprehensionTargets _ _ _ | setComprehension _ _ _ | dictionaryComprehension _ _ _ _ | comprehensionStore _ | sumGeneratorTargets _ _ _ _ | generatorCollect _ _ _ _ | truthGenerator _ _ _ _ | extremumGenerator _ _ _ _ _ | nextGenerator _ _ _ _ | isDigit _ | permutationStart _ _ _ _ _ | combinationStart _ _ _ _ _ | zipStart _ _ _ _ _ | method _ _ _ | notCallable | setField _ _ => rfl
   | dictionary remaining entries env => cases remaining <;> rfl
   | expr _ _ | block _ _ | startRange _ _ _ _ _ _ | extremumLoop _ _ _ | sortedLoop _ _ _ => rfl
   | value value =>

@@ -121,6 +121,12 @@ theorem step_operation_preserves (module : Module)
   | splitWhitespace text =>
     exact step_stringMethod_preserves module logical physical rename logicalAnchors physicalAnchors
       _ values stack globals layout (.split text) inside globalsInside
+  | splitLines text =>
+    exact step_stringMethod_preserves module logical physical rename logicalAnchors physicalAnchors
+      _ values stack globals layout (.splitLines text) inside globalsInside
+  | startsWith text =>
+    exact step_stringMethod_preserves module logical physical rename logicalAnchors physicalAnchors
+      _ values stack globals layout (.startsWith text) inside globalsInside
   | join text =>
     exact step_stringMethod_preserves module logical physical rename logicalAnchors physicalAnchors
       _ values stack globals layout (.join text) inside globalsInside
@@ -221,4 +227,3 @@ theorem step_operation_preserves (module : Module) (choices : ChoiceSchedule)
       operation values stack globals layout ⟨inside.1, inside.2.1⟩ globalsInside)
 
 end FormalSW.PyAst.IteratorCalls.Relocation
-

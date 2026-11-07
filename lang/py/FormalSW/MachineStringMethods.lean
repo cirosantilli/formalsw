@@ -107,6 +107,8 @@ theorem result_zfill_preserves (logical physical : Mutable.Heap) (rename : Nat �
 inductive StringMethodOperation : Operation → Prop
   | strip (text : String) : StringMethodOperation (.strip text)
   | split (text : String) : StringMethodOperation (.splitWhitespace text)
+  | splitLines (text : String) : StringMethodOperation (.splitLines text)
+  | startsWith (text : String) : StringMethodOperation (.startsWith text)
   | replace (text : String) : StringMethodOperation (.replace text)
   | zfill (text : String) : StringMethodOperation (.zfill text)
   | upper (text : String) : StringMethodOperation (.upper text)
@@ -140,6 +142,33 @@ theorem step_stringMethod_preserves (module : Module)
         ((Strings.splitWhitespace text).map fun word => .scalar (.string word)) stack globals layout bounded inside.2 globalsInside
       simpa only [List.map_map, Function.comp_def, relocateValue] using allocated.protectGenerator stack inside.2
     | cons value rest => exact Preserves.unchanged layout (by trivial) (by trivial) rfl
+  | splitLines text =>
+    cases values with
+    | nil =>
+      have bounded : ∀ value ∈ (Strings.splitLines text).map (fun line => Mutable.Value.scalar (.string line)), value.edge.Within logical.length := by
+        intro value member
+        obtain ⟨line, _, rfl⟩ := List.mem_map.mp member
+        trivial
+      have allocated := result_allocateList_preserves logical physical rename logicalAnchors physicalAnchors
+        ((Strings.splitLines text).map fun line => .scalar (.string line)) stack globals layout bounded inside.2 globalsInside
+      simpa only [List.map_map, Function.comp_def, relocateValue] using allocated.protectGenerator stack inside.2
+    | cons value rest => exact Preserves.unchanged layout (by trivial) (by trivial) rfl
+  | startsWith text =>
+    rcases values with _ | ⟨value, _ | ⟨extra, rest⟩⟩
+    case cons.nil =>
+      cases value with
+      | scalar value =>
+        cases value with
+        | string expected =>
+          exact (result_scalar_preserves logical physical rename logicalAnchors physicalAnchors
+            (some (.ok (.bool (Strings.startsWith text expected)))) stack globals layout inside.2 globalsInside).protectGenerator stack inside.2
+        | _ => exact Preserves.unchanged layout (by trivial) (by trivial) rfl
+      | ref address => exact Preserves.unchanged layout (by trivial) (by trivial) rfl
+    case cons.cons =>
+      cases value with
+      | scalar value => cases value <;> exact Preserves.unchanged layout (by trivial) (by trivial) rfl
+      | ref address => exact Preserves.unchanged layout (by trivial) (by trivial) rfl
+    all_goals exact Preserves.unchanged layout (by trivial) (by trivial) rfl
   | replace text =>
     exact (result_replace_preserves logical physical rename logicalAnchors physicalAnchors text values stack globals
       layout inside.1.2 inside.2 globalsInside).protectGenerator stack inside.2

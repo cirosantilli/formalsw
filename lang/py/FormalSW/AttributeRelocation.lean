@@ -124,6 +124,10 @@ theorem bindMethod_scalar_relocates (logical physical : Mutable.Heap) (rename : 
   · subst name; cases value <;> rfl
   by_cases splitName : name = "split"
   · subst name; cases value <;> rfl
+  by_cases splitLinesName : name = "splitlines"
+  · subst name; cases value <;> rfl
+  by_cases startsWithName : name = "startswith"
+  · subst name; cases value <;> rfl
   by_cases replaceName : name = "replace"
   · subst name; cases value <;> rfl
   by_cases zfillName : name = "zfill"
@@ -144,7 +148,7 @@ theorem bindMethod_scalar_relocates (logical physical : Mutable.Heap) (rename : 
   · subst name; cases value <;> rfl
   by_cases sortName : name = "sort"
   · subst name; cases value <;> rfl
-  simp [bindMethod, ordinary, isdigitName, upperName, stripName, splitName, replaceName,
+  simp [bindMethod, ordinary, isdigitName, upperName, stripName, splitName, splitLinesName, startsWithName, replaceName,
     zfillName, joinName, countName, appendName, addName, getName, setdefaultName, popName, sortName, Mutable.unsupported]
 
 set_option maxHeartbeats 400000 in

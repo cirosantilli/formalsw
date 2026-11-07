@@ -161,6 +161,18 @@ theorem preserves_replace (invariant : Heap → Prop) (text : String) (values : 
     | apply Preserves.bind _ _ _ (Preserves.get invariant); intro heap
     | split
 
+theorem preserves_startsWith (invariant : Heap → Prop) (text : String) (values : List Value) :
+    Preserves invariant (primitive (.startsWith text) values) := by
+  cases values with
+  | nil => exact Preserves.unsupported invariant
+  | cons value rest =>
+    cases value with
+    | scalar value =>
+      cases value <;> cases rest <;> first
+        | exact Preserves.pure invariant _
+        | exact Preserves.unsupported invariant
+    | ref address => exact Preserves.unsupported invariant
+
 theorem preserves_dictionarySingleton (invariant : Heap → Prop) (stable : AppendInvariant invariant)
     (key value : Value) : Preserves invariant (DictionaryDisplay.singleton key value) := by
   unfold DictionaryDisplay.singleton
@@ -218,6 +230,7 @@ theorem preserves_primitive (invariant : Heap → Prop) (stable : AppendInvarian
     | exact preserves_builtin invariant stable _ values updates
     | exact preserves_isDigit invariant _ values
     | exact preserves_replace invariant _ values
+    | exact preserves_startsWith invariant _ values
     | exact preserves_allocate invariant stable values
     | exact preserves_allocateTuple invariant stable values
     | exact preserves_reversedList invariant stable values

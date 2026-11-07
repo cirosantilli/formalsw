@@ -38,6 +38,14 @@ theorem bindMethod_scalar_within (module : Module) (heap after : Mutable.Heap)
   · subst name
     cases value <;> simp [bindMethod, Mutable.error, Mutable.unsupported] at executed
     all_goals rcases executed with ⟨rfl, rfl⟩; exact ⟨by trivial, fun _ => rfl⟩
+  by_cases splitLinesName : name = "splitlines"
+  · subst name
+    cases value <;> simp [bindMethod, Mutable.error, Mutable.unsupported] at executed
+    all_goals rcases executed with ⟨rfl, rfl⟩; exact ⟨by trivial, fun _ => rfl⟩
+  by_cases startsWithName : name = "startswith"
+  · subst name
+    cases value <;> simp [bindMethod, Mutable.error, Mutable.unsupported] at executed
+    all_goals rcases executed with ⟨rfl, rfl⟩; exact ⟨by trivial, fun _ => rfl⟩
   by_cases replaceName : name = "replace"
   · subst name
     cases value <;> simp [bindMethod, Mutable.error, Mutable.unsupported] at executed
@@ -78,7 +86,7 @@ theorem bindMethod_scalar_within (module : Module) (heap after : Mutable.Heap)
   · subst name
     cases value <;> simp [bindMethod, Mutable.error] at executed
     all_goals rcases executed with ⟨rfl, rfl⟩; exact ⟨by trivial, fun _ => rfl⟩
-  simp [bindMethod, ordinary, isdigitName, upperName, stripName, splitName, replaceName, zfillName, joinName, countName, appendName, addName, getName, setdefaultName, popName, sortName, Mutable.unsupported] at executed
+  simp [bindMethod, ordinary, isdigitName, upperName, stripName, splitName, splitLinesName, startsWithName, replaceName, zfillName, joinName, countName, appendName, addName, getName, setdefaultName, popName, sortName, Mutable.unsupported] at executed
 
 set_option maxHeartbeats 400000 in
 theorem bindMethod_builtin_within (module : Module) (heap after : Mutable.Heap)

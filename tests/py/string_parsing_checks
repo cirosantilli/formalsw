@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Compare line splitting, prefix tests, allocation and evaluation order with CPython."""
+import ast
+import itertools
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.call_support import uses_heap_calls
+from lang.py.object_snapshot import snapshot_roots
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / "formalsw"))
+
+
+def constant(value):
+    if type(value) is bool:
+        return ".bool " + str(value).lower()
+    if type(value) is int:
+        return f".int ({value})"
+    return ".string (String.ofList [" + ", ".join(f"Char.ofNat {ord(c)}" for c in value) + "])"
+
+
+def data(value):
+    if type(value) is list:
+        return ".list [" + ", ".join(map(data, value)) + "]"
+    return ".scalar (" + constant(value) + ")"
+
+
+SOURCE = '''
+def lines(text: str) -> list[str]:
+    return text.splitlines()
+
+def matches(text: str, prefix: str) -> bool:
+    return text.startswith(prefix)
+
+def record(log: list[str], text: str) -> str:
+    log.append(text)
+    return text
+
+def effects(log: list[str], text: str, prefix: str) -> bool:
+    return record(log, text).startswith(record(log, prefix))
+
+def line_effects(log: list[str], text: str) -> list[str]:
+    return record(log, text).splitlines()
+
+def bad_receiver(log: list[str]):
+    return 1 .startswith(record(log, "unseen"))
+
+def keepends():
+    return "x\\n".splitlines(True)
+
+def tuple_prefix():
+    prefix = "x"
+    return "x".startswith((prefix, "y"))
+
+def bounds():
+    return "xyz".startswith("y", 1)
+
+def bytes_lines():
+    return b"x\\n".splitlines()
+'''
+
+PROOF = r'''
+namespace StringParsingExamples
+open FormalSW.PyAst HeapCalls
+set_option Elab.async false
+
+theorem lines_result (text : String) (heap : Mutable.Heap) :
+    ReturnsValue source "lines" [.scalar (.string text)] heap (.ref heap.length)
+      (heap ++ [.list ((Strings.splitLines text).map fun line => .scalar (.string line))]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.split_lines (Evaluates.lookup rfl) (by intro name same; cases same; rfl)
+
+theorem matches_result (text expected : String) (heap : Mutable.Heap) :
+    ReturnsValue source "matches" [.scalar (.string text), .scalar (.string expected)] heap
+      (.scalar (.bool (Strings.startsWith text expected))) heap := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.starts_with (Evaluates.lookup rfl) (Evaluates.lookup rfl) (by intro name same; cases same; rfl)
+
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (text : String) : Mutable.Heap :=
+  heap.set address (.list (items ++ [.scalar (.string text)]))
+
+theorem record_result (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue source "record" [.ref address, .scalar (.string text)] heap (.scalar (.string text))
+      (inserted heap address items text) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.discard (Evaluates.append (Evaluates.lookup rfl) found (Evaluates.lookup rfl) found)
+  exact BlockReturns.return_value (Evaluates.lookup rfl)
+
+theorem line_effects_result (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (text : String)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue source "line_effects" [.ref address, .scalar (.string text)] heap (.ref heap.length)
+      (inserted heap address items text ++ [.list ((Strings.splitLines text).map fun line => .scalar (.string line))]) := by
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  have size : (inserted heap address items text).length = heap.length := by simp [inserted]
+  rw [← size]
+  apply Evaluates.split_lines
+  · exact Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (record_result heap address items text found)
+  · intro name impossible
+    cases impossible
+
+theorem effects_result (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (text expected : String)
+    (found : heap[address]? = some (.list items)) :
+    ReturnsValue source "effects" [.ref address, .scalar (.string text), .scalar (.string expected)] heap
+      (.scalar (.bool (Strings.startsWith text expected)))
+      (inserted (inserted heap address items text) address (items ++ [.scalar (.string text)]) expected) := by
+  have retained : (inserted heap address items text)[address]? = some (.list (items ++ [.scalar (.string text)])) :=
+    List.getElem?_set_self (List.getElem?_eq_some_iff.mp found).1
+  apply BlockReturns.function rfl rfl
+  apply BlockReturns.return_value
+  exact Evaluates.starts_with
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (record_result heap address items text found))
+    (Evaluates.call (.cons (Evaluates.lookup rfl) (.cons (Evaluates.lookup rfl) .nil))
+      (record_result (inserted heap address items text) address (items ++ [.scalar (.string text)]) expected retained))
+    (by intro name impossible; cases impossible)
+
+end StringParsingExamples
+'''
+
+program = ast.parse(SOURCE)
+checker = SupportChecker(program)
+for function in program.body:
+    assert not checker.check(function.name, heap_calls=True), (function.name, checker.check(function.name, heap_calls=True))
+    assert uses_heap_calls(program, function), function.name
+world = {}
+exec(SOURCE, world)
+lines = ["import FormalSW", "import lang.py.FormalSW.MachineStringMethods", "open FormalSW.PyAst", "set_option Elab.async false",
+         "set_option maxRecDepth 8192",
+         'def source : Module := pyast_from_json% (include_str "source.json")', PROOF]
+comparisons = 0
+
+
+def compare(name, terms, heap, arguments, anchors):
+    global comparisons
+    try:
+        result = world[name](*arguments)
+        error = None
+    except AttributeError as exception:
+        result, error = None, type(exception).__name__
+    expected = data(snapshot_roots(anchors + ([result] if error is None else [])))
+    call = f'HeapCalls.call source "{name}" [{terms}] {heap}'
+    outcome = ("match c.outcome with | .ok _ => true | _ => false" if error is None else
+               f'match c.outcome with | .error e => decide (e = (⟨"{error}", []⟩ : ExceptionObject)) | _ => false')
+    lines.extend([f"#eval (match ({call}).execution.observe 1000 with",
+                  f"  | .done (.ok c) => ({outcome}) &&",
+                  f"      (Graph.observedBool ((Graph.compare c.snapshot ({expected})).observe 5000) == some true)",
+                  "  | _ => false)"])
+    comparisons += 1
+
+
+breaks = [chr(code) for code in range(0x110000) if chr(code).splitlines() == [""]]
+cases = {"", "Grid 01", "λ 😀", "\0", "\x1f", "\u2003", "\ufeff"}
+for boundary in breaks + ["\r\n"]:
+    cases.update((boundary, boundary * 3, "a" + boundary, boundary + "a", "λ" + boundary + "😀", "a" + boundary + boundary + "b"))
+for characters in itertools.product(("a", "\r", "\n", "\u2028"), repeat=3):
+    cases.add("".join(characters))
+for text in sorted(cases):
+    compare("lines", ".scalar (" + constant(text) + ")", "[]", [text], [])
+for text, prefix in itertools.product(("", "Grid 01", "grid", "λ😀", "\0x"), ("", "Grid", "λ", "λ😀x", "\0")):
+    terms = ".scalar (" + constant(text) + "), .scalar (" + constant(prefix) + ")"
+    compare("matches", terms, "[]", [text, prefix], [])
+    log = []
+    log.append(log)
+    compare("effects", ".ref 0, " + terms, "[.list [.ref 0]]", [log, text, prefix], [log])
+for text in ("", "x\r\ny\n", "λ\u2028😀"):
+    log = []
+    log.append(log)
+    compare("line_effects", ".ref 0, .scalar (" + constant(text) + ")", "[.list [.ref 0]]", [log, text], [log])
+log = []
+compare("bad_receiver", ".ref 0", "[.list []]", [log], [log])
+for name in ("keepends", "tuple_prefix", "bounds", "bytes_lines"):
+    lines.append(f'#eval decide ((HeapCalls.call source "{name}" [] []).execution.observe 100 = .unsupported)')
+    comparisons += 1
+
+audits = ["StringParsingExamples." + name for name in
+          ("lines_result", "matches_result", "record_result", "line_effects_result", "effects_result")]
+audits += ["FormalSW.PyAst.HeapCalls.Relocation.step_stringMethod_preserves"]
+lines.extend("#print axioms " + name for name in audits)
+with project_temporary_directory(prefix="string-parsing-checks-") as temporary:
+    directory = Path(temporary)
+    (directory / "source.json").write_text(api["AstJsonEmitter"](program).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("\n".join(lines) + "\n")
+    checked = subprocess.run(["lake", "env", "lean", "-M4096", "-j1", "-DwarningAsError=true", str(proof)],
+                             cwd=ROOT, capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    observed = [line for line in checked.stdout.splitlines() if line in ("true", "false")]
+    assert observed == ["true"] * comparisons, checked.stdout + checked.stderr
+    dependencies = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    assert len(dependencies) + checked.stdout.count("does not depend on any axioms") == len(audits), checked.stdout
+    for names in dependencies:
+        assert {name.strip() for name in names.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"{comparisons} string parsing comparisons and {len(audits)} axiom audits passed")
