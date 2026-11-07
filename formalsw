@@ -2499,7 +2499,7 @@ def finish_report(report: CheckReport, *, stub: bool = False) -> None:
     if report.unsupported or report.failed_files:
         raise SystemExit(1)
     if not stub:
-        print(f"All {report.passed} checks passed")
+        print(f"All {report.passed} properties proved")
 
 
 def main() -> None:

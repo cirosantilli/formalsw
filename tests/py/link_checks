@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory(prefix='formalsw-link-') as temporary:
         assert message in output, output
         return output
 
-    check(0, 'All 2 checks passed')
+    check(0, 'All 2 properties proved')
     check(0, 'import «link_reference.py»', stub=True)
     reference.write_text(original_reference.replace('n + n', 'n + n + 1'))
     check(1, 'imported Python proof failed')

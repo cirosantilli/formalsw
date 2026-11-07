@@ -62,7 +62,7 @@ def main():
             proof = proof.replace(f'tests.py.{name}', name).replace(f'tests/py/{name}.py', f'{name}.py')
             (project / f'{name}.py.lean').write_text(proof)
             run([cli, '--stub', f'{name}.py'], f'namespace {name}')
-            run([cli, f'{name}.py'], f'All {count} checks passed')
+            run([cli, f'{name}.py'], f'All {count} properties proved')
         assert not (project / 'lakefile.toml').exists()
         assert not (project / 'lean-toolchain').exists()
 
@@ -71,7 +71,7 @@ def main():
         (project / 'lean-toolchain').write_text((runtime / 'lean-toolchain').read_text())
         (project / 'lakefile.toml').write_text(
             'name = "package_check"\n[[require]]\nname = "formalsw"\npath = ' + repr(str(runtime)) + '\n')
-        run([cli, 'range_sum.py'], 'All 5 checks passed')
+        run([cli, 'range_sum.py'], 'All 5 properties proved')
         source = project / 'range_sum.py'
         source.write_text(source.read_text().replace('n * (n - 1)', 'n * (n + 1)'))
         failed = subprocess.run([cli, 'range_sum.py'], cwd=project, env=env,

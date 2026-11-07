@@ -78,7 +78,7 @@ end solver
         assert message in output, output
         return output
 
-    check(message='All 2 checks passed')
+    check(message='All 2 properties proved')
     check(message='import reference.«1.py»', stub=True)
     # A changed reference must be rechecked even though old objects exist.
     original_reference = reference.read_text()
@@ -107,7 +107,7 @@ end solver
     named.symlink_to('1.py')
     solver.write_text(original.replace('from importlib import import_module\n'
         'naive = import_module("reference.1").f', 'from reference.named import f as naive'))
-    check(message='All 2 checks passed')
+    check(message='All 2 properties proved')
     solver.write_text(original)
     # Explicit Python setup replaces runtime imports. Its side effects must run
     # once across dependency discovery and the actual obligation check.
@@ -125,7 +125,7 @@ end solver
         '    """\n'
         '    return n\n')
     solver.write_text(setup)
-    check(message='All 2 checks passed')
+    check(message='All 2 properties proved')
     assert (project / 'setup-count').read_text() == 'x'
     check(message='import reference.«1.py»', stub=True)
     assert (project / 'setup-count').read_text() == 'xx'
@@ -135,7 +135,7 @@ end solver
     # Resolve from a configured package root, without a source-directory symlink.
     (project / 'pyproject.toml').write_text('[tool.formalsw]\npython-path = ["reference"]\n')
     solver.write_text(setup.replace('naive = import_module("reference.1").f', 'from named import f as naive'))
-    check(message='All 2 checks passed')
+    check(message='All 2 properties proved')
     solver.write_text(setup.replace('naive = import_module("reference.1").f', 'raise ValueError("setup failed")'))
     check(1, 'Py setup failed: ValueError: setup failed')
     solver.write_text(setup.replace('        lower = sum([0, 0])',
@@ -157,7 +157,7 @@ theorem solve.«Returns» (n : Int)
     (scalarFunction SolverAst.module "solve" [.int n]).Returns := ⟨.int n, .done rfl⟩
 end solver
 ''')
-    check(message='All 2 checks passed')
+    check(message='All 2 properties proved')
     reference.write_text(original_reference.replace('return n', 'return n + 1'))
     check(1, 'imported Python proof failed')
     reference.write_text(original_reference)
