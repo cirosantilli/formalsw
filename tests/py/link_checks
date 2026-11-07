@@ -32,10 +32,15 @@ with tempfile.TemporaryDirectory(prefix='formalsw-link-') as temporary:
         return output
 
     check(0, 'All 1 property proved plus 1 property proved in dependency files')
-    directory_result = subprocess.run([str(REPO / 'formalsw'), str(project)],
-                                      cwd=project, text=True, capture_output=True)
-    assert directory_result.returncode == 0, directory_result.stdout + directory_result.stderr
-    assert directory_result.stdout.strip() == 'All 2 properties proved', directory_result.stdout
+    for inputs in ([project], [source, reference], [reference, source], [source, project, source]):
+        result = subprocess.run([str(REPO / 'formalsw'), *map(str, inputs)],
+                                cwd=project, text=True, capture_output=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.strip() == 'All 2 properties proved', result.stdout
+    result = subprocess.run([str(REPO / 'formalsw'), '--stub', str(source), str(reference)],
+                            cwd=project, text=True, capture_output=True)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert '--stub requires one Python source file' in result.stderr, result.stderr
     check(0, 'import «link_reference.py»', stub=True)
     reference.write_text(original_reference.replace('n + n', 'n + n + 1'))
     check(1, 'imported Python proof failed')

@@ -232,6 +232,8 @@ All 3 properties proved
 
 When imported Python files also have proof obligations, the summary reports them separately, for example: `All 3 properties proved plus 4 properties proved in dependency files`. For a directory input, properties in all Python files under that directory count as directly requested; only dependencies outside that set count separately.
 
+Pass multiple files or directories to check them together, for example `formalsw solvers/1.py solvers/2.py`. Each file and shared dependency is checked once, even when input paths overlap. Files explicitly requested or found in an input directory count as direct inputs, including files also imported by another input. `--stub` accepts exactly one Python file.
+
 You can check this with the following example contained in-tree:
 
 link:tests/py/range_sum.py[]
