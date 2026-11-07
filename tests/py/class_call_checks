@@ -11,6 +11,8 @@ import sys
 
 from test_support import project_temporary_directory
 
+# The adjacent typing.py fixture must not replace the standard-library module.
+sys.path[:] = [entry for entry in sys.path if Path(entry).resolve() != Path(__file__).resolve().parent]
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from lang.py.object_snapshot import snapshot_roots
@@ -21,6 +23,12 @@ api = runpy.run_path(str(ROOT / 'formalsw'))
 source = '''
 from dataclasses import dataclass
 import dataclasses as dc
+from typing import Dict, List, Tuple
+import typing as t
+@dataclass
+class Nested:
+    by_pattern: Dict[Tuple[int, ...], List[str]]
+    as_set: t.Set[str]
 @dataclass(frozen=True)
 class Frozen:
     value: int
@@ -78,6 +86,11 @@ def replace(box: Box, n: int) -> int:
 
 variants = {
     'dataclass_init': 'return Frozen(n, items)',
+    'dataclass_keywords': 'return Frozen(value=mark(items, n), items=items)',
+    'dataclass_mixed_keywords': 'return Frozen(mark(items, n), items=items)',
+    'dataclass_keyword_order': 'return Frozen(value=mark(items, n), items=[mark(items, 2)])',
+    'dataclass_keyword_failure': 'return Frozen(value=mark(items, n) // 0, items=[mark(items, 2)])',
+    'dataclass_nested_annotations': 'return Nested(by_pattern={(n, n): ["square"]}, as_set={"square"})',
     'dataclass_read': 'return Frozen(n, items).value',
     'dataclass_missing_argument': 'return Frozen(mark(items, n))',
     'dataclass_extra_argument': 'return Frozen(mark(items, n), items, mark(items, 2))',
@@ -311,5 +324,22 @@ rejected = (
 for snippet in rejected:
     program = ast.parse(snippet + '\ndef run(n: int) -> int:\n    box = Box()\n    return n\n')
     assert SupportChecker(program).check('run', heap_calls=True), snippet
+
+for call in ('Frozen(items=items, value=n)', 'Frozen(value=n)', 'Frozen(n, value=n, items=items)',
+             'Frozen(value=n, missing=items)', 'Frozen(**items)', 'Box(value=n)'):
+    program = ast.parse(source + '\ndef rejected_call(items: list[int], n: int):\n    return ' + call + '\n')
+    assert SupportChecker(program).check('rejected_call', heap_calls=True), call
+    emitted = json.loads(api['AstJsonEmitter'](program).emit())['ast']['body'][-1]['body'][-1]
+    assert emitted['type'] == 'Unsupported', (call, emitted)
+
+for annotation, extra in (('Dict[Tuple[int, ...], List[str]]', 'Dict = dict'),
+                          ('t.Set[str]', 't.Set = set'),
+                          ('t.Set[str]', 'escaped = t'),
+                          ('t.ClassVar[int]', ''), ('dc.InitVar[int]', '')):
+    program = ast.parse('from dataclasses import dataclass\nimport dataclasses as dc\n'
+                        'from typing import Dict, List, Tuple\nimport typing as t\n'
+                        '@dataclass\nclass BadAnnotation:\n    value: ' + annotation + '\n' + extra +
+                        '\ndef rejected_annotation(n: int):\n    return BadAnnotation(n)\n')
+    assert SupportChecker(program).check('rejected_annotation', heap_calls=True), (annotation, extra)
 
 print(f'{len(checks)} class executions, imported class identity, and {len(rejected)} unsupported-class checks passed')

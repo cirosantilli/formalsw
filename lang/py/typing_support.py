@@ -8,8 +8,8 @@ from lang.py.imports import bindings
 def resolve_typing_annotations(module):
     """Attach validated domains while preserving the source annotation syntax.
 
-    Only module-level signatures and globals use this resolver. Class and local
-    annotation scopes need their own binding analysis before they can opt in.
+    Class field aliases are resolved here; dataclass admission separately checks
+    class-local names. Local annotations do not define contract input domains.
     """
     for node in ast.walk(module):
         if hasattr(node, 'formalsw_typing_container'):
@@ -47,6 +47,16 @@ def resolve_typing_annotations(module):
             annotations.append(statement.returns)
         elif isinstance(statement, ast.AnnAssign):
             annotations.append(statement.annotation)
+        elif isinstance(statement, ast.ClassDef):
+            scope = ast.Module(body=statement.body, type_ignores=[])
+            for field in statement.body:
+                if isinstance(field, ast.AnnAssign):
+                    shadowed = [node for node in ast.walk(field.annotation)
+                                if isinstance(node, ast.Name) and bindings(scope, node.id)]
+                    for node in shadowed:
+                        node.formalsw_typing_invalid = True
+                    if not shadowed:
+                        annotations.append(field.annotation)
     allowed = {id(node) for annotation in annotations if annotation is not None for node in ast.walk(annotation)}
     # Function-local variable annotations are not evaluated by Python. They do
     # not resolve input domains, but using an alias there does not escape it.

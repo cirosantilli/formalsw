@@ -8,6 +8,27 @@ from lang.py.imports import bindings
 from lang.py.global_inputs import annotation_kind, RecordInput
 
 
+def dataclass_annotation(module, annotation):
+    """Allow ordinary nested containers without treating them as quantified input domains."""
+    if isinstance(annotation, ast.Constant) and annotation.value is None:
+        return True
+    if isinstance(annotation, ast.Name) and annotation.id in ('object', 'int', 'str', 'bytes', 'bytearray', 'bool'):
+        return not bindings(module, annotation.id)
+    if not isinstance(annotation, ast.Subscript) or getattr(annotation.value, 'formalsw_typing_invalid', False):
+        return False
+    container = getattr(annotation.value, 'formalsw_typing_container', None)
+    if container is None and isinstance(annotation.value, ast.Name) and not bindings(module, annotation.value.id):
+        container = annotation.value.id
+    parts = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
+    if container == 'tuple' and len(parts) == 2 and isinstance(parts[1], ast.Constant) and parts[1].value is Ellipsis:
+        return dataclass_annotation(module, parts[0])
+    if container not in ('list', 'set', 'dict', 'tuple'):
+        return False
+    if container != 'tuple' and len(parts) != (2 if container == 'dict' else 1):
+        return False
+    return all(dataclass_annotation(module, part) for part in parts)
+
+
 def dataclass_fields(module, cls, reject, *, allow_iterator_methods=False):
     """Resolve the standard decorator and its required positional data fields."""
     if not cls.decorator_list:
@@ -57,9 +78,7 @@ def dataclass_fields(module, cls, reject, *, allow_iterator_methods=False):
                 return fail('dataclass fields require unique ordinary names', node)
             if name in ('bit_length', 'bit_count'):
                 return fail(f'{name} is currently reserved for the modeled integer method', node)
-            universal = isinstance(node.annotation, ast.Name) and node.annotation.id == 'object'
-            if (annotation_kind(node.annotation) is None and not universal) or any(
-                    bindings(module, part.id) for part in ast.walk(node.annotation) if isinstance(part, ast.Name)):
+            if not dataclass_annotation(module, node.annotation):
                 return fail('dataclass fields need unshadowed object, scalar or container annotations', node)
             names.add(name)
             fields.append(node)
@@ -76,6 +95,24 @@ def dataclass_fields(module, cls, reject, *, allow_iterator_methods=False):
     if any(part.id in methods for field in fields for part in ast.walk(field.annotation) if isinstance(part, ast.Name)):
         return fail('class methods must not shadow dataclass field annotations')
     return frozen, fields
+
+
+def dataclass_arguments(module, node):
+    """Lower complete declaration-order keywords without changing argument evaluation order."""
+    if (not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or not node.keywords
+            or any(isinstance(arg, ast.Starred) for arg in node.args)):
+        return None
+    definitions = bindings(module, node.func.id)
+    if len(definitions) != 1 or not isinstance(definitions[0], ast.ClassDef):
+        return None
+    issues = []
+    data = dataclass_fields(module, definitions[0], lambda node, message: issues.append(message))
+    if issues or data is None:
+        return None
+    names = [field.target.id for field in data[1]]
+    if len(node.args) > len(names) or [keyword.arg for keyword in node.keywords] != names[len(node.args):]:
+        return None
+    return node.args + [keyword.value for keyword in node.keywords]
 
 
 def plain_class_methods(module, cls, reject):

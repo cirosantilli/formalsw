@@ -13,7 +13,7 @@ from lang.py.memo_support import cache_argument, cache_decorator, uses_memoized
 from lang.py.call_graph import call_targets
 from lang.py.sorting_support import uses_sort_model
 from lang.py.tuple_support import flat_unpacking, unpacking_target, unpacked_tuple_displays, unpacked_return_tuple_displays, globally_private_return_tuple_displays, compared_set_tuple_displays, compared_local_tuple_displays, runtime_tuple_element
-from lang.py.class_support import ordinary_attribute, plain_class_methods
+from lang.py.class_support import dataclass_arguments, ordinary_attribute, plain_class_methods
 
 
 # These builtin constructors preserve positional arguments without the special
@@ -1235,9 +1235,10 @@ def check_calls(module, function, reject, *, heap=False):
                 for item in node.args:
                     recurse(item)
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in classes:
-                if node.func.id in scope or node.keywords:
-                    reject(node, 'class construction requires an unshadowed name and positional arguments')
-                for item in node.args:
+                constructor_arguments = dataclass_arguments(module, node) if node.keywords else node.args
+                if node.func.id in scope or constructor_arguments is None:
+                    reject(node, 'class construction requires an unshadowed name and positional arguments or complete declaration-order dataclass keywords')
+                for item in constructor_arguments if constructor_arguments is not None else node.args:
                     recurse(item)
                 visit_class(classes[node.func.id])
             elif heap and isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):

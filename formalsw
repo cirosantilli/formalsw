@@ -33,7 +33,7 @@ from lang.py.contracts import ContractError, input_condition, reference_kind, he
 from lang.py.defaults import literal_default
 from lang.py.tuple_support import unpacking_target
 from lang.py.imports import bindings, identify_classes, resolve_function, resolve_python_function
-from lang.py.class_support import dataclass_fields, resolve_record_inputs
+from lang.py.class_support import dataclass_arguments, dataclass_fields, resolve_record_inputs
 from lang.py.typing_support import resolve_typing_annotations
 from lang.py.linking import link_imports
 from lang import spec_setup
@@ -1521,6 +1521,10 @@ class AstJsonEmitter:
 
     def expr(self, expr: ast.expr) -> dict[str, object]:
         """Encode one Python expression."""
+        constructor_arguments = dataclass_arguments(self.bindings_module, expr)
+        if constructor_arguments is not None:
+            return {"type": "Call", "func": self.expr(expr.func),
+                    "args": [self.expr(arg) for arg in constructor_arguments]}
         if isinstance(expr, ast.Call) and any(isinstance(arg, ast.Starred) for arg in expr.args):
             # These internal names cannot be spelled as Python identifiers.
             # A whole-call wrapper leaves every ordinary Call AST unchanged.
