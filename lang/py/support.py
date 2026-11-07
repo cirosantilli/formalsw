@@ -273,8 +273,8 @@ class SupportChecker:
                 if any(isinstance(node, (ast.Attribute, ast.Subscript, ast.Call, ast.Compare)) for node in ast.walk(expr)):
                     reject(expr, 'parallel arithmetic must use local scalar values; split shared reads into separate statements')
                     return frozenset()
-                if isinstance(expr, ast.UnaryOp) and not isinstance(expr.op, ast.USub):
-                    reject(expr, 'parallel unary expressions currently support integer negation only')
+                if isinstance(expr, ast.UnaryOp) and not isinstance(expr.op, (ast.USub, ast.Invert)):
+                    reject(expr, 'parallel unary arithmetic supports integer negation and complement')
                     return frozenset()
                 return self.expression(expr, env, reject)
             reject(expr, 'parallel expressions require local values; split shared accesses into separate statements')
@@ -486,7 +486,7 @@ class SupportChecker:
             operand = self.expression(expr.operand, env, reject)
             if isinstance(expr.op, ast.Not):
                 return frozenset(['bool'])
-            if isinstance(expr.op, ast.USub) and operand <= {'int'}:
+            if isinstance(expr.op, (ast.USub, ast.Invert)) and operand <= {'int'}:
                 return frozenset(['int'])
         elif isinstance(expr, ast.Compare):
             if len(expr.ops) != 1:

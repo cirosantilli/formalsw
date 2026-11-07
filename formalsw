@@ -1829,6 +1829,8 @@ class AstJsonEmitter:
         match op:
             case ast.USub():
                 return "USub"
+            case ast.Invert():
+                return "Invert"
             case ast.Not():
                 return "Not"
             case _:

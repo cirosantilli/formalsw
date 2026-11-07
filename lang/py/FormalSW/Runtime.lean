@@ -165,6 +165,9 @@ def scalarExpr (env : ScalarEnv) : Expr → Option (Except ExceptionObject Const
           | .uSub, .int value => return .ok (.int (-value))
           | .uSub, .bool value => return .ok (.int (if value then -1 else 0))
           | .uSub, _ => return .error { typeName := "TypeError", args := [] }
+          | .invert, .int value => return .ok (.int (~~~value))
+          | .invert, .bool value => return .ok (.int (if value then -2 else -1))
+          | .invert, _ => return .error { typeName := "TypeError", args := [] }
   | .compare left [(op, right)] => do
       let left ← scalarExpr env left
       match left with

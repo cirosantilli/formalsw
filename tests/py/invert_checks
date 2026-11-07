@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Check signed complement, operand effects, and augmented-assignment evaluation order."""
+import ast
+import json
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+import warnings
+
+from test_support import project_temporary_directory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.data_ast import module_json
+from lang.py.support import SupportChecker
+
+api = runpy.run_path(str(ROOT / "formalsw"))
+SOURCE = '''
+def invert(n: int) -> int:
+    return ~n
+
+def twice(n: int) -> int:
+    return ~~n
+
+def record(log: list[int], n: int) -> int:
+    log.append(n)
+    return n
+
+def effect(log: list[int], n: int) -> int:
+    return ~record(log, n)
+
+def replace(log: list[int], n: int) -> int:
+    log[0] = n
+    return n
+
+def captured(log: list[int], n: int) -> int:
+    log[0] &= ~replace(log, n)
+    return log[0]
+
+def raising(log: list[int]) -> int:
+    log.append(9)
+    raise ValueError("operand")
+
+def operand_error(log: list[int]) -> int:
+    return ~raising(log)
+
+def reference(log: list[int]) -> int:
+    log.append(9)
+    return ~log
+'''
+
+PROOF = r'''
+namespace InvertExamples
+open FormalSW.PyAst
+set_option Elab.async false
+
+theorem scalar_result (n : Int) : Calls.ReturnsValue source "invert" [.int n] (.int (~~~n)) := by
+  apply Calls.BlockReturns.function rfl rfl
+  apply Calls.BlockReturns.return_value
+  exact Calls.Evaluates.unary (Calls.Evaluates.lookup rfl) rfl
+
+theorem heap_result (n : Int) (heap : Mutable.Heap) :
+    HeapCalls.ReturnsValue source "invert" [.scalar (.int n)] heap (.scalar (.int (~~~n))) heap := by
+  apply HeapCalls.BlockReturns.function rfl rfl
+  apply HeapCalls.BlockReturns.return_value
+  exact HeapCalls.Evaluates.unary (HeapCalls.Evaluates.lookup rfl) rfl
+
+theorem complement_arithmetic (n : Int) : ~~~n = -n - 1 := by
+  change Int.not n = -n - 1
+  cases n <;> simp [Int.not, Int.negSucc_eq] <;> omega
+
+theorem twice_result (n : Int) (heap : Mutable.Heap) :
+    HeapCalls.ReturnsValue source "twice" [.scalar (.int n)] heap (.scalar (.int n)) heap := by
+  have inverse : ~~~(~~~n) = n := by rw [complement_arithmetic, complement_arithmetic]; omega
+  have evaluated : HeapCalls.ReturnsValue source "twice" [.scalar (.int n)] heap
+      (.scalar (.int (~~~(~~~n)))) heap := by
+    apply HeapCalls.BlockReturns.function rfl rfl
+    apply HeapCalls.BlockReturns.return_value
+    exact HeapCalls.Evaluates.unary (HeapCalls.Evaluates.unary (HeapCalls.Evaluates.lookup rfl) rfl) rfl
+  simpa only [inverse] using evaluated
+
+def inserted (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (n : Int) : Mutable.Heap :=
+  heap.set address (.list (items ++ [.scalar (.int n)]))
+
+theorem record_result (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (n : Int)
+    (found : heap[address]? = some (.list items)) :
+    HeapCalls.ReturnsValue source "record" [.ref address, .scalar (.int n)] heap (.scalar (.int n))
+      (inserted heap address items n) := by
+  apply HeapCalls.BlockReturns.function rfl rfl
+  apply HeapCalls.BlockReturns.discard
+    (HeapCalls.Evaluates.append (HeapCalls.Evaluates.lookup rfl) found (HeapCalls.Evaluates.lookup rfl) found)
+  exact HeapCalls.BlockReturns.return_value (HeapCalls.Evaluates.lookup rfl)
+
+theorem effect_result (heap : Mutable.Heap) (address : Nat) (items : List Mutable.Value) (n : Int)
+    (found : heap[address]? = some (.list items)) :
+    HeapCalls.ReturnsValue source "effect" [.ref address, .scalar (.int n)] heap (.scalar (.int (~~~n)))
+      (inserted heap address items n) := by
+  apply HeapCalls.BlockReturns.function rfl rfl
+  apply HeapCalls.BlockReturns.return_value
+  exact HeapCalls.Evaluates.unary
+    (HeapCalls.Evaluates.call (.cons (HeapCalls.Evaluates.lookup rfl) (.cons (HeapCalls.Evaluates.lookup rfl) .nil))
+      (record_result heap address items n found)) rfl
+
+end InvertExamples
+'''
+
+
+def constant(value):
+    if value is None:
+        return ".none"
+    if type(value) is bool:
+        return ".bool " + str(value).lower()
+    if type(value) is int:
+        return f".int ({value})"
+    if type(value) is bytes:
+        return ".bytes [" + ", ".join(map(str, value)) + "]"
+    return ".string " + json.dumps(value)
+
+
+def result(operation):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            return ".ok (" + constant(operation()) + ")"
+    except (TypeError, ValueError) as exception:
+        # Runtime-generated TypeError messages are outside the model's exception arguments.
+        arguments = [] if isinstance(exception, TypeError) else list(exception.args)
+        return '.error { typeName := "' + type(exception).__name__ + '", args := [' + ", ".join(
+            "(" + constant(argument) + ")" for argument in arguments) + "] }"
+
+
+program = ast.parse(SOURCE)
+checker = SupportChecker(program)
+for function in program.body:
+    assert not checker.check(function.name, heap_calls=True), (function.name, checker.check(function.name, heap_calls=True))
+for name in ("invert", "twice"):
+    assert not checker.check(name), (name, checker.check(name))
+# Also exercise the independent read-only AST frontend.
+assert '"Invert"' in module_json("def invert(n):\n    return ~n\n")
+world = {}
+exec(SOURCE, world)
+lines = ["import FormalSW", "import lang.py.FormalSW.MachineExpressionInvariant", "import lang.py.FormalSW.ReadHeapFrame",
+         "open FormalSW.PyAst", "set_option maxRecDepth 8192", "set_option Elab.async false",
+         'def source : Module := pyast_from_json% (include_str "source.json")', PROOF]
+comparisons = 0
+values = list(range(-128, 129))
+for bits in (8, 31, 63, 130, 1024):
+    values.extend(sign * (2**bits + offset) for sign in (-1, 1) for offset in (-1, 0, 1))
+values.extend((True, False, None, "x", b"x"))
+for value in values:
+    encoded = "(" + constant(value) + ")"
+    expected = result(lambda: ~value)
+    expression = ".unaryOp .invert (.constant " + encoded + ")"
+    lines.append(f"#eval decide (scalarExpr (fun _ => none) ({expression}) = some ({expected}))")
+    lines.extend([f"#eval (match dataExpr (fun _ => none) ({expression}) with",
+                  f"  | some (.ok (.scalar actual)) => decide ((.ok actual : Except ExceptionObject Constant) = ({expected} : Except ExceptionObject Constant))",
+                  f"  | some (.error actual) => decide ((.error actual : Except ExceptionObject Constant) = ({expected} : Except ExceptionObject Constant))",
+                  "  | _ => false)"])
+    lines.append(f"#eval decide (Mutable.expr (fun _ => none) ({expression}) [] = some (({expected} : Except ExceptionObject Constant).map Mutable.Value.scalar, []))")
+    comparisons += 3
+    if type(value) is int:
+        lines.append(f"#eval decide (evalIntExpr [] ({expression}) = some ({~value}))")
+        lines.append(f"#eval decide (sharedExpr [] ({expression}) = .ok (.int ({~value})))")
+        comparisons += 2
+    for name in ("invert", "twice"):
+        expected_call = result(lambda: world[name](value))
+        lines.extend([f'#eval (match (HeapCalls.call source "{name}" [.scalar {encoded}] []).execution.observe 100 with',
+                      f'  | .done (.ok c) => decide (c.outcome = ({expected_call} : Except ExceptionObject Constant).map Mutable.Value.scalar ∧ c.heap = [])',
+                      '  | _ => false)'])
+        comparisons += 1
+for value in (-2**130 - 1, -1, 0, 1, 511, 2**130 + 7, "bad"):
+    log = []
+    log.append(log)
+    expected = result(lambda: world["effect"](log, value))
+    lines.extend([f'#eval (match (HeapCalls.call source "effect" [.ref 0, .scalar ({constant(value)})] [.list [.ref 0]]).execution.observe 200 with',
+                  f'  | .done (.ok c) => decide (c.outcome = ({expected} : Except ExceptionObject Constant).map Mutable.Value.scalar ∧ c.heap = ([.list [.ref 0, .scalar ({constant(value)})]] : Mutable.Heap))',
+                  '  | _ => false)'])
+    comparisons += 1
+for mask in range(512):
+    bit = 1 << (mask % 9)
+    log = [mask]
+    expected = world["captured"](log, bit)
+    lines.extend([f'#eval (match (HeapCalls.call source "captured" [.ref 0, .scalar (.int {bit})] [.list [.scalar (.int {mask})]]).execution.observe 200 with',
+                  f'  | .done (.ok c) => decide (c.outcome = (Except.ok (.scalar (.int {expected})) : Except ExceptionObject Mutable.Value) ∧ c.heap = ([.list [.scalar (.int {log[0]})]] : Mutable.Heap))',
+                  '  | _ => false)'])
+    comparisons += 1
+log = []
+expected = result(lambda: world["operand_error"](log))
+assert log == [9]
+lines.extend(['#eval (match (HeapCalls.call source "operand_error" [.ref 0] [.list []]).execution.observe 200 with',
+              f'  | .done (.ok c) => decide (c.outcome = ({expected} : Except ExceptionObject Constant).map Mutable.Value.scalar ∧ c.heap = ([.list [.scalar (.int 9)]] : Mutable.Heap))',
+              '  | _ => false)',
+              '#eval decide ((HeapCalls.call source "reference" [.ref 0] [.list []]).execution.observe 100 = .unsupported)'])
+comparisons += 2
+
+audits = ["InvertExamples." + name for name in
+          ("scalar_result", "heap_result", "complement_arithmetic", "twice_result", "record_result", "effect_result")]
+audits += ["FormalSW.PyAst.HeapCalls.Relocation.unary_relocates",
+           "FormalSW.PyAst.HeapCalls.Relocation.unary_effect",
+           "FormalSW.PyAst.HeapCalls.Relocation.step_unary_preserves",
+           "FormalSW.PyAst.Heapq.preserves_unary"]
+lines.extend("#print axioms " + name for name in audits)
+with project_temporary_directory(prefix="invert-checks-") as temporary:
+    directory = Path(temporary)
+    (directory / "source.json").write_text(api["AstJsonEmitter"](program).emit())
+    proof = directory / "Checks.lean"
+    proof.write_text("\n".join(lines) + "\n")
+    checked = subprocess.run(["lake", "env", "lean", "-M4096", "-j1", "-DwarningAsError=true", str(proof)],
+                             cwd=ROOT, capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert [line for line in checked.stdout.splitlines() if line in ("true", "false")] == ["true"] * comparisons, checked.stdout
+    dependencies = re.findall(r"depends on axioms:\s*\[([^\]]*)\]", checked.stdout)
+    assert len(dependencies) + checked.stdout.count("does not depend on any axioms") == len(audits), checked.stdout
+    for names in dependencies:
+        assert {name.strip() for name in names.split(",")} <= {"propext", "Classical.choice", "Quot.sound"}, checked.stdout
+print(f"{comparisons} complement comparisons and {len(audits)} axiom audits passed")

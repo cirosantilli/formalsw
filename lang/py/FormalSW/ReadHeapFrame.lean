@@ -22,6 +22,7 @@ theorem preserves_unary (invariant : Heap → Prop) (op : UnaryOp) (value : Valu
     | exact preserves_scalarResult invariant _
     | exact Preserves.pure invariant _
     | exact Preserves.error invariant _
+    | exact Preserves.unsupported invariant
     | apply Preserves.bind _ _ _ (preserves_truth invariant value); intro truth
     | split
 

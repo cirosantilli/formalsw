@@ -1156,7 +1156,7 @@ def check_calls(module, function, reject, *, heap=False):
             if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift)):
                 recurse(node.left)
                 recurse(node.right)
-            elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):
+            elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub, ast.Invert)):
                 recurse(node.operand)
             elif heap and isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)):
                 # An immediately consumed literal never exposes its pooled tuple identity.

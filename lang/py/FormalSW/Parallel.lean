@@ -159,6 +159,9 @@ def sharedExpr (env : SharedEnv) : Expr → SharedResult SharedValue
   | .unaryOp .uSub operand => do
       let .int n ← sharedExpr env operand | .error .unsupported
       return .int (-n)
+  | .unaryOp .invert operand => do
+      let .int n ← sharedExpr env operand | .error .unsupported
+      return .int (~~~n)
   | .unaryOp .not operand => do
       let value ← sharedExpr env operand
       let some scalar := value.toConstant | .error .unsupported

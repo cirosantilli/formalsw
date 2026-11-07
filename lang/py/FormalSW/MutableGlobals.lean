@@ -1479,6 +1479,12 @@ def expr (env : Env) : Expr → Eval Value
       | .scalar (.int n) => return .scalar (.int (-n))
       | .scalar (.bool b) => return .scalar (.int (if b then -1 else 0))
       | _ => error "TypeError"
+  | .unaryOp .invert a => do
+      match ← expr env a with
+      | .scalar (.int n) => return .scalar (.int (~~~n))
+      | .scalar (.bool b) => return .scalar (.int (if b then -2 else -1))
+      | .scalar _ => error "TypeError"
+      | .ref _ => unsupported
   | .compare a [(op, b)] => do
       let a ← expr env a
       let b ← expr env b

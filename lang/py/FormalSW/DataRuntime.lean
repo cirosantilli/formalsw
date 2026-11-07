@@ -115,6 +115,8 @@ def dataExpr (env : DataEnv) : Expr → Option (Except ExceptionObject Data)
         | .not, value => .ok (.scalar (.bool (!value.truth)))
         | .uSub, .scalar (.int n) => .ok (.scalar (.int (-n)))
         | .uSub, .scalar (.bool b) => .ok (.scalar (.int (if b then -1 else 0)))
+        | .invert, .scalar (.int n) => .ok (.scalar (.int (~~~n)))
+        | .invert, .scalar (.bool b) => .ok (.scalar (.int (if b then -2 else -1)))
         | _, _ => dataError "TypeError"
   | .compare left [(op, right)] => do
       let left ← dataExpr env left

@@ -17,7 +17,7 @@ def module_json(source):
         ast.Module, ast.FunctionDef, ast.arguments, ast.arg, ast.Return,
         ast.Assign, ast.If, ast.While, ast.Expr, ast.Constant, ast.Name,
         ast.List, ast.Subscript, ast.BinOp, ast.UnaryOp, ast.Compare, ast.Call,
-        ast.Load, ast.Store, ast.Add, ast.Sub, ast.Not, ast.USub,
+        ast.Load, ast.Store, ast.Add, ast.Sub, ast.Not, ast.USub, ast.Invert,
         ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
     )
     for node in ast.walk(tree):

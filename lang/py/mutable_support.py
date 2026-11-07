@@ -67,7 +67,7 @@ def check_mutable(function, globals, bindings, reject):
                     if kind in left and right & {'int', 'bool'} or kind in right and left & {'int', 'bool'}:
                         kinds.add(kind)
             return frozenset(kinds)
-        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub, ast.Invert)):
             expression(node.operand, env)
             return frozenset(('bool' if isinstance(node.op, ast.Not) else 'int',))
         elif isinstance(node, ast.Compare):

@@ -27,6 +27,8 @@ deriving Repr, DecidableEq, BEq, Lean.ToExpr
 inductive UnaryOp where
   /-- Python unary minus. -/
   | uSub
+  /-- Python's unbounded signed integer complement. -/
+  | invert
   /-- Python logical `not`. -/
   | not
 deriving Repr, BEq, Lean.ToExpr
@@ -391,6 +393,7 @@ private def jsonArray (json : Lean.Json) (name : String)
 private def UnaryOp.fromJson? (json : Lean.Json) : Except String UnaryOp := do
   match ← json.getStr? with
   | "USub" => return .uSub
+  | "Invert" => return .invert
   | "Not" => return .not
   | name => throw s!"unsupported unary operator: {name}"
 
@@ -1621,6 +1624,9 @@ def evalIntExpr (env : Env) : Expr -> Option Int
   | Expr.unaryOp UnaryOp.uSub expr => do
       let value <- evalIntExpr env expr
       some (-value)
+  | Expr.unaryOp UnaryOp.invert expr => do
+      let value <- evalIntExpr env expr
+      some (~~~value)
   | Expr.unaryOp _ _ => none
   | Expr.boolOp _ _ => none
   | Expr.ifExp _ _ _ => none

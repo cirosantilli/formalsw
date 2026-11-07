@@ -90,7 +90,7 @@ theorem unary_relocates (logical physical : Mutable.Heap) (rename : Nat → Nat)
     have paired := layout.truth value inside
     simp only [unary, Mutable.eval_bind, paired, tested, Option.map_some, Except.map]
     rfl
-  | uSub =>
+  | uSub | invert =>
     cases value with
     | scalar scalar => exact scalarResult_relocates logical physical rename _
     | ref address => rfl
@@ -114,5 +114,9 @@ theorem unary_effect (heap after : Mutable.Heap) (op : UnaryOp) (value : Value)
       have same : Except.error {typeName := "TypeError", args := []} = outcome ∧ heap = after := by
         simpa [unary, Mutable.error] using executed
       exact ⟨same.2.symm, by intro returned impossible; rw [← same.1] at impossible; cases impossible⟩
+  | invert =>
+    cases value with
+    | scalar scalar => exact scalarResult_effect heap after _ outcome executed
+    | ref address => simp [unary, Mutable.unsupported] at executed
 
 end FormalSW.PyAst.HeapCalls.Relocation

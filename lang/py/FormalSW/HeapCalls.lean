@@ -66,6 +66,9 @@ def unary (op : UnaryOp) (value : Value) : Eval Value := do
   | .uSub => match value with
       | .scalar value => scalarResult (scalarExpr (fun _ => none) (.unaryOp .uSub (.constant value)))
       | .ref _ => Mutable.error "TypeError"
+  | .invert => match value with
+      | .scalar value => scalarResult (scalarExpr (fun _ => none) (.unaryOp .invert (.constant value)))
+      | .ref _ => Mutable.unsupported
 
 /-- Identity never calls equality methods or coerces Boolean/integer values. -/
 def identity : Value → Value → Eval Value
