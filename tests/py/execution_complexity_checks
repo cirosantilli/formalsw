@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 frontend = runpy.run_path(str(ROOT / "formalsw"))
 InvalidRequirement = frontend["InvalidRequirement"]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--lean-output", type=Path, help="write generated list obligations for Lean type checking")
+parser.add_argument("--lean-output", type=Path, help="write generated obligations for separate Lean type checking")
 options = parser.parse_args()
 lean_checks = ["import lang.py.FormalSW.HeapRuntimeCostSequences\nimport lang.py.FormalSW.HeapRuntimeInputs\nimport lang.py.FormalSW.IntegerListWork\n"]
 
@@ -440,6 +440,182 @@ def solve(start: int, end: int) -> int:
     else:
         raise AssertionError("Negative bounds must not exploit missing cost rules")
 
+    # Global state belongs to the same input family as the measured argument:
+    # a single asymptotic constant must cover every permitted heap and aliasing.
+    family = "Nat × FormalSW.PyAst.Mutable.Heap × Nat × Nat × Nat"
+    state = '[("ONES", .ref input.2.2.1), ("TEENS", .ref input.2.2.2.1), ("TENS", .ref input.2.2.2.2)]'
+
+    def emit_global_case(index, source, module, claim):
+        semantic = frontend["module_with_python_builtins"](source, module)
+        emitter = frontend["AstJsonEmitter"](semantic)
+        lean_checks.append(f"namespace GlobalCase{index}\nnamespace GlobalAst\nopen FormalSW.PyAst\n")
+        lean_checks.append(f"def module : Module := pyast_from_json% {frontend['lean_string'](emitter.emit())}\n")
+        for name, condition in module.formalsw_conditions.items():
+            lean_checks.append(f"def {name} : Expr := pyexpr_from_json% {frontend['lean_string'](json.dumps(emitter.expr(condition)))}\n")
+        lean_checks.append(f"end GlobalAst\nexample : Prop := {claim}\nend GlobalCase{index}\n")
+
+    for index, (initializer, policy, guarded) in enumerate([
+        ('{1: "one"}', 'fixed', True),
+        ('{99: "initializer must not constrain entry state"}', 'bits', True),
+        ('{}', 'fixed', False),
+    ]):
+        source = Path(directory) / f"globals{index}.py"
+        guards = '''    @formalsw: Requires(0 <= n <= 1000)
+    @formalsw: Requires({1: "one"} == ONES)
+    @formalsw: Requires({10: "ten"} == TEENS)
+    @formalsw: Requires({2: "twenty"} == TENS)
+''' if guarded else ''
+        source.write_text(f'''
+ONES: dict[int, str] = {initializer}
+TEENS: dict[int, str] = {{}}
+TENS: dict[int, str] = {{}}
+
+def letters(n: int) -> int:
+    return len(ONES.get(n, "")) + len(TEENS.get(n, "")) + len(TENS.get(n, ""))
+
+def solve(n: int = 1000) -> int:
+    """
+{guards}    @formalsw: BigO(n, arithmetic={policy})
+    """
+    return letters(n)
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Global", "GlobalAst")
+        runtime = next(item for item in requirements if item.marker.startswith("BigO("))
+        assert not runtime.unsupported, runtime.unsupported
+        claim = runtime.property_type
+        assert claim.startswith(f"FormalSW.PyAst.HeapCalls.Runtime.IsBigO .{'word' if policy == 'fixed' else 'bits'}"), claim
+        assert f"(fun input : {family} => [.scalar (.int input.1)]) (fun input : {family} => input.2.1)" in claim, claim
+        assert f"(fun input : {family} => input.1) (fun n : Nat => n)" in claim, claim
+        assert claim.endswith(f"(globals := fun input : {family} => {state})"), claim
+        assert 'Heap.Valid input.2.1' in claim, claim
+        for reference in ('input.2.2.1', 'input.2.2.2.1', 'input.2.2.2.2'):
+            assert f'Value.HasType input.2.1 (.ref {reference}) "dict[int,str]"' in claim, claim
+        assert '∀' not in claim and '∃' not in claim and '«' not in claim, claim
+        assert '≠' not in claim and '[]' not in claim and 'initializer' not in claim, claim
+        assert claim.count('HeapCalls.Condition') == (4 if guarded else 0), claim
+        if guarded:
+            assert f'some (.scalar (.int (input.1 : Int))) else ({state} : FormalSW.PyAst.Mutable.Globals).lookup' in claim, claim
+            for guard in range(4):
+                assert f'GlobalAst.requires_solve_{guard} input.2.1 {state}' in claim, claim
+        if index == 0:
+            word_claim = claim
+        elif index == 1:
+            # Initializer changes cannot shrink the quantified call-entry domain.
+            assert claim.replace('IsBigO .bits', 'IsBigO .word') == word_claim
+        emit_global_case(index, source, module, claim)
+
+    # The generated global map admits both equal and distinct addresses in an
+    # arbitrary shared heap. These are definitional checks for the parent to run.
+    lean_checks.append(f'''example (heap : FormalSW.PyAst.Mutable.Heap) :
+    (fun input : {family} => ({state} : FormalSW.PyAst.Mutable.Globals)) (7, heap, 3, 3, 9) =
+      [("ONES", .ref 3), ("TEENS", .ref 3), ("TENS", .ref 9)] := rfl
+''')
+    uniform_claim = word_claim.replace('GlobalAst.', 'GlobalCase0.GlobalAst.')
+    uniform_domain = uniform_claim.splitlines()[2].split(f' (fun input : {family} => input.1)')[0].strip()
+    lean_checks.append(f'''example : ({uniform_claim}) ↔
+    ∃ constant threshold : Nat, ∀ input : {family},
+      {uniform_domain} input → threshold ≤ input.1 →
+      FormalSW.PyAst.HeapCalls.Runtime.TimeBound .word GlobalCase0.GlobalAst.module "solve"
+        [.scalar (.int input.1)] input.2.1 (constant * input.1) (globals := {state}) := Iff.rfl
+''')
+
+    for index, (declarations, signature, guard, body, marker, expected_family, expected_state) in enumerate([
+        ('TABLE: dict[int, str] = {}', 'n: int', 'len(TABLE) >= n', 'return n',
+         'BigO(n)', 'Nat × FormalSW.PyAst.Mutable.Heap × Nat', '[("TABLE", .ref input.2.2)]'),
+        ('A: list[int] = [1]\nB: list[int] = A', 'n: int', 'len(A) == len(B)',
+         'A.append(n)\n    return len(B)', 'BigO(1)', 'Nat × FormalSW.PyAst.Mutable.Heap × Nat × Nat',
+         '[("A", .ref input.2.2.1), ("B", .ref input.2.2.2)]'),
+        ('input: dict[int, str] = {}\n_formalsw_heap: int = 2', '_formalsw_heap: int',
+         'len(input) >= _formalsw_heap', 'return helper(_formalsw_heap)',
+         'BigO(n, n = _formalsw_heap)', 'Nat × FormalSW.PyAst.Mutable.Heap × Int × Nat',
+         '[("_formalsw_heap", .scalar (.int input.2.2.1)), ("input", .ref input.2.2.2)]'),
+        ('input: dict[int, str] = {}\n_formalsw_heap: int = 2', 'input: int',
+         'input >= 0', 'return helper(input)', 'BigO(input)',
+         'Nat × FormalSW.PyAst.Mutable.Heap × Int × Nat',
+         '[("_formalsw_heap", .scalar (.int input.2.2.1)), ("input", .ref input.2.2.2)]'),
+    ]):
+        source = Path(directory) / f"global_alias{index}.py"
+        helper = '''
+def helper(n: int) -> int:
+    return len(input.get(n, "")) + _formalsw_heap
+''' if index >= 2 else ''
+        source.write_text(f'''
+{declarations}
+{helper}
+def solve({signature}) -> int:
+    """
+    @formalsw: Requires({guard})
+    @formalsw: {marker}
+    """
+    {body}
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Global", "GlobalAst")
+        runtime = next(item for item in requirements if item.marker.startswith("BigO("))
+        assert not runtime.unsupported, runtime.unsupported
+        claim = runtime.property_type
+        assert claim.endswith(f'(globals := fun input : {expected_family} => {expected_state})'), claim
+        assert f'GlobalAst.requires_solve_0 input.2.1 {expected_state}' in claim, claim
+        assert '«' not in claim and '∀' not in claim and '≠' not in claim and '[]' not in claim, claim
+        assert 'Heap.Valid input.2.1' in claim and 'HasType input.2.1' in claim, claim
+        emit_global_case(f'Alias{index}', source, module, claim)
+
+    for index, (declaration, signature, marker, guard, body, expected) in enumerate([
+        ('TABLE: dict[int, str] = {}', 'a: int, b: int', 'BigO(1)', 'len(TABLE) >= 0', 'return a', 'one integer input'),
+        ('TABLE: dict[int, str] = {}', 'a: list[int]', 'BigO(n, n = len(a))', 'len(TABLE) >= 0', 'return len(a)', 'one integer input'),
+        ('TABLE: dict[int, str] = {}', 'n: int', 'BigO(n, n = len(TABLE))', 'n >= 0', 'return len(TABLE)', 'optional n = input'),
+        ('TABLE: dict[int, str] = {}', 'n: int', 'Not BigO(1)', 'n >= 0', 'return len(TABLE)', 'cost-coverage proof'),
+        ('TABLE: dict[int, str] = {}', 'n: int', 'BigO(n, cost=steps)', 'n >= 0', 'return len(TABLE)', 'operation-specific costs'),
+        ('TABLE: dict[int, str] = {}', 'n: int', 'BigO(n, arithmetic=unknown)', 'n >= 0', 'return len(TABLE)', 'arithmetic must be fixed or bits'),
+        ('TABLE: int = 2', 'n: int', 'BigO(n)', 'TABLE >= n', 'return TABLE', 'reference global'),
+        ('TABLE: list[list[int]] = [[1]]', 'n: int', 'BigO(n)', 'n >= 0', 'return len(TABLE)', 'nested list globals'),
+        ('TABLE: dict[int, str] = {}', 'n: int', 'BigO(n)', 'n >= 0', 'return unknown(TABLE)', 'unsupported by call execution'),
+    ]):
+        source = Path(directory) / f"invalid_global{index}.py"
+        source.write_text(f'''
+{declaration}
+def solve({signature}) -> int:
+    """
+    @formalsw: Requires({guard})
+    @formalsw: {marker}
+    """
+    {body}
+''')
+        module = frontend["source_module"](source)
+        try:
+            requirements = frontend["collect_requirements"](source, module, "Invalid", "InvalidAst")
+        except InvalidRequirement as error:
+            assert expected in str(error), error
+        else:
+            runtime = next(item for item in requirements if 'BigO(' in item.marker)
+            assert runtime.unsupported and runtime.property_type == 'False', runtime
+            assert expected in str(runtime.unsupported), runtime.unsupported
+
+    for index, (setup, decorator, body) in enumerate([
+        ('from functools import lru_cache', '@lru_cache(None)\n', 'return len(TABLE)'),
+        ('', '', 'return sum({n, len(TABLE)})'),
+    ]):
+        source = Path(directory) / f"unsupported_global_backend{index}.py"
+        source.write_text(f'''
+{setup}
+TABLE: dict[int, str] = {{}}
+{decorator}def solve(n: int) -> int:
+    """
+    @formalsw: BigO(n)
+    """
+    {body}
+''')
+        module = frontend["source_module"](source)
+        try:
+            requirements = frontend["collect_requirements"](source, module, "Invalid", "InvalidAst")
+        except InvalidRequirement as error:
+            assert 'deterministic, non-memoized execution' in str(error), error
+        else:
+            runtime = next(item for item in requirements if item.marker == 'BigO(n)')
+            assert runtime.unsupported and runtime.property_type == 'False', runtime
+            assert 'memoized' in str(runtime.unsupported) or 'set' in str(runtime.unsupported), runtime.unsupported
+
 if options.lean_output:
     options.lean_output.write_text("".join(lean_checks))
-print("Scalar/integer-pair/list/nested-list/heap and integer-width BigO obligations checked; unit-step and partial-resource markers rejected.")
+print("Scalar/integer-pair/list/nested-list/heap/global-state and integer-width BigO obligations checked; unsupported shapes and partial-resource markers rejected.")

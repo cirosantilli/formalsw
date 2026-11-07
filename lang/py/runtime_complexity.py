@@ -6,8 +6,8 @@ import ast
 import json
 import re
 
-from lang.py.global_inputs import annotation_kind
-from lang.py.contracts import heap_input_name
+from lang.py.global_inputs import annotation_kind, global_input_names
+from lang.py.contracts import heap_input_name, reference_kind
 
 
 def absolute_argument(node, name):
@@ -175,7 +175,55 @@ def integer_pair_input_family(function, arguments, args, conditions, heap):
     )
 
 
-def runtime_complexity_type(namespace, function, args, conditions, *, heap=False):
+def global_heap_input_family(function, arguments, args, conditions, domains, globals_value):
+    """
+    Quantify the input, shared heap, and global values inside one runtime family.
+    Independent references may alias; initializers never constrain entry state.
+    """
+    if len(arguments) != 1 or annotation_kind(arguments[0].annotation) != "int":
+        raise ValueError("runtime BigO heap globals support one integer input on natural values")
+    argument = arguments[0].arg
+    if len(args) == 1:
+        variable = argument
+    elif len(args) == 2 and args[1].strip() == argument:
+        variable = "n"
+    else:
+        raise ValueError("runtime BigO expects a bound and an optional n = input binding")
+    globals_ = function.formalsw_globals
+    if not heap_input_name(function) or globals_value is None:
+        raise ValueError("runtime BigO heap globals require a reference global and a shared heap contract")
+    scalar_types = {"int": "Int", "str": "String", "bytes": "List UInt8", "bool": "Bool"}
+    types = ["Nat", "FormalSW.PyAst.Mutable.Heap"]
+    for item in globals_:
+        if reference_kind(item.kind):
+            types.append("Nat")
+        elif item.kind in scalar_types:
+            types.append(scalar_types[item.kind])
+        else:
+            raise ValueError(f"runtime BigO does not support global type {item.kind}")
+    family = " × ".join(types)
+    names = [argument, heap_input_name(function), *global_input_names(function, globals_).values()]
+    replacements = {}
+    for index, name in enumerate(names):
+        projection = "input" + ".2" * index + (".1" if index < len(names) - 1 else "")
+        replacements[name] = f"({projection} : Int)" if index == 0 else projection
+
+    def substitute(term):
+        # Simultaneous substitution also handles source names such as `input`.
+        return re.sub(r"«([^»]+)»", lambda match: replacements.get(match[1], match[0]), term)
+
+    predicate = " ∧ ".join(f"({substitute(condition)})" for condition in (*domains, *conditions))
+    parameter = variable if re.search(rf"\b{re.escape(variable)}\b", args[0]) else "_"
+    return (
+        f"(fun input : {family} => [.scalar (.int input.1)]) (fun input : {family} => input.2.1)",
+        f"(fun input : {family} => {predicate})",
+        f"(fun input : {family} => input.1) (fun {parameter} : Nat => {args[0]})",
+        f"(globals := fun input : {family} => {substitute(globals_value)})",
+    )
+
+
+def runtime_complexity_type(namespace, function, args, conditions, *, heap=False,
+                            globals_domain=(), globals_value=None):
     args = list(args)
     arithmetic = "fixed"
     if args and args[-1].startswith("arithmetic="):
@@ -187,6 +235,17 @@ def runtime_complexity_type(namespace, function, args, conditions, *, heap=False
         raise ValueError("runtime BigO requires positional inputs")
     if any(re.search(r"\bcost\s*=", argument) for argument in args):
         raise ValueError("runtime BigO uses operation-specific costs; cost=steps and partial resource models are not supported")
+    if getattr(function, "formalsw_globals", ()):
+        if not heap:
+            raise ValueError("runtime BigO global inputs require the heap interpreter")
+        inputs, domain, measure, state = global_heap_input_family(
+            function, arguments, args, conditions, globals_domain, globals_value)
+        return (
+            f"FormalSW.PyAst.HeapCalls.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module {json.dumps(function.name)}\n"
+            f"  {inputs}\n"
+            f"  {domain} {measure}\n"
+            f"  {state}"
+        )
     kinds = {annotation_kind(argument.annotation) for argument in arguments}
     if kinds & {"list[int]", "list[list[int]]"}:
         if not heap:

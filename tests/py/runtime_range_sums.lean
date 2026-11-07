@@ -19,7 +19,7 @@ example (n : Int) (heap : Heap) : ∃ extra, ∃ answer : Int,
       (12*n.toNat+18) (.scalar (.int answer)) (heap ++ extra) := by
   let summed := setLocal (comprehensionEnv env [("i", .call (.name "range") [.constant (.int n)], [])])
     sumAccumulator (.scalar (.int 0))
-  obtain ⟨extra, answer, loop⟩ := range_sum_loop (module := program) (.name "i") "i" 1 (fun _ => True) (by decide)
+  obtain ⟨extra, answer, loop⟩ := range_sum_loop (globals := []) (module := program) (.name "i") "i" 1 (fun _ => True) (by decide)
     (by intros; trivial)
     (by intro heap env i _ lookup; exact ⟨[], i, by simpa using EvaluatesIn.lookup lookup⟩)
     n.toNat 0 n 0 (by simp) heap summed trivial rfl

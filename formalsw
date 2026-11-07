@@ -261,6 +261,18 @@ def property_type_for_short_requirement(
     conditions=(),
 ) -> str:
     """Return the Lean property type for a short property marker."""
+    if property_name == "BigO" and getattr(function, "formalsw_globals", ()):
+        if negations:
+            raise InvalidRequirement(
+                f"{function_name}: negative runtime BigO needs a separate cost-coverage proof")
+        if (uses_memoized(module, function) or uses_heap_memoized(module, function)
+                or uses_set_iteration(module, function) or uses_parallel_model(function)):
+            raise InvalidRequirement(f"{function_name}: runtime BigO heap globals require deterministic, non-memoized execution")
+        try:
+            return runtime_complexity_type(ast_namespace, function, args, conditions, heap=True,
+                globals_domain=contract_domain(function)[1], globals_value=contract_globals(function))
+        except ValueError as error:
+            raise InvalidRequirement(f"{function_name}: {error}") from error
     if module is not None:
         global_args = function_globals(module, function)
         if property_name in ("Equiv", "EquivReturn"):
@@ -1136,7 +1148,11 @@ def collect_requirements(
                 requirements.append(Requirement(theorem_name, property_type, source_path,
                     marker.line, marker.text, unsupported))
                 continue
-            unsupported = support.requirement(stmt.name, marker.text)
+            # Heap global contracts already include transitive and Requires-only
+            # globals. The legacy requirement checker selects older global models.
+            heap_global_bigo = parsed and parsed[0] == "BigO" and getattr(stmt, "formalsw_globals", ())
+            unsupported = ((*condition_unsupported, *support.check(stmt.name, heap_calls=True))
+                           if heap_global_bigo else support.requirement(stmt.name, marker.text))
             if raw_theorem is not None:
                 theorem_name = raw_theorem.theorem_name
                 if "." not in theorem_name:

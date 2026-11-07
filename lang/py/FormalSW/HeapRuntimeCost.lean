@@ -308,14 +308,15 @@ def potential (state : State) : Nat := heapPotential state.heap
 
 def TimeBound (arithmetic : Arithmetic) (module : Module) (name : String)
     (values : List Value) (heap : Heap) (bound : Nat)
-    (maps : MapRepresentation := .collisionChain) : Prop :=
-  RuntimeCost.TimeBound (call module name values heap).execution (fun state => charge arithmetic module state maps) bound
+    (maps : MapRepresentation := .collisionChain) (globals : Mutable.Globals := []) : Prop :=
+  RuntimeCost.TimeBound (call module name values heap globals).execution (fun state => charge arithmetic module state maps) bound
 
 /-- A uniform bound on complete source executions, with every heap operation priced. -/
 def IsBigO (arithmetic : Arithmetic) (module : Module) (name : String)
     (inputs : ι → List Value) (heaps : ι → Heap) (domain : ι → Prop)
-    (size : ι → Nat) (bound : Nat → Nat) (maps : MapRepresentation := .collisionChain) : Prop :=
-  RuntimeCost.IsBigO (fun input => (call module name (inputs input) (heaps input)).execution)
+    (size : ι → Nat) (bound : Nat → Nat) (maps : MapRepresentation := .collisionChain)
+    (globals : ι → Mutable.Globals := fun _ => []) : Prop :=
+  RuntimeCost.IsBigO (fun input => (call module name (inputs input) (heaps input) (globals input)).execution)
     (fun _ state => charge arithmetic module state maps) domain size bound
 
 end FormalSW.PyAst.HeapCalls.Runtime

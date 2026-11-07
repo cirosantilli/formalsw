@@ -114,7 +114,7 @@ theorem for_buffer_enumerate (iterable : EvaluatesIn .word module env expression
       ⟨.value (.ref address), .enumerateSource index name (.constant (.int 0)) body otherwise following env :: stack, middle⟩ 1
       ⟨.expr (.constant (.int 0)) env, .enumerateStart index name (.ref address) body otherwise following env :: stack, middle⟩ :=
     advance rfl rfl rfl
-  have zero := EvaluatesIn.constant (arithmetic := .word) (module := module) (env := env) (heap := middle)
+  have zero := EvaluatesIn.constant (globals := []) (arithmetic := .word) (module := module) (env := env) (heap := middle)
     (value := .int 0) anchors (.enumerateStart index name (.ref address) body otherwise following env :: stack)
   have enter : Reaches .word module anchors
       ⟨.value (.scalar (.int 0)), .enumerateStart index name (.ref address) body otherwise following env :: stack, middle⟩ 3

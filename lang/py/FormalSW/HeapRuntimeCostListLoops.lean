@@ -55,7 +55,7 @@ theorem for_list_name (lookup : env receiver = some (.ref address))
   have first : Reaches arithmetic module anchors
       ⟨.block (.forIn (.name name) (.name receiver) body otherwise :: following) env, stack, heap⟩ 1
       ⟨.expr (.name receiver) env, .sequence name body otherwise following env :: stack, heap⟩ := advance rfl rfl rfl
-  have loaded := EvaluatesIn.lookup (arithmetic := arithmetic) (module := module) (heap := heap) lookup anchors
+  have loaded := EvaluatesIn.lookup (globals := []) (arithmetic := arithmetic) (module := module) (heap := heap) lookup anchors
     (.sequence name body otherwise following env :: stack)
   have next : Reaches arithmetic module anchors
       ⟨.value (.ref address), .sequence name body otherwise following env :: stack, heap⟩ 1

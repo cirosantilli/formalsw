@@ -40,7 +40,7 @@ theorem EvaluatesIn.method {field : String}
       ⟨.expr (.name name) env, .methodReceiver field expressions env :: stack, heap⟩ :=
     advance (by simp [step, ordinary.1, ordinary.2, lookup])
       (by simp [charge]) rfl
-  have loaded := EvaluatesIn.lookup (arithmetic := arithmetic) (module := module) (heap := heap)
+  have loaded := EvaluatesIn.lookup (globals := []) (arithmetic := arithmetic) (module := module) (heap := heap)
     lookup anchors (.methodReceiver field expressions env :: stack)
   have boundRun : Reaches arithmetic module anchors
       ⟨.value receiver, .methodReceiver field expressions env :: stack, heap⟩ (work+1)

@@ -37,7 +37,7 @@ theorem BlockContinuesIn.augAssign_list
       ⟨.block ([.augAssign (.name name) .add expression] ++ following) env, stack, heap⟩ 1
       ⟨.expr (.name name) env, .binaryLeft .add expression env true :: .assign name following env :: stack, heap⟩ :=
     advance rfl rfl rfl
-  have loaded := EvaluatesIn.lookup (arithmetic := arithmetic) (module := module) (heap := heap)
+  have loaded := EvaluatesIn.lookup (globals := []) (arithmetic := arithmetic) (module := module) (heap := heap)
     lookup anchors (.binaryLeft .add expression env true :: .assign name following env :: stack)
   have next : Reaches arithmetic module anchors
       ⟨.value (.ref address), .binaryLeft .add expression env true :: .assign name following env :: stack, heap⟩ 1

@@ -60,7 +60,7 @@ theorem BlockContinuesIn.for_unpack_name
       ⟨.block ([.forIn (.tuple targets) (.name receiver) body otherwise] ++ following) env, stack, heap⟩ (targets.length+1)
       ⟨.expr (.name receiver) env, .unpackSequence names body otherwise following env :: stack, heap⟩ :=
     advance (by simp [step, targetsValid]) (by simp [charge, unpackEntry, targetsValid]) rfl
-  have loaded := EvaluatesIn.lookup (arithmetic := arithmetic) (module := module) (heap := heap) lookup anchors
+  have loaded := EvaluatesIn.lookup (globals := []) (arithmetic := arithmetic) (module := module) (heap := heap) lookup anchors
     (.unpackSequence names body otherwise following env :: stack)
   have ready : Reaches arithmetic module anchors
       ⟨.value (.ref address), .unpackSequence names body otherwise following env :: stack, heap⟩ 1
