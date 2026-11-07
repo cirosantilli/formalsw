@@ -14,6 +14,25 @@ theorem ReturnsIn.timeBound (run : ReturnsIn arithmetic module name values cost 
 
 namespace EvaluatesIn
 
+theorem call_single (argument : EvaluatesIn arithmetic module env expression ca input)
+    (callee : ReturnsIn arithmetic module name [input] cc value) :
+    EvaluatesIn arithmetic module env (.call (.name name) [expression]) (ca + cc + 2) value := by
+  intro stack
+  have run := RuntimeCost.Reaches.next (charge := charge arithmetic module) (step := step module)
+    (state := ⟨.expr (.call (.name name) [expression]) env, stack⟩) rfl rfl
+    ((argument _).trans (.next rfl rfl (callee stack)))
+  simpa only [Nat.add_assoc, Nat.add_comm, Nat.add_left_comm] using run
+
+theorem conditional
+    (test : EvaluatesIn arithmetic module env condition ct (.bool flag))
+    (selected : EvaluatesIn arithmetic module env (if flag then yes else no) cb value) :
+    EvaluatesIn arithmetic module env (.ifExp condition yes no) (ct + cb + 2) value := by
+  intro stack
+  have run := RuntimeCost.Reaches.next (charge := charge arithmetic module) (step := step module)
+    (state := ⟨.expr (.ifExp condition yes no) env, stack⟩) rfl rfl
+    ((test _).trans (.next rfl rfl (selected stack)))
+  simpa only [Nat.add_assoc, Nat.add_comm, Nat.add_left_comm] using run
+
 theorem call_pair (left : EvaluatesIn arithmetic module env a ca av)
     (right : EvaluatesIn arithmetic module env b cb bv)
     (callee : ReturnsIn arithmetic module name [av, bv] cc value) :

@@ -67,4 +67,42 @@ theorem rangeSum (module : Module) (sum : RangeSum) (item : Int → Int) (itemCo
       exact run
 
 
+/-- An unfiltered range sum may take different source branches on each visit.
+Each item supplies its actual tariff and execution, bounded uniformly above. -/
+theorem rangeSumWithin (module : Module) (sum : RangeSum) (itemBound : Nat)
+    (unfiltered : sum.conditions = []) (stride : sum.stride = 1)
+    (evaluated : ∀ i, ∃ cost value, cost ≤ itemBound ∧
+      EvaluatesIn .word module (sum.env.set sum.name (.int i)) sum.element cost (.int value))
+    (remaining : Nat) (start total : Int) (stop : sum.stop = start + remaining)
+    (stack : List Frame) :
+    ∃ cost answer, 13 * remaining + 4 ≤ cost ∧ cost ≤ (itemBound + 13) * remaining + 4 ∧
+      RuntimeCost.Reaches (step module) (charge .word module) ⟨.sumLoop sum start total, stack⟩
+        cost ⟨.value (.int answer), stack⟩ := by
+  induction remaining generalizing start total with
+  | zero =>
+      refine ⟨4, total, by simp, by simp, .next (amount := 4) (cost := 0) ?_ rfl .refl⟩
+      simp [step, rangeContinues, stop, stride]
+  | succ remaining ih =>
+      obtain ⟨itemCost, item, itemBounded, itemRun⟩ := evaluated start
+      obtain ⟨tailCost, answer, tailLower, tailBounded, tail⟩ := ih (start + 1) (total + item)
+        (by simp_all; omega)
+      have continues : rangeContinues start sum.stop sum.stride = true := by
+        simp [rangeContinues, stop, stride]
+        omega
+      have first : step module ⟨.sumLoop sum start total, stack⟩ =
+          .next ⟨.expr (.constant (.bool true)) (sum.env.set sum.name (.int start)),
+            .sumFilter sum start total :: stack⟩ := by
+        simp [step, continues, RangeSum.filter, unfiltered]
+      have afterItem : step module ⟨.value (.int item), .sumElement sum start total :: stack⟩ =
+          .next ⟨.sumLoop sum (start + 1) (total + item), stack⟩ := by
+        simp [step, sumAdd, stride]
+      have run := RuntimeCost.Reaches.next (charge := charge .word module) first rfl
+        (.next rfl rfl (.next rfl rfl ((itemRun _).trans (.next afterItem rfl tail))))
+      refine ⟨_, answer, ?_, ?_, run⟩
+      all_goals
+        simp only [rangeWork, PrimitiveWork.integer]
+        rw [Nat.mul_succ]
+        omega
+
+
 end FormalSW.PyAst.Calls.Runtime

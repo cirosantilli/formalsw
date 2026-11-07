@@ -222,6 +222,9 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .assign [.tuple targets] _ :: _ | .assign [.list targets] _ :: _ =>
           (Calls.targetNames targets).map (fun _ => targets.length + 1)
       | .raise (some (.call (.name _) _)) :: _ | .raise (some (.name _)) :: _ => some 1
+      | .augAssign (.subscript _ index) _ _ :: _ => match index with
+          | .slice _ _ _ => none
+          | _ => some 1
       | [] | .assign [.name _] _ :: _ | .augAssign (.name _) _ _ :: _
       | .annAssign (.name _) _ _ :: _
       | .assign [.attribute _ _] _ :: _ | .annAssign (.attribute _ _) _ _ :: _
@@ -247,6 +250,13 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .listComp _ (_ :: _) | .listCompTargets _ (_ :: _) => some 1
       | _ => none
   | .value value => match state.stack with
+      | .augmentItemReceiver _ _ _ _ _ :: _ => some 1
+      | .augmentItemIndex receiver _ _ _ _ :: _ =>
+          -- Read through the saved receiver before evaluating the RHS.
+          (operation arithmetic state.heap .subscript [receiver, value] maps).map (· + 1)
+      | .writeItem receiver index _ _ :: _ =>
+          -- Normalize the saved index again using the live heap after RHS effects.
+          (operation arithmetic state.heap (.setItem value) [receiver, index] maps).map (· + 1)
       | .methodReceiver name _ _ :: _ =>
           (RecordWork.method module state.heap value name).map (· + 1) <|>
             (match name, value with
