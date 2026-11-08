@@ -230,10 +230,12 @@ def global_heap_input_family(function, arguments, args, conditions, domains, glo
 
 
 def runtime_complexity_type(namespace, function, args, conditions, *, heap=False,
-                            memoized=False, globals_domain=(), globals_value=None):
+                            memoized=False, set_iteration=False, globals_domain=(), globals_value=None):
     if memoized and heap:
         raise ValueError("runtime BigO does not yet model heap memoization")
-    runtime = "MemoCalls" if memoized else "HeapCalls" if heap else "Calls"
+    if set_iteration and (not heap or memoized):
+        raise ValueError("runtime BigO set iteration requires non-memoized heap execution")
+    runtime = "SetCalls" if set_iteration else "MemoCalls" if memoized else "HeapCalls" if heap else "Calls"
     cache_names = f" {namespace}.module.memoizedFunctions" if memoized else ""
     args = list(args)
     arithmetic = "fixed"
@@ -252,7 +254,7 @@ def runtime_complexity_type(namespace, function, args, conditions, *, heap=False
         inputs, domain, measure, state = global_heap_input_family(
             function, arguments, args, conditions, globals_domain, globals_value)
         return (
-            f"FormalSW.PyAst.HeapCalls.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module {json.dumps(function.name)}\n"
+            f"FormalSW.PyAst.{runtime}.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module {json.dumps(function.name)}\n"
             f"  {inputs}\n"
             f"  {domain} {measure}\n"
             f"  {state}"
@@ -265,7 +267,7 @@ def runtime_complexity_type(namespace, function, args, conditions, *, heap=False
         inputs, domain, size = family(function, arguments, args, conditions)
         parameter = "n" if re.search(r"\bn\b", args[0]) else "_"
         return (
-            f"FormalSW.PyAst.HeapCalls.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module {json.dumps(function.name)}\n"
+            f"FormalSW.PyAst.{runtime}.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module {json.dumps(function.name)}\n"
             f"  {inputs}\n"
             f"  {domain} {size} (fun {parameter} : Nat => {args[0]})"
         )

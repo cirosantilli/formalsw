@@ -567,6 +567,9 @@ Integer-list `sum` and single unfiltered sum generators charge each iterator rea
 
 List enumeration retains the live receiver and charges each read, index increment and target binding, including exhaustion. An explicit signed start is evaluated after the iterable. Unfiltered sums over `enumerate` also charge each summand and addition; link:lang/py/FormalSW/HeapRuntimeCostEnumeration.lean[] and link:lang/py/FormalSW/HeapRuntimeCostEnumeratedSums.lean[] provide compositional proofs.
 
+Runtime bounds for set traversal quantify over every permitted order with one common constant and threshold. link:lang/py/FormalSW/SetRuntimeCost.lean[] retains ordinary heap tariffs and charges scalar-set acquisition and iterator reads; link:tests/py/runtime_set_iteration.lean[] checks a complete order-dependent call and iterator invalidation after a size change. Object-key iteration remains unpriced.
+
+
 
 ==== ShapeBound
 

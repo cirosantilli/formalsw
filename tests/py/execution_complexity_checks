@@ -17,9 +17,40 @@ InvalidRequirement = frontend["InvalidRequirement"]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--lean-output", type=Path, help="write generated obligations for separate Lean type checking")
 options = parser.parse_args()
-lean_checks = ["import lang.py.FormalSW.HeapRuntimeCostSequences\nimport lang.py.FormalSW.HeapRuntimeInputs\nimport lang.py.FormalSW.IntegerListWork\nimport lang.py.FormalSW.MemoRuntimeCost\n"]
+lean_checks = ["import lang.py.FormalSW.SetRuntimeCost\nimport lang.py.FormalSW.HeapRuntimeCostSequences\nimport lang.py.FormalSW.HeapRuntimeInputs\nimport lang.py.FormalSW.IntegerListWork\nimport lang.py.FormalSW.MemoRuntimeCost\n"]
 
 with TemporaryDirectory() as directory:
+    # Iteration inside a helper also requires a bound uniform over set orders.
+    source = Path(directory) / "set_order.py"
+    source.write_text('''def visit(n: int) -> int:
+    values = {n}
+    total = 0
+    for value in values:
+        total += value
+    return total
+
+
+def solve(n: int) -> int:
+    """
+    @formalsw: Requires(n >= 0)
+    @formalsw: BigO(1)
+    """
+    return visit(n)
+''')
+    module = frontend["source_module"](source)
+    requirements = frontend["collect_requirements"](source, module, "SetOrder", "SetOrderAst")
+    runtime = next(item for item in requirements if item.marker.startswith("BigO("))
+    assert not runtime.unsupported, runtime.unsupported
+    claim = runtime.property_type
+    assert "SetCalls.Runtime.IsBigO .word" in claim, claim
+    semantic = frontend["module_with_python_builtins"](source, module)
+    emitter = frontend["AstJsonEmitter"](semantic)
+    lean_checks.append("namespace SetOrderCase\nnamespace SetOrderAst\nopen FormalSW.PyAst\n")
+    lean_checks.append(f"def module : Module := pyast_from_json% {frontend['lean_string'](emitter.emit())}\n")
+    for name, condition in module.formalsw_conditions.items():
+        lean_checks.append(f"def {name} : Expr := pyexpr_from_json% {frontend['lean_string'](json.dumps(emitter.expr(condition)))}\n")
+    lean_checks.append(f"end SetOrderAst\nexample : Prop := {claim}\nend SetOrderCase\n")
+
     for index, marker in enumerate([
         "BigO(n, cost=steps)", "Not BigO(1, cost=steps)",
         "BigO(n, cost=lists)", "BigO(n, cost=buffers)",

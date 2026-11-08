@@ -284,7 +284,8 @@ def property_type_for_short_requirement(
         try:
             result = runtime_complexity_type(ast_namespace, function, args, conditions,
                                             heap=module is not None and uses_heap_calls(module, function),
-                                            memoized=module is not None and uses_memoized(module, function))
+                                            memoized=module is not None and uses_memoized(module, function),
+                                            set_iteration=module is not None and uses_set_iteration(module, function))
         except ValueError as error:
             raise InvalidRequirement(f"{function_name}: {error}") from error
         if negations:
