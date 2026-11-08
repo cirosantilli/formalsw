@@ -359,7 +359,7 @@ def main() -> int:
         if output:
             print(textwrap.indent(output.rstrip(), "  "))
     execution_cost_passed = True
-    for cost_test in ("execution_cost", "runtime_cost", "runtime_sums", "runtime_scalar_range_sums", "runtime_comprehensions", "runtime_strings", "runtime_membership", "runtime_records", "runtime_classes", "runtime_range_sums", "runtime_list_extension", "runtime_range_comprehensions", "runtime_extrema", "runtime_extremum", "runtime_memo", "runtime_dictionary_writes", "runtime_list_writes", "runtime_list_augassign", "runtime_reverse_loops", "runtime_list_repetition", "runtime_unpacking"):
+    for cost_test in ("execution_cost", "runtime_cost", "runtime_sums", "runtime_scalar_range_sums", "runtime_filtered_sums", "runtime_comprehensions", "runtime_strings", "runtime_membership", "runtime_records", "runtime_classes", "runtime_range_sums", "runtime_list_extension", "runtime_range_comprehensions", "runtime_extrema", "runtime_extremum", "runtime_memo", "runtime_dictionary_writes", "runtime_list_writes", "runtime_list_augassign", "runtime_reverse_loops", "runtime_list_repetition", "runtime_unpacking"):
         execution_cost = subprocess.run(
             ["lake", "env", "lean", "-j1", "-M2048", "-DwarningAsError=true", f"tests/py/{cost_test}.lean"],
             cwd=REPO, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,

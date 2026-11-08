@@ -545,7 +545,7 @@ Dictionary access defaults to collision-chain worst case; explicitly selecting a
 
 Constant dictionary displays charge each insertion against the growing table, retain duplicate-key replacement semantics, and pay for final allocation. `.get()` charges the live table after argument evaluation, including missing-key searches. `divmod` charges division, remainder and allocation of its returned pair. See link:tests/py/runtime_dictionaries.lean[].
 
-Range sums evaluate their bounds and initial accumulator once, then charge each summand and addition. Summands may allocate objects; their costs and retained list credits compose through the loop. See link:tests/py/runtime_range_sums.lean[].
+Range sums evaluate their bounds and initial accumulator once, then charge each summand and addition. Summands may allocate objects; their costs and retained list credits compose through the loop. Filtered scalar sums also charge rejected candidates and can bound the returned value for later calls. See link:tests/py/runtime_range_sums.lean[] and link:tests/py/runtime_filtered_sums.lean[].
 
 Stored instance and dataclass field reads pay for a conservative linear scan of field names, including string-comparison work. Generated positional dataclass constructors pay for copying the field references; reading or storing a reference does not traverse its referent. Ordinary constructors and bound methods charge argument binding and execute their Python bodies under the same cost model. Field writes pay for name lookup and rebuilding the field storage; annotated assignments leave the annotation unevaluated. Dynamic attribute protocols still need separate runtime rules. See link:tests/py/runtime_records.lean[] and link:tests/py/runtime_classes.lean[].
 
