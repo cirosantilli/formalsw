@@ -69,6 +69,15 @@ theorem fold_magnitude (values : List Int) (initial : Int) :
         initial.natAbs+(head.natAbs+(tail.map Int.natAbs).sum)
       omega
 
+/-- Signed cancellation cannot make the sum wider than all input magnitudes together. -/
+theorem sum_decimal_bound (values : List Int) :
+    (values.foldl Int.add 0).natAbs < 10^size values := by
+  have magnitude := fold_magnitude values 0
+  have total := absolute_sum_lt_power values
+  have power := Nat.pow_le_pow_left (by decide : 2 ≤ 10) (size values)
+  simp only [Int.natAbs_zero, Nat.zero_add] at magnitude
+  omega
+
 theorem sum_width (values : List Int) :
     bitLength (values.foldl Int.add 0) ≤ size values+1 := by
   have magnitude := fold_magnitude values 0
