@@ -521,6 +521,8 @@ For a bit-cost analysis, replace the annotation with `@formalsw: BigO((Nat.log2 
 
 Integer `bit_length()` follows the arithmetic policy: constant work in the fixed model and operand-width work in the bit model. Successful assertions charge their condition evaluation and control steps; their message expressions are skipped.
 
+Heap runtime proofs can reuse a separately proved return value and final heap through `ReturnsIn.with_result` in link:lang/py/FormalSW/HeapRuntimeCostResults.lean[]. Both proofs must cover the same function, inputs and starting heap; execution determinism connects their results while retaining the runtime bound.
+
 The short marker supports one integer argument on natural inputs, optionally with `n = argument` before the arithmetic option to rename the size variable. For one `list[int]` argument, optionally accompanied by one integer argument, use `BigO(n, n = len(values))`. This family ranges over arbitrary signed list elements and signed integer arguments; the bound must be uniform in every input except list length, subject to `Requires`. The heap starts with that list. Heap calls without reference inputs or globals start empty and include the collections they allocate.
 
 For two integer arguments, use `BigO(n, n = abs(start) + abs(end) + 1)`, naming both arguments in signature order. This family includes negative inputs and works with either arithmetic model; its `Requires` conditions restrict the quantified domain.
