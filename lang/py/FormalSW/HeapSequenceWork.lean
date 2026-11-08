@@ -40,4 +40,11 @@ theorem slice_suffix (length start : Nat) :
     integer, Py.Builtin.Slice.indexList_suffix, Except.toOption]
   omega
 
+theorem slice_full (length : Nat) :
+    slice .word length (.scalar .none) (.scalar .none) (.scalar .none) =
+      some (6*length+201) := by
+  simp [slice, optionalIndex, BufferWork.sliceWidth, BufferWork.bound, integer,
+    Py.Builtin.Slice.indexList_full, Except.toOption]
+  omega
+
 end FormalSW.PyAst.HeapCalls.SequenceWork

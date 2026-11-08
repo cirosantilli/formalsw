@@ -1,5 +1,6 @@
 import lang.py.FormalSW.HeapRuntimeCostComprehensions
 import lang.py.FormalSW.HeapRuntimeInputs
+import lang.py.FormalSW.HeapRuntimeCostSetup
 
 open FormalSW.PyAst HeapCalls HeapCalls.Runtime
 private def program : Module := { body := [] }
@@ -48,3 +49,20 @@ example : BlockContinuesIn .word program (fun _ => none)
   apply BlockContinuesIn.zip_step (work := 20) (budget := 20)
     (fields := [.scalar (.int 1), .scalar (.int 2), .scalar (.int 3)]) rfl rfl rfl
   exact BlockContinuesIn.zip_done (work := 20) rfl rfl BlockContinuesIn.nil
+
+/-- An exhausted reverse range still evaluates all three negative bounds. -/
+example (heap : Heap) : BlockReturnsIn .word program (fun _ => none)
+    [.forIn (.name "i") (.call (.name "range")
+      [.unaryOp .uSub (.constant (.int 1)), .unaryOp .uSub (.constant (.int 1)),
+       .unaryOp .uSub (.constant (.int 1))]) [] [], .return (.constant (.int 7))]
+    heap 29 (.scalar (.int 7)) heap := by
+  apply BlockReturnsIn.for_range_triple (cost := 6)
+    (EvaluatesIn.negate_int EvaluatesIn.constant)
+    (EvaluatesIn.negate_int EvaluatesIn.constant)
+    (EvaluatesIn.negate_int EvaluatesIn.constant) (by decide)
+  exact (BlockContinuesIn.range_done (module := program) (name := "i")
+    (next := -1) (stop := -1) (stride := -1) (body := []) (otherwise := [])
+    rfl BlockContinuesIn.nil).returns (BlockReturnsIn.return_value EvaluatesIn.constant)
+
+example (length : Nat) : SequenceWork.slice .word length (.scalar .none) (.scalar .none) (.scalar .none) =
+    some (6*length+201) := SequenceWork.slice_full length

@@ -22,6 +22,30 @@ theorem row (rows : List (List Int)) (i : Nat) (valid : i < rows.length) :
     (heap rows)[i+1]? = some (.list (encode rows[i])) := by
   simp [heap, List.getElem?_eq_getElem valid]
 
+/-- Pair each input row with its address in the canonical heap. -/
+def bindings (rows : List (List Int)) : List (Nat × List Int) :=
+  rows.zipIdx.map (fun pair => (pair.2+1, pair.1))
+
+theorem bindings_values (rows : List (List Int)) : (bindings rows).map Prod.snd = rows := by
+  simp [bindings, List.map_map, Function.comp_def]
+
+theorem bindings_root (rows : List (List Int)) :
+    (heap rows)[0]? = some (.list ((bindings rows).map (fun pair => .ref pair.1))) := by
+  have indices := List.zipIdx_map_snd 0 rows
+  have mapped := congrArg (List.map (fun i => Mutable.Value.ref (i+1))) indices
+  rw [← List.range_eq_range'] at mapped
+  rw [root]
+  congr 2
+  simpa only [bindings, List.map_map, Function.comp_def] using mapped.symm
+
+theorem bindings_row (rows : List (List Int)) (pair : Nat × List Int) (member : pair ∈ bindings rows) :
+    (heap rows)[pair.1]? = some (.list (encode pair.2)) := by
+  unfold bindings at member
+  obtain ⟨⟨values, index⟩, indexed, equal⟩ := List.mem_map.mp member
+  subst pair
+  obtain ⟨valid, same⟩ := List.mem_zipIdx' indexed
+  simpa only [same] using row rows index valid
+
 theorem rows_le_size (rows : List (List Int)) : rows.length ≤ size rows := by
   simp [size]
 
