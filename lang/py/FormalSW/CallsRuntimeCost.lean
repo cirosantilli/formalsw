@@ -68,6 +68,8 @@ def primitive (arithmetic : Arithmetic) (operation : Primitive) (values : List C
   | .raiseException _, values => some (values.length + 1)
   | .builtin .identity, [_, _] | .builtin .isinstanceInt, [_] => some 1
   | .builtin .len, [.string _] | .builtin .len, [.bytes _] => some 1
+  | .builtin .ord, [.string value] => if value.length = 1 then some 1 else none
+  | .builtin .ord, [.bytes [_]] => some 1
   | .builtin .abs, [value] => integerWork arithmetic value
   | .builtin .intBitLength, [value] => integerWork arithmetic value
   | .builtin .pow, [left, right] => binary arithmetic .pow left right

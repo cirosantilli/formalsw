@@ -97,6 +97,10 @@ def truth (heap : Heap) : Value → Option Nat
       | some (.dict _) | some (.set _) | some (.keyDict _) | some (.keySet _) => some 1
       | _ => none
 
+def enumeratedGenerator : List (Expr × Expr × List Expr) → Bool
+  | [(_, .call (.name "enumerate") [_, _], [])] => true
+  | _ => false
+
 def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values : List Value)
     (maps : MapRepresentation := .collisionChain) : Option Nat :=
   match op, values with
@@ -117,6 +121,10 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
       (scalarValues values).map (fun values => Calls.Runtime.argumentWork arithmetic values + 1)
   | .sumGenerator _ [(_, _, [])] _ _, [source] =>
       (sequenceLength heap source).map (fun _ => 2)
+  | .sumGeneratorTargets _ generators _ _, [source, .scalar (.int counter)] =>
+      if enumeratedGenerator generators then
+        (sequenceLength heap source).map (fun _ => integer arithmetic counter + 1)
+      else none
   | .append address, [_] => match heap[address]? with
       | some (.list items) => some (DynamicArray.append items.length)
       | _ => none
@@ -218,6 +226,8 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .enumerateStepLoop _ _ (.ref address) position counter _ _ :: _ => match state.heap[address]? with
           | some (.bytearray bytes) =>
               some (3 + 2 * integer arithmetic position + integer arithmetic counter + integer arithmetic bytes.length)
+          | some (.list items) | some (.tuple items) =>
+              some (3 + 2 * integer arithmetic position + integer arithmetic counter + integer arithmetic items.length)
           | _ => none
       | .assign [.tuple targets] _ :: _ | .assign [.list targets] _ :: _ =>
           (Calls.targetNames targets).map (fun _ => targets.length + 1)
@@ -247,6 +257,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .list _ | .tuple _ | .dict _ | .reversedList _ | .subscript _ _ | .sumSequence _ _
       | .membership _ _ _ | .attribute _ _ => some 1
       | .sumGenerator _ [_] _ | .sumRange _ _ _ _ => some 1
+      | .sumGeneratorTargets _ generators _ => if enumeratedGenerator generators then some 1 else none
       | .listComp _ (_ :: _) | .listCompTargets _ (_ :: _) => some 1
       | _ => none
   | .value value => match state.stack with
@@ -296,6 +307,8 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .arguments _ done _ _ :: _ | .rangeArguments _ done _ _ _ _ _ :: _ => some (done.length + 1)
       | .enumerateStart _ _ (.ref address) _ _ _ _ :: _ => match state.heap[address]?, value with
           | some (.bytearray _), .scalar value => (scalarNumber value).map (fun initial => 2 + integer arithmetic initial)
+          | some (.list _), .scalar value | some (.tuple _), .scalar value =>
+              (scalarNumber value).map (fun initial => 2 + integer arithmetic initial)
           | _, _ => none
       | .appendReceiver _ _ :: _ => match value with
           | .ref address => match state.heap[address]? with

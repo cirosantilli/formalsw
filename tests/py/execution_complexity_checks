@@ -192,6 +192,67 @@ def solve(n: int) -> int:
             lean_checks.append(f"def {name} : Expr := pyexpr_from_json% {lean_string(json.dumps(emitter.expr(condition)))}\n")
         lean_checks.append(f"end ListInputAst\nexample : Prop := {claim}\nend Case{index}\n")
 
+    for index, (signature, name, measure, policy) in enumerate([
+        ("names: list[str]", "names", "len(names)", "fixed"),
+        ("names: list[str]", "names", "len(names) + sum(len(name) for name in names)", "fixed"),
+        ("names: list[str], k: int", "names", "len(names) + sum(len(text) for text in names)", "bits"),
+        ("_formalsw_heap: int, input: list[str]", "input", "len(input) + sum(len(s) for s in input)", "fixed"),
+    ]):
+        source = Path(directory) / f"string_list{index}.py"
+        source.write_text(f'''def solve({signature}) -> int:
+    """
+    @formalsw: Requires(len({name}) >= 0)
+    @formalsw: BigO(n, n = {measure}, arithmetic={policy})
+    """
+    return len({name})
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Strings", "StringsAst")
+        runtime = next(item for item in requirements if item.marker.startswith("BigO("))
+        assert not runtime.unsupported, runtime.unsupported
+        claim = runtime.property_type
+        assert "List String" in claim and ".scalar (.string value)" in claim, claim
+        assert "HeapCalls.Condition" in claim and "«" not in claim, claim
+        assert ("StringList.size" in claim) == ("sum(" in measure), claim
+        assert f"Runtime.IsBigO .{'word' if policy == 'fixed' else 'bits'}" in claim, claim
+        if index >= 2:
+            assert "List String × Int" in claim, claim
+        if index == 3:
+            assert "[.scalar (.int input.2), .ref 0]" in claim, claim
+        semantic = frontend["module_with_python_builtins"](source, module)
+        emitter = frontend["AstJsonEmitter"](semantic)
+        lean_checks.append(f"namespace StringCase{index}\nnamespace StringsAst\nopen FormalSW.PyAst\n")
+        lean_checks.append(f"def module : Module := pyast_from_json% {frontend['lean_string'](emitter.emit())}\n")
+        for condition_name, condition in module.formalsw_conditions.items():
+            lean_checks.append(f"def {condition_name} : Expr := pyexpr_from_json% {frontend['lean_string'](json.dumps(emitter.expr(condition)))}\n")
+        lean_checks.append(f"end StringsAst\nexample : Prop := {claim}\nend StringCase{index}\n")
+    lean_checks.append('example : FormalSW.PyAst.HeapCalls.Runtime.StringList.size ["", "é", "🙂", "é"] = 8 := by decide\n')
+    lean_checks.append('example : FormalSW.PyAst.HeapCalls.Runtime.StringList.size ["", "", ""] = 3 := rfl\n')
+
+    for index, measure in enumerate([
+        "len(missing)", "len(names) + sum(len(s) for s in names if s)",
+        "len(names) + sum(len(s) for s in missing)",
+        "len(names) + sum(len(s) for s in names for c in s)",
+        "len(names) + sum(mutate(s) for s in names)",
+        "len(names) + sum(len(other) for s in names)",
+        "len(names) + sum(len(object=s) for s in names)",
+        "len(names) + sum(len(s) for s in names, start=1)",
+    ]):
+        source = Path(directory) / f"invalid_strings{index}.py"
+        source.write_text(f'''def solve(names: list[str]) -> int:
+    """
+    @formalsw: BigO(n, n = {measure})
+    """
+    return len(names)
+''')
+        module = frontend["source_module"](source)
+        try:
+            frontend["collect_requirements"](source, module, "Invalid", "InvalidAst")
+        except InvalidRequirement as error:
+            assert "string lists require" in str(error), error
+        else:
+            raise AssertionError(f"Invalid string-list measure accepted: {measure}")
+
     for index, (signature, measure, policy) in enumerate([
         ("rows: list[list[int]]", "len(rows)", "fixed"),
         ("rows: list[list[int]]", "len(rows) + sum(len(row) for row in rows)", "fixed"),
@@ -327,6 +388,7 @@ def solve(digits: list[int]) -> int:
         ("list[int]", "_formalsw_heap", True, "bits"),
         ("list[list[int]]", "k", False, "fixed"),
         ("list[list[int]]", "input", True, "bits"),
+        ("list[str]", "input", True, "fixed"),
     ]):
         arguments = [f"values: {container}", f"{integer}: int"]
         if reversed_args:
@@ -344,7 +406,7 @@ def solve(digits: list[int]) -> int:
         runtime = next(item for item in requirements if item.marker.startswith("BigO("))
         assert not runtime.unsupported, runtime.unsupported
         claim = runtime.property_type
-        family = "List (List Int) × Int" if container == "list[list[int]]" else "List Int × Int"
+        family = {"list[list[int]]": "List (List Int) × Int", "list[int]": "List Int × Int", "list[str]": "List String × Int"}[container]
         assert f"(fun input : {family} => input.2.natAbs + 1) (fun _ : Nat => 1)" in claim, claim
         assert f"Runtime.IsBigO .{'word' if policy == 'fixed' else 'bits'}" in claim, claim
         assert "requires_solve_0" in claim and "«" not in claim, claim
@@ -358,7 +420,7 @@ def solve(digits: list[int]) -> int:
         lean_checks.append(f"end WindowAst\nexample : Prop := {claim}\nend WindowCase{index}\n")
     lean_checks.append("example : (fun input : List (List Int) × Int => input.2.natAbs + 1) ([[], [-100]], -5) = 6 := rfl\n")
 
-    for kind, container in enumerate(("list[int]", "list[list[int]]")):
+    for kind, container in enumerate(("list[int]", "list[list[int]]", "list[str]")):
         for index, measure in enumerate([
             "abs(k)", "abs(k) + True", "abs(missing) + 1", "abs(values) + 1",
             "abs(k, 2) + 1", "abs(value=k) + 1", "mutate(k) + 1",
@@ -649,4 +711,4 @@ TABLE: dict[int, str] = {{}}
 
 if options.lean_output:
     options.lean_output.write_text("".join(lean_checks))
-print("Scalar/integer-pair/list/nested-list/heap/global-state and integer-width BigO obligations checked; unsupported shapes and partial-resource markers rejected.")
+print("Scalar/integer-pair/list/string-list/nested-list/heap/global-state and integer-width BigO obligations checked; unsupported shapes and partial-resource markers rejected.")

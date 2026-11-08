@@ -12,6 +12,7 @@ import lang.py.FormalSW.HeapRuntimeCostSets
 import lang.py.FormalSW.HeapRuntimeCostComparisons
 import lang.py.FormalSW.HeapRuntimeCostSorting
 import lang.py.FormalSW.HeapRuntimeCostBooleans
+import lang.py.FormalSW.StringListWork
 
 open FormalSW.PyAst
 
@@ -20,6 +21,24 @@ private def gcdModule : Module := { body := [.importFrom "math" [("gcd", "gcd")]
 private def sqrtModule : Module := { body := [.importFrom "math" [("isqrt", "isqrt")]] }
 private def combModule : Module := { body := [.importFrom "math" [("comb", "choose")]] }
 private def factorialModule : Module := { body := [.importFrom "math" [("factorial", "fact")]] }
+
+/-- Unicode code points and bytes have bounded width under either arithmetic model. -/
+example (arithmetic : PrimitiveWork.Arithmetic) (c : Char) :
+    Calls.Runtime.primitive arithmetic (.builtin .ord) [.string (String.ofList [c])] = some 1 := by
+  simp [Calls.Runtime.primitive]
+
+example : Calls.Runtime.primitive .bits (.builtin .ord) [.string "🙂"] = some 1 := by decide
+example : Calls.Runtime.primitive .word (.builtin .ord) [.bytes [255]] = some 1 := rfl
+example : Calls.Runtime.primitive .word (.builtin .ord) [.string ""] = none := rfl
+example : Calls.Runtime.primitive .word (.builtin .ord) [.string "AB"] = none := by decide
+example : Calls.Runtime.primitive .word (.builtin .ord) [.int 65] = none := rfl
+
+/-- Equal list lengths do not imply equal string-sort work. Unicode widths are
+character counts, and empty strings still incur comparisons and list copying. -/
+example : HeapCalls.SortWork.sorting .word [.string "A", .string "B"] = 33 := by decide
+example : HeapCalls.SortWork.sorting .word [.string "AAAAAAAA", .string "B"] = 117 := by decide
+example : HeapCalls.SortWork.sorting .bits [.string "🙂", .string "é"] = 33 := by decide
+example : HeapCalls.SortWork.sorting .word [.string "", .string ""] = 21 := by decide
 
 /-- Factorial follows all factors, including the empty product, and checks signs
 before looping. The bit model charges the growing intermediate products. -/
@@ -152,10 +171,17 @@ example : HeapCalls.Runtime.charge .bits emptyModule
     ⟨.block [.enumerateStepLoop "i" "x" (.ref 0) (2^100) (2^100) [] []] (fun _ => none), [],
       [.bytearray [1,2,3]]⟩ = some 308 := by decide
 
-/-- Buffer iteration rules do not silently supply a tariff for other containers. -/
+/-- Lists and tuples retain their receiver and charge counter widths too;
+unordered containers still have no enumeration tariff. -/
 example : HeapCalls.Runtime.charge .word emptyModule
     ⟨.block [.enumerateStepLoop "i" "x" (.ref 0) 0 0 [] []] (fun _ => none), [],
-      [.list []]⟩ = none := rfl
+      [.list []]⟩ = some 7 := rfl
+example : HeapCalls.Runtime.charge .bits emptyModule
+    ⟨.block [.enumerateStepLoop "i" "x" (.ref 0) (2^100) (-(2^100)) [] []] (fun _ => none), [],
+      [.tuple [.scalar (.string "A"), .scalar (.string "B"), .scalar (.string "C")]]⟩ = some 308 := by decide
+example : HeapCalls.Runtime.charge .word emptyModule
+    ⟨.block [.enumerateStepLoop "i" "x" (.ref 0) 0 0 [] []] (fun _ => none), [],
+      [.set []]⟩ = none := rfl
 
 /-- Fixed arithmetic still charges byte allocation and repetition by output size. -/
 example : HeapCalls.Runtime.charge .word emptyModule

@@ -32,8 +32,8 @@ def integer_argument_measure(expression, integers):
     return None
 
 
-def nested_list_measure(expression, name, values):
-    """Recognize row count or total rows and cells without evaluating Python."""
+def sequence_list_measure(expression, name, values, model, description):
+    """Recognize item count or items plus their lengths without evaluating Python."""
     try:
         node = ast.parse(expression, mode="eval").body
     except SyntaxError:
@@ -57,9 +57,9 @@ def nested_list_measure(expression, name, values):
             if (isinstance(loop.target, ast.Name) and isinstance(loop.iter, ast.Name)
                     and loop.iter.id == name and not loop.ifs and not loop.is_async
                     and length_of(generator.elt, loop.target.id)):
-                return f"FormalSW.PyAst.HeapCalls.Runtime.NestedIntList.size {values}"
-    raise ValueError(f"runtime BigO nested lists require n = len({name}) or "
-                     f"n = len({name}) + sum(len(row) for row in {name})")
+                return f"FormalSW.PyAst.HeapCalls.Runtime.{model}.size {values}"
+    raise ValueError(f"runtime BigO {description} require n = len({name}) or "
+                     f"n = len({name}) + sum(len(item) for item in {name})")
 
 
 def nested_list_input_family(function, arguments, args, conditions):
@@ -72,7 +72,8 @@ def nested_list_input_family(function, arguments, args, conditions):
         raise ValueError("runtime BigO nested lists require an explicit size binding")
     family = "List (List Int) × Int" if integers else "List (List Int)"
     values = "input.1" if integers else "input"
-    size = integer_argument_measure(args[1], integers) or nested_list_measure(args[1], lists[0].arg, values)
+    size = integer_argument_measure(args[1], integers) or sequence_list_measure(
+        args[1], lists[0].arg, values, "NestedIntList", "nested lists")
     heap = f"(FormalSW.PyAst.HeapCalls.Runtime.NestedIntList.heap {values})"
     replacements = {lists[0].arg: "(0 : Nat)", heap_input_name(function): heap}
     if integers:
@@ -119,18 +120,24 @@ def integer_list_measure(expression, name, values):
 
 
 def list_input_family(function, arguments, args, conditions):
-    """Quantify signed elements and an optional integer with an explicit size measure."""
-    lists = [argument for argument in arguments if annotation_kind(argument.annotation) == "list[int]"]
+    """Quantify scalar list elements and an optional signed integer."""
+    strings = any(annotation_kind(argument.annotation) == "list[str]" for argument in arguments)
+    kind = "list[str]" if strings else "list[int]"
+    lists = [argument for argument in arguments if annotation_kind(argument.annotation) == kind]
     integers = [argument for argument in arguments if annotation_kind(argument.annotation) == "int"]
     if len(lists) != 1 or len(integers) > 1 or len(lists) + len(integers) != len(arguments):
-        raise ValueError("runtime BigO list inputs support one list[int] and at most one int argument")
+        raise ValueError(f"runtime BigO list inputs support one {kind} and at most one int argument")
     name = lists[0].arg
     if len(args) != 2:
         raise ValueError(f"runtime BigO list inputs require an explicit n = len({name}) binding")
-    family = "List Int × Int" if integers else "List Int"
+    scalar = "String" if strings else "Int"
+    constructor = "string" if strings else "int"
+    family = f"List {scalar} × Int" if integers else f"List {scalar}"
     values = "input.1" if integers else "input"
-    size = integer_argument_measure(args[1], integers) or integer_list_measure(args[1], name, values)
-    heap = f"[.list ({values}.map (fun value => .scalar (.int value)))]"
+    size = integer_argument_measure(args[1], integers) or (
+        sequence_list_measure(args[1], name, values, "StringList", "string lists") if strings
+        else integer_list_measure(args[1], name, values))
+    heap = f"[.list ({values}.map (fun value => .scalar (.{constructor} value)))]"
     replacements = {name: "(0 : Nat)", heap_input_name(function): heap}
     if integers:
         replacements[integers[0].arg] = "input.2"
@@ -251,7 +258,7 @@ def runtime_complexity_type(namespace, function, args, conditions, *, heap=False
             f"  {state}"
         )
     kinds = {annotation_kind(argument.annotation) for argument in arguments}
-    if kinds & {"list[int]", "list[list[int]]"}:
+    if kinds & {"list[int]", "list[str]", "list[list[int]]"}:
         if not heap:
             raise ValueError("runtime BigO list inputs require the heap interpreter")
         family = nested_list_input_family if "list[list[int]]" in kinds else list_input_family
