@@ -66,17 +66,48 @@ def nested_list_input_family(function, arguments, args, conditions):
     )
 
 
+def integer_list_measure(expression, name, values):
+    """Recognize list length or total integer encoding size without evaluating Python."""
+    if re.fullmatch(rf"len\(\s*{re.escape(name)}\s*\)", expression):
+        return f"{values}.length"
+    try:
+        node = ast.parse(expression, mode="eval").body
+    except SyntaxError:
+        node = None
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "sum" and len(node.args) == 1 and not node.keywords
+            and isinstance(node.args[0], ast.GeneratorExp)):
+        generator = node.args[0]
+        if len(generator.generators) == 1:
+            loop = generator.generators[0]
+            element = generator.elt
+            if (isinstance(loop.target, ast.Name) and isinstance(loop.iter, ast.Name)
+                    and loop.iter.id == name and not loop.ifs and not loop.is_async
+                    and isinstance(element, ast.BinOp) and isinstance(element.op, ast.Add)
+                    and isinstance(element.left, ast.Constant) and type(element.left.value) is int
+                    and element.left.value == 1 and isinstance(element.right, ast.Call)
+                    and not element.right.args and not element.right.keywords
+                    and isinstance(element.right.func, ast.Attribute)
+                    and element.right.func.attr == "bit_length"
+                    and isinstance(element.right.func.value, ast.Name)
+                    and element.right.func.value.id == loop.target.id):
+                return f"FormalSW.PyAst.IntegerListWork.size {values}"
+    raise ValueError(f"runtime BigO list inputs require an explicit n = len({name}) or "
+                     f"n = sum(1 + value.bit_length() for value in {name}) binding")
+
+
 def list_input_family(function, arguments, args, conditions):
-    """Quantify arbitrary signed elements and window sizes, measuring list length."""
+    """Quantify signed elements and an optional integer with an explicit size measure."""
     lists = [argument for argument in arguments if annotation_kind(argument.annotation) == "list[int]"]
     integers = [argument for argument in arguments if annotation_kind(argument.annotation) == "int"]
     if len(lists) != 1 or len(integers) > 1 or len(lists) + len(integers) != len(arguments):
         raise ValueError("runtime BigO list inputs support one list[int] and at most one int argument")
     name = lists[0].arg
-    if len(args) != 2 or re.fullmatch(rf"len\(\s*{re.escape(name)}\s*\)", args[1]) is None:
+    if len(args) != 2:
         raise ValueError(f"runtime BigO list inputs require an explicit n = len({name}) binding")
     family = "List Int × Int" if integers else "List Int"
     values = "input.1" if integers else "input"
+    size = integer_list_measure(args[1], name, values)
     heap = f"[.list ({values}.map (fun value => .scalar (.int value)))]"
     replacements = {name: "(0 : Nat)", heap_input_name(function): heap}
     if integers:
@@ -89,7 +120,7 @@ def list_input_family(function, arguments, args, conditions):
     return (
         f"(fun {'input' if integers else '_'} : {family} => [{inputs}]) (fun input : {family} => {heap})",
         f"(fun (input : {family}) => {predicate})" if conditions else "(fun _ => True)",
-        f"(fun input : {family} => {values}.length)",
+        f"(fun input : {family} => {size})",
     )
 
 

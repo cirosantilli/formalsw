@@ -17,7 +17,7 @@ InvalidRequirement = frontend["InvalidRequirement"]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--lean-output", type=Path, help="write generated list obligations for Lean type checking")
 options = parser.parse_args()
-lean_checks = ["import lang.py.FormalSW.HeapRuntimeCostSequences\nimport lang.py.FormalSW.HeapRuntimeInputs\n"]
+lean_checks = ["import lang.py.FormalSW.HeapRuntimeCostSequences\nimport lang.py.FormalSW.HeapRuntimeInputs\nimport lang.py.FormalSW.IntegerListWork\n"]
 
 with TemporaryDirectory() as directory:
     for index, marker in enumerate([
@@ -219,6 +219,62 @@ def solve(rows: list[list[int]]) -> int:
         else:
             raise AssertionError(f"Invalid nested measure accepted: {measure}")
 
+    for index, (signature, values, policy) in enumerate([
+        ("digits: list[int]", "input", "fixed"),
+        ("digits: list[int], k: int", "input.1", "fixed"),
+        ("k: int, digits: list[int]", "input.1", "bits"),
+    ]):
+        source = Path(directory) / f"integer_size{index}.py"
+        source.write_text(f'''
+def solve({signature}) -> int:
+    """
+    @formalsw: Requires(sum(digits) >= 0)
+    @formalsw: BigO(n, n = sum(1 + item.bit_length() for item in digits), arithmetic={policy})
+    """
+    return len(digits)
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Sized", "SizedAst")
+        requirement = next(item for item in requirements if item.marker.startswith("BigO("))
+        assert not requirement.unsupported, requirement.unsupported
+        claim = requirement.property_type
+        assert f"FormalSW.PyAst.IntegerListWork.size {values}" in claim, claim
+        assert "«" not in claim and "requires_solve_0" in claim, claim
+        assert f"IsBigO .{'word' if policy == 'fixed' else 'bits'}" in claim, claim
+        semantic = frontend["module_with_python_builtins"](source, module)
+        emitter = frontend["AstJsonEmitter"](semantic)
+        lean_checks.append(f"namespace SizedCase{index}\nnamespace SizedAst\nopen FormalSW.PyAst\n")
+        lean_checks.append(f"def module : Module := pyast_from_json% {frontend['lean_string'](emitter.emit())}\n")
+        for name, condition in module.formalsw_conditions.items():
+            lean_checks.append(f"def {name} : Expr := pyexpr_from_json% {frontend['lean_string'](json.dumps(emitter.expr(condition)))}\n")
+        lean_checks.append(f"end SizedAst\nexample : Prop := {claim}\nend SizedCase{index}\n")
+    lean_checks.append("example : FormalSW.PyAst.IntegerListWork.size [0, -8, 7] = 10 := rfl\n")
+
+    for index, measure in enumerate([
+        "sum(item.bit_length() for item in digits)",
+        "sum(1 + other.bit_length() for item in digits)",
+        "sum(1 + item.bit_length() for item in missing)",
+        "sum(1 + item.bit_length() for item in digits if item)",
+        "sum(1 + item.bit_length(2) for item in digits)",
+        "sum(True + item.bit_length() for item in digits)",
+        "__import__('os').system('false')",
+    ]):
+        source = Path(directory) / f"invalid_integer_size{index}.py"
+        source.write_text(f'''
+def solve(digits: list[int]) -> int:
+    """
+    @formalsw: BigO(n, n = {measure})
+    """
+    return len(digits)
+''')
+        module = frontend["source_module"](source)
+        try:
+            frontend["collect_requirements"](source, module, "Invalid", "InvalidAst")
+        except InvalidRequirement as error:
+            assert "explicit n = len(digits)" in str(error), error
+        else:
+            raise AssertionError(f"Invalid integer-list measure accepted: {measure}")
+
     for index, marker in enumerate(("BigO(n)", "BigO(n, n = k)", "BigO(n, n = len(missing))")):
         source = Path(directory) / f"invalid_list_size{index}.py"
         source.write_text(f'''def solve(digits: list[int], k: int) -> int:
@@ -267,4 +323,4 @@ def solve(rows: list[list[int]]) -> int:
 
 if options.lean_output:
     options.lean_output.write_text("".join(lean_checks))
-print("Scalar/list/nested-list/heap fixed/bit BigO obligations checked; unit-step and partial-resource markers rejected.")
+print("Scalar/list/nested-list/heap and integer-width BigO obligations checked; unit-step and partial-resource markers rejected.")
