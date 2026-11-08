@@ -26,6 +26,23 @@ theorem acquire (found : heap[address]? = some (.set items)) :
   · simp [charge, HeapCalls.Runtime.charge, iteratorCharge, found]
   · rfl
 
+/-- Acquire a named source set before entering its first iteration. -/
+theorem for_set_name (lookup : env source = some (.ref address))
+    (found : heap[address]? = some (.set items)) :
+    Reaches (globals := globals) arithmetic module anchors choices
+      ⟨⟨.block (.forIn (.name name) (.name source) body otherwise :: following) env, stack, heap⟩, used⟩
+      (items.length + 4)
+      ⟨⟨.block (.setStepLoop name address items items body otherwise :: following) env,
+        stack, heap⟩, used⟩ := by
+  have enter : HeapCalls.Runtime.Reaches (globals := globals) arithmetic module anchors
+      ⟨.block (.forIn (.name name) (.name source) body otherwise :: following) env, stack, heap⟩ 1
+      ⟨.expr (.name source) env, .sequence name body otherwise following env :: stack, heap⟩ :=
+    HeapCalls.Runtime.advance rfl rfl rfl
+  have evaluated : HeapCalls.Runtime.EvaluatesIn (globals := globals) arithmetic module env
+      (.name source) heap 1 (.ref address) heap := HeapCalls.Runtime.EvaluatesIn.lookup lookup
+  exact ((lift_heap enter).trans (lift_heap (evaluated anchors _))).trans
+    (acquire found) |>.mono (by omega)
+
 /-- Exhaustion checks the source size and leaves the schedule unchanged. -/
 theorem iterator_done (found : heap[address]? = some (.set current))
     (sameSize : current.length = original.length) :

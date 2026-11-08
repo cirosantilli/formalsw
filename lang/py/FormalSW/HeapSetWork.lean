@@ -19,6 +19,13 @@ def insert (representation : MapRepresentation) (arithmetic : Arithmetic)
 def extremum (arithmetic : Arithmetic) (items : List Constant) : Nat :=
   (items.length + 1) * (2 * width arithmetic items + 1)
 
+def lookup (representation : MapRepresentation) (arithmetic : Arithmetic)
+    (heap : Mutable.Heap) (address : Nat) (key : Mutable.Value) : Option Nat :=
+  match heap[address]?, key with
+  | some (.set items), .scalar key =>
+      some (mapLookup representation items.length (scalarSize arithmetic key + width arithmetic items))
+  | _, _ => none
+
 def operation (representation : MapRepresentation) (arithmetic : Arithmetic)
     (heap : Mutable.Heap) (op : Operation) (values : List Mutable.Value) : Option Nat :=
   match op, values with
@@ -40,6 +47,12 @@ theorem insert_ints (items : List Int) (key : Int) :
     insert .collisionChain .word (items.map Constant.int) (.int key) = 9 * (items.length + 1) := by
   simp [insert, width_ints, mapLookup, scalarSize, integer, Nat.mul_comm]
   omega
+
+theorem membership_ints (heap : Mutable.Heap) (address : Nat) (items : List Int) (key : Int)
+    (found : heap[address]? = some (.set (items.map Constant.int))) :
+    lookup .collisionChain .word heap address (.scalar (.int key)) =
+      some (3 * (items.length + 1)) := by
+  simp [lookup, found, width_ints, mapLookup, scalarSize, integer, Nat.mul_comm]
 
 theorem extremum_ints (items : List Int) :
     extremum .word (items.map Constant.int) = 3 * (items.length + 1) := by

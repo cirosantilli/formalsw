@@ -109,6 +109,8 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
   | .list, values | .tuple, values => some (sequenceCopy values.length)
   | .comprehension _ ((_, .call (.name "range") _, _) :: _) _, values =>
       (scalarValues values).map (fun values => Calls.Runtime.argumentWork arithmetic values + 1)
+  | .setComprehension _ ((_, .call (.name "range") _, _) :: _) _, values =>
+      (scalarValues values).map (fun values => Calls.Runtime.argumentWork arithmetic values + 1)
   | .comprehension _ (_ :: _) _, [source] => (sequenceLength heap source).map (fun _ => 2)
   | .comprehensionTargets _ ((_, .zipIterable _, _) :: _) _, values => do
       let _ ← values.mapM (sequenceLength heap)
@@ -134,7 +136,8 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
   | .builtin .len, [value] => (sequenceLength heap value).map (fun _ => 1)
   | .membership _, [needle, .ref address] => match heap[address]? with
       | some (.list items) | some (.tuple items) => sequenceMembership arithmetic needle items
-      | _ => BufferWork.operation arithmetic heap op values <|> MapWork.operation maps arithmetic heap op values
+      | _ => BufferWork.operation arithmetic heap op values <|> MapWork.operation maps arithmetic heap op values <|>
+          SetWork.lookup maps arithmetic heap address needle
   | .slice, [.ref address, lower, upper, stride] => match heap[address]? with
       | some (.list items) => SequenceWork.slice arithmetic items.length lower upper stride
       | _ => none
@@ -247,7 +250,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .forIn (.tuple targets) iterable _ _ :: _ => unpackEntry targets iterable
       | .forIn (.list targets) _ _ _ :: _ =>
           (Calls.targetNames targets).map (fun _ => targets.length+1)
-      | .comprehensionAppend _ _ :: _ => some 1
+      | .comprehensionAppend _ _ :: _ | .comprehensionAdd _ _ :: _ => some 1
       | _ => none
   | .expr expression _ => match expression with
       | .call (.attribute base name) args => attributeCallEntry base name args
@@ -259,6 +262,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .sumGenerator _ [_] _ | .sumRange _ _ _ _ => some 1
       | .sumGeneratorTargets _ generators _ => if enumeratedGenerator generators then some 1 else none
       | .listComp _ (_ :: _) | .listCompTargets _ (_ :: _) => some 1
+      | .setComp _ ((_, .call (.name "range") _, _) :: _) => some 1
       | _ => none
   | .value value => match state.stack with
       | .augmentItemReceiver _ _ _ _ _ :: _ => some 1

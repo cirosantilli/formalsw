@@ -30,3 +30,22 @@ example : operation .word [.dict [(.int 1, .scalar .none), (.int 2, .scalar .non
     (.membership false) [.scalar (.int 3), .ref 0] = some 9 := rfl
 example : operation .word [.dict [(.int 1, .scalar .none), (.int 2, .scalar .none)]]
     (.membership false) [.scalar (.int 3), .ref 0] .balancedTree = some 15 := rfl
+
+/-- Scalar sets use the same worst-case search convention, including Python's
+equality between Boolean True and integer one. -/
+example (env : HeapCalls.Env) (get : env "s" = some (.ref 0)) :
+    EvaluatesIn .word program env (.membership (.constant (.bool true)) (.name "s") false)
+      [.set [.int 1]] 13 (.scalar (.bool true)) [.set [.int 1]] := by
+  apply EvaluatesIn.membership (budget := 5) (work := 6)
+    (ArgumentsIn.cons EvaluatesIn.constant (ArgumentsIn.cons (EvaluatesIn.lookup get) ArgumentsIn.nil))
+  · rfl
+  · rfl
+
+example : operation .word [.set []] (.membership true) [.scalar (.int 1), .ref 0] = some 3 := rfl
+example : operation .word [.set [.int 1, .int 2]] (.membership false)
+    [.scalar (.int 3), .ref 0] = some 9 := rfl
+example : operation .word [.set [.int 1, .int 2]] (.membership false)
+    [.scalar (.int 3), .ref 0] .balancedTree = some 15 := rfl
+example : operation .word [.set [.string "ABCDEFGH"]] (.membership false)
+    [.scalar (.string "A"), .ref 0] = some 24 := rfl
+example : operation .word [.set [.int 1]] (.membership false) [.ref 1, .ref 0] = none := rfl
