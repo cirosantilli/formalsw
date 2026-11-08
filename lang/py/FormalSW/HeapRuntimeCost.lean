@@ -93,6 +93,10 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
   | .slice, [.ref address, lower, upper, stride] => match heap[address]? with
       | some (.list items) => SequenceWork.slice arithmetic items.length lower upper stride
       | _ => none
+  | .slice, [.scalar value, .scalar lower, .scalar upper, .scalar stride] =>
+      Calls.Runtime.primitive arithmetic .slice [value, lower, upper, stride]
+  | .subscript, [.scalar value, .scalar index] =>
+      Calls.Runtime.primitive arithmetic .subscript [value, index]
   | .subscript, [.ref address, .scalar index] =>
       match heap[address]? with
       | some (.list items) | some (.tuple items) => do
