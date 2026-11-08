@@ -21,6 +21,20 @@ example : EvaluatesIn .word program (fun _ => none)
     (ArgumentsIn.cons EvaluatesIn.constant ArgumentsIn.nil) rfl rfl
   exact BlockContinuesIn.range_done rfl BlockContinuesIn.nil
 
+/-- Iterable evaluation allocates its list before the comprehension result. -/
+example : EvaluatesIn .word program (fun _ => none)
+    (.listComp (.name "x") [("x", .list [], [])])
+    [] 15 (.ref 1) [.list [], .list []] := by
+  apply EvaluatesIn.list_comp_sequence (ca := 3) (cb := 5) (items := []) (size := 0)
+    (middle := [.list []]) (value := .ref 0)
+    (finalEnv := comprehensionEnv (fun _ => none) [("x", .list [], [])])
+  · intro expressions h; cases h
+  · exact EvaluatesIn.empty_list
+  · rfl
+  · rfl
+  · intro following anchors stack
+    exact advance rfl rfl rfl
+
 /-- Mutating the same list during element evaluation retains both writes. -/
 example : BlockContinuesIn .word program (fun _ => some (.ref 0))
     [.comprehensionAppend 0 (.call (.attribute (.name "out") "append") [.constant (.int 4)])]

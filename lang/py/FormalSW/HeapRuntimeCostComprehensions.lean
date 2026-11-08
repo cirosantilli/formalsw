@@ -63,6 +63,45 @@ theorem EvaluatesIn.list_comp_range
         (advance rfl rfl rfl)
   exact ((((first.trans args).trans setup).trans (executed [] anchors _)).trans finish).mono (by omega)
 
+/-- Ordinary builtin sequences retain their receiver after iterable evaluation.
+The loop charges reads and output appends separately. -/
+theorem EvaluatesIn.list_comp_sequence
+    (ordinary : ∀ expressions, iterable ≠ .call (.name "range") expressions)
+    (evaluated : EvaluatesIn arithmetic module env iterable heap ca value middle)
+    (sequence : Mutable.sequence value middle = some (.ok items, middle))
+    (length : sequenceLength middle value = some size)
+    (executed : BlockContinuesIn arithmetic module
+      (comprehensionEnv env ((name, iterable, filters) :: generators))
+      [.sequenceStepLoop name (sequenceSource value) 0
+        (comprehensionFilters filters (comprehensionBody middle.length element generators)) []]
+      (middle ++ [.list []]) cb finalEnv finalHeap) :
+    EvaluatesIn arithmetic module env (.listComp element ((name, iterable, filters) :: generators))
+      heap (ca+cb+7) (.ref middle.length) finalHeap := by
+  intro anchors stack
+  let localEnv := comprehensionEnv env ((name, iterable, filters) :: generators)
+  let op := Operation.comprehension element ((name, iterable, filters) :: generators) localEnv
+  have first : Reaches arithmetic module anchors
+      ⟨.expr (.listComp element ((name, iterable, filters) :: generators)) env, stack, heap⟩ 1
+      (argumentsState op env [] [iterable] stack heap) :=
+    advance (by cases iterable <;> simp_all [step, op, localEnv]) rfl rfl
+  have args := (ArgumentsIn.cons evaluated ArgumentsIn.nil).reaches (completed := []) op anchors stack
+  have setup : Reaches arithmetic module anchors ⟨.operation op [value], stack, middle⟩ 3
+      ⟨.block [.sequenceStepLoop name (sequenceSource value) 0
+        (comprehensionFilters filters (comprehensionBody middle.length element generators)) []] localEnv,
+        .comprehensionResult middle.length :: stack, middle ++ [.list []]⟩ := by
+    apply RuntimeCost.Amortized.Reaches.next (amount := 3)
+    · cases iterable <;> simp_all [step, op, comprehensionStart, run]
+    · cases iterable <;> simp_all [charge, op, operation]
+    · simp [potential, heapPotential_allocate, DynamicArray.potential, DynamicArray.capacity]
+  have finish : Reaches arithmetic module anchors
+      ⟨.block [] finalEnv, .comprehensionResult middle.length :: stack, finalHeap⟩ 2
+      ⟨.value (.ref middle.length), stack, finalHeap⟩ := by
+    exact (advance rfl rfl rfl : Reaches arithmetic module anchors
+      ⟨.block [] finalEnv, .comprehensionResult middle.length :: stack, finalHeap⟩ 1
+      ⟨.value (.scalar .none), .comprehensionResult middle.length :: stack, finalHeap⟩).trans
+        (advance rfl rfl rfl)
+  exact ((((first.trans args).trans setup).trans (executed [] anchors _)).trans finish).mono (by simp; omega)
+
 theorem BlockContinuesIn.zip_step
     (fetched : zipItem sources position heap = some (.ok (some fields), heap))
     (allocated : Mutable.allocateTuple fields heap = some (.ok (.ref heap.length), heap ++ [.tuple fields]))

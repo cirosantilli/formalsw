@@ -8,19 +8,19 @@ def ConstantSequenceRead (module : Module) (heap : Heap) (source : SequenceSourc
     charge .word module ⟨.block (.sequenceStepLoop name source position body otherwise :: following) env,
       stack, heap⟩ = some 5
 
-/-- Pure mapped summation preserves the sequence and charges the element expression each time. -/
-theorem sum_sequence_loop {α : Type} {values : List α} {encode : α → Value} {number : α → Int}
-    (remaining : List α) (position : Nat) (itemCost : Nat)
+/-- Mapped summation adds the individual expression costs, retaining input-size information. -/
+theorem sum_sequence_loop_costs {α : Type} {values : List α} {encode : α → Value} {number : α → Int}
+    (remaining : List α) (position : Nat) (itemCost : α → Nat)
     (privateName : name ≠ sumAccumulator)
     (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok (values.map encode), heap))
     (priced : ConstantSequenceRead module heap source)
     (evaluated : ∀ env item, env name = some (encode item) →
-      EvaluatesIn .word module env element heap itemCost (.scalar (.int (number item))) heap)
+      EvaluatesIn .word module env element heap (itemCost item) (.scalar (.int (number item))) heap)
     (suffix : values.drop position = remaining)
     (accumulator : env sumAccumulator = some (.scalar (.int initial))) :
     BlockReturnsIn .word module env
       [.sequenceStepLoop name source position (sumBody element []) [], .return (.name sumAccumulator)] heap
-      ((itemCost+12)*remaining.length+7)
+      ((remaining.map (fun item => itemCost item+12)).sum+7)
       (.scalar (.int (remaining.foldl (fun total item => total + number item) initial))) heap := by
   induction remaining generalizing position env initial with
   | nil =>
@@ -38,7 +38,7 @@ theorem sum_sequence_loop {α : Type} {values : List α} {encode : α → Value}
         simpa [suffix] using (List.head?_drop (l := values) (i := position)).symm
       have itemRun := evaluated (setLocal env name (encode item)) item (by simp [setLocal])
       have addition : EvaluatesIn .word module (setLocal env name (encode item))
-          (.binOp (.name sumAccumulator) .add element) heap (itemCost+5)
+          (.binOp (.name sumAccumulator) .add element) heap (itemCost item+5)
           (.scalar (.int (initial+number item))) heap := by
         have run := EvaluatesIn.binary (op := .add) (av := .int initial) (bv := .int (number item))
           (work := 1) (EvaluatesIn.lookup (name := sumAccumulator) (by simpa [setLocal, Ne.symm privateName] using accumulator)) itemRun rfl rfl
@@ -54,7 +54,30 @@ theorem sum_sequence_loop {α : Type} {values : List α} {encode : α → Value}
               .return (.name sumAccumulator)]) (setLocal env name (encode item)), stack, heap⟩ :=
         advance (by simp [step, run, sequence, found, sumBody, Calls.loopContinuation, Calls.loopControl, Calls.loopControlStmt])
           (priced ..) rfl
-      exact (head.trans (BlockReturnsIn.assign addition tail anchors stack)).mono (by simp [Nat.mul_add]; omega)
+      exact (head.trans (BlockReturnsIn.assign addition tail anchors stack)).mono (by simp; omega)
+
+/-- A uniform per-element tariff is the constant-cost specialization. -/
+theorem sum_sequence_loop {α : Type} {values : List α} {encode : α → Value} {number : α → Int}
+    (remaining : List α) (position : Nat) (itemCost : Nat)
+    (privateName : name ≠ sumAccumulator)
+    (sequence : Mutable.sequence (sequenceValue source) heap = some (.ok (values.map encode), heap))
+    (priced : ConstantSequenceRead module heap source)
+    (evaluated : ∀ env item, env name = some (encode item) →
+      EvaluatesIn .word module env element heap itemCost (.scalar (.int (number item))) heap)
+    (suffix : values.drop position = remaining)
+    (accumulator : env sumAccumulator = some (.scalar (.int initial))) :
+    BlockReturnsIn .word module env
+      [.sequenceStepLoop name source position (sumBody element []) [], .return (.name sumAccumulator)] heap
+      ((itemCost+12)*remaining.length+7)
+      (.scalar (.int (remaining.foldl (fun total item => total + number item) initial))) heap := by
+  have total : (remaining.map (fun _ => itemCost+12)).sum = (itemCost+12)*remaining.length := by
+    clear suffix
+    induction remaining with
+    | nil => simp
+    | cons head tail ih => simp [ih, Nat.mul_add, Nat.add_comm]
+  have run := sum_sequence_loop_costs (values := values) (encode := encode) (number := number)
+    remaining position (fun _ => itemCost) privateName sequence priced evaluated suffix accumulator
+  simpa only [total] using run
 
 /-- Acquire a builtin sequence once, then execute a single unfiltered generator lazily. -/
 theorem EvaluatesIn.sum_generator
