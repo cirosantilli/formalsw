@@ -4,6 +4,13 @@ import Init.Data.Int.ToString
 
 namespace FormalSW.PyAst.PrimitiveWork
 
+/-- An exponential value still has only linearly many decimal digits. -/
+theorem power_two_decimal (n : Nat) : 2^n < 10^(n+1) := by
+  have bounded : (2 : Nat)^n ≤ 10^n := Nat.pow_le_pow_left (by decide) n
+  have positive : 0 < (10 : Nat)^n := Nat.pow_pos (by decide)
+  rw [Nat.pow_succ]
+  omega
+
 /-- A decimal digit bound also bounds the work of integer-to-string conversion. -/
 theorem bitLength_decimal (value digits : Nat) (bounded : value < 10^digits) :
     bitLength (value : Int) ≤ 4*digits+1 := by

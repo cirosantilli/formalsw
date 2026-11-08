@@ -533,6 +533,9 @@ Scalar set insertion pays for worst-case key search and a conservative storage-r
 
 `sorted` on scalar lists and tuples uses an O(n log n) comparison-sort library tariff, weighted by key size and including output copying. This is a target-library cost contract; Lean's insertion-sort definition specifies the returned ordering. Tuple construction and flat unpacking charge for each copied or assigned reference. Object comparison callbacks remain unpriced.
 
+Integer-list `sum` and single unfiltered sum generators charge each iterator read, element expression and addition. Decimal character sums also charge integer-to-string conversion and each character parse. Iterator setup retains the builtin sequence without copying it. Other iterator protocols and overloaded additions remain unpriced. See link:tests/py/runtime_sums.lean[].
+
+
 ==== ShapeBound
 
 `ShapeBound(...)` is the old structural classifier, retained for inspecting recognized source shapes. It does not prove termination or runtime complexity. For example, `ShapeBound(n, n = n)` bounds the classifier's assigned growth, not the execution of the function or its helpers. The underlying legacy Lean proposition is `FormalSW.Property.Function.BigO`. See link:tests/py/range_sum.py[] and link:tests/py/sort.py[].

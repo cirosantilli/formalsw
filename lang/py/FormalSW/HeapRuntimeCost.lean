@@ -62,6 +62,12 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
     (maps : MapRepresentation := .collisionChain) : Option Nat :=
   match op, values with
   | .list, values | .tuple, values => some (sequenceCopy values.length)
+  | .sumSequence, [source, .scalar (.int initial)] =>
+      -- Iterator acquisition uses builtin metadata. The lowered loop separately
+      -- charges each element read and addition, without copying the input.
+      (sequenceLength heap source).map (fun _ => integer arithmetic initial + 1)
+  | .sumGenerator _ [(_, _, [])] _ _, [source] =>
+      (sequenceLength heap source).map (fun _ => 2)
   | .append address, [_] => match heap[address]? with
       | some (.list items) => some (DynamicArray.append items.length)
       | _ => none
@@ -108,6 +114,8 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
           | some (.list items) | some (.tuple items) =>
               some (2 + 2 * integer arithmetic position + integer arithmetic items.length)
           | _ => none
+      | .sequenceStepLoop _ (.scalar (.string text)) position _ _ :: _ =>
+          some (2 + 2 * integer arithmetic position + integer arithmetic text.length)
       | .enumerateStepLoop _ _ (.ref address) position counter _ _ :: _ => match state.heap[address]? with
           | some (.bytearray bytes) =>
               some (3 + 2 * integer arithmetic position + integer arithmetic counter + integer arithmetic bytes.length)
@@ -128,7 +136,8 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .constant _ | .name _ | .binOp _ _ _ | .unaryOp _ _ | .compare _ _
       | .boolOp _ _ | .ifExp _ _ _ | .call (.name _) _
       | .builtinCall _ _
-      | .list _ | .tuple _ | .reversedList _ | .subscript _ _ => some 1
+      | .list _ | .tuple _ | .reversedList _ | .subscript _ _ | .sumSequence _ _ => some 1
+      | .sumGenerator _ [_] _ => some 1
       | .call (.attribute (.name _) _) _ => some 1
       | _ => none
   | .value value => match state.stack with
@@ -164,6 +173,10 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
           | _ => none
       | .unpack names _ _ :: _ =>
           (sequenceLength state.heap value).map (fun length => length + names.length + 1)
+      | .sumStart _ _ :: _ => match value with
+          | .scalar (.int initial) => some (integer arithmetic initial + 1)
+          | _ => none
+      | .generatorEnd :: _ => some 1
       | .sequence _ _ _ _ _ :: _ => match value with
           | .ref address => match state.heap[address]? with
               | some (.list _) | some (.tuple _) => some 1
