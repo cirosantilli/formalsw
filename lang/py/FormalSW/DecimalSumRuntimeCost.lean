@@ -34,7 +34,8 @@ theorem evaluates (n k : Nat) (positive : 0 < k) (bounded : n < 10^k)
       EvaluatesIn .word module env (.builtinCall .int [.name "ch"]) heap 8
         (.scalar (.int (value c))) heap := by
     intro env c get
-    apply EvaluatesIn.builtin_single (builtin := .int) (work := 4) (ca := 1)
+    apply EvaluatesIn.mono (small := 6) (larger := by omega)
+    apply EvaluatesIn.builtin_single (builtin := .int) (work := 2) (ca := 1)
       (value := .scalar (.string (String.singleton c.val)))
       (answer := .scalar (.int (value c))) (by intro h; cases h) (by intro h; cases h)
       (EvaluatesIn.lookup get)
@@ -42,7 +43,7 @@ theorem evaluates (n k : Nat) (positive : 0 < k) (bounded : n < 10^k)
       have member : c.val ∈ Nat.toDigits 10 n := by simpa [characters] using c.property
       rw [parse_digit c.val (Nat.isDigit_of_mem_toDigits (by decide) (by decide) member)]
       rfl
-    · simp [operation, scalarValues, Calls.Runtime.primitive, String.length_singleton]
+    · simp [operation, scalarValues, Calls.Runtime.primitive, PrimitiveWork.decimalInput, String.length_singleton]
   let sumEnv := setLocal (comprehensionEnv env [("ch", .builtinCall .str [source], [])])
     sumAccumulator (.scalar (.int 0))
   have loop := sum_sequence_loop (module := module) (env := sumEnv) (initial := 0)

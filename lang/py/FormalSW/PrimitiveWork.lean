@@ -27,6 +27,14 @@ def decimalOutput (arithmetic : Arithmetic) (value : Int) : Nat :=
   | .word => bitLength value + 1
   | .bits => bitLength value * bitLength value + 1
 
+/-- Decimal parsing scans the text and accumulates digits by multiplying by ten
+and adding. Fixed arithmetic pays once per character; bit arithmetic also pays
+for the growing accumulator, bounded quadratically in the input length. -/
+def decimalInput (arithmetic : Arithmetic) (length : Nat) : Nat :=
+  match arithmetic with
+  | .word => length + 1
+  | .bits => (length + 1) * (length + 1)
+
 def scalarSize (arithmetic : Arithmetic) : Constant → Nat
   | .int value => integer arithmetic value
   | .string value => value.length + 1

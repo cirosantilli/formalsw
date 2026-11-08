@@ -83,8 +83,8 @@ def primitive (arithmetic : Arithmetic) (operation : Primitive) (values : List C
       let value ← scalarNumber value
       return bitLength value + 1
   | .builtin .int, [.int _] | .builtin .int, [.bool _] | .builtin .int, [] => some 1
-  | .builtin .int, [.string value] => some ((value.length + 1) * (value.length + 1))
-  | .builtin .int, [.bytes value] => some ((value.length + 1) * (value.length + 1))
+  | .builtin .int, [.string value] => some (decimalInput arithmetic value.length)
+  | .builtin .int, [.bytes value] => some (decimalInput arithmetic value.length)
   | .subscript, [.string _, index] | .subscript, [.bytes _, index] =>
       (integerWork arithmetic index).map (· + 1)
   | .slice, [.string _, lower, upper, stride]
