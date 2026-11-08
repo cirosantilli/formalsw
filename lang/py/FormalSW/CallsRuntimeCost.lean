@@ -37,6 +37,20 @@ def library (arithmetic : Arithmetic) (module : Module) (name : String)
       let value ← scalarNumber value
       let width := bitLength value
       return match arithmetic with | .word => width | .bits => width * width * width
+  | some ("math", "comb"), [n, k] => do
+      let n ← scalarNumber n
+      let k ← scalarNumber k
+      if n < 0 ∨ k < 0 ∨ n < k then
+        return match arithmetic with
+          | .word => 1
+          | .bits => 4 * (bitLength n + bitLength k) + 1
+      let count := min k.toNat (n - k).toNat
+      -- Multiplicative recurrence: count factors and exact divisions. Every
+      -- intermediate is bounded by n^(n+1), including the product before division.
+      let width := (n.toNat + 1) * (bitLength n + 1) + 1
+      return match arithmetic with
+        | .word => 8 * (count + 1)
+        | .bits => 8 * (count + 1) * width * width
   | _, _ => none
 
 def primitive (arithmetic : Arithmetic) (operation : Primitive) (values : List Constant) : Option Nat :=

@@ -18,6 +18,19 @@ open FormalSW.PyAst
 private def emptyModule : Module := { body := [] }
 private def gcdModule : Module := { body := [.importFrom "math" [("gcd", "gcd")]] }
 private def sqrtModule : Module := { body := [.importFrom "math" [("isqrt", "isqrt")]] }
+private def combModule : Module := { body := [.importFrom "math" [("comb", "choose")]] }
+
+/-- Library work follows the smaller number of factors, including aliases,
+empty products and error exits. Bit costs also account for intermediate widths. -/
+example : Calls.Runtime.library .word combModule "choose" [.int 40, .int 20] = some 168 := rfl
+example : Calls.Runtime.library .word combModule "choose" [.int 40, .int 39] = some 16 := rfl
+example : Calls.Runtime.library .word combModule "choose" [.int 40, .int 0] = some 8 := rfl
+example : Calls.Runtime.library .word combModule "choose" [.int 40, .int 41] = some 1 := rfl
+example : Calls.Runtime.library .word combModule "choose" [.int (-1), .int 0] = some 1 := rfl
+example : Calls.Runtime.library .bits combModule "choose" [.int 4, .int 2] = some 10584 := rfl
+example : Calls.Runtime.library .bits combModule "choose" [.int 4, .int (2^100)] = some 417 := rfl
+example : Calls.Runtime.library .word combModule "comb" [.int 4, .int 2] = none := rfl
+example : Calls.Runtime.library .word combModule "choose" [.string "4", .int 2] = none := rfl
 
 /-- Sorting pays for comparison work and copying; it is constant here only
 because the input arity is three and integer arithmetic is fixed-cost. -/
