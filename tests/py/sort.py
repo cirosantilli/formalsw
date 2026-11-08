@@ -26,13 +26,15 @@ class DummyInt:
 def merge_sort_int(values: list[int]) -> list[int]:
     """
     @formalsw: Equiv(quick_sort_int)
-    @formalsw: BigO(n * (Nat.log2 n + 1), n = len(values))
+    @formalsw: ShapeBound(n * (Nat.log2 n + 1), n = len(values))
     """
     return merge_sort_untyped(values)
 
 
 def quick_sort_int(values: list[int]) -> list[int]:
-    """@formalsw: BigO(n * n, n = len(values))"""
+    """
+    @formalsw: ShapeBound(n * n, n = len(values))
+    """
     return quick_sort(values)
 
 
@@ -55,7 +57,7 @@ def merge_sort_untyped(values: list) -> list:
     algorithm internal ordering details.
     @formalsw: EquivReturn(quick_sort)
 
-    @formalsw: BigO(n * (Nat.log2 n + 1), n = len(values))
+    @formalsw: ShapeBound(n * (Nat.log2 n + 1), n = len(values))
 
     If comparison of some objects don't halt then this function also does not halt.
     @formalsw: theorem returns_of_le_safe :
@@ -85,7 +87,9 @@ def merge_sort_untyped(values: list) -> list:
 
 
 def quick_sort(values: list) -> list:
-    """@formalsw: BigO(n * n, n = len(values))"""
+    """
+    @formalsw: ShapeBound(n * n, n = len(values))
+    """
     if len(values) <= 1:
         return values
     pivot = values[0]

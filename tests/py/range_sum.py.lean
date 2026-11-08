@@ -153,7 +153,7 @@ private theorem sum.abstract_equiv :
     ]
 
 /-- The closed-form implementation has constant worst-case cost. -/
-theorem sum.«BigO(1)» :
+theorem sum.«ShapeBound(1)» :
     FormalSW.Property.Function.BigO RangeSumAst.module "sum"
       (.intToNat "n") (fun _ => 1) := by
   apply FormalSW.Property.Function.bigO_of_growth_bound
@@ -163,7 +163,7 @@ theorem sum.«BigO(1)» :
   · exact FormalSW.PyAst.Growth.constant_isBigO
 
 /-- The loop implementation has linear worst-case cost. -/
-theorem sum_naive.«BigO(n)» :
+theorem sum_naive.«ShapeBound(n)» :
     FormalSW.Property.Function.BigO RangeSumAst.module "sum_naive"
       (.intToNat "n") (fun n => n) := by
   apply FormalSW.Property.Function.bigO_of_growth_bound

@@ -65,7 +65,7 @@ theorem guarded.«EquivReturn(identity)» (n : Int) (hp : allowed n) :
   intro a b ha hb
   exact Except.ok.inj (((guarded.«Equiv(identity)» n hp) _ |>.mp ha).unique hb)
 
-theorem guarded.«BigO(1)» (n : Int) (_hp : allowed n) :
+theorem guarded.«ShapeBound(1)» (n : Int) (_hp : allowed n) :
     FormalSW.Property.Function.BigO program "guarded" (.intToNat "n") (fun _ => 1) := by
   apply FormalSW.Property.Function.bigO_of_growth_bound
     (inputSize := .intToNat "n") (growth := .constant)

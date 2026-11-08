@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+Exercise the Nagini dialect boundary, non-evaluation and fresh source snapshots.
+"""
+
+import ast
+from hashlib import sha256
+import json
+from pathlib import Path
+import runpy
+import sys
+from tempfile import TemporaryDirectory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from lang.py.contracts import ContractError
+from lang.py.nagini_erasure import erase_nagini_annotations
+
+
+def normalize(source):
+    module = ast.parse(source)
+    erase_nagini_annotations(module)
+    return ast.fix_missing_locations(module)
+
+
+source = '''
+from nagini_contracts.contracts import Requires, Ensures, Pure, Old
+from nagini_contracts.obligations import MustTerminate
+from nonexistent_ghost_dependency import ghost
+
+@Pure
+def solve(n: int) -> int:
+    """Retain this documentation."""
+    Requires(MustTerminate(1))
+    Requires(1 // 0)
+    Ensures(int, lambda result: ghost(Old(n)))
+    return n + 1
+'''
+module = normalize(source)
+assert not any(isinstance(node, (ast.Import, ast.ImportFrom)) for node in module.body)
+assert ast.get_docstring(module.body[0]) == 'Retain this documentation.'
+environment = {}
+exec(compile(module, '<nagini-normalized>', 'exec'), environment)
+assert environment['solve'](9) == 10
+assert 'nagini_contracts.contracts' not in sys.modules
+assert module.formalsw_nagini_erasure['dialect'] == 'canonical-leading-contracts-v1'
+assert module.formalsw_nagini_erasure['ghost_imports'] == (('nonexistent_ghost_dependency', 'ghost'),)
+assert 4 in module.formalsw_nagini_erasure['erased_lines']
+assert module.formalsw_nagini_erasure['ghost_import_lines'] == (4,)
+partial = normalize(source.replace('import ghost', 'import ghost, keep').replace('return n + 1', 'return keep(n)'))
+assert 4 not in partial.formalsw_nagini_erasure['erased_lines']
+assert partial.formalsw_nagini_erasure['ghost_import_lines'] == (4,)
+assert partial.body[0].names[0].name == 'keep'
+first = ast.dump(module)
+erase_nagini_annotations(module)
+assert first == ast.dump(module)
+
+# Unrecognized ordinary Python calls are never silently erased.
+ordinary = 'def Requires(x): return x\ndef solve(n):\n    Requires(n)\n    return n\n'
+assert ast.dump(normalize(ordinary)) == ast.dump(ast.parse(ordinary))
+foreign = 'from other import Requires\ndef solve(n):\n    Requires(n)\n    return n\n'
+assert ast.dump(normalize(foreign)) == ast.dump(ast.parse(foreign))
+
+# An import still used by executable syntax must remain present.
+runtime = normalize(source.replace('return n + 1', 'return ghost(n)'))
+assert any(isinstance(node, ast.ImportFrom) and node.module == 'nonexistent_ghost_dependency' for node in runtime.body)
+
+base = 'from nagini_contracts.contracts import Requires, Pure\n\n@Pure\ndef solve(n):\n    Requires(n > 0)\n    return n\n'
+bad = [
+    base + '\nRequires = print\n',
+    base + '\nif False:\n    Requires = print\n',
+    base + '\ndel Pure\n',
+    base + '\ndef Requires(n): return n\n',
+    base + '\nclass Pure: pass\n',
+    base + '\nfrom other import Requires\n',
+    base + '\nfrom other import *\n',
+    base + '\nRequires.extra = 1\n',
+    base + '\nalias = Requires\n',
+    base + '\ndef other(Requires): return 0\n',
+    base + '\ndef other():\n    global Requires\n',
+    base + '\ntry: pass\nexcept Exception as Requires: pass\n',
+    base + '\nmatch 1:\n    case {"x": Pure}: pass\n',
+    base + '\nmatch {}:\n    case {**Requires}: pass\n',
+    base.replace('solve(n)', 'solve(n, Requires)'),
+    base.replace('Requires(n > 0)', 'x = Requires(n > 0)'),
+    base.replace('Requires(n > 0)', 'alias = Requires\n    alias(n > 0)'),
+    base.replace('Requires(n > 0)', 'if n:\n        Requires(n > 0)'),
+    base.replace('Requires(n > 0)', 'Requires(*[n > 0])'),
+    base.replace('Requires(n > 0)', 'Requires(True, False)'),
+    base.replace('Requires(n > 0)', 'Requires(condition=n > 0)'),
+    base.replace('Requires(n > 0)', 'Requires()'),
+    base.replace('return n', 'Requires = print\n    return n'),
+    base.replace('@Pure', '@Pure()'),
+    base.replace('Requires, Pure', 'Requires as R, Pure'),
+    base.replace('Requires, Pure', '*'),
+    base.replace('Requires, Pure', 'Requires, Pure, Ghost'),
+    base.replace('Requires, Pure', 'Requires, Requires, Pure'),
+    base.replace('from nagini_contracts.contracts import Requires, Pure', 'import nagini_contracts.contracts'),
+    base.replace('from nagini_contracts.contracts', 'from .nagini_contracts.contracts'),
+    'def local():\n    from nagini_contracts.contracts import Requires\n',
+    '@Pure\ndef solve(n): return n\nfrom nagini_contracts.contracts import Pure\n',
+    'Requires(True)\nfrom nagini_contracts.contracts import Requires\n',
+]
+if sys.version_info >= (3, 12):
+    bad.extend(base.replace('solve(n)', f'solve[{parameter}](n)')
+               for parameter in ('Requires', '*Requires', '**Requires'))
+for candidate in bad:
+    try:
+        normalize(candidate)
+    except ContractError:
+        pass
+    else:
+        raise AssertionError(candidate)
+
+# Exercise the real source_module entry point: no contract package is imported,
+# proof markers survive, and an edited original cannot reuse a stripped cache.
+api = runpy.run_path(str(ROOT / 'formalsw'))
+with TemporaryDirectory(prefix='nagini-erasure-') as temporary:
+    path = Path(temporary) / 'source.py'
+    annotated = source.replace('Retain this documentation.', '@formalsw: Returns')
+    path.write_text(annotated)
+    loaded = api['source_module'](path)
+    assert loaded.formalsw_source_text == annotated
+    assert loaded.body[0].formalsw_markers[0].text == 'Returns'
+    document = json.loads(api['AstJsonEmitter'](loaded).emit())
+    assert document['nagini_erasure']['dialect'] == 'canonical-leading-contracts-v1'
+    assert document['nagini_erasure']['source_sha256'] == sha256(annotated.encode('utf-8')).hexdigest()
+    path.write_text(annotated.replace('return n + 1', 'return n + 2'))
+    try:
+        api['source_module'](path)
+    except api['InvalidRequirement'] as error:
+        assert 'source changed' in str(error)
+    else:
+        raise AssertionError('stale normalized source accepted')
+    fresh = runpy.run_path(str(ROOT / 'formalsw'))['source_module'](path)
+    assert 'n + 2' in ast.unparse(fresh)
+
+print(f'Nagini erasure: non-evaluation, source snapshots and {len(bad)} rejection cases passed')

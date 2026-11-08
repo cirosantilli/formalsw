@@ -17,7 +17,7 @@ def guarded(n: int) -> int:
     @formalsw: ReturnType
     @formalsw: Equiv(identity)
     @formalsw: EquivReturn(identity)
-    @formalsw: BigO(1)
+    @formalsw: ShapeBound(1)
     @formalsw: theorem correct : Returns(this_function(n))
     @formalsw: theorem quantified : ∀ n : Int, Returns(this_function(n))
     @formalsw: theorem witnessed : ∃ n : Int, Returns(this_function(n))

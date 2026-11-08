@@ -4,7 +4,7 @@
 def sum(n: int) -> int:
     """Optimized version of sum_naive.
 
-    @formalsw: BigO(1)
+    @formalsw: ShapeBound(1)
     @formalsw: Equiv(sum_naive)
     @formalsw: ReturnType
     """
@@ -15,7 +15,7 @@ def sum(n: int) -> int:
 def sum_naive(n: int) -> int:
     """Sum of integers from 0 through n - 1. Return 0 if n <= 0.
 
-    @formalsw: BigO(n)
+    @formalsw: ShapeBound(n)
     @formalsw: Returns
     """
     total = 0

@@ -22,6 +22,8 @@ from lang.py.quotation import compile_quotation
 from lang.py.lean_frontend import parse_imports, parse_theorem, guard_proposition, lean_env, lean_session
 from lang.py.local_functions import lower_local_functions
 from lang.py.named_callbacks import lower_named_callbacks
+from lang.py.nagini_erasure import erase_nagini_annotations
+from lang.py.runtime_complexity import runtime_complexity_type
 from lang.py.call_support import range_sum, range_extremum, sequence_extremum, sequence_sort, generator_extremum, sequence_sum, consumed_generator, materialized_range, mapped_list, zip_iterable, enumerate_arguments, reversed_sequence, reversed_list, plain_fstring, uses_calls_model, has_partial_primitives, uses_heap_calls, uses_set_iteration, uses_heap_memoized, memo_heap_runtime, heap_pool_functions, observable_pool_tuples, dictionary_values_receiver
 from lang.py.permutation_support import permutation_arguments, combination_arguments
 from lang.py.call_support import reverse_keyword, integer_instance
@@ -150,9 +152,11 @@ def proof_name_for_short_requirement(
             pass
         case "EquivReturn", [_]:
             pass
-        case "BigO", [_]:
+        case "ShapeBound" | "BigO", [_]:
             pass
-        case "BigO", [_, _]:
+        case "ShapeBound" | "BigO", [_, _]:
+            pass
+        case "BigO", [_, _, mode] if mode.startswith("arithmetic="):
             pass
         case _:
             raise InvalidRequirement(
@@ -264,6 +268,16 @@ def property_type_for_short_requirement(
             global_args = merge_globals(global_args, function_globals(module, other))
         if global_args:
             return global_property_type(ast_namespace, function, property_name, args, negations, global_args, conditions)
+    if property_name == "BigO":
+        try:
+            result = runtime_complexity_type(ast_namespace, function, args, conditions,
+                                            heap=module is not None and uses_heap_calls(module, function))
+        except ValueError as error:
+            raise InvalidRequirement(f"{function_name}: {error}") from error
+        if negations:
+            raise InvalidRequirement(
+                f"{function_name}: negative runtime BigO needs a separate cost-coverage proof")
+        return result
     match property_name, args:
         case "Returns" | "Halts", []:
             arguments = [*function.args.posonlyargs, *function.args.args]
@@ -293,7 +307,7 @@ def property_type_for_short_requirement(
                 f'FormalSW.Property.Function.EquivReturn {ast_namespace}.module '
                 f'{lean_string(function_name)} {lean_string(other)}'
             )
-        case "BigO", [bound]:
+        case "ShapeBound", [bound]:
             int_arguments = [
                 argument.arg
                 for argument in function.args.args
@@ -302,7 +316,7 @@ def property_type_for_short_requirement(
             ]
             if len(int_arguments) != 1:
                 raise InvalidRequirement(
-                    f"{function_name}: BigO without an explicit input-size binding "
+                    f"{function_name}: ShapeBound without an explicit input-size binding "
                     "requires exactly one int argument"
                 )
             argument = int_arguments[0]
@@ -313,7 +327,7 @@ def property_type_for_short_requirement(
                 f'(FormalSW.PyAst.InputSize.intToNat {lean_string(argument)}) '
                 f'(fun {parameter} : Nat => {bound})'
             )
-        case "BigO", [bound, measure]:
+        case "ShapeBound", [bound, measure]:
             parameter = "n" if re.search(r"\bn\b", bound) else "_"
             list_measure = re.fullmatch(
                 r"len\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", measure
@@ -331,7 +345,7 @@ def property_type_for_short_requirement(
                 )
             else:
                 raise InvalidRequirement(
-                    f"{function_name}: unsupported BigO input size: n = {measure}"
+                    f"{function_name}: unsupported ShapeBound input size: n = {measure}"
                 )
             property_type = (
                 f'FormalSW.Property.Function.BigO {ast_namespace}.module '
@@ -369,15 +383,17 @@ def parse_short_marker(marker: str) -> tuple[str, list[str], int] | None:
         args = []
     elif property_name in ("Requires", "Equiv", "EquivReturn"):
         args = [args_text.strip()] if args_text.strip() else []
-    elif property_name == "BigO":
-        big_o_match = re.fullmatch(
-            r"(.+),\s*n\s*=\s*(.+)", args_text.strip(), re.DOTALL
-        )
-        args = (
-            [big_o_match.group(1).strip(), big_o_match.group(2).strip()]
-            if big_o_match is not None
-            else [args_text.strip()]
-        )
+    elif property_name in ("ShapeBound", "BigO"):
+        text = args_text.strip()
+        arithmetic = (re.search(r",\s*arithmetic\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", text)
+                      if property_name == "BigO" else None)
+        if arithmetic:
+            text = text[:arithmetic.start()].strip()
+        big_o_match = re.fullmatch(r"(.+),\s*n\s*=\s*(.+)", text, re.DOTALL)
+        args = ([big_o_match.group(1).strip(), big_o_match.group(2).strip()]
+                if big_o_match is not None else [text])
+        if arithmetic:
+            args.append("arithmetic=" + arithmetic.group(1))
     else:
         args = [arg.strip() for arg in args_text.split(",") if arg.strip()]
     return property_name, args, negations
@@ -764,6 +780,7 @@ def source_module(source):
             module = ast.parse(text, filename=str(source))
             module.formalsw_source = path
             module.formalsw_source_text = text
+            erase_nagini_annotations(module)
             identify_constant_pools(module, path, text)
             identify_classes(module, path)
             prepare_specification(source, module)
@@ -1344,6 +1361,9 @@ class AstJsonEmitter:
                 ],
             },
         }
+        normalization = getattr(self.bindings_module, 'formalsw_nagini_erasure', None)
+        if normalization is not None:
+            document['nagini_erasure'] = normalization
         return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
 
     def stmt(self, stmt: ast.stmt) -> dict[str, object]:

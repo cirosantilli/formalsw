@@ -446,7 +446,7 @@ A predicate is parsed as an ordinary Python expression, including calls to Pytho
 
 The domain consists of inputs on which the expression finishes with exactly Boolean `True`. A truthy integer or string is not `True`; an exception or nontermination does not establish the precondition. `Calls.Condition` records this finite Python execution, and `Evaluates.condition_iff` connects an evaluated result to the domain. The source AST module exposes each predicate as `requires_<function>_<index>`, so editing it changes the checked obligation. For the example, the guard is provably equivalent to `n ≥ 0`.
 
-`Returns`, `Halts`, `ReturnType`, `Equiv`, and `EquivReturn` are required on inputs satisfying all preconditions. `Throws` needs a witness inside that domain. `Not` negates the whole guarded short obligation, so `Not Throws` excludes exceptions on valid inputs. Multiple preconditions apply together; a precondition without any property is an error. `BigO` keeps its existing structural cost abstraction and is guarded as a whole proposition; preconditions do not change the classifier or substitute a different cost model.
+`Returns`, `Halts`, `ReturnType`, `Equiv`, and `EquivReturn` are required on inputs satisfying all preconditions. `Throws` needs a witness inside that domain. `Not` negates the whole guarded short obligation, so `Not Throws` excludes exceptions on valid inputs. Multiple preconditions apply together; a precondition without any property is an error. `ShapeBound` keeps the legacy structural cost abstraction and is guarded as a whole proposition; preconditions do not change the classifier or substitute a different cost model.
 
 Raw theorems receive the precondition after their input binders. Lean's parser also recognizes leading `∀` and `∃` binders: the guard is an implication for universally quantified inputs and a conjunction for existential witnesses. This preserves the distinction between an admissible witness and a vacuous implication. Explicit theorem parameters remain in scope. link:tests/py/requires.py[] and its adjacent proof cover helper calls, every scalar short property, raw statements, chained-comparison short circuiting, signed arithmetic, and exact Boolean results.
 
@@ -500,75 +500,59 @@ See link:tests/py/termination.py[] and link:tests/py/termination.py.lean[] for a
 
 ==== BigO
 
-`BigO` bounds the cost assigned by the current structural cost model using https://en.wikipedia.org/wiki/Big_O_notation[Big O notation]. This classifier is an abstraction of recognized source shapes, not a proof that execution terminates. Use `Returns` or `Halts` for termination.
+`BigO(bound)` defaults to fixed-cost integer arithmetic: addition, multiplication, division and numeric comparisons take constant work. Use `arithmetic=bits` when operand growth matters, for example in factorization. Both models charge collections and copying by size; fixed arithmetic does not make an entire library call constant-time. These are algorithmic cost models, not timing predictions for CPython. `BigO(..., cost=steps)` and partial allocation/write models are rejected.
 
-It takes two inputs:
-
-* arbitrary Lean expression
-* optional definition of lean variables from python expressions
-
-Example:
+For example, even with fixed arithmetic, a `gcd` call is charged according to the smaller operand's bit length. In a range fold whose current factor is at most n, n gcd calls contribute O(n log n) work. Integer-to-decimal conversion is linear in input bit width under fixed arithmetic and quadratic under bit arithmetic; string reversal is linear in character count.
 
 [source,python]
 ----
-def merge_sort(values: list) -> list:
+def solve(n: int) -> int:
     """
-    @formalsw: BigO(n * (Nat.log2 n + 1), n = len(values))
+    @formalsw: Requires(n >= 0)
+    @formalsw: BigO(1)
     """
-    # ...
+    return n * n
 ----
 
-Here:
+For a bit-cost analysis, replace the annotation with `@formalsw: BigO((Nat.log2 (n + 1) + 1)^2, arithmetic=bits)`. Addition and comparison then cost the sum of operand widths; multiplication and division cost their product. Here `n` is the numerical input value, so this bound is quadratic in input bit length. `arithmetic=fixed` explicitly selects the default. The cost option does not change Python's integer semantics or introduce machine overflow.
 
-* `n` is a lean variable
-* `len(values)` is a Python expression that maps the Python into the lean variable
+Integer `bit_length()` follows the arithmetic policy: constant work in the fixed model and operand-width work in the bit model. Successful assertions charge their condition evaluation and control steps; their message expressions are skipped.
 
-Python arguments annotated as `int` are automatically available in Lean under the same name, e.g. we can write the following:
+The short marker supports one integer argument on natural inputs, optionally with `n = argument` before the arithmetic option to rename the size variable. For one `list[int]` argument, optionally accompanied by one integer argument, use `BigO(n, n = len(values))`. This family ranges over arbitrary signed list elements and signed integer arguments; the bound must be uniform in every input except list length, subject to `Requires`. The heap starts with that list. Other heap calls start empty and include the collections they allocate.
 
-[source,python]
-----
-def sum_naive(n: int) -> int:
-    """Sum of integers from 1 to n. Return 0 if n <= 0.
+`Requires` restricts the input family inside the asymptotic quantifiers. The adjacent theorem proves `Calls.Runtime.IsBigO` or `HeapCalls.Runtime.IsBigO`, with `.word` or `.bits` arithmetic. A missing primitive cost rule prevents a finite-cost proof, even if ordinary execution terminates. Other collection signatures and negative `Not BigO` markers still need further support.
 
-    @formalsw: BigO(n)
-    """
-----
+The `HeapRuntimeCost` model charges list allocation, reversal, indexed reads, slicing, concatenation, iteration, flat comparisons and dynamic-array resizing. Indexed list and tuple reads copy one value reference; index and length arithmetic follow the selected arithmetic model. Fresh list slices pay for the selected references after signed-bound normalization, and concatenation pays for both inputs. List iterators retain the receiver identity, with a charge for each bounds check, read and cursor update. These rules do not price in-place concatenation or shrinking mutations. Its grow-only arrays double capacity: resizing appends pay for copying, and a potential proof bounds copying and writing by three units per append from an empty array, plus source-execution overhead. This is an abstract representation, not CPython's exact allocation schedule; shrinking list operations still lack tariffs. Dictionary access defaults to collision-chain worst case; explicitly selecting a balanced tree in a Lean theorem gives logarithmic search depth, with key-comparison work charged in both cases. See link:tests/py/runtime_cost.lean[] for regressions covering operand sizes, collections and missing-cost rejection.
 
-rather than the more tedious:
+Bytearray allocation and repetition pay for output bytes. Indexed access is constant under fixed arithmetic; nonempty extended-slice replacement pays per written byte. Contiguous replacement and deletion also charge for moving the old buffer's suffix. Bytearray enumeration uses an indexed iterator and charges for each counter update and read. Bit arithmetic additionally charges slice-bound and address calculations by operand width. These buffer rules do not supply costs for shrinking dynamic lists.
 
-----
-@formalsw: BigO(n, n = n)
-----
+Scalar set insertion pays for worst-case key search and a conservative storage-rebuilding allowance on every call. `max` and `min` on scalar sets pay for scanning all elements. Integer widths follow the arithmetic option, while strings always retain length-dependent costs. Arbitrary object-key protocols remain unpriced.
 
-The merge_sort example above requires `merge_sort.«BigO(n * (Nat.log2 n + 1), n = len(values))»` with type:
+`sorted` on scalar lists and tuples uses an O(n log n) comparison-sort library tariff, weighted by key size and including output copying. This is a target-library cost contract; Lean's insertion-sort definition specifies the returned ordering. Tuple construction and flat unpacking charge for each copied or assigned reference. Object comparison callbacks remain unpriced.
 
-[source,lean]
-----
-FormalSW.Property.Function.BigO
-  SortAst.module "merge_sort"
-    (FormalSW.PyAst.InputSize.listLength "values")
-    (fun n : Nat => n * (Nat.log2 n + 1))
-----
+==== ShapeBound
 
-Expanding that property gives the following raw Lean equivalent:
+`ShapeBound(...)` is the old structural classifier, retained for inspecting recognized source shapes. It does not prove termination or runtime complexity. For example, `ShapeBound(n, n = n)` bounds the classifier's assigned growth, not the execution of the function or its helpers. The underlying legacy Lean proposition is `FormalSW.Property.Function.BigO`. See link:tests/py/range_sum.py[] and link:tests/py/sort.py[].
 
-[source,lean]
-----
-∃ analysis,
-  SortAst.module.analyzeFunction "merge_sort" = some analysis ∧
-  analysis.inputSize = InputSize.listLength "values" ∧
-  ∃ (c n₀ : Nat), ∀ n : Nat, n₀ ≤ n →
-    analysis.operations * analysis.growth.bound n ≤
-      c * (n * (Nat.log2 n + 1))
-----
+===== Execution transition costs
 
-Here the universal variable is the input size used by the cost abstraction. The existential constants permit a multiplicative factor and a finite prefix of small inputs.
+Import `lang.py.FormalSW.CallsCost` for experimental costs tied to the scalar call interpreter. `FinishesIn step state count outcome` counts every transition, including the terminal one. `Execution.TimeBound execution bound` requires a terminating trace of at most `bound` transitions: unsupported states, infinite loops, and exhausted observation fuel cannot satisfy it. Both normal and exceptional termination are counted.
 
-The analyzer checks that `values` is the actual `list` argument; changing the binding to another name does not produce a provable obligation. Integer arguments use their natural-number projection automatically. Because the current cost relation is one-dimensional, omitting the binding requires exactly one `int` argument.
+`Execution.IsBigO` bounds interpreter-transition counts; it is a low-level proof tool, not the implementation of runtime `BigO` annotations. `Execution.WeightedBigO` supports an explicit charge per state. The existing allocation and buffer models measure selected resource work, not complete runtime. Their proofs can be reused when building a model that accounts for each primitive's work.
 
-Other valid bounds include `BigO(1)`, `BigO(n)`, `BigO(n * n, n = len(values))`, or a call to a user-defined Lean cost function. Because the bound is Lean rather than a second expression DSL, ordinary Lean functions and notation are available.
+`ReachesIn.trans` adds prefix costs, `FinishesIn.unique` fixes both the cost and outcome, and `Calls.Cost.rangeSum` counts every iteration and its item expression in any caller continuation. Existing termination proofs imply that some finite cost exists, but do not by themselves give an asymptotic bound. See link:tests/py/execution_cost.lean[] for regression examples.
 
-The cost model assigns cost 1 to every represented statement and expression operation. It then proves a constant multiple of the selected bound beyond some input-size threshold. Calls are unit-cost by default too; later standard-library models can replace that default with operation-specific complexity. The initial structural analyzer recognizes constant and iterative integer functions plus the recursive list-sort shapes demonstrated in link:tests/py/sort.py[].
+These are interpreter-transition costs, not CPython timing or bit complexity. Arithmetic and primitive work hidden inside a transition remain atomic. Explicit Python helper calls in `Calls.function` consume transitions; C builtins, list copies, and heap operations need separate weighted models before claiming their full costs. Different execution backends may group work into different transitions, so compare functions using the same backend.
+
+`CallsCostLoops` and `HeapCallsCost` add counted expressions, calls, branches and loops that compose in arbitrary caller continuations. `ScalarSortCost` counts the comparisons performed by the modeled insertion sort, including a constant bound for sorting three integers.
+
+Import `lang.py.FormalSW.WeightedExecutionCost` to supply a charge for each actual interpreter state. `FinishesWith` and `ReachesWith` retain the same execution relation while summing charges; `Execution.WeightedBigO` gives a uniform bound for that model. `AllocationCost` instantiates heap charges as one per transition plus each net new list-element slot. It counts list slices and concatenations by their allocated lengths, including unreachable heap objects. It does not yet charge bytearray writes, set traversal, scalar bit operations or garbage collection. A potential theorem bounds final list-slot growth by the cost of any terminating weighted trace. The separate `BufferCost` model adds fresh bytearray storage, bytes produced by binary operations, and successful buffer slice/item writes. Writes cost their length even when they leave every byte unchanged. It is intended for sieve work; it is not a complete cost model for every Python buffer operation.
+
+===== Nagini annotations in source proofs
+
+The frontend recognizes a restricted Nagini annotation dialect before linking Python source. Canonical module-level imports from `nagini_contracts.contracts` and `nagini_contracts.obligations` declare ghost syntax: bare `@Pure` and leading `Requires`, `Ensures` and `Decreases` statements are erased. Their arguments are never evaluated; imports used only by erased syntax are also removed. Remaining Python code follows the normal source-proof pipeline.
+
+This is an explicit source-language convention, not equivalence to CPython executing the contract library, and it does not prove the Nagini contracts. Aliases, wildcard imports, rebinding, shadowing, nested contracts and runtime uses of annotation names are rejected. Generated AST JSON records the dialect, erased lines, ghost dependencies and original source SHA-256. See link:lang/py/nagini_erasure.py[] and link:tests/py/nagini_erasure_checks[].
 
 ==== Equiv
 
@@ -900,7 +884,7 @@ The raw obligation for `push` is:
 
 This quantifies over every valid entry heap and list address, including empty lists. List arguments and all required list globals use addresses in that same heap; their addresses can coincide. Initializers establish input domains without fixing list contents or assuming distinct objects. `list[int]`, `list[str]`, and `list[bool]` are supported; a nonempty homogeneous literal can supply the element type, and an empty initializer needs an annotation. An annotation describes the entry state; subsequent supported scalar writes may change element types.
 
-The heap interpreter supports list literals, scalar indexed reads and writes (including negative indices), `append`, concatenation, repetition, `len`, name assignment, name or indexed augmented assignment, scalar expressions, `if`, `while`, message-free `assert`, `return`, and ordinary builtin `raise` with scalar arguments (special constructors such as `OSError` are rejected). `list += string` appends its characters in place. Indexed augmented assignment evaluates the target once, reads before the right-hand side, and preserves Python's write order even if the right-hand side mutates the list. List operations on a function argument share the same semantics as operations on a global. Ordinary calls, slicing, other list methods, recursive list comparisons, nested mutable containers, dictionary/object globals, imported module attributes, closures (`nonlocal`), deletion of globals, and globals in the parallel or quotation backends remain unsupported. The scalar global model does not execute ordinary function calls either. These dependencies produce unsupported-construct diagnostics rather than being silently omitted. `BigO` currently rejects functions depending on globals because its single input-size abstraction does not account for additional state inputs. Explicit legacy `Property.Function`/`scalarFunction` specifications cannot discard a function's globals; use the short DSL, `scalarFunctionWithGlobals` for scalar state, or `Mutable.function` for shared list state.
+The heap interpreter supports list literals, scalar indexed reads and writes (including negative indices), `append`, concatenation, repetition, `len`, name assignment, name or indexed augmented assignment, scalar expressions, `if`, `while`, message-free `assert`, `return`, and ordinary builtin `raise` with scalar arguments (special constructors such as `OSError` are rejected). `list += string` appends its characters in place. Indexed augmented assignment evaluates the target once, reads before the right-hand side, and preserves Python's write order even if the right-hand side mutates the list. List operations on a function argument share the same semantics as operations on a global. Ordinary calls, slicing, other list methods, recursive list comparisons, nested mutable containers, dictionary/object globals, imported module attributes, closures (`nonlocal`), deletion of globals, and globals in the parallel or quotation backends remain unsupported. The scalar global model does not execute ordinary function calls either. These dependencies produce unsupported-construct diagnostics rather than being silently omitted. `ShapeBound` rejects functions depending on globals because its single input-size abstraction does not account for additional state inputs. Explicit legacy `Property.Function`/`scalarFunction` specifications cannot discard a function's globals; use the short DSL, `scalarFunctionWithGlobals` for scalar state, or `Mutable.function` for shared list state.
 
 Mutable completions retain global bindings and the heap on both return and exception. `Equiv` compares the outcome and the rooted final object graph, using the interpreted Python `same_snapshot` comparison; exactly identical completions are an immediate fast path. Roots include every entry object (a caller might retain it), final globals, and a successful return value. This preserves caller-visible aliases even after rebinding and permits renaming newly allocated objects and ignoring unreachable temporary allocations. Entry heap addresses keep their order as caller anchors. `EquivReturn` compares this same observable state whenever both executions return. Implicit builtin exception messages remain abstracted, as in the scalar interpreter; explicit supported exception arguments are retained.
 

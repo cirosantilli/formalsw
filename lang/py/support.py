@@ -604,9 +604,13 @@ class SupportChecker:
             while short.startswith('Not '):
                 short = short[4:]
             property_name = short.split('(', 1)[0].strip()
-            if uses_calls_model(self.module, function) and property_name not in ('Returns', 'Halts') and not marker.startswith('theorem '):
+            if uses_calls_model(self.module, function) and property_name not in ('Returns', 'Halts', 'BigO') and not marker.startswith('theorem '):
                 issues.append(UnsupportedConstruct(name, function.lineno,
                     'call execution requires a raw theorem for this property; legacy abstract properties do not model calls'))
+            if property_name == 'BigO' and (uses_memoized(self.module, function)
+                                          or uses_heap_memoized(self.module, function)):
+                issues.append(UnsupportedConstruct(name, function.lineno,
+                    'runtime BigO does not yet model memoized execution'))
             try:
                 global_targets = re.findall(r'\bEquiv(?:Return)?\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', marker)
                 stateful = bool(function_globals(self.module, function)) or any(
@@ -615,7 +619,7 @@ class SupportChecker:
             except GlobalInputError:
                 stateful = False  # check() reports the precise declaration error.
             supported_arguments = all(annotation_kind(arg.annotation) is not None for arg in args)
-            if stateful and property_name == 'BigO':
+            if stateful and property_name in ('BigO', 'ShapeBound'):
                 issues.append(UnsupportedConstruct(name, function.lineno,
                     'BigO does not yet model global-state inputs; use an explicit cost specification'))
             if property_name in ('Equiv', 'EquivReturn', 'ReturnType') and not (

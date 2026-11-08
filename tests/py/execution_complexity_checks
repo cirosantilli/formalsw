@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""
+Reject runtime claims from unit steps or the structural classifier.
+"""
+
+import argparse
+import json
+from pathlib import Path
+import runpy
+import sys
+from tempfile import TemporaryDirectory
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+frontend = runpy.run_path(str(ROOT / "formalsw"))
+InvalidRequirement = frontend["InvalidRequirement"]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--lean-output", type=Path, help="write generated list obligations for Lean type checking")
+options = parser.parse_args()
+lean_checks = ["import lang.py.FormalSW.HeapRuntimeCostSequences\n"]
+
+with TemporaryDirectory() as directory:
+    for index, marker in enumerate([
+        "BigO(n, cost=steps)", "Not BigO(1, cost=steps)",
+        "BigO(n, cost=lists)", "BigO(n, cost=buffers)",
+    ]):
+        source = Path(directory) / f"cost{index}.py"
+        source.write_text(f'''def solve(n: int) -> int:
+    """
+    @formalsw: Requires(n >= 0)
+    @formalsw: {marker}
+    """
+    return n + 1
+''')
+        module = frontend["source_module"](source)
+        try:
+            frontend["collect_requirements"](source, module, "Cost", "CostAst")
+        except InvalidRequirement as error:
+            assert "operation-specific costs" in str(error), error
+        else:
+            raise AssertionError(f"Runtime complexity claim accepted: {marker}")
+
+    source = Path(directory) / "shape.py"
+    source.write_text('''def solve(n: int) -> int:
+    """
+    @formalsw: ShapeBound(1)
+    """
+    return n + 1
+''')
+    module = frontend["source_module"](source)
+    requirements = frontend["collect_requirements"](source, module, "Shape", "ShapeAst")
+    shape = next(requirement for requirement in requirements if requirement.marker.startswith("ShapeBound"))
+    assert not shape.unsupported, shape.unsupported
+    assert shape.theorem_name == 'Shape.solve.«ShapeBound(1)»'
+    assert 'FormalSW.Property.Function.BigO' in shape.property_type
+    assert 'Execution.IsBigO' not in shape.property_type
+
+    source = Path(directory) / "runtime.py"
+    source.write_text('''def solve(n: int) -> int:
+    """
+    @formalsw: Requires(n >= 0)
+    @formalsw: BigO(1)
+    @formalsw: BigO((Nat.log2 (n + 1) + 1)^2, arithmetic=bits)
+    """
+    return n * n
+''')
+    module = frontend["source_module"](source)
+    requirements = frontend["collect_requirements"](source, module, "Runtime", "RuntimeAst")
+    fixed = next(requirement for requirement in requirements if requirement.marker == "BigO(1)")
+    assert "Calls.Runtime.IsBigO .word" in fixed.property_type
+    runtime = next(requirement for requirement in requirements if "arithmetic=bits" in requirement.marker)
+    assert not runtime.unsupported, runtime.unsupported
+    assert 'Calls.Runtime.IsBigO .bits' in runtime.property_type
+    assert 'Property.Function.BigO' not in runtime.property_type
+    assert 'Execution.IsBigO' not in runtime.property_type
+    assert 'RuntimeAst.requires_solve_0' in runtime.property_type
+    assert '(fun (input : Nat)' in runtime.property_type
+    assert '∀' not in runtime.property_type
+    assert '«n»' not in runtime.property_type
+
+    for index, (marker, policy, bound) in enumerate([
+        ("BigO(1, arithmetic=fixed)", "word", "(fun _ : Nat => 1)"),
+        ("BigO(n, n = value)", "word", "(fun n : Nat => n)"),
+        ("BigO(n, n = value, arithmetic = bits)", "bits", "(fun n : Nat => n)"),
+        ("BigO(value, arithmetic=bits)", "bits", "(fun value : Nat => value)"),
+    ]):
+        source = Path(directory) / f"option{index}.py"
+        source.write_text(f'''def solve(value: int) -> int:
+    """
+    @formalsw: Requires(value >= 0)
+    @formalsw: {marker}
+    """
+    return value + 1
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Option", "OptionAst")
+        requirement = next(item for item in requirements if item.marker == marker)
+        assert not requirement.unsupported, requirement.unsupported
+        assert f"Calls.Runtime.IsBigO .{policy}" in requirement.property_type
+        assert bound in requirement.property_type, requirement.property_type
+        assert requirement.theorem_name == f"Option.solve.«{marker}»"
+        assert "«value»" not in requirement.property_type
+
+    for mode, policy in [("", "word"), (", arithmetic=bits", "bits")]:
+        source = Path(directory) / f"heap_{policy}.py"
+        source.write_text(f'''def solve(n: int) -> int:
+    """
+    @formalsw: Requires(n >= 0)
+    @formalsw: BigO(n + 1{mode})
+    """
+    values = []
+    for i in range(n):
+        values.append(i)
+    return len(values)
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Heap", "HeapAst")
+        runtime = next(item for item in requirements if item.marker.startswith("BigO("))
+        assert not runtime.unsupported, runtime.unsupported
+        assert runtime.property_type.startswith(f"FormalSW.PyAst.HeapCalls.Runtime.IsBigO .{policy}")
+        assert "[.scalar (.int input)]) (fun _ => [])" in runtime.property_type
+        assert "HeapAst.requires_solve_0" in runtime.property_type
+
+    for index, (signature, guard, values, family, sequence) in enumerate([
+        ("digits: list[int], k: int", "k >= 0", "[.ref 0, .scalar (.int input.2)]", "List Int × Int", "input.1"),
+        ("k: int, digits: list[int]", "k <= len(digits)", "[.scalar (.int input.2), .ref 0]", "List Int × Int", "input.1"),
+        ("digits: list[int]", "len(digits) > 0", "[.ref 0]", "List Int", "input"),
+        ("digits: list[int], _formalsw_heap: int", "_formalsw_heap <= len(digits)", "[.ref 0, .scalar (.int input.2)]", "List Int × Int", "input.1"),
+    ]):
+        source = Path(directory) / f"list{index}.py"
+        source.write_text(f'''def solve({signature}) -> int:
+    """
+    @formalsw: Requires({guard})
+    @formalsw: BigO(n, n = len(digits))
+    """
+    return len(digits)
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "ListInput", "ListInputAst")
+        runtime = next(item for item in requirements if item.marker.startswith("BigO("))
+        assert not runtime.unsupported, runtime.unsupported
+        claim = runtime.property_type
+        assert claim.startswith("FormalSW.PyAst.HeapCalls.Runtime.IsBigO .word")
+        assert f"(fun {'_' if family == 'List Int' else 'input'} : {family} => {values})" in claim, claim
+        assert f"(fun input : {family} => {sequence}.length) (fun n : Nat => n)" in claim, claim
+        assert f"[.list ({sequence}.map (fun value => .scalar (.int value)))]" in claim, claim
+        assert "requires_solve_0" in claim and "«" not in claim, claim
+        if index:
+            assert "HeapCalls.Condition" in claim, claim
+        else:
+            assert "Calls.Condition" in claim, claim
+        # The auxiliary integer is signed and is not part of the growth measure:
+        # constants must work for every window size, subject to the source guard.
+        assert "Nat ×" not in claim and "× Nat" not in claim, claim
+        semantic = frontend["module_with_python_builtins"](source, module)
+        emitter = frontend["AstJsonEmitter"](semantic)
+        lean_string = frontend["lean_string"]
+        lean_checks.append(f"namespace Case{index}\nnamespace ListInputAst\nopen FormalSW.PyAst\n")
+        lean_checks.append(f"def module : Module := pyast_from_json% {lean_string(emitter.emit())}\n")
+        for name, condition in module.formalsw_conditions.items():
+            lean_checks.append(f"def {name} : Expr := pyexpr_from_json% {lean_string(json.dumps(emitter.expr(condition)))}\n")
+        lean_checks.append(f"end ListInputAst\nexample : Prop := {claim}\nend Case{index}\n")
+
+    for index, marker in enumerate(("BigO(n)", "BigO(n, n = k)", "BigO(n, n = len(missing))")):
+        source = Path(directory) / f"invalid_list_size{index}.py"
+        source.write_text(f'''def solve(digits: list[int], k: int) -> int:
+    """
+    @formalsw: {marker}
+    """
+    return len(digits)
+''')
+        module = frontend["source_module"](source)
+        try:
+            frontend["collect_requirements"](source, module, "Invalid", "InvalidAst")
+        except InvalidRequirement as error:
+            assert "explicit n = len(digits)" in str(error), error
+        else:
+            raise AssertionError(f"Invalid list measure accepted: {marker}")
+
+    source = Path(directory) / "invalid_option.py"
+    source.write_text('''def solve(n: int) -> int:
+    """
+    @formalsw: BigO(n, arithmetic=unknown)
+    """
+    return n
+''')
+    module = frontend["source_module"](source)
+    try:
+        frontend["collect_requirements"](source, module, "Invalid", "InvalidAst")
+    except InvalidRequirement as error:
+        assert "arithmetic must be fixed or bits" in str(error), error
+    else:
+        raise AssertionError("Unknown arithmetic mode accepted")
+
+    source = Path(directory) / "negative.py"
+    source.write_text('''def solve(n: int) -> int:
+    """
+    @formalsw: Not BigO(1)
+    """
+    return n
+''')
+    module = frontend["source_module"](source)
+    try:
+        frontend["collect_requirements"](source, module, "Negative", "NegativeAst")
+    except InvalidRequirement as error:
+        assert "cost-coverage proof" in str(error), error
+    else:
+        raise AssertionError("Negative bounds must not exploit missing cost rules")
+
+if options.lean_output:
+    options.lean_output.write_text("".join(lean_checks))
+print("Scalar/list/heap fixed/bit BigO obligations checked; unit-step and partial-resource markers rejected.")

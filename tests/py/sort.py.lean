@@ -15,8 +15,8 @@ theorem merge_sort_int.«Equiv(quick_sort_int)» :
   · intro values
     rfl
 
-/-- Integer merge sort has linearithmic worst-case cost. -/
-theorem merge_sort_int.«BigO(n * (Nat.log2 n + 1), n = len(values))» :
+/-- Integer merge sort receives the linearithmic structural classification. -/
+theorem merge_sort_int.«ShapeBound(n * (Nat.log2 n + 1), n = len(values))» :
     FormalSW.Property.Function.BigO
       SortAst.module "merge_sort_int" (.listLength "values")
         (fun n => n * (Nat.log2 n + 1)) := by
@@ -26,8 +26,8 @@ theorem merge_sort_int.«BigO(n * (Nat.log2 n + 1), n = len(values))» :
   · rfl
   · exact FormalSW.PyAst.Growth.linearithmic_isBigO
 
-/-- Integer first-element-pivot quicksort has quadratic worst-case cost. -/
-theorem quick_sort_int.«BigO(n * n, n = len(values))» :
+/-- Integer first-element-pivot quicksort receives the quadratic structural classification. -/
+theorem quick_sort_int.«ShapeBound(n * n, n = len(values))» :
     FormalSW.Property.Function.BigO
       SortAst.module "quick_sort_int" (.listLength "values") (fun n => n * n) := by
   apply FormalSW.Property.Function.bigO_of_growth_bound
@@ -107,8 +107,8 @@ theorem merge_sort_untyped.«EquivReturn(quick_sort)» :
     ] at leftOutcome rightOutcome
   exact leftOutcome.symm.trans rightOutcome
 
-/-- Untyped merge sort has linearithmic worst-case cost. -/
-theorem merge_sort_untyped.«BigO(n * (Nat.log2 n + 1), n = len(values))» :
+/-- Untyped merge sort receives the linearithmic structural classification. -/
+theorem merge_sort_untyped.«ShapeBound(n * (Nat.log2 n + 1), n = len(values))» :
     FormalSW.Property.Function.BigO
       SortAst.module "merge_sort_untyped" (.listLength "values")
         (fun n => n * (Nat.log2 n + 1)) := by
@@ -118,8 +118,8 @@ theorem merge_sort_untyped.«BigO(n * (Nat.log2 n + 1), n = len(values))» :
   · rfl
   · exact FormalSW.PyAst.Growth.linearithmic_isBigO
 
-/-- Untyped first-element-pivot quicksort has quadratic worst-case cost. -/
-theorem quick_sort.«BigO(n * n, n = len(values))» :
+/-- Untyped first-element-pivot quicksort receives the quadratic structural classification. -/
+theorem quick_sort.«ShapeBound(n * n, n = len(values))» :
     FormalSW.Property.Function.BigO
       SortAst.module "quick_sort" (.listLength "values") (fun n => n * n) := by
   apply FormalSW.Property.Function.bigO_of_growth_bound
