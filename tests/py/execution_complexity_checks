@@ -17,7 +17,7 @@ InvalidRequirement = frontend["InvalidRequirement"]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--lean-output", type=Path, help="write generated list obligations for Lean type checking")
 options = parser.parse_args()
-lean_checks = ["import lang.py.FormalSW.HeapRuntimeCostSequences\n"]
+lean_checks = ["import lang.py.FormalSW.HeapRuntimeCostSequences\nimport lang.py.FormalSW.HeapRuntimeInputs\n"]
 
 with TemporaryDirectory() as directory:
     for index, marker in enumerate([
@@ -161,6 +161,64 @@ with TemporaryDirectory() as directory:
             lean_checks.append(f"def {name} : Expr := pyexpr_from_json% {lean_string(json.dumps(emitter.expr(condition)))}\n")
         lean_checks.append(f"end ListInputAst\nexample : Prop := {claim}\nend Case{index}\n")
 
+    for index, (signature, measure, policy) in enumerate([
+        ("rows: list[list[int]]", "len(rows)", "fixed"),
+        ("rows: list[list[int]]", "len(rows) + sum(len(row) for row in rows)", "fixed"),
+        ("rows: list[list[int]], k: int", "len(rows) + sum(len(r) for r in rows)", "bits"),
+        ("_formalsw_heap: int, rows: list[list[int]]", "len(rows)", "fixed"),
+    ]):
+        source = Path(directory) / f"nested{index}.py"
+        source.write_text(f'''
+def solve({signature}) -> int:
+    """
+    @formalsw: Requires(len(rows) >= 0)
+    @formalsw: BigO(n, n = {measure}, arithmetic={policy})
+    """
+    return len(rows)
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Nested", "NestedAst")
+        runtime = next(item for item in requirements if item.marker.startswith("BigO("))
+        assert not runtime.unsupported, runtime.unsupported
+        claim = runtime.property_type
+        assert "NestedIntList.heap" in claim and "«" not in claim, claim
+        assert "HeapCalls.Condition" in claim, claim
+        assert ("NestedIntList.size" in claim) == ("sum(" in measure), claim
+        if index >= 2:
+            assert "List (List Int) × Int" in claim, claim
+        if index == 3:
+            assert "[.scalar (.int input.2), .ref 0]" in claim, claim
+        semantic = frontend["module_with_python_builtins"](source, module)
+        emitter = frontend["AstJsonEmitter"](semantic)
+        lean_string = frontend["lean_string"]
+        lean_checks.append(f"namespace NestedCase{index}\nnamespace NestedAst\nopen FormalSW.PyAst\n")
+        lean_checks.append(f"def module : Module := pyast_from_json% {lean_string(emitter.emit())}\n")
+        for name, condition in module.formalsw_conditions.items():
+            lean_checks.append(f"def {name} : Expr := pyexpr_from_json% {lean_string(json.dumps(emitter.expr(condition)))}\n")
+        lean_checks.append(f"end NestedAst\nexample : Prop := {claim}\nend NestedCase{index}\n")
+
+    for index, measure in enumerate([
+        "len(missing)", "len(rows) + sum(len(r) for r in rows if r)",
+        "len(rows) + sum(len(r) for r in missing)",
+        "len(rows) + sum(len(r) for r in rows for q in r)",
+        "len(rows) + sum(mutate(r) for r in rows)",
+    ]):
+        source = Path(directory) / f"invalid_nested{index}.py"
+        source.write_text(f'''
+def solve(rows: list[list[int]]) -> int:
+    """
+    @formalsw: BigO(n, n = {measure})
+    """
+    return len(rows)
+''')
+        module = frontend["source_module"](source)
+        try:
+            frontend["collect_requirements"](source, module, "Invalid", "InvalidAst")
+        except InvalidRequirement as error:
+            assert "nested lists require" in str(error), error
+        else:
+            raise AssertionError(f"Invalid nested measure accepted: {measure}")
+
     for index, marker in enumerate(("BigO(n)", "BigO(n, n = k)", "BigO(n, n = len(missing))")):
         source = Path(directory) / f"invalid_list_size{index}.py"
         source.write_text(f'''def solve(digits: list[int], k: int) -> int:
@@ -209,4 +267,4 @@ with TemporaryDirectory() as directory:
 
 if options.lean_output:
     options.lean_output.write_text("".join(lean_checks))
-print("Scalar/list/heap fixed/bit BigO obligations checked; unit-step and partial-resource markers rejected.")
+print("Scalar/list/nested-list/heap fixed/bit BigO obligations checked; unit-step and partial-resource markers rejected.")

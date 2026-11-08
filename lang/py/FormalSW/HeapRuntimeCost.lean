@@ -29,6 +29,15 @@ def sequenceLength (heap : Heap) : Value → Option Nat
       | _ => none
   | _ => none
 
+/-- Zip retains its builtin receivers. Each advance reads up to one item from
+each receiver and allocates a tuple containing the obtained references. -/
+def zipIteration (arithmetic : Arithmetic) (heap : Heap)
+    (sources : List SequenceSource) (position : Nat) : Option Nat := do
+  let widths ← sources.mapM fun source => do
+    let length ← sequenceLength heap (sequenceValue source)
+    return 2 + integer arithmetic position + integer arithmetic length
+  return widths.sum + 2*sources.length + 2
+
 def elementComparison (arithmetic : Arithmetic) : Value → Value → Option Nat
   | .scalar left, .scalar right => some (PrimitiveWork.comparison arithmetic left right)
   | .ref left, .ref right => if left = right then some 1 else none
@@ -62,6 +71,12 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
     (maps : MapRepresentation := .collisionChain) : Option Nat :=
   match op, values with
   | .list, values | .tuple, values => some (sequenceCopy values.length)
+  | .comprehension _ ((_, .call (.name "range") _, _) :: _) _, values =>
+      (scalarValues values).map (fun values => Calls.Runtime.argumentWork arithmetic values + 1)
+  | .comprehension _ (_ :: _) _, [source] => (sequenceLength heap source).map (fun _ => 2)
+  | .comprehensionTargets _ ((_, .zipIterable _, _) :: _) _, values => do
+      let _ ← values.mapM (sequenceLength heap)
+      return 2*values.length + 1
   | .sumSequence, [source, .scalar (.int initial)] =>
       -- Iterator acquisition uses builtin metadata. The lowered loop separately
       -- charges each element read and addition, without copying the input.
@@ -109,6 +124,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
   | .startRange _ values _ _ _ _ => do
       return Calls.Runtime.argumentWork arithmetic (← scalarValues values)
   | .block body _ => match body with
+      | .zipStepLoop _ sources position _ _ :: _ => zipIteration arithmetic state.heap sources position
       | .rangeStepLoop _ next stop stride _ _ :: _ => some (Calls.Runtime.rangeWork arithmetic next stop stride)
       | .sequenceStepLoop _ (.ref address) position _ _ :: _ => match state.heap[address]? with
           | some (.list items) | some (.tuple items) =>
@@ -130,6 +146,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .forIn (.name _) _ _ _ :: _
       | .forIn (.tuple [.name _, .name _]) (.call (.name "enumerate") [_]) _ _ :: _
       | .expr _ :: _ | .loopResume _ :: _ | .breakLoop :: _ | .continueLoop :: _ => some 1
+      | .comprehensionAppend _ _ :: _ => some 1
       | _ => none
   | .expr expression _ => match expression with
       | .call (.attribute _ "append") [_] | .call (.attribute _ "add") [_] => some 1
@@ -138,6 +155,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .builtinCall _ _
       | .list _ | .tuple _ | .reversedList _ | .subscript _ _ | .sumSequence _ _ => some 1
       | .sumGenerator _ [_] _ => some 1
+      | .listComp _ (_ :: _) | .listCompTargets _ (_ :: _) => some 1
       | .call (.attribute (.name _) _) _ => some 1
       | _ => none
   | .value value => match state.stack with
@@ -177,6 +195,7 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
           | .scalar (.int initial) => some (integer arithmetic initial + 1)
           | _ => none
       | .generatorEnd :: _ => some 1
+      | .comprehensionResult _ :: _ => some 1
       | .sequence _ _ _ _ _ :: _ => match value with
           | .ref address => match state.heap[address]? with
               | some (.list _) | some (.tuple _) => some 1

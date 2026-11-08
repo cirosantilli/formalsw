@@ -2,11 +2,68 @@
 Generate runtime BigO obligations with mandatory size-dependent primitive costs.
 """
 
+import ast
 import json
 import re
 
 from lang.py.global_inputs import annotation_kind
 from lang.py.contracts import heap_input_name
+
+
+def nested_list_measure(expression, name, values):
+    """Recognize row count or total rows and cells without evaluating Python."""
+    try:
+        node = ast.parse(expression, mode="eval").body
+    except SyntaxError:
+        node = None
+
+    def length_of(node, variable):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "len" and not node.keywords and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == variable)
+
+    if length_of(node, name):
+        return f"{values}.length"
+    if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+            and length_of(node.left, name) and isinstance(node.right, ast.Call)
+            and isinstance(node.right.func, ast.Name) and node.right.func.id == "sum"
+            and not node.right.keywords and len(node.right.args) == 1
+            and isinstance(node.right.args[0], ast.GeneratorExp)):
+        generator = node.right.args[0]
+        if len(generator.generators) == 1:
+            loop = generator.generators[0]
+            if (isinstance(loop.target, ast.Name) and isinstance(loop.iter, ast.Name)
+                    and loop.iter.id == name and not loop.ifs and not loop.is_async
+                    and length_of(generator.elt, loop.target.id)):
+                return f"FormalSW.PyAst.HeapCalls.Runtime.NestedIntList.size {values}"
+    raise ValueError(f"runtime BigO nested lists require n = len({name}) or "
+                     f"n = len({name}) + sum(len(row) for row in {name})")
+
+
+def nested_list_input_family(function, arguments, args, conditions):
+    """Use a canonical heap containing an outer list and one object per row."""
+    lists = [argument for argument in arguments if annotation_kind(argument.annotation) == "list[list[int]]"]
+    integers = [argument for argument in arguments if annotation_kind(argument.annotation) == "int"]
+    if len(lists) != 1 or len(integers) > 1 or len(lists) + len(integers) != len(arguments):
+        raise ValueError("runtime BigO nested inputs support one list[list[int]] and at most one int argument")
+    if len(args) != 2:
+        raise ValueError("runtime BigO nested lists require an explicit size binding")
+    family = "List (List Int) × Int" if integers else "List (List Int)"
+    values = "input.1" if integers else "input"
+    size = nested_list_measure(args[1], lists[0].arg, values)
+    heap = f"(FormalSW.PyAst.HeapCalls.Runtime.NestedIntList.heap {values})"
+    replacements = {lists[0].arg: "(0 : Nat)", heap_input_name(function): heap}
+    if integers:
+        replacements[integers[0].arg] = "input.2"
+    predicate = " ∧ ".join(f"({condition})" for condition in conditions) or "True"
+    predicate = re.sub(r"«([^»]+)»", lambda match: replacements.get(match[1], match[0]), predicate)
+    inputs = ", ".join(".ref 0" if argument is lists[0] else ".scalar (.int input.2)"
+                       for argument in arguments)
+    return (
+        f"(fun {'input' if integers else '_'} : {family} => [{inputs}]) (fun input : {family} => {heap})",
+        f"(fun (input : {family}) => {predicate})" if conditions else "(fun _ => True)",
+        f"(fun input : {family} => {size})",
+    )
 
 
 def list_input_family(function, arguments, args, conditions):
@@ -48,10 +105,12 @@ def runtime_complexity_type(namespace, function, args, conditions, *, heap=False
         raise ValueError("runtime BigO requires positional inputs")
     if any(re.search(r"\bcost\s*=", argument) for argument in args):
         raise ValueError("runtime BigO uses operation-specific costs; cost=steps and partial resource models are not supported")
-    if any(annotation_kind(argument.annotation) == "list[int]" for argument in arguments):
+    kinds = {annotation_kind(argument.annotation) for argument in arguments}
+    if kinds & {"list[int]", "list[list[int]]"}:
         if not heap:
             raise ValueError("runtime BigO list inputs require the heap interpreter")
-        inputs, domain, size = list_input_family(function, arguments, args, conditions)
+        family = nested_list_input_family if "list[list[int]]" in kinds else list_input_family
+        inputs, domain, size = family(function, arguments, args, conditions)
         parameter = "n" if re.search(r"\bn\b", args[0]) else "_"
         return (
             f"FormalSW.PyAst.HeapCalls.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module {json.dumps(function.name)}\n"
