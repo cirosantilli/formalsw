@@ -48,6 +48,18 @@ theorem list_slice
       omega
   exact ((initial.trans (arguments.reaches .slice anchors stack)).trans copied).mono (by omega)
 
+theorem list_suffix_word
+    (evaluated : EvaluatesIn .word module env receiver heap cost (.ref address) middle)
+    (found : middle[address]? = some (.list items)) (start : Nat) :
+    EvaluatesIn .word module env
+      (.subscript receiver (.slice (some (.constant (.int start))) none none)) heap
+      (cost+7*(items.length-start)+216) (.ref middle.length) (middle ++ [.list (items.drop start)]) := by
+  have copied := list_slice (lower := some (.constant (.int start))) (upper := none) (stride := none)
+    (ArgumentsIn.cons evaluated (ArgumentsIn.cons EvaluatesIn.constant
+      (ArgumentsIn.cons EvaluatesIn.constant (ArgumentsIn.cons EvaluatesIn.constant ArgumentsIn.nil)))) found
+    (Mutable.getSlice_list_suffix middle address items start found) (SequenceWork.slice_suffix items.length start)
+  exact copied.mono (by simp; omega)
+
 theorem concatenate
     (left : EvaluatesIn .word module env a heap ca (.ref leftAddress) middle)
     (right : EvaluatesIn .word module env b middle cb (.ref rightAddress) afterRight)
@@ -85,6 +97,22 @@ theorem not_list (evaluated : EvaluatesIn arithmetic module env expression heap 
     advance (by simp [step, result, run, HeapCalls.unary, Mutable.truth, found])
       (by simp [charge, truth, found]) rfl
   exact ((initial.trans (evaluated anchors _)).trans next).mono (by omega)
+
+theorem list_conditional
+    (condition : EvaluatesIn arithmetic module env test heap ct (.ref address) middle)
+    (found : middle[address]? = some (.list items))
+    (tested : Mutable.truth (.ref address) middle = some (.ok flag, middle))
+    (branch : EvaluatesIn arithmetic module env (if flag then yes else no) middle cb answer finalHeap) :
+    EvaluatesIn arithmetic module env (.ifExp test yes no) heap (ct+cb+2) answer finalHeap := by
+  intro anchors stack
+  have first : Reaches arithmetic module anchors
+      ⟨.expr (.ifExp test yes no) env, stack, heap⟩ 1
+      ⟨.expr test env, .conditional yes no env :: stack, heap⟩ := advance rfl rfl rfl
+  have chosen : Reaches arithmetic module anchors
+      ⟨.value (.ref address), .conditional yes no env :: stack, middle⟩ 1
+      ⟨.expr (if flag then yes else no) env, stack, middle⟩ :=
+    advance (by simp [step, run, tested]) (by simp [charge, truth, found]) rfl
+  exact (((first.trans (condition anchors _)).trans chosen).trans (branch anchors stack)).mono (by omega)
 
 end EvaluatesIn
 end FormalSW.PyAst.HeapCalls.Runtime

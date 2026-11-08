@@ -1,6 +1,7 @@
 import lang.py.FormalSW.HeapRuntimeCostComprehensions
 import lang.py.FormalSW.HeapRuntimeInputs
 import lang.py.FormalSW.HeapRuntimeCostSetup
+import lang.py.FormalSW.HeapRuntimeCostListLoops
 
 open FormalSW.PyAst HeapCalls HeapCalls.Runtime
 private def program : Module := { body := [] }
@@ -66,3 +67,21 @@ example (heap : Heap) : BlockReturnsIn .word program (fun _ => none)
 
 example (length : Nat) : SequenceWork.slice .word length (.scalar .none) (.scalar .none) (.scalar .none) =
     some (6*length+201) := SequenceWork.slice_full length
+
+/-- An empty slice creates the list which the loop subsequently iterates. -/
+example : BlockReturnsIn .word program (fun _ => some (.ref 0))
+    [.forIn (.name "x") (.subscript (.name "rows") (.slice (some (.constant (.int 1))) none none)) [] [],
+      .return (.constant (.int 7))]
+    [.list []] 226 (.scalar (.int 7)) [.list [], .list []] := by
+  have sliced : EvaluatesIn .word program (fun _ => some (.ref 0))
+      (.subscript (.name "rows") (.slice (some (.constant (.int 1))) none none)) [.list []]
+      217 (.ref 1) [.list [], .list []] := by
+    exact EvaluatesIn.list_suffix_word (items := []) (EvaluatesIn.lookup rfl) rfl 1
+  apply BlockReturnsIn.for_list_subscript (budget := 7) sliced rfl
+  exact BlockReturnsIn.list_done rfl rfl (BlockReturnsIn.return_value EvaluatesIn.constant)
+
+/-- The out-of-range read is not evaluated when the list condition is empty. -/
+example : EvaluatesIn .word program (fun _ => some (.ref 0))
+    (.ifExp (.name "acc") (.subscript (.name "acc") (.constant (.int 0))) (.constant (.int 7)))
+    [.list []] 4 (.scalar (.int 7)) [.list []] :=
+  EvaluatesIn.list_conditional (flag := false) (EvaluatesIn.lookup rfl) rfl rfl EvaluatesIn.constant

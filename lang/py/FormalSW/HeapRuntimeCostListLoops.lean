@@ -5,6 +5,26 @@ No traversal or element copy is hidden in iterator setup. -/
 namespace FormalSW.PyAst.HeapCalls.Runtime.BlockReturnsIn
 open PrimitiveWork
 
+/-- Acquire the iterator after evaluating the subscription, retaining any copy or mutation. -/
+theorem for_list_subscript
+    (evaluated : EvaluatesIn arithmetic module env (.subscript receiver index) heap cost (.ref address) middle)
+    (found : middle[address]? = some (.list items))
+    (rest : BlockReturnsIn arithmetic module env
+      (.sequenceStepLoop name (.ref address) 0 body otherwise :: following) middle budget answer finalHeap) :
+    BlockReturnsIn arithmetic module env
+      (.forIn (.name name) (.subscript receiver index) body otherwise :: following)
+      heap (cost+budget+2) answer finalHeap := by
+  intro anchors stack
+  have first : Reaches arithmetic module anchors
+      ⟨.block (.forIn (.name name) (.subscript receiver index) body otherwise :: following) env, stack, heap⟩ 1
+      ⟨.expr (.subscript receiver index) env, .sequence name body otherwise following env :: stack, heap⟩ :=
+    advance rfl rfl rfl
+  have next : Reaches arithmetic module anchors
+      ⟨.value (.ref address), .sequence name body otherwise following env :: stack, middle⟩ 1
+      ⟨.block (.sequenceStepLoop name (.ref address) 0 body otherwise :: following) env, stack, middle⟩ :=
+    advance (by simp [step, run, Mutable.sequence, found, sequenceSource]) (by simp [charge, found]) rfl
+  exact (((first.trans (evaluated anchors _)).trans next).trans (rest anchors stack)).mono (by omega)
+
 theorem for_list_name (lookup : env receiver = some (.ref address))
     (found : heap[address]? = some (.list items))
     (rest : BlockReturnsIn arithmetic module env
