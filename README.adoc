@@ -504,7 +504,7 @@ See link:tests/py/termination.py[] and link:tests/py/termination.py.lean[] for a
 
 For example, even with fixed arithmetic, a `gcd` call is charged according to the smaller operand's bit length. In a range fold whose current factor is at most n, n gcd calls contribute O(n log n) work. Integer-to-decimal conversion is linear in input bit width under fixed arithmetic and quadratic under bit arithmetic; string reversal is linear in character count.
 
-`math.comb(n, k)` has a multiplicative-recurrence library tariff: O(min(k, n-k)+1) under fixed arithmetic. The bit-cost tariff also bounds intermediate products and exact divisions. This is an explicit algorithmic cost contract, independent of the installed Python library implementation.
+`math.comb(n, k)` has a multiplicative-recurrence library tariff: O(min(k, n-k)+1) under fixed arithmetic. The bit-cost tariff also bounds intermediate products and exact divisions. This is an explicit algorithmic cost contract, independent of the installed Python library implementation. `math.factorial(n)` similarly charges O(n+1) multiplications, with intermediate widths included in the bit model. link:lang/py/FormalSW/FactorialWorkBounds.lean[] bounds the resulting decimal length by O(n log(n+1)); digit conversion and traversal are charged separately.
 
 
 [source,python]

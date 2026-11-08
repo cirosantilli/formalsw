@@ -37,6 +37,16 @@ def library (arithmetic : Arithmetic) (module : Module) (name : String)
       let value ← scalarNumber value
       let width := bitLength value
       return match arithmetic with | .word => width | .bits => width * width * width
+  | some ("math", "factorial"), [value] => do
+      let value ← scalarNumber value
+      if value < 0 then
+        return integer arithmetic value + 1
+      let count := value.toNat
+      -- Multiply 1 through count. Every intermediate is at most (count+1)^count.
+      let width := (count+1) * (bitLength value+1) + 1
+      return match arithmetic with
+        | .word => 8 * (count+1)
+        | .bits => 8 * (count+1) * width * width
   | some ("math", "comb"), [n, k] => do
       let n ← scalarNumber n
       let k ← scalarNumber k

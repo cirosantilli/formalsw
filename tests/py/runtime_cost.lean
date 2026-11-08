@@ -19,6 +19,17 @@ private def emptyModule : Module := { body := [] }
 private def gcdModule : Module := { body := [.importFrom "math" [("gcd", "gcd")]] }
 private def sqrtModule : Module := { body := [.importFrom "math" [("isqrt", "isqrt")]] }
 private def combModule : Module := { body := [.importFrom "math" [("comb", "choose")]] }
+private def factorialModule : Module := { body := [.importFrom "math" [("factorial", "fact")]] }
+
+/-- Factorial follows all factors, including the empty product, and checks signs
+before looping. The bit model charges the growing intermediate products. -/
+example : Calls.Runtime.library .word factorialModule "fact" [.int 10] = some 88 := rfl
+example : Calls.Runtime.library .word factorialModule "fact" [.int 0] = some 8 := rfl
+example : Calls.Runtime.library .word factorialModule "fact" [.int (-1)] = some 2 := rfl
+example : Calls.Runtime.library .bits factorialModule "fact" [.int 4] = some 17640 := rfl
+example : Calls.Runtime.library .bits factorialModule "fact" [.int (-(2^100))] = some 102 := rfl
+example : Calls.Runtime.library .word factorialModule "factorial" [.int 4] = none := rfl
+example : Calls.Runtime.library .word factorialModule "fact" [.string "4"] = none := rfl
 
 /-- Library work follows the smaller number of factors, including aliases,
 empty products and error exits. Bit costs also account for intermediate widths. -/
