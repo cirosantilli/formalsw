@@ -291,6 +291,69 @@ def solve(digits: list[int]) -> int:
         else:
             raise AssertionError(f"Invalid list measure accepted: {marker}")
 
+    for index, (first, second, heap, policy, guarded) in enumerate([
+        ("start", "end", False, "fixed", True),
+        ("start", "end", False, "bits", False),
+        ("start", "end", True, "fixed", True),
+        ("_formalsw_heap", "input", True, "bits", True),
+    ]):
+        source = Path(directory) / f"pair{index}.py"
+        guard = f"    @formalsw: Requires({first} <= {second})\n" if guarded else ""
+        body = f"    values = [{first}, {second}]\n    return sum(values)" if heap else f"    return {first} + {second}"
+        source.write_text(f'''
+def solve({first}: int, {second}: int) -> int:
+    """
+{guard}    @formalsw: BigO(n^2, n = abs({first}) + abs({second}) + 1, arithmetic={policy})
+    """
+{body}
+''')
+        module = frontend["source_module"](source)
+        requirements = frontend["collect_requirements"](source, module, "Pair", "PairAst")
+        requirement = next(item for item in requirements if item.marker.startswith("BigO("))
+        assert not requirement.unsupported, requirement.unsupported
+        claim = requirement.property_type
+        backend = "HeapCalls" if heap else "Calls"
+        assert f"{backend}.Runtime.IsBigO .{'word' if policy == 'fixed' else 'bits'}" in claim, claim
+        assert "(fun input : Int × Int => input.1.natAbs + input.2.natAbs + 1)" in claim, claim
+        assert "«" not in claim and "Nat × Nat" not in claim, claim
+        assert ("requires_solve_0" in claim) == guarded, claim
+        if guarded:
+            assert 'some (.int input.1)' in claim and 'some (.int input.2)' in claim, claim
+        if heap:
+            assert "[.scalar (.int input.1), .scalar (.int input.2)]) (fun _ => [])" in claim, claim
+        else:
+            assert "[.int input.1, .int input.2])" in claim, claim
+        semantic = frontend["module_with_python_builtins"](source, module)
+        emitter = frontend["AstJsonEmitter"](semantic)
+        lean_checks.append(f"namespace PairCase{index}\nnamespace PairAst\nopen FormalSW.PyAst\n")
+        lean_checks.append(f"def module : Module := pyast_from_json% {frontend['lean_string'](emitter.emit())}\n")
+        for name, condition in module.formalsw_conditions.items():
+            lean_checks.append(f"def {name} : Expr := pyexpr_from_json% {frontend['lean_string'](json.dumps(emitter.expr(condition)))}\n")
+        lean_checks.append(f"end PairAst\nexample : Prop := {claim}\nend PairCase{index}\n")
+    lean_checks.append("example : (fun input : Int × Int => input.1.natAbs + input.2.natAbs + 1) (-3, -5) = 9 := rfl\n")
+
+    for index, marker in enumerate([
+        "BigO(n)", "BigO(n, n = start + end)", "BigO(n, n = abs(start) + abs(end))",
+        "BigO(n, n = abs(start) + abs(start) + 1)", "BigO(n, n = abs(start) + abs(missing) + 1)",
+        "BigO(n, n = abs(start) + abs(end) + True)", "BigO(n, n = abs(start, 2) + abs(end) + 1)",
+        "BigO(n, n = abs(start) + abs(value=end) + 1)", "BigO(n, n = mutate(start) + abs(end) + 1)",
+    ]):
+        source = Path(directory) / f"invalid_pair{index}.py"
+        source.write_text(f'''
+def solve(start: int, end: int) -> int:
+    """
+    @formalsw: {marker}
+    """
+    return start + end
+''')
+        module = frontend["source_module"](source)
+        try:
+            frontend["collect_requirements"](source, module, "Invalid", "InvalidAst")
+        except InvalidRequirement as error:
+            assert "integer pairs require" in str(error), error
+        else:
+            raise AssertionError(f"Invalid integer-pair measure accepted: {marker}")
+
     source = Path(directory) / "invalid_option.py"
     source.write_text('''def solve(n: int) -> int:
     """
@@ -323,4 +386,4 @@ def solve(digits: list[int]) -> int:
 
 if options.lean_output:
     options.lean_output.write_text("".join(lean_checks))
-print("Scalar/list/nested-list/heap and integer-width BigO obligations checked; unit-step and partial-resource markers rejected.")
+print("Scalar/integer-pair/list/nested-list/heap and integer-width BigO obligations checked; unit-step and partial-resource markers rejected.")

@@ -124,6 +124,40 @@ def list_input_family(function, arguments, args, conditions):
     )
 
 
+def integer_pair_input_family(function, arguments, args, conditions, heap):
+    """Measure both signed inputs by magnitude, without executing size metadata."""
+    names = [argument.arg for argument in arguments]
+    expected = f"n = abs({names[0]}) + abs({names[1]}) + 1"
+    if len(args) != 2:
+        raise ValueError(f"runtime BigO integer pairs require {expected}")
+    try:
+        node = ast.parse(args[1], mode="eval").body
+    except SyntaxError:
+        node = None
+
+    def absolute(node, name):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "abs" and len(node.args) == 1 and not node.keywords
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == name)
+
+    if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+            and isinstance(node.right, ast.Constant) and type(node.right.value) is int
+            and node.right.value == 1 and isinstance(node.left, ast.BinOp)
+            and isinstance(node.left.op, ast.Add)
+            and absolute(node.left.left, names[0]) and absolute(node.left.right, names[1])):
+        raise ValueError(f"runtime BigO integer pairs require {expected}")
+    replacements = {names[0]: "input.1", names[1]: "input.2", heap_input_name(function): "[]"}
+    predicate = " ∧ ".join(f"({condition})" for condition in conditions) or "True"
+    predicate = re.sub(r"«([^»]+)»", lambda match: replacements.get(match[1], match[0]), predicate)
+    values = "[.scalar (.int input.1), .scalar (.int input.2)]" if heap else "[.int input.1, .int input.2]"
+    inputs = f"(fun input : Int × Int => {values})" + (" (fun _ => [])" if heap else "")
+    return (
+        inputs,
+        f"(fun input : Int × Int => {predicate})" if conditions else "(fun _ => True)",
+        "(fun input : Int × Int => input.1.natAbs + input.2.natAbs + 1)",
+    )
+
+
 def runtime_complexity_type(namespace, function, args, conditions, *, heap=False):
     args = list(args)
     arithmetic = "fixed"
@@ -148,8 +182,17 @@ def runtime_complexity_type(namespace, function, args, conditions, *, heap=False
             f"  {inputs}\n"
             f"  {domain} {size} (fun {parameter} : Nat => {args[0]})"
         )
+    if len(arguments) == 2 and kinds == {"int"}:
+        inputs, domain, size = integer_pair_input_family(function, arguments, args, conditions, heap)
+        parameter = "n" if re.search(r"\bn\b", args[0]) else "_"
+        runtime = "HeapCalls" if heap else "Calls"
+        return (
+            f"FormalSW.PyAst.{runtime}.Runtime.IsBigO .{'word' if arithmetic == 'fixed' else 'bits'} {namespace}.module {json.dumps(function.name)}\n"
+            f"  {inputs}\n"
+            f"  {domain} {size} (fun {parameter} : Nat => {args[0]})"
+        )
     if len(arguments) != 1 or annotation_kind(arguments[0].annotation) != "int":
-        raise ValueError("runtime BigO supports one integer input on natural values, or a list[int] with an optional int")
+        raise ValueError("runtime BigO supports one integer input on natural values, two signed integers, or a list with an optional int")
     argument = arguments[0].arg
     if len(args) == 1:
         variable = argument

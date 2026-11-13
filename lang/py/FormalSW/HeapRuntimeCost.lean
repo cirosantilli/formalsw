@@ -48,6 +48,12 @@ def sequenceComparison (arithmetic : Arithmetic) : List Value → List Value →
   | left :: ls, right :: rs => do
       return (← elementComparison arithmetic left right) + (← sequenceComparison arithmetic ls rs) + 1
 
+/-- A conservative linear scan, including the comparisons of scalar contents. -/
+def sequenceMembership (arithmetic : Arithmetic) (needle : Value) : List Value → Option Nat
+  | [] => some 1
+  | item :: rest => do
+      return (← elementComparison arithmetic item needle) + (← sequenceMembership arithmetic needle rest) + 1
+
 def comparison (arithmetic : Arithmetic) (heap : Heap) (op : CmpOp) (left right : Value) : Option Nat :=
   match left, right with
   | .scalar left, .scalar right => some (PrimitiveWork.comparison arithmetic left right)
@@ -90,6 +96,9 @@ def operation (arithmetic : Arithmetic) (heap : Heap) (op : Operation) (values :
       (sequenceLength heap value).map sequenceCopy
   | .builtin .list, [] => some 1
   | .builtin .len, [value] => (sequenceLength heap value).map (fun _ => 1)
+  | .membership _, [needle, .ref address] => match heap[address]? with
+      | some (.list items) | some (.tuple items) => sequenceMembership arithmetic needle items
+      | _ => BufferWork.operation arithmetic heap op values <|> MapWork.operation maps arithmetic heap op values
   | .slice, [.ref address, lower, upper, stride] => match heap[address]? with
       | some (.list items) => SequenceWork.slice arithmetic items.length lower upper stride
       | _ => none
@@ -157,7 +166,8 @@ def charge (arithmetic : Arithmetic) (module : Module) (state : State)
       | .constant _ | .name _ | .binOp _ _ _ | .unaryOp _ _ | .compare _ _
       | .boolOp _ _ | .ifExp _ _ _ | .call (.name _) _
       | .builtinCall _ _
-      | .list _ | .tuple _ | .reversedList _ | .subscript _ _ | .sumSequence _ _ => some 1
+      | .list _ | .tuple _ | .reversedList _ | .subscript _ _ | .sumSequence _ _
+      | .membership _ _ _ => some 1
       | .sumGenerator _ [_] _ => some 1
       | .listComp _ (_ :: _) | .listCompTargets _ (_ :: _) => some 1
       | .call (.attribute (.name _) _) _ => some 1
